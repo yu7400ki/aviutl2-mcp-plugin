@@ -1,0 +1,6 @@
+[submodule "vendor/aviutl2_sdk_mirror"]
+	path = vendor/aviutl2_sdk_mirror
+	url = https://github.com/aviutl2/aviutl2_sdk_mirror.git
+[submodule "vendor/aviutl2-rs"]
+	path = vendor/aviutl2-rs
+	url = https://github.com/sevenc-nanashi/aviutl2-rs.git
