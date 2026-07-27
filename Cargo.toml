@@ -1,6 +1,28 @@
-[package]
-name = "aviutl2-mcp-plugin"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "AviUtl2 MCP Plugin"
+publish = false
 
-[dependencies]
+[workspace.dependencies]
+anyhow = "1.0.95"
+aviutl2-mcp-core = { path = "crates/core" }
+base64 = "0.23.0"
+chrono = { version = "0.4.39", features = ["serde"] }
+hmac = "0.13.0"
+rand = "0.10.2"
+raw-window-handle = "0.6.2"
+serde = { version = "1.0.216", features = ["derive"] }
+serde_json = "1.0.134"
+sha2 = "0.11.0"
+subtle = "2.6.1"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+uuid = { version = "1.11.0", features = ["v4"] }
+windows = "0.62.2"
