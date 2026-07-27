@@ -1,0 +1,42 @@
+[project]
+id = "aviutl2-mcp-plugin"
+name = "AviUtl2 MCP Plugin"
+version = "0.1.0"
+
+[build_group]
+debug_all = ["cargo build"]
+release_all = ["cargo build --release"]
+
+[development]
+aviutl2_version = "latest"
+
+[preview]
+aviutl2_version = "latest"
+install_dir = "./.aviutl2-cli/preview"
+profile = "release"
+
+[release]
+output_dir = "release"
+profile = "release"
+
+[artifacts.aviutl2_mcp_plugin]
+destination = "Plugin/aviutl2-mcp-plugin.aux2"
+build = { group = "debug_all" }
+
+[artifacts.aviutl2_mcp_plugin.profiles.debug]
+source = "target/debug/aviutl2_mcp_plugin.dll"
+
+[artifacts.aviutl2_mcp_plugin.profiles.release]
+source = "target/release/aviutl2_mcp_plugin.dll"
+build = { group = "release_all" }
+
+[artifacts.aviutl2_mcp_server]
+destination = "Plugin/aviutl2-mcp-server.exe"
+build = { group = "debug_all" }
+
+[artifacts.aviutl2_mcp_server.profiles.debug]
+source = "target/debug/aviutl2-mcp-server.exe"
+
+[artifacts.aviutl2_mcp_server.profiles.release]
+source = "target/release/aviutl2-mcp-server.exe"
+build = { group = "release_all" }
