@@ -41,19 +41,26 @@ unsafe fn get_process_times(handle: HANDLE) -> Option<DateTime<Utc>> {
 
 /// `FILETIME`（100 ナノ秒単位、1601-01-01 UTC 起点）を `DateTime<Utc>` へ変換する。
 fn filetime_to_utc(ft: FILETIME) -> DateTime<Utc> {
-    // FILETIME 値を 100 ナノ秒間隔の整数として合成。
-    let ft100ns = ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
-    // 1601-01-01 から 1970-01-01 までの秒数。
-    const EPOCH_DIFF_100NS: u64 = 11_644_473_600_000_000;
-    let unix_100ns = ft100ns.saturating_sub(EPOCH_DIFF_100NS);
-    let secs = (unix_100ns / 10_000_000) as i64;
-    let nsecs = ((unix_100ns % 10_000_000) * 100) as u32;
+    let quad = ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
+    const HUNDRED_NANOS_PER_SEC: i64 = 10_000_000;
+    const EPOCH_DIFF_SECS: i64 = 11_644_473_600;
+    let secs = (quad as i64 / HUNDRED_NANOS_PER_SEC) - EPOCH_DIFF_SECS;
+    let nsecs = ((quad as i64 % HUNDRED_NANOS_PER_SEC) * 100) as u32;
     DateTime::from_timestamp(secs, nsecs).unwrap_or(DateTime::UNIX_EPOCH)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filetime_unix_epoch_converts_to_unix_epoch() {
+        let filetime = FILETIME {
+            dwLowDateTime: 0xD53E_8000,
+            dwHighDateTime: 0x019D_B1DE,
+        };
+        assert_eq!(filetime_to_utc(filetime), DateTime::UNIX_EPOCH);
+    }
 
     #[test]
     fn current_process_has_creation_time() {

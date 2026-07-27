@@ -451,6 +451,21 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_preserves_descriptor_for_live_process() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = InstanceId::new_v4();
+        let descriptor = sample_descriptor(id);
+        let path = dir.join(format!("{}.json", id));
+        std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
+
+        try_cleanup_stale_descriptor(&path).unwrap();
+        assert!(path.exists(), "生存中の descriptor は削除されない");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn stale_pid_excluded_and_cleaned() {
         let dir = temp_registry_dir();
         std::fs::create_dir_all(&dir).unwrap();

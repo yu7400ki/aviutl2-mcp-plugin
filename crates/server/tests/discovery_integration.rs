@@ -437,6 +437,39 @@ fn discovery_excludes_authentication_failed_instance() {
 
     let instances = find_instances(&dir, DiscoveryConfig::default(), true);
     assert!(instances.is_empty(), "auth_secret 不一致は除外される");
+    assert!(path.exists(), "生存中の descriptor は削除されない");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cleanup_preserves_live_but_unreachable_instance() {
+    let dir = temp_registry_dir();
+    let id = InstanceId::new_v4();
+    let created_at = current_process_created_at();
+    let descriptor = InstanceDescriptor {
+        schema_version: 1,
+        protocol_version: ProtocolVersion::CURRENT,
+        instance_id: id,
+        pipe_name: pipe_name_for(&id),
+        auth_secret: AuthSecret::generate(),
+        pid: std::process::id(),
+        process_created_at: created_at.clone(),
+        hwnd: None,
+        started_at: created_at,
+        state: InstanceState::Ready,
+        project: None,
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{}.json", id));
+    std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
+
+    let instances = find_instances(&dir, DiscoveryConfig::default(), true);
+    assert!(
+        instances.is_empty(),
+        "pipe に接続できない instance は除外される"
+    );
+    assert!(path.exists(), "生存中の descriptor は削除されない");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -481,6 +514,7 @@ fn discovery_isolates_broken_candidate() {
     let instances = find_instances(&dir, DiscoveryConfig::default(), true);
     assert_eq!(instances.len(), 1);
     assert_eq!(instances[0].instance_id, id1);
+    assert!(path2.exists(), "生存中の descriptor は削除されない");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -561,6 +595,10 @@ fn discovery_excludes_stopped_instance_even_if_descriptor_remains() {
     let instances = find_instances(&dir, DiscoveryConfig::default(), true);
     assert_eq!(instances.len(), 1, "終了したインスタンスは一覧に含まれない");
     assert_eq!(instances[0].instance_id, id2);
+    assert!(
+        dir.join(format!("{}.json", id1)).exists(),
+        "生存中の descriptor は削除されない"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
