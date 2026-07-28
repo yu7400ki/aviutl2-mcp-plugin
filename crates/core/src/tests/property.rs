@@ -1,8 +1,14 @@
 //! property-based テスト。
 
+use crate::effect::{EffectItem, EffectItemType, TrackInfo};
+use crate::fingerprint::{
+    Fingerprint, FingerprintAlgorithm, effect_fingerprint, object_fingerprint,
+};
 use crate::handshake::{Mac, Nonce, compute_client_mac, compute_server_mac, verify_mac};
 use crate::identifier::{InstanceId, ProtocolVersion};
+use crate::item_value::ItemValue;
 use crate::json::{JsonStrictError, parse_json};
+use crate::number::FiniteF64;
 use proptest::prelude::*;
 use proptest::string::string_regex;
 
@@ -283,5 +289,237 @@ proptest! {
         let actual = Mac::from_bytes(actual_bytes);
 
         prop_assert!(!verify_mac(&expected, &actual));
+    }
+}
+
+// ============================================================================
+// fingerprint
+// ============================================================================
+
+fn fingerprint_algorithm_strategy() -> impl Strategy<Value = FingerprintAlgorithm> {
+    prop_oneof![
+        Just(FingerprintAlgorithm::NormalizedAliasV1),
+        Just(FingerprintAlgorithm::RawV1),
+    ]
+}
+
+/// `object_fingerprint` の引数一式。
+#[derive(Debug, Clone, PartialEq)]
+struct ObjectFingerprintInput {
+    algorithm: FingerprintAlgorithm,
+    scene_id: i32,
+    layer: usize,
+    frame_start: usize,
+    frame_end: usize,
+    name: Option<String>,
+    alias: String,
+}
+
+impl ObjectFingerprintInput {
+    fn compute(&self) -> Fingerprint {
+        object_fingerprint(
+            &self.algorithm,
+            self.scene_id,
+            self.layer,
+            self.frame_start,
+            self.frame_end,
+            self.name.as_deref(),
+            &self.alias,
+        )
+    }
+}
+
+fn object_fingerprint_input_strategy() -> impl Strategy<Value = ObjectFingerprintInput> {
+    (
+        fingerprint_algorithm_strategy(),
+        any::<i32>(),
+        0..1_000usize,
+        0..1_000_000usize,
+        0..1_000_000usize,
+        prop::option::of(".*"),
+        ".*",
+    )
+        .prop_map(
+            |(algorithm, scene_id, layer, frame_start, frame_end, name, alias)| {
+                ObjectFingerprintInput {
+                    algorithm,
+                    scene_id,
+                    layer,
+                    frame_start,
+                    frame_end,
+                    name,
+                    alias,
+                }
+            },
+        )
+}
+
+fn item_value_strategy() -> impl Strategy<Value = ItemValue> {
+    prop_oneof![
+        any::<f64>()
+            .prop_filter("有限数", |v| v.is_finite())
+            .prop_map(|v| ItemValue::Number {
+                value: FiniteF64::try_new(v).expect("有限数のみを生成する"),
+            }),
+        any::<i64>().prop_map(|value| ItemValue::Integer { value }),
+        any::<bool>().prop_map(|value| ItemValue::Bool { value }),
+        ".*".prop_map(|value| ItemValue::Color { value }),
+        (".*", prop::option::of(0..100usize))
+            .prop_map(|(value, index)| ItemValue::Choice { value, index }),
+        ".*".prop_map(|path| ItemValue::File { path }),
+        ".*".prop_map(|path| ItemValue::Folder { path }),
+        ".*".prop_map(|name| ItemValue::Font { name }),
+        ".*".prop_map(|value| ItemValue::Text { value }),
+        ".*".prop_map(|raw| ItemValue::Unknown { raw }),
+    ]
+}
+
+fn track_info_strategy() -> impl Strategy<Value = TrackInfo> {
+    (
+        ".*",
+        prop::collection::vec(
+            any::<f64>()
+                .prop_filter("有限数", |v| v.is_finite())
+                .prop_map(|v| FiniteF64::try_new(v).expect("有限数のみを生成する")),
+            0..4,
+        ),
+        any::<(bool, bool, bool, bool)>(),
+        (0..8usize, 0..8usize),
+        prop::option::of(".*"),
+    )
+        .prop_map(
+            |(
+                mode,
+                params,
+                (accelerate, decelerate, twopoint, timecontrol),
+                (group_num, group_index),
+                group_name,
+            )| {
+                TrackInfo {
+                    mode,
+                    params,
+                    accelerate,
+                    decelerate,
+                    twopoint,
+                    timecontrol,
+                    group_num,
+                    group_index,
+                    group_name,
+                }
+            },
+        )
+}
+
+fn effect_item_strategy() -> impl Strategy<Value = EffectItem> {
+    (
+        ".*",
+        any::<i32>().prop_map(EffectItemType::from_raw),
+        item_value_strategy(),
+        prop::option::of(track_info_strategy()),
+    )
+        .prop_map(|(name, item_type, value, track)| EffectItem {
+            name,
+            item_type,
+            value,
+            track,
+        })
+}
+
+/// `effect_fingerprint` の引数一式。
+#[derive(Debug, Clone)]
+struct EffectFingerprintInput {
+    algorithm: FingerprintAlgorithm,
+    effect_name: String,
+    effect_index: usize,
+    enabled: bool,
+    locked: bool,
+    items: Vec<EffectItem>,
+}
+
+impl EffectFingerprintInput {
+    fn compute(&self) -> Fingerprint {
+        effect_fingerprint(
+            &self.algorithm,
+            &self.effect_name,
+            self.effect_index,
+            self.enabled,
+            self.locked,
+            &self.items,
+        )
+    }
+}
+
+fn effect_fingerprint_input_strategy() -> impl Strategy<Value = EffectFingerprintInput> {
+    (
+        fingerprint_algorithm_strategy(),
+        ".*",
+        0..8usize,
+        any::<bool>(),
+        any::<bool>(),
+        prop::collection::vec(effect_item_strategy(), 0..4),
+    )
+        .prop_map(
+            |(algorithm, effect_name, effect_index, enabled, locked, items)| {
+                EffectFingerprintInput {
+                    algorithm,
+                    effect_name,
+                    effect_index,
+                    enabled,
+                    locked,
+                    items,
+                }
+            },
+        )
+}
+
+/// 正準表現かどうかを判定する。
+fn is_canonical_fingerprint(fingerprint: &Fingerprint) -> bool {
+    fingerprint
+        .as_str()
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| {
+            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
+proptest! {
+    #[test]
+    fn object_fingerprint_is_deterministic(input in object_fingerprint_input_strategy()) {
+        prop_assert_eq!(input.compute(), input.compute());
+    }
+
+    #[test]
+    fn object_fingerprint_has_canonical_form(input in object_fingerprint_input_strategy()) {
+        let fingerprint = input.compute();
+        prop_assert!(is_canonical_fingerprint(&fingerprint));
+        prop_assert!(fingerprint.as_str().parse::<Fingerprint>().is_ok());
+    }
+
+    #[test]
+    fn object_fingerprint_differs_for_distinct_inputs(
+        (a, b) in (object_fingerprint_input_strategy(), object_fingerprint_input_strategy()),
+    ) {
+        if a != b {
+            prop_assert_ne!(a.compute(), b.compute());
+        }
+    }
+
+    #[test]
+    fn object_fingerprint_distinguishes_absent_name_from_empty(
+        input in object_fingerprint_input_strategy(),
+    ) {
+        let absent = ObjectFingerprintInput { name: None, ..input.clone() };
+        let empty = ObjectFingerprintInput { name: Some(String::new()), ..input };
+        prop_assert_ne!(absent.compute(), empty.compute());
+    }
+
+    #[test]
+    fn effect_fingerprint_is_deterministic(input in effect_fingerprint_input_strategy()) {
+        prop_assert_eq!(input.compute(), input.compute());
+    }
+
+    #[test]
+    fn effect_fingerprint_has_canonical_form(input in effect_fingerprint_input_strategy()) {
+        prop_assert!(is_canonical_fingerprint(&input.compute()));
     }
 }
