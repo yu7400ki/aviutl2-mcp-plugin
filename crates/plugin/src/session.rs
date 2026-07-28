@@ -19,9 +19,10 @@ use aviutl2_mcp_core::{
     ListAvailableEffectsResult, ListLayersParams, ListLayersResult, ListObjectsParams,
     ListObjectsResult, Nonce, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
     OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
-    OPERATION_LIST_OBJECTS, ObjectFilterError, PageError, PageRequest, ProtocolVersion,
-    RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult, compute_client_mac,
-    compute_server_mac, deserialize_json, negotiate, take_page, verify_mac,
+    OPERATION_LIST_OBJECTS, ObjectFilterError, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT,
+    PLUGIN_WRITE_TIMEOUT, PageError, PageRequest, ProtocolVersion, RequestEnvelope, RequestId,
+    ResponseEnvelope, ResponseKind, ResponseResult, compute_client_mac, compute_server_mac,
+    deserialize_json, negotiate, take_page, verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -35,7 +36,10 @@ use std::time::{Duration, Instant};
 /// handshake は接続確立直後に 3 往復で完結する軽量な処理であり、
 /// クライアントの待ち時間は含まない。未応答のクライアントが待受を占有する
 /// 時間をこの値に抑える。
-pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// 要求元は接続・handshake・ping をまとめた 1 つの予算で待つため、上限は
+/// その予算の内側から配分する。
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = PLUGIN_HANDSHAKE_TIMEOUT;
 
 /// 認証済み接続で次の要求フレームを待つ上限。
 ///
@@ -44,13 +48,20 @@ pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// 通常はミリ秒で終わる。待受インスタンスは 1 本だけで、1 接続の処理中は
 /// 新たな接続を受理できないため、黙り込んだクライアントが占有できる時間を
 /// この値に抑える。
+///
+/// 要求 1 件の処理時間ではなく接続を保持する上限であるため、要求フェーズの
+/// 予算配分には含まれない。要求元が解決フェーズを終えてから要求を送り出すまでの
+/// 間隔を覆えるよう、フェーズ予算より長く採る。
 const REQUEST_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 1 フレームの送信に許す上限。
 ///
 /// 受信側がバッファを読み出さない場合でも送信側が滞留しないようにする。
 /// 要求が deadline を指定した場合は、この上限と deadline の短い方を採用する。
-const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// [`READ_TIMEOUT`] とは別枠で確保するため、読み取りが実行の上限を使い切っても
+/// 応答を送る持ち時間が残る。
+const WRITE_TIMEOUT: Duration = PLUGIN_WRITE_TIMEOUT;
 
 /// 読み取り operation の実行に許す上限。
 ///
@@ -58,7 +69,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// 応答の送信はこの期限とは別に区切る。読み取りに費やした時間を差し引いた残りと
 /// [`WRITE_TIMEOUT`] の短い方を送信へ充てることで、読み取りが長引いた分だけ
 /// 送信の余地が奪われる。
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
+const READ_TIMEOUT: Duration = PLUGIN_READ_TIMEOUT;
 
 /// 読み取りを受け付けられない状態で案内する再試行間隔（ミリ秒）。
 ///
@@ -831,8 +842,8 @@ mod tests {
     use aviutl2_mcp_core::{
         AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
         EffectItemType, EffectType, Extent, FiniteF64, FrameRange, LayerInfo, ObjectDetail,
-        ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary, SceneInfo,
-        SectionRange,
+        ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary, SERVER_REQUEST_BUDGET,
+        SERVER_RESOLVE_BUDGET, SceneInfo, SectionRange, TRANSPORT_HEADROOM,
     };
     use std::sync::Mutex;
 
@@ -1534,11 +1545,33 @@ mod tests {
 
     #[test]
     fn timeouts_match_the_intended_budget() {
-        // 期限と再試行案内の設計値。変えると要求元との取り決めが変わるため、
+        // 各段の上限は要求元と共有する配分から取る。ここで別の値を持つと、
+        // 段の合計が要求元のフェーズ予算を超えても誰も気付けなくなる。
+        assert_eq!(HANDSHAKE_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT);
+        assert_eq!(READ_TIMEOUT, PLUGIN_READ_TIMEOUT);
+        assert_eq!(WRITE_TIMEOUT, PLUGIN_WRITE_TIMEOUT);
+
+        // 接続を保持する上限は段の配分に属さないが、要求 1 件の処理が終わる前に
+        // 接続を畳んでしまわないだけの長さを持つ。
+        assert!(REQUEST_IDLE_TIMEOUT > SERVER_REQUEST_BUDGET);
+
+        // 再試行案内の設計値。変えると要求元との取り決めが変わるため、
         // 値そのものを主張する。
-        assert_eq!(READ_TIMEOUT, Duration::from_secs(5));
-        assert_eq!(WRITE_TIMEOUT, Duration::from_secs(5));
         assert_eq!(HOST_BUSY_RETRY_AFTER_MS, 500);
+    }
+
+    #[test]
+    fn read_and_write_stages_fit_within_the_request_budget() {
+        // 読み取りが上限まで走っても応答送信の持ち時間が要求元の予算の内側に
+        // 残る。ここが崩れると、完了した読み取りを誰も待っていない窓へ送る。
+        assert!(READ_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_REQUEST_BUDGET);
+    }
+
+    #[test]
+    fn handshake_stage_fits_within_the_resolve_budget() {
+        // handshake が解決フェーズの予算を使い切ると、続く ping の往復に
+        // 持ち時間が残らず、生きているインスタンスが期限超過として除外される。
+        assert!(HANDSHAKE_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_RESOLVE_BUDGET);
     }
 
     #[test]
@@ -1688,15 +1721,16 @@ mod tests {
     #[test]
     fn send_uses_the_remaining_budget_after_the_read() {
         let now = Instant::now();
-        // 読み取りに 1 秒使い、要求の残りは 3 秒。送信上限より短いので残りを採る。
+        // 読み取りは期限内で終わり、要求の残りは 500 ミリ秒。送信上限より短いので
+        // 残りを採る。
         assert_eq!(
             decide_send(
                 now,
                 NOW_UNIX_MS,
                 RequestDeadline::Within(now + Duration::from_secs(4)),
-                Some((NOW_UNIX_MS + 3_000) as u64),
+                Some((NOW_UNIX_MS + 500) as u64),
             ),
-            SendDecision::Send(now + Duration::from_secs(3))
+            SendDecision::Send(now + Duration::from_millis(500))
         );
     }
 
@@ -1823,12 +1857,12 @@ mod tests {
             now,
             NOW_UNIX_MS,
             RequestDeadline::Within(now + Duration::from_secs(4)),
-            Some((NOW_UNIX_MS + 3_000) as u64),
+            Some((NOW_UNIX_MS + 500) as u64),
             Ok(result.clone()),
         );
 
         assert_eq!(response.outcome.unwrap(), result);
         assert!(!response.discarded);
-        assert_eq!(response.deadline, now + Duration::from_secs(3));
+        assert_eq!(response.deadline, now + Duration::from_millis(500));
     }
 }
