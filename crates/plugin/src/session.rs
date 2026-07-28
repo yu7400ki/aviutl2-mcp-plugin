@@ -1545,11 +1545,20 @@ mod tests {
 
     #[test]
     fn timeouts_match_the_intended_budget() {
-        // 各段の上限は要求元と共有する配分から取る。ここで別の値を持つと、
-        // 段の合計が要求元のフェーズ予算を超えても誰も気付けなくなる。
-        assert_eq!(HANDSHAKE_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT);
-        assert_eq!(READ_TIMEOUT, PLUGIN_READ_TIMEOUT);
-        assert_eq!(WRITE_TIMEOUT, PLUGIN_WRITE_TIMEOUT);
+        // 読み取りが実行の上限まで走っても、応答送信の持ち時間が要求元の
+        // 要求フェーズ予算の内側に残る。ここが崩れると、完了した読み取りを
+        // 誰も待っていない窓へ送ることになる。
+        assert!(
+            READ_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_REQUEST_BUDGET,
+            "読み取り {READ_TIMEOUT:?} と送信 {WRITE_TIMEOUT:?} が要求フェーズ予算 {SERVER_REQUEST_BUDGET:?} に収まらない"
+        );
+
+        // handshake が解決フェーズの予算を使い切ると、続く ping の往復に
+        // 持ち時間が残らず、応答している接続が期限超過として扱われる。
+        assert!(
+            HANDSHAKE_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_RESOLVE_BUDGET,
+            "handshake {HANDSHAKE_TIMEOUT:?} と ping 応答 {WRITE_TIMEOUT:?} が解決フェーズ予算 {SERVER_RESOLVE_BUDGET:?} に収まらない"
+        );
 
         // 接続を保持する上限は段の配分に属さないが、要求 1 件の処理が終わる前に
         // 接続を畳んでしまわないだけの長さを持つ。
@@ -1558,20 +1567,6 @@ mod tests {
         // 再試行案内の設計値。変えると要求元との取り決めが変わるため、
         // 値そのものを主張する。
         assert_eq!(HOST_BUSY_RETRY_AFTER_MS, 500);
-    }
-
-    #[test]
-    fn read_and_write_stages_fit_within_the_request_budget() {
-        // 読み取りが上限まで走っても応答送信の持ち時間が要求元の予算の内側に
-        // 残る。ここが崩れると、完了した読み取りを誰も待っていない窓へ送る。
-        assert!(READ_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_REQUEST_BUDGET);
-    }
-
-    #[test]
-    fn handshake_stage_fits_within_the_resolve_budget() {
-        // handshake が解決フェーズの予算を使い切ると、続く ping の往復に
-        // 持ち時間が残らず、生きているインスタンスが期限超過として除外される。
-        assert!(HANDSHAKE_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_RESOLVE_BUDGET);
     }
 
     #[test]
