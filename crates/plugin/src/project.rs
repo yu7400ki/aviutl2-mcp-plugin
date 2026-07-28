@@ -280,14 +280,18 @@ impl ProjectState {
     /// シーン変更イベントを反映する。
     ///
     /// このイベントはシーンの切り替えとシーン情報の更新の双方で発生し、
-    /// イベントスレッドからは両者を区別できない。プロジェクトの差し替えとも
-    /// 区別できないが、切り替えのたびに epoch を更新すると参照の無効化が
-    /// 頻発するため、epoch は据え置いて revision の増加と変更の記録だけを行う。
+    /// イベントスレッドからは両者を区別できない。切り替えのたびに epoch を
+    /// 更新すると参照の無効化が頻発するため、epoch は据え置いて revision の
+    /// 増加と変更の記録を行う。
     ///
-    /// シーンの切り替えは編集対象を変えるだけで未保存の変更を生まないため、
-    /// `modified` も据え置く。
+    /// `modified` は立てる。シーン情報の更新は未保存の変更そのものであり、
+    /// 切り替えと区別できない以上どちらかに倒す必要がある。`modified` が偽で
+    /// あることは「未保存の変更が無い」という積極的な主張であり、それを信じて
+    /// 閉じたり上書きしたりすれば変更が失われる。過大に報告して余分な保存を
+    /// 促す方が、取りこぼして失わせるより害が小さい。
     pub fn on_scene_changed(&self) {
         self.revision.fetch_add(1, Ordering::Relaxed);
+        self.modified.store(true, Ordering::Relaxed);
         self.notifier.record(ChangeKind::CurrentScene);
     }
 
@@ -455,13 +459,16 @@ mod tests {
     }
 
     #[test]
-    fn scene_change_does_not_mark_modified() {
+    fn scene_change_marks_modified() {
         let state = ProjectState::new();
         state.on_project_load(Some(r"C:\projects\sample.aup2"));
+        assert!(!state.modified());
 
+        // シーン情報の更新は切り替えと区別できないため、未保存の変更を
+        // 取りこぼさない側へ倒す。
         state.on_scene_changed();
 
-        assert!(!state.modified());
+        assert!(state.modified());
     }
 
     #[test]
