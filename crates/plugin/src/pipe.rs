@@ -22,7 +22,6 @@ use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
 };
-use windows::Win32::System::Threading::SetEvent;
 use windows::core::PCWSTR;
 
 /// pipe の入出力バッファサイズ。
@@ -519,23 +518,6 @@ fn await_connection(pipe: &OwnedPipeHandle, stop: &StopSignal) -> Result<Connect
         // 接続完了まで生存する `op` の内部を指す。
         unsafe { ConnectNamedPipe(pipe.raw(), Some(overlapped)) }
     });
-
-    // `ConnectNamedPipe` が同期的に失敗した場合、I/O はカーネルへ渡っていない。
-    // それでも `OVERLAPPED` は保留状態のまま残され、完了通知イベントが
-    // シグナルされることは二度とない。`OverlappedOp` は解放時に必ず保留 I/O を
-    // 排出する（`GetOverlappedResult` を bWait = TRUE で待つ）ため、
-    // このままでは接続受理スレッドが永久に戻らなくなる。
-    // カーネルがこの `OVERLAPPED` と結びついていないことは同期失敗が保証するので、
-    // 完了通知イベントを自分でシグナルして排出を終わらせる。
-    if let Err(e) = &result
-        && e.code() != ERROR_IO_PENDING.into()
-    {
-        // SAFETY: `op` が所有する有効なイベントハンドルをシグナルするだけであり、
-        // 保留中の I/O は存在しない。
-        unsafe {
-            let _ = SetEvent(op.event_handle());
-        }
-    }
 
     // `GetLastError` の遅延読み取りは他の API 呼び出しで上書きされ得るため、
     // 戻り値そのものが持つエラーコードで分岐する。

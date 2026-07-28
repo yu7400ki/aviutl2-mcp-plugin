@@ -162,7 +162,13 @@ impl OverlappedOp {
     /// overlapped I/O を発行する。
     ///
     /// `start` には初期化済みの `OVERLAPPED` ポインタを渡す。発行前に保留状態を
-    /// 立てるため、`start` の戻り値にかかわらず `Drop` が確実にキャンセルを試みる。
+    /// 立てるため、`start` が I/O をカーネルへ渡した直後に巻き戻っても
+    /// `Drop` が確実にキャンセルを試みる。
+    ///
+    /// `ERROR_IO_PENDING` 以外のエラーで同期的に失敗した場合、I/O はカーネルへ
+    /// 渡っておらず完了通知イベントがシグナルされることは二度とない。保留状態を
+    /// 残すと `Drop` の排出（`GetOverlappedResult` を bWait = TRUE で待つ）が
+    /// 永久に戻らなくなるため、ここで落とす。
     pub(crate) fn issue(
         &mut self,
         start: impl FnOnce(*mut OVERLAPPED) -> windows::core::Result<()>,
@@ -170,7 +176,13 @@ impl OverlappedOp {
         self.rearm()?;
         let overlapped = self.as_mut_ptr();
         self.pending = true;
-        start(overlapped)
+        let result = start(overlapped);
+        if let Err(e) = &result
+            && e.code() != ERROR_IO_PENDING.into()
+        {
+            self.pending = false;
+        }
+        result
     }
 
     /// 保留 I/O の完了を確認して転送バイト数を得る。
