@@ -470,7 +470,133 @@ fn to_wait_millis(remaining: Duration) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND};
+    use aviutl2_mcp_core::InstanceId;
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::{
+        ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, GENERIC_READ, GENERIC_WRITE,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    };
+    use windows::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_READMODE_MESSAGE,
+        PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_TYPE_MESSAGE,
+    };
+    use windows::Win32::System::Threading::{
+        CreateMutexW, GetCurrentProcess, GetProcessHandleCount,
+    };
+    use windows::core::PCWSTR;
+
+    /// 期限超過を確実に起こすための待機時間。
+    const SHORT_DEADLINE: Duration = Duration::from_millis(80);
+
+    /// 期限超過後に「遅れて完了した I/O」が観測されるまでの猶予。
+    ///
+    /// キャンセルせずに戻る実装であれば、この間にカーネルが読み取りバッファへ
+    /// 書き込む。短すぎると見逃すため、期限の数倍を取る。
+    const LATE_COMPLETION_GRACE: Duration = Duration::from_millis(250);
+
+    /// 両端とも overlapped で開いた named pipe の対。
+    ///
+    /// `client` 側を本番と同じ経路（`read_exact` / `write_all`）で駆動し、
+    /// `server` 側を対向端として使う。
+    struct PipePair {
+        server: HANDLE,
+        client: HANDLE,
+    }
+
+    impl PipePair {
+        fn create() -> Self {
+            Self::create_with(PIPE_TYPE_BYTE | PIPE_READMODE_BYTE)
+        }
+
+        /// メッセージモードの pipe 対を作る。
+        ///
+        /// 長さ 0 のメッセージを送ると読み取りが「成功したが転送 0 バイト」で
+        /// 完了するため、バイトモードでは作れない転送 0 バイトを再現できる。
+        fn create_message_mode() -> Self {
+            Self::create_with(PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE)
+        }
+
+        fn create_with(mode: windows::Win32::System::Pipes::NAMED_PIPE_MODE) -> Self {
+            let name = format!(r"\\.\pipe\aviutl2-mcp-win-io-{}", InstanceId::new_v4());
+            let wide: Vec<u16> = OsStr::new(&name)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
+            let server = unsafe {
+                CreateNamedPipeW(
+                    PCWSTR(wide.as_ptr()),
+                    PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                    mode | PIPE_REJECT_REMOTE_CLIENTS,
+                    1,
+                    64 * 1024,
+                    64 * 1024,
+                    0,
+                    None,
+                )
+            };
+            assert!(!server.is_invalid(), "テスト用 pipe の作成に失敗しました");
+
+            // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
+            let client = unsafe {
+                CreateFileW(
+                    PCWSTR(wide.as_ptr()),
+                    GENERIC_READ.0 | GENERIC_WRITE.0,
+                    FILE_SHARE_NONE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAG_OVERLAPPED,
+                    None,
+                )
+            }
+            .expect("テスト用 pipe への接続に失敗しました");
+
+            // client が先に接続済みのため、この呼び出しは待たずに戻る。
+            // SAFETY: `server` は直前に作成した有効な pipe ハンドル。
+            let _ = unsafe { ConnectNamedPipe(server, None) };
+
+            Self { server, client }
+        }
+
+        /// 対向端だけを閉じ、client 側から見て切断された状態にする。
+        fn close_server(&mut self) {
+            close_handle(&mut self.server);
+        }
+    }
+
+    impl Drop for PipePair {
+        fn drop(&mut self) {
+            close_handle(&mut self.client);
+            close_handle(&mut self.server);
+        }
+    }
+
+    /// 二重クローズを避けつつハンドルを閉じる。
+    fn close_handle(handle: &mut HANDLE) {
+        if handle.is_invalid() {
+            return;
+        }
+        // SAFETY: 呼び出し元が単独で所有するハンドルであり、閉じた後は無効値で
+        // 上書きするため再度閉じられることはない。
+        unsafe {
+            let _ = CloseHandle(*handle);
+        }
+        *handle = HANDLE::default();
+    }
+
+    /// 自プロセスが開いているカーネルハンドルの総数。
+    fn process_handle_count() -> u32 {
+        let mut count = 0u32;
+        // SAFETY: `GetCurrentProcess` が返す擬似ハンドルは常に有効であり、
+        // `count` はスタック上の有効な書き込み先。
+        unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) }
+            .expect("プロセスのハンドル数を取得できません");
+        count
+    }
 
     #[test]
     fn manual_reset_event_signals_and_resets() {
@@ -603,5 +729,245 @@ mod tests {
             Duration::ZERO
         );
         assert!(!remaining_until(Instant::now() + Duration::from_secs(1)).is_zero());
+    }
+
+    #[test]
+    fn timed_out_read_leaves_no_pending_io() {
+        let pipe = PipePair::create();
+        let mut buf = [0u8; 4];
+        // SAFETY: `pipe` は本テストの終わりまで生存し、`op` はその前に drop される。
+        let mut op = unsafe { OverlappedOp::new(pipe.client) }.unwrap();
+
+        op.begin().unwrap();
+        // SAFETY: `buf` は本テストのスコープで生存し、`op` は同じスコープ内で
+        // キャンセル完了まで待ってから drop される。
+        let issued = unsafe { ReadFile(pipe.client, Some(&mut buf), None, Some(op.as_mut_ptr())) };
+        assert_eq!(
+            op.classify(issued).unwrap(),
+            IoIssue::Pending,
+            "相手が何も送らないため読み取りはカーネルに保留される"
+        );
+        assert!(op.pending, "保留状態が記録される");
+
+        let error = op
+            .await_completion(Instant::now() + SHORT_DEADLINE)
+            .expect_err("相手が何も送らないため期限を超過する");
+        assert!(
+            matches!(error, WinIoError::TimedOut),
+            "期限超過として報告される: {error:?}"
+        );
+        assert!(
+            !op.pending,
+            "期限超過時に I/O をキャンセルし完了を確定させてから戻る"
+        );
+        // 保留 I/O が残っていれば `begin` の表明に掛かる。
+        op.begin().unwrap();
+    }
+
+    #[test]
+    fn timed_out_read_never_writes_buffer_afterwards() {
+        const SENTINEL: [u8; 8] = [0xA5; 8];
+        const LATE_DATA: [u8; 8] = [0x5C; 8];
+
+        for attempt in 0..5 {
+            let pipe = PipePair::create();
+            let mut buf = vec![0u8; SENTINEL.len()];
+
+            let error = read_exact(pipe.client, &mut buf, Instant::now() + SHORT_DEADLINE)
+                .expect_err("相手が何も送らないため期限を超過する");
+            assert!(
+                matches!(error, WinIoError::TimedOut),
+                "{attempt} 回目が期限超過にならない: {error:?}"
+            );
+
+            // 期限超過後にバッファを書き換える。キャンセルせずに戻る実装であれば、
+            // このあと届くデータで保留中の読み取りが完了し番兵を上書きする。
+            buf.copy_from_slice(&SENTINEL);
+            write_all(
+                pipe.server,
+                &LATE_DATA,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect("対向端への送信に失敗しました");
+            std::thread::sleep(LATE_COMPLETION_GRACE);
+
+            assert_eq!(
+                std::hint::black_box(&buf)[..],
+                SENTINEL[..],
+                "{attempt} 回目: 期限超過後にカーネルが読み取りバッファを書き換えた"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_transfers_do_not_leak_handles() {
+        /// 1 回のリークが 1 ハンドルに対応するため、測定誤差と明確に差が付く回数。
+        const ITERATIONS: usize = 200;
+        /// 同一プロセスで並行するテストがハンドルを開閉する分の許容幅。
+        /// リーク時の増分（`ITERATIONS` × 2 = 400）より十分小さい。
+        const TOLERANCE: u32 = 32;
+        /// 一過性のノイズと単調増加を切り分けるための測定回数。
+        const ATTEMPTS: usize = 3;
+
+        let pipe = PipePair::create();
+        let payload = [0xC3u8; 8];
+        let transfer = |count: usize| {
+            for _ in 0..count {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                write_all(pipe.client, &payload, deadline).expect("送信に失敗しました");
+                let mut received = [0u8; 8];
+                read_exact(pipe.server, &mut received, deadline).expect("受信に失敗しました");
+                assert_eq!(received, payload);
+            }
+        };
+
+        // 遅延初期化で確保されるハンドルを測定前に確定させる。
+        transfer(20);
+
+        let mut deltas = Vec::with_capacity(ATTEMPTS);
+        for _ in 0..ATTEMPTS {
+            let before = process_handle_count();
+            transfer(ITERATIONS);
+            let delta = process_handle_count().saturating_sub(before);
+            if delta <= TOLERANCE {
+                return;
+            }
+            deltas.push(delta);
+        }
+
+        panic!(
+            "{ITERATIONS} 回の読み書きでハンドル数が {deltas:?} 増加しました（許容 {TOLERANCE}）"
+        );
+    }
+
+    #[test]
+    fn read_reports_disconnect_without_spinning_until_deadline() {
+        let mut pipe = PipePair::create();
+        pipe.close_server();
+
+        let started = Instant::now();
+        let mut buf = [0u8; 4];
+        let error = read_exact(pipe.client, &mut buf, started + Duration::from_secs(10))
+            .expect_err("切断された pipe からは読み取れない");
+        assert!(
+            matches!(error, WinIoError::Io(_)),
+            "期限超過ではなく I/O エラーとして報告する: {error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "進捗のないまま期限まで回り続けている: {}ms",
+            started.elapsed().as_millis()
+        );
+    }
+
+    #[test]
+    fn write_reports_disconnect_without_spinning_until_deadline() {
+        let mut pipe = PipePair::create();
+        pipe.close_server();
+
+        let started = Instant::now();
+        let error = write_all(pipe.client, b"payload", started + Duration::from_secs(10))
+            .expect_err("切断された pipe へは書き込めない");
+        assert!(
+            matches!(error, WinIoError::Io(_)),
+            "期限超過ではなく I/O エラーとして報告する: {error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "進捗のないまま期限まで回り続けている: {}ms",
+            started.elapsed().as_millis()
+        );
+    }
+
+    #[test]
+    fn zero_byte_transfer_stops_instead_of_looping() {
+        let pipe = PipePair::create_message_mode();
+        // 長さ 0 のメッセージを送ると、読み取りは成功しつつ転送 0 バイトで完了する。
+        // 進捗が無いまま再発行を繰り返すと期限まで回り続ける。
+        let mut written = 0u32;
+        // SAFETY: `pipe.server` は本テストが所有する有効なハンドルで、
+        // 長さ 0 の書き込みはバッファを参照しない。
+        unsafe { WriteFile(pipe.server, Some(&[]), Some(&mut written), None) }
+            .expect("長さ 0 のメッセージ送信に失敗しました");
+
+        let started = Instant::now();
+        let mut buf = [0u8; 4];
+        let error = read_exact(pipe.client, &mut buf, started + Duration::from_secs(10))
+            .expect_err("転送 0 バイトは進捗が無いため打ち切られる");
+        assert!(
+            matches!(error, WinIoError::Io(_)),
+            "転送 0 バイトを期限超過ではなく打ち切りとして報告する: {error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "転送 0 バイトのまま期限まで回り続けている: {}ms",
+            started.elapsed().as_millis()
+        );
+    }
+
+    #[test]
+    fn wait_failure_is_distinguished_from_timeout() {
+        // 無効なハンドルへの待機は `WAIT_FAILED` になる。期限は十分先に置くため、
+        // 期限超過と取り違えていればここで待ち続けることになる。
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let started = Instant::now();
+        let outcome = wait_one(HANDLE::default(), deadline);
+        let WaitOutcome::Failed(error) = outcome else {
+            panic!("待機失敗が期限超過と混同されています: {outcome:?}");
+        };
+        assert_eq!(error.raw_os_error(), Some(ERROR_INVALID_HANDLE.0 as i32));
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let outcome = wait_any(&[HANDLE::default()], Some(deadline));
+        assert!(
+            matches!(outcome, WaitAnyOutcome::Failed(_)),
+            "複数待機でも待機失敗を期限超過と混同しない: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn abandoned_object_is_distinguished_from_timeout() {
+        /// 所有スレッドへ生ハンドルを持ち込むための包み。所有権は移動しない。
+        struct RawHandle(HANDLE);
+        // SAFETY: ミューテックスハンドルはスレッドを跨いで使用でき、
+        // 所有権は呼び出し元に残る。
+        unsafe impl Send for RawHandle {}
+
+        /// 取得したまま所有スレッドが終了した（放棄された）ミューテックスを作る。
+        ///
+        /// 放棄されたミューテックスは待機に成功した側が所有権を得るため、
+        /// 検証のたびに作り直す。
+        fn abandoned_mutex() -> HANDLE {
+            // SAFETY: 名前なし・既定のセキュリティ属性でミューテックスを作成する。
+            let mutex = unsafe { CreateMutexW(None, false, None) }
+                .expect("テスト用ミューテックスの作成に失敗しました");
+            let owned = RawHandle(mutex);
+            std::thread::spawn(move || {
+                let owned = owned;
+                // SAFETY: `mutex` はこのスレッドの終了まで呼び出し元が保持している。
+                let result = unsafe { WaitForSingleObject(owned.0, 5_000) };
+                assert_eq!(result, WAIT_OBJECT_0, "ミューテックスを取得できません");
+                // 解放せずに終了し、ミューテックスを放棄状態にする。
+            })
+            .join()
+            .expect("所有スレッドが異常終了しました");
+            mutex
+        }
+
+        let mut mutex = abandoned_mutex();
+        let outcome = wait_one(mutex, Instant::now() + Duration::from_secs(30));
+        assert!(
+            matches!(outcome, WaitOutcome::Failed(_)),
+            "放棄された同期オブジェクトを期限超過と混同しない: {outcome:?}"
+        );
+        close_handle(&mut mutex);
+
+        let mut mutex = abandoned_mutex();
+        let outcome = wait_any(&[mutex], Some(Instant::now() + Duration::from_secs(30)));
+        assert!(
+            matches!(outcome, WaitAnyOutcome::Failed(_)),
+            "複数待機でも放棄を期限超過と混同しない: {outcome:?}"
+        );
+        close_handle(&mut mutex);
     }
 }
