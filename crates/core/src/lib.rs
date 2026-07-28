@@ -11,6 +11,7 @@ pub mod handshake;
 pub mod identifier;
 pub mod json;
 pub mod number;
+pub mod page;
 pub mod state;
 pub mod version;
 pub mod wire_format;
@@ -33,6 +34,7 @@ pub use handshake::{
 pub use identifier::{InstanceId, ProtocolVersion, RequestId, pipe_name_for};
 pub use json::{JsonStrictError, deserialize_json, parse_json};
 pub use number::FiniteF64;
+pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
 pub use state::InstanceState;
 pub use version::negotiate;
 pub use wire_format::{format_hwnd, format_utc_timestamp, parse_utc_timestamp};

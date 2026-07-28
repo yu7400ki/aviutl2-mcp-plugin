@@ -3,14 +3,9 @@
 //! MCP SDK 未使用。内部関数または CLI 経由で呼び出す。
 
 use crate::discovery::{DiscoveryConfig, find_instances};
-use aviutl2_mcp_core::{ErrorCode, InstanceInfo};
+use aviutl2_mcp_core::{DEFAULT_PAGE_LIMIT, ErrorCode, InstanceInfo, MAX_PAGE_LIMIT};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-
-/// 1 ページあたりの既定件数。
-const DEFAULT_LIMIT: u32 = 50;
-/// 最大件数。
-const MAX_LIMIT: u32 = 200;
 
 /// `aviutl2_list_instances` 要求。
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -25,7 +20,7 @@ pub struct ListInstancesRequest {
 }
 
 fn default_limit() -> u32 {
-    DEFAULT_LIMIT
+    DEFAULT_PAGE_LIMIT
 }
 
 /// `aviutl2_list_instances` 応答。
@@ -78,7 +73,7 @@ pub fn aviutl2_list_instances(
     registry_dir: &Path,
     request: ListInstancesRequest,
 ) -> Result<ListInstancesResponse, ListInstancesError> {
-    if request.limit == 0 || request.limit > MAX_LIMIT {
+    if request.limit == 0 || request.limit > MAX_PAGE_LIMIT {
         return Err(ListInstancesError::InvalidArgument);
     }
 
@@ -264,7 +259,7 @@ mod tests {
             &dir,
             ListInstancesRequest {
                 offset: u32::MAX,
-                limit: MAX_LIMIT,
+                limit: MAX_PAGE_LIMIT,
             },
         )
         .expect("総件数を超える offset は空ページを返す");
@@ -282,7 +277,7 @@ mod tests {
         let dir = temp_registry_dir();
         std::fs::create_dir_all(&dir).unwrap();
 
-        for limit in [1, MAX_LIMIT] {
+        for limit in [1, MAX_PAGE_LIMIT] {
             assert!(
                 aviutl2_list_instances(&dir, ListInstancesRequest { offset: 0, limit }).is_ok(),
                 "limit {limit} は許容される"
