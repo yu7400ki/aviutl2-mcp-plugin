@@ -1,0 +1,1234 @@
+//! 読み取り operation の手順。
+//!
+//! SDK 呼び出しは [`ReadHost`] へ委ね、ここでは受付可否の判定・参照区間の
+//! 使い方・セレクターの解決・DTO の組み立てだけを行う。SDK の型は現れない。
+
+use crate::project::ProjectState;
+use crate::read::error::ReadError;
+use crate::read::host::{
+    EditState, HostEditInfo, HostEffect, HostObject, HostObjectDetail, ReadHost, SceneReader,
+};
+use crate::read::{ReadAdapter, Snapshot};
+use aviutl2_mcp_core::{
+    AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFingerprintInput, EffectInfo,
+    EffectType, Extent, FiniteF64, FrameRange, LayerInfo, ObjectDetail, ObjectFilter,
+    ObjectFingerprintInput, ObjectSelector, ObjectSummary, SceneInfo,
+};
+use aviutl2_mcp_core::{FingerprintAlgorithm, object_fingerprint};
+use std::ops::RangeInclusive;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+
+/// [`ReadHost`] の上に読み取り operation を実装した adapter。
+pub struct HostReadAdapter<H> {
+    host: H,
+    project: Arc<ProjectState>,
+}
+
+impl<H> HostReadAdapter<H> {
+    /// ホストとプロジェクト状態から adapter を作る。
+    pub fn new(host: H, project: Arc<ProjectState>) -> Self {
+        Self { host, project }
+    }
+}
+
+impl<H: ReadHost> HostReadAdapter<H> {
+    /// 読み取りを受け付けられる状態かを確かめる。
+    ///
+    /// 準備前の編集ハンドルは読み取り API の呼び出し自体が許されないため、
+    /// ここを通らない限り [`ReadHost`] の他のメソッドを呼ばない。
+    fn ensure_readable(&self) -> Result<(), ReadError> {
+        if !self.host.is_ready() {
+            return Err(ReadError::NotReady);
+        }
+        match self.host.edit_state()? {
+            EditState::Edit => Ok(()),
+            state => Err(ReadError::EditBlocked { state }),
+        }
+    }
+
+    /// panic を捕捉した状態で参照区間へ入る。
+    ///
+    /// 参照区間のコールバックは C の関数ポインタから呼ばれるため、panic を
+    /// 境界の外へ伝播させるとホストのプロセスごと落ちる。クロージャを捕捉層で
+    /// 包んでからホストへ渡し、境界を越える巻き戻しを起こさない。
+    ///
+    /// クロージャを保持する領域は呼び出しごとに解放されないため、捕らえる値は
+    /// 参照と数値だけに留め、所有値を移し込まない。
+    fn read_section<T, F>(&self, f: F) -> Result<T, ReadError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&dyn SceneReader) -> Result<T, ReadError> + Send,
+    {
+        self.host
+            .enter_read_section(move |scene| guard(|| f(scene)))?
+    }
+}
+
+/// クロージャの panic を型付きの失敗へ変換する。
+fn guard<T>(f: impl FnOnce() -> Result<T, ReadError>) -> Result<T, ReadError> {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(_) => Err(ReadError::Panicked),
+    }
+}
+
+impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
+    fn get_edit_info(&self) -> Result<EditInfo, ReadError> {
+        self.ensure_readable()?;
+        let info = self.host.edit_info()?;
+        let epoch = self.project.epoch();
+        let project = self.project.as_ref();
+
+        let (revision, scene_name, grid_bpm) = self.read_section(move |scene| {
+            let revision = project.revision();
+            let scene_name = scene.scene_name();
+            let grid_bpm = scene.grid_bpm()?;
+            Ok((revision, scene_name, grid_bpm))
+        })?;
+
+        Ok(EditInfo {
+            scene: scene_info(&info, scene_name),
+            cursor: Cursor {
+                frame: info.cursor_frame,
+                layer: info.cursor_layer,
+            },
+            extent: Extent {
+                frame_max: info.frame_max,
+                layer_max: info.layer_max,
+            },
+            display: DisplayRange {
+                frame_start: info.display_frame_start,
+                layer_start: info.display_layer_start,
+                frame_num: info.display_frame_num,
+                layer_num: info.display_layer_num,
+            },
+            selected_range: selected_range(&info),
+            grid_bpm,
+            project_epoch: epoch,
+            project_revision: revision,
+        })
+    }
+
+    fn get_current_scene(&self) -> Result<(SceneInfo, u64), ReadError> {
+        self.ensure_readable()?;
+        let info = self.host.edit_info()?;
+        let project = self.project.as_ref();
+
+        let (revision, scene_name) =
+            self.read_section(move |scene| Ok((project.revision(), scene.scene_name())))?;
+
+        Ok((scene_info(&info, scene_name), revision))
+    }
+
+    fn list_layers(&self, expected_scene_id: i32) -> Result<Snapshot<LayerInfo>, ReadError> {
+        self.ensure_readable()?;
+        let info = self.host.edit_info()?;
+        ensure_scene(&info, expected_scene_id)?;
+        let layer_max = info.layer_max;
+        let project = self.project.as_ref();
+
+        let (snapshot_revision, items) = self.read_section(move |scene| {
+            let revision = project.revision();
+            let mut items = Vec::with_capacity(layer_max.saturating_add(1));
+            for index in 0..=layer_max {
+                let layer = scene.layer(index)?;
+                let object_count = scene.objects_in_layer(index)?.len();
+                items.push(LayerInfo {
+                    index,
+                    name: layer.name,
+                    enabled: layer.enabled,
+                    locked: layer.locked,
+                    object_count,
+                });
+            }
+            Ok((revision, items))
+        })?;
+
+        Ok(Snapshot {
+            items,
+            snapshot_revision,
+        })
+    }
+
+    fn list_objects(
+        &self,
+        expected_scene_id: i32,
+        filter: Option<&ObjectFilter>,
+    ) -> Result<Snapshot<ObjectSummary>, ReadError> {
+        self.ensure_readable()?;
+        if let Some(filter) = filter {
+            filter.validate()?;
+        }
+        let info = self.host.edit_info()?;
+        ensure_scene(&info, expected_scene_id)?;
+        let layers = layer_range(filter, info.layer_max);
+        let scene_id = info.scene_id;
+        let epoch = self.project.epoch();
+        let epoch = epoch.as_str();
+        let project = self.project.as_ref();
+
+        let (snapshot_revision, items) = self.read_section(move |scene| {
+            let revision = project.revision();
+            let mut items = Vec::new();
+            for layer in layers {
+                for object in scene.objects_in_layer(layer)? {
+                    items.push(object_summary(epoch, scene_id, &object));
+                }
+            }
+            Ok((revision, items))
+        })?;
+
+        Ok(Snapshot {
+            items,
+            snapshot_revision,
+        })
+    }
+
+    fn get_object(&self, selector: &ObjectSelector) -> Result<ObjectDetail, ReadError> {
+        self.ensure_readable()?;
+        let info = self.host.edit_info()?;
+        ensure_scene(&info, selector.scene_id)?;
+
+        let epoch = self.project.epoch();
+        if epoch != selector.project_epoch {
+            return Err(ReadError::EpochMismatch);
+        }
+        if selector.fingerprint_algorithm != FingerprintAlgorithm::GENERATED {
+            return Err(ReadError::FingerprintAlgorithmMismatch {
+                requested: selector.fingerprint_algorithm.to_string(),
+                supported: FingerprintAlgorithm::GENERATED.to_string(),
+            });
+        }
+
+        let scene_id = info.scene_id;
+        let layer = selector.layer;
+        let frame = selector.frame;
+        let required_name = selector.name.as_deref();
+        let expected_fingerprint = &selector.fingerprint;
+        let epoch = epoch.as_str();
+        let project = self.project.as_ref();
+
+        self.read_section(move |scene| {
+            let revision = project.revision();
+            let candidate =
+                resolve_candidate(scene.objects_in_layer(layer)?, frame, required_name)?;
+            if object_fingerprint(fingerprint_input(scene_id, &candidate)) != *expected_fingerprint
+            {
+                return Err(ReadError::FingerprintMismatch);
+            }
+            let detail = scene.object_detail(layer, candidate.frame_start)?;
+            Ok(object_detail(epoch, scene_id, revision, detail))
+        })
+    }
+
+    fn list_available_effects(
+        &self,
+        effect_type: Option<&EffectType>,
+    ) -> Result<Snapshot<AvailableEffect>, ReadError> {
+        self.ensure_readable()?;
+        // カタログは参照区間を必要としないため、列挙の直前の revision を採る。
+        let snapshot_revision = self.project.revision();
+        let mut items = self.host.effect_catalog()?;
+        if let Some(effect_type) = effect_type {
+            items.retain(|effect| effect.effect_type == *effect_type);
+        }
+        Ok(Snapshot {
+            items,
+            snapshot_revision,
+        })
+    }
+}
+
+/// 現在シーンが要求の前提と一致することを確かめる。
+fn ensure_scene(info: &HostEditInfo, expected_scene_id: i32) -> Result<(), ReadError> {
+    if info.scene_id == expected_scene_id {
+        Ok(())
+    } else {
+        Err(ReadError::SceneMismatch {
+            expected: expected_scene_id,
+            current: info.scene_id,
+        })
+    }
+}
+
+/// 絞り込み条件を現在のレイヤー数で丸めた走査範囲。
+///
+/// 下限が上限を上回る指定は要求の誤りとして事前に弾いているため、ここでは
+/// 空の範囲にならない。上限だけが現在のレイヤー数を超える指定は丸める。
+fn layer_range(filter: Option<&ObjectFilter>, layer_max: usize) -> RangeInclusive<usize> {
+    let min = filter.and_then(|filter| filter.layer_min).unwrap_or(0);
+    let max = filter
+        .and_then(|filter| filter.layer_max)
+        .unwrap_or(layer_max)
+        .min(layer_max);
+    min..=max
+}
+
+/// 開始フレームの完全一致と名前の一致で候補を 1 件へ絞る。
+///
+/// 「指定フレーム以降」の探索結果をそのまま候補にしない。セレクターの `frame` は
+/// 対象の開始フレームであり、途中フレームでの重なりを表さない。
+fn resolve_candidate(
+    objects: Vec<HostObject>,
+    frame: usize,
+    required_name: Option<&str>,
+) -> Result<HostObject, ReadError> {
+    let mut candidates: Vec<HostObject> = objects
+        .into_iter()
+        .filter(|object| object.frame_start == frame && matches_name(required_name, object))
+        .collect();
+
+    match candidates.len() {
+        0 => Err(ReadError::ObjectNotFound),
+        1 => Ok(candidates.remove(0)),
+        candidate_count => Err(ReadError::AmbiguousObject { candidate_count }),
+    }
+}
+
+/// 名前が指定されている場合に一致を必須とする。
+fn matches_name(required_name: Option<&str>, object: &HostObject) -> bool {
+    match required_name {
+        None => true,
+        Some(name) => object.name.as_deref() == Some(name),
+    }
+}
+
+/// fingerprint の入力を組み立てる。
+fn fingerprint_input<'a>(scene_id: i32, object: &'a HostObject) -> ObjectFingerprintInput<'a> {
+    ObjectFingerprintInput {
+        scene_id,
+        layer: object.layer,
+        frame_start: object.frame_start,
+        frame_end: object.frame_end,
+        name: object.name.as_deref(),
+        alias: &object.alias,
+    }
+}
+
+/// オブジェクトの概要を組み立てる。
+fn object_summary(epoch: &str, scene_id: i32, object: &HostObject) -> ObjectSummary {
+    ObjectSummary::new(epoch, fingerprint_input(scene_id, object))
+}
+
+/// オブジェクトの詳細を組み立てる。
+fn object_detail(
+    epoch: &str,
+    scene_id: i32,
+    revision: u64,
+    detail: HostObjectDetail,
+) -> ObjectDetail {
+    let alias = detail.object.alias.clone();
+    let summary = object_summary(epoch, scene_id, &detail.object);
+    let effects = detail
+        .effects
+        .iter()
+        .map(|effect| effect_info(&summary.selector, effect))
+        .collect();
+    ObjectDetail {
+        summary,
+        alias,
+        sections: detail.sections,
+        effects,
+        project_revision: revision,
+    }
+}
+
+/// effect の読み取り結果を組み立てる。
+fn effect_info(object: &ObjectSelector, effect: &HostEffect) -> EffectInfo {
+    EffectInfo::new(
+        object.clone(),
+        EffectFingerprintInput {
+            effect_name: &effect.name,
+            effect_index: effect.index,
+            enabled: effect.enabled,
+            locked: effect.locked,
+            items: &effect.items,
+        },
+    )
+}
+
+/// シーン情報を組み立てる。
+fn scene_info(info: &HostEditInfo, name: Option<String>) -> SceneInfo {
+    SceneInfo {
+        id: info.scene_id,
+        name,
+        width: info.width,
+        height: info.height,
+        fps: fps(info.fps_rate, info.fps_scale),
+        fps_rate: info.fps_rate,
+        fps_scale: info.fps_scale,
+        sample_rate: info.sample_rate,
+    }
+}
+
+/// フレームレートを算出する。分母が 0 の場合は算出できない。
+fn fps(rate: i32, scale: i32) -> Option<FiniteF64> {
+    if scale == 0 {
+        return None;
+    }
+    FiniteF64::try_new(f64::from(rate) / f64::from(scale))
+}
+
+/// フレーム範囲選択を組み立てる。片側しか得られない場合は未選択として扱う。
+fn selected_range(info: &HostEditInfo) -> Option<FrameRange> {
+    match (info.select_range_start, info.select_range_end) {
+        (Some(start), Some(end)) => Some(FrameRange { start, end }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::read::host::HostLayer;
+    use aviutl2_mcp_core::{
+        AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
+        ItemValue, SectionRange,
+    };
+    use std::sync::Mutex;
+
+    /// 参照区間の内側で panic させる位置。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum PanicPoint {
+        SceneName,
+        ObjectsInLayer,
+    }
+
+    /// テスト用のレイヤー。
+    #[derive(Debug, Clone)]
+    struct FakeLayer {
+        name: Option<String>,
+        enabled: bool,
+        locked: bool,
+        objects: Vec<HostObject>,
+    }
+
+    /// SDK の代わりに定型データを返すホスト。
+    ///
+    /// 呼び出された経路を記録するため、受付前に SDK を呼ばないことを検証できる。
+    struct FakeHost {
+        ready: bool,
+        state: EditState,
+        info: HostEditInfo,
+        scene_name: Option<String>,
+        grid_bpm: Vec<FiniteF64>,
+        layers: Vec<FakeLayer>,
+        effects: Vec<HostEffect>,
+        catalog: Vec<AvailableEffect>,
+        panic_at: Option<PanicPoint>,
+        /// 参照区間へ入る直前に進めるプロジェクト revision の回数。
+        bump_on_enter: u64,
+        project: Option<Arc<ProjectState>>,
+        calls: Mutex<Vec<&'static str>>,
+    }
+
+    impl FakeHost {
+        fn new() -> Self {
+            Self {
+                ready: true,
+                state: EditState::Edit,
+                info: fake_edit_info(),
+                scene_name: Some("Scene 1".to_string()),
+                grid_bpm: vec![FiniteF64::try_new(120.0).unwrap()],
+                layers: fake_layers(),
+                effects: fake_effects(),
+                catalog: fake_catalog(),
+                panic_at: None,
+                bump_on_enter: 0,
+                project: None,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn record(&self, call: &'static str) {
+            self.calls.lock().unwrap().push(call);
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl ReadHost for FakeHost {
+        fn is_ready(&self) -> bool {
+            self.ready
+        }
+
+        fn edit_state(&self) -> Result<EditState, ReadError> {
+            self.record("edit_state");
+            Ok(self.state)
+        }
+
+        fn edit_info(&self) -> Result<HostEditInfo, ReadError> {
+            self.record("edit_info");
+            Ok(self.info.clone())
+        }
+
+        fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError> {
+            self.record("effect_catalog");
+            Ok(self.catalog.clone())
+        }
+
+        fn enter_read_section<T, F>(&self, f: F) -> Result<T, ReadError>
+        where
+            T: Send + 'static,
+            F: FnOnce(&dyn SceneReader) -> T + Send,
+        {
+            self.record("enter_read_section");
+            if let Some(project) = &self.project {
+                for _ in 0..self.bump_on_enter {
+                    project.on_object_updated();
+                }
+            }
+            let scene = FakeScene { host: self };
+            Ok(f(&scene))
+        }
+    }
+
+    struct FakeScene<'a> {
+        host: &'a FakeHost,
+    }
+
+    impl SceneReader for FakeScene<'_> {
+        fn scene_name(&self) -> Option<String> {
+            assert_ne!(
+                self.host.panic_at,
+                Some(PanicPoint::SceneName),
+                "参照区間の内側で panic させます"
+            );
+            self.host.scene_name.clone()
+        }
+
+        fn grid_bpm(&self) -> Result<Vec<FiniteF64>, ReadError> {
+            Ok(self.host.grid_bpm.clone())
+        }
+
+        fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {
+            let fake = self.host.layers.get(layer).ok_or(ReadError::Sdk {
+                operation: "get_layer_name",
+            })?;
+            Ok(HostLayer {
+                name: fake.name.clone(),
+                enabled: fake.enabled,
+                locked: fake.locked,
+            })
+        }
+
+        fn objects_in_layer(&self, layer: usize) -> Result<Vec<HostObject>, ReadError> {
+            assert_ne!(
+                self.host.panic_at,
+                Some(PanicPoint::ObjectsInLayer),
+                "参照区間の内側で panic させます"
+            );
+            Ok(self
+                .host
+                .layers
+                .get(layer)
+                .map(|fake| fake.objects.clone())
+                .unwrap_or_default())
+        }
+
+        fn object_detail(
+            &self,
+            layer: usize,
+            frame_start: usize,
+        ) -> Result<HostObjectDetail, ReadError> {
+            let object = self
+                .host
+                .layers
+                .get(layer)
+                .and_then(|fake| {
+                    fake.objects
+                        .iter()
+                        .find(|object| object.frame_start == frame_start)
+                })
+                .ok_or(ReadError::ObjectNotFound)?;
+            Ok(HostObjectDetail {
+                object: object.clone(),
+                sections: vec![SectionRange {
+                    start: object.frame_start,
+                    end: object.frame_end,
+                }],
+                effects: self.host.effects.clone(),
+            })
+        }
+    }
+
+    fn fake_edit_info() -> HostEditInfo {
+        HostEditInfo {
+            scene_id: 0,
+            width: 1920,
+            height: 1080,
+            fps_rate: 30000,
+            fps_scale: 1001,
+            sample_rate: 48000,
+            cursor_frame: 12,
+            cursor_layer: 1,
+            frame_max: 3600,
+            layer_max: 2,
+            display_frame_start: 0,
+            display_layer_start: 0,
+            display_frame_num: 600,
+            display_layer_num: 10,
+            select_range_start: Some(10),
+            select_range_end: Some(20),
+        }
+    }
+
+    fn object(
+        layer: usize,
+        frame_start: usize,
+        frame_end: usize,
+        name: Option<&str>,
+    ) -> HostObject {
+        HostObject {
+            layer,
+            frame_start,
+            frame_end,
+            name: name.map(str::to_string),
+            alias: format!("[{layer}:{frame_start}]"),
+        }
+    }
+
+    fn fake_layers() -> Vec<FakeLayer> {
+        vec![
+            FakeLayer {
+                name: Some("背景".to_string()),
+                enabled: true,
+                locked: false,
+                objects: vec![object(0, 0, 99, None)],
+            },
+            FakeLayer {
+                name: None,
+                enabled: true,
+                locked: true,
+                objects: vec![
+                    object(1, 100, 200, Some("立ち絵")),
+                    object(1, 300, 400, Some("字幕")),
+                ],
+            },
+            FakeLayer {
+                name: Some("効果".to_string()),
+                enabled: false,
+                locked: false,
+                objects: Vec::new(),
+            },
+        ]
+    }
+
+    fn fake_effects() -> Vec<HostEffect> {
+        vec![HostEffect {
+            name: "動画ファイル".to_string(),
+            index: 0,
+            enabled: true,
+            locked: false,
+            items: vec![EffectItem {
+                name: "ファイル".to_string(),
+                item_type: EffectItemType::File,
+                value: ItemValue::File {
+                    path: r"C:\movie.mp4".to_string(),
+                },
+                track: None,
+            }],
+        }]
+    }
+
+    fn fake_catalog() -> Vec<AvailableEffect> {
+        vec![
+            AvailableEffect {
+                name: "ぼかし".to_string(),
+                effect_type: EffectType::Filter,
+                flags: EffectFlags::from_raw(1),
+                items: vec![AvailableEffectItem {
+                    name: "範囲".to_string(),
+                    item_type: EffectItemType::Integer,
+                }],
+            },
+            AvailableEffect {
+                name: "動画ファイル".to_string(),
+                effect_type: EffectType::Input,
+                flags: EffectFlags::from_raw(3),
+                items: Vec::new(),
+            },
+        ]
+    }
+
+    /// adapter とプロジェクト状態を組み立てる。
+    fn adapter_with(
+        host: impl FnOnce(&Arc<ProjectState>) -> FakeHost,
+    ) -> HostReadAdapter<FakeHost> {
+        let project = Arc::new(ProjectState::new());
+        let host = host(&project);
+        HostReadAdapter::new(host, project)
+    }
+
+    fn adapter() -> HostReadAdapter<FakeHost> {
+        adapter_with(|_| FakeHost::new())
+    }
+
+    /// 全 read operation を 1 度ずつ実行し、エラーコードを集める。
+    fn error_codes_of_all_operations(adapter: &HostReadAdapter<FakeHost>) -> Vec<ErrorCode> {
+        let selector = sample_selector(adapter);
+        vec![
+            adapter.get_edit_info().err().map(|e| e.error_code()),
+            adapter.get_current_scene().err().map(|e| e.error_code()),
+            adapter.list_layers(0).err().map(|e| e.error_code()),
+            adapter.list_objects(0, None).err().map(|e| e.error_code()),
+            adapter.get_object(&selector).err().map(|e| e.error_code()),
+            adapter
+                .list_available_effects(None)
+                .err()
+                .map(|e| e.error_code()),
+        ]
+        .into_iter()
+        .map(|code| code.expect("成功してしまいました"))
+        .collect()
+    }
+
+    /// レイヤー 1・フレーム 100 のオブジェクトを指すセレクター。
+    fn sample_selector(adapter: &HostReadAdapter<FakeHost>) -> ObjectSelector {
+        let object = object(1, 100, 200, Some("立ち絵"));
+        object_summary(&adapter.project.epoch(), 0, &object).selector
+    }
+
+    /// panic のたびに既定フックが標準エラーへ出力するのを抑える。
+    fn with_silent_panic_hook<T>(f: impl FnOnce() -> T) -> T {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(AssertUnwindSafe(f));
+        std::panic::set_hook(previous);
+        result.expect("panic が呼び出し側へ漏れました")
+    }
+
+    #[test]
+    fn not_ready_rejects_every_operation_without_touching_sdk() {
+        let adapter = adapter_with(|_| FakeHost {
+            ready: false,
+            ..FakeHost::new()
+        });
+
+        for code in error_codes_of_all_operations(&adapter) {
+            assert_eq!(code, ErrorCode::HostBusy);
+        }
+        assert!(
+            adapter.host.calls().is_empty(),
+            "準備前に SDK を呼び出しました: {:?}",
+            adapter.host.calls()
+        );
+    }
+
+    #[test]
+    fn not_ready_advises_retry() {
+        let adapter = adapter_with(|_| FakeHost {
+            ready: false,
+            ..FakeHost::new()
+        });
+        let error = adapter.get_edit_info().unwrap_err();
+        assert!(error.retryable());
+        assert!(error.retry_after_ms().is_some());
+    }
+
+    #[test]
+    fn preview_and_save_are_edit_blocked_without_entering_read_section() {
+        for state in [EditState::Preview, EditState::Save] {
+            let adapter = adapter_with(|_| FakeHost {
+                state,
+                ..FakeHost::new()
+            });
+
+            for code in error_codes_of_all_operations(&adapter) {
+                assert_eq!(
+                    code,
+                    ErrorCode::EditBlocked,
+                    "{state} で拒否されませんでした"
+                );
+            }
+            assert!(
+                !adapter.host.calls().contains(&"enter_read_section"),
+                "{state} で参照区間へ入りました: {:?}",
+                adapter.host.calls()
+            );
+            assert!(
+                !adapter.host.calls().contains(&"edit_info"),
+                "{state} で編集情報を取得しました"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_blocked_reports_current_state() {
+        let adapter = adapter_with(|_| FakeHost {
+            state: EditState::Save,
+            ..FakeHost::new()
+        });
+        let error = adapter.get_edit_info().unwrap_err();
+        assert_eq!(error.details()["edit_state"], "save");
+        assert!(error.retryable());
+    }
+
+    #[test]
+    fn guard_converts_panic_into_internal_error() {
+        let error = with_silent_panic_hook(|| {
+            guard::<()>(|| panic!("参照区間の内側で panic させます")).unwrap_err()
+        });
+        assert_eq!(error.error_code(), ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn guard_passes_through_success_and_failure() {
+        assert_eq!(guard(|| Ok(7)).unwrap(), 7);
+        let error = guard::<()>(|| Err(ReadError::ObjectNotFound)).unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn panic_inside_read_section_becomes_internal_error() {
+        let adapter = adapter_with(|_| FakeHost {
+            panic_at: Some(PanicPoint::SceneName),
+            ..FakeHost::new()
+        });
+
+        let error = with_silent_panic_hook(|| adapter.get_edit_info().unwrap_err());
+        assert_eq!(error.error_code(), ErrorCode::InternalError);
+        assert!(adapter.host.calls().contains(&"enter_read_section"));
+    }
+
+    #[test]
+    fn panic_inside_object_lookup_becomes_internal_error() {
+        let adapter = adapter_with(|_| FakeHost {
+            panic_at: Some(PanicPoint::ObjectsInLayer),
+            ..FakeHost::new()
+        });
+        let selector = sample_selector(&adapter);
+
+        let error = with_silent_panic_hook(|| adapter.get_object(&selector).unwrap_err());
+        assert_eq!(error.error_code(), ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn get_edit_info_maps_host_values() {
+        let adapter = adapter();
+        let info = adapter.get_edit_info().unwrap();
+
+        assert_eq!(info.scene.id, 0);
+        assert_eq!(info.scene.name.as_deref(), Some("Scene 1"));
+        assert_eq!(info.scene.width, 1920);
+        assert_eq!(info.scene.fps_rate, 30000);
+        assert_eq!(info.scene.fps_scale, 1001);
+        assert_eq!(info.scene.fps.map(|fps| fps.get()), Some(30000.0 / 1001.0));
+        assert_eq!(
+            info.cursor,
+            Cursor {
+                frame: 12,
+                layer: 1
+            }
+        );
+        assert_eq!(
+            info.extent,
+            Extent {
+                frame_max: 3600,
+                layer_max: 2
+            }
+        );
+        assert_eq!(info.selected_range, Some(FrameRange { start: 10, end: 20 }));
+        assert_eq!(info.grid_bpm.len(), 1);
+        assert_eq!(info.project_epoch, adapter.project.epoch());
+    }
+
+    #[test]
+    fn fps_is_absent_when_denominator_is_zero() {
+        let adapter = adapter_with(|_| FakeHost {
+            info: HostEditInfo {
+                fps_scale: 0,
+                ..fake_edit_info()
+            },
+            ..FakeHost::new()
+        });
+        let info = adapter.get_edit_info().unwrap();
+        assert_eq!(info.scene.fps, None);
+        assert_eq!(info.scene.fps_rate, 30000);
+        assert_eq!(info.scene.fps_scale, 0);
+    }
+
+    #[test]
+    fn unselected_range_is_absent() {
+        let adapter = adapter_with(|_| FakeHost {
+            info: HostEditInfo {
+                select_range_start: None,
+                select_range_end: None,
+                ..fake_edit_info()
+            },
+            ..FakeHost::new()
+        });
+        assert_eq!(adapter.get_edit_info().unwrap().selected_range, None);
+    }
+
+    #[test]
+    fn get_current_scene_returns_scene_and_revision() {
+        let adapter = adapter();
+        adapter.project.on_object_updated();
+        let (scene, revision) = adapter.get_current_scene().unwrap();
+        assert_eq!(scene.id, 0);
+        assert_eq!(revision, 1);
+    }
+
+    #[test]
+    fn snapshot_revision_is_taken_inside_read_section() {
+        // 参照区間へ入った時点の revision を採る。区間へ入る前の値を採っていると
+        // ここで 0 が返り、テストが落ちる。
+        let adapter = adapter_with(|project| FakeHost {
+            bump_on_enter: 3,
+            project: Some(Arc::clone(project)),
+            ..FakeHost::new()
+        });
+
+        assert_eq!(adapter.list_layers(0).unwrap().snapshot_revision, 3);
+    }
+
+    #[test]
+    fn list_layers_enumerates_up_to_layer_max() {
+        let adapter = adapter();
+        let snapshot = adapter.list_layers(0).unwrap();
+
+        assert_eq!(snapshot.items.len(), 3);
+        assert_eq!(snapshot.items[0].index, 0);
+        assert_eq!(snapshot.items[0].name.as_deref(), Some("背景"));
+        assert_eq!(snapshot.items[0].object_count, 1);
+        assert_eq!(snapshot.items[1].name, None);
+        assert!(snapshot.items[1].locked);
+        assert_eq!(snapshot.items[1].object_count, 2);
+        assert!(!snapshot.items[2].enabled);
+        assert_eq!(snapshot.items[2].object_count, 0);
+    }
+
+    #[test]
+    fn scene_guard_rejects_other_scene() {
+        let adapter = adapter();
+        for error in [
+            adapter.list_layers(7).unwrap_err(),
+            adapter.list_objects(7, None).unwrap_err(),
+        ] {
+            assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+            assert_eq!(error.details()["expected_scene_id"], 7);
+            assert_eq!(error.details()["current_scene_id"], 0);
+        }
+    }
+
+    #[test]
+    fn list_objects_enumerates_every_layer_by_default() {
+        let adapter = adapter();
+        let snapshot = adapter.list_objects(0, None).unwrap();
+        assert_eq!(snapshot.items.len(), 3);
+        assert_eq!(snapshot.items[0].layer, 0);
+        assert_eq!(snapshot.items[1].frame_start, 100);
+        assert_eq!(snapshot.items[1].frame_end, 200);
+        assert_eq!(snapshot.items[1].name.as_deref(), Some("立ち絵"));
+    }
+
+    #[test]
+    fn list_objects_applies_layer_filter() {
+        let adapter = adapter();
+        let filter = ObjectFilter {
+            layer_min: Some(1),
+            layer_max: Some(1),
+        };
+        let snapshot = adapter.list_objects(0, Some(&filter)).unwrap();
+        assert_eq!(snapshot.items.len(), 2);
+        assert!(snapshot.items.iter().all(|item| item.layer == 1));
+    }
+
+    #[test]
+    fn list_objects_clamps_filter_to_existing_layers() {
+        let adapter = adapter();
+        let filter = ObjectFilter {
+            layer_min: None,
+            layer_max: Some(999),
+        };
+        assert_eq!(
+            adapter.list_objects(0, Some(&filter)).unwrap().items.len(),
+            3
+        );
+    }
+
+    #[test]
+    fn list_objects_rejects_inverted_filter() {
+        let adapter = adapter();
+        let filter = ObjectFilter {
+            layer_min: Some(2),
+            layer_max: Some(1),
+        };
+        let error = adapter.list_objects(0, Some(&filter)).unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn list_objects_selector_can_be_resolved() {
+        let adapter = adapter();
+        let snapshot = adapter.list_objects(0, None).unwrap();
+        for summary in snapshot.items {
+            let detail = adapter.get_object(&summary.selector).unwrap();
+            assert_eq!(detail.summary.fingerprint, summary.fingerprint);
+        }
+    }
+
+    #[test]
+    fn get_object_returns_detail_for_matching_selector() {
+        let adapter = adapter();
+        let selector = sample_selector(&adapter);
+        let detail = adapter.get_object(&selector).unwrap();
+
+        assert_eq!(detail.summary.layer, 1);
+        assert_eq!(detail.summary.frame_start, 100);
+        assert_eq!(detail.alias, "[1:100]");
+        assert_eq!(detail.sections.len(), 1);
+        assert_eq!(detail.effects.len(), 1);
+        assert_eq!(detail.effects[0].name, "動画ファイル");
+        assert_eq!(detail.effects[0].selector.object, detail.summary.selector);
+    }
+
+    #[test]
+    fn get_object_matches_start_frame_exactly() {
+        // 開始フレーム以降の探索を流用していると、範囲内のフレームでも
+        // 同じオブジェクトが解決されてしまう。
+        let adapter = adapter();
+        let mut selector = sample_selector(&adapter);
+        selector.frame = 150;
+
+        let error = adapter.get_object(&selector).unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn get_object_reports_not_found_when_no_candidate() {
+        let adapter = adapter();
+        let mut selector = sample_selector(&adapter);
+        selector.frame = 1000;
+        assert_eq!(
+            adapter.get_object(&selector).unwrap_err().error_code(),
+            ErrorCode::NotFound
+        );
+    }
+
+    #[test]
+    fn get_object_reports_not_found_when_name_differs() {
+        let adapter = adapter();
+        let mut selector = sample_selector(&adapter);
+        selector.name = Some("別の名前".to_string());
+        assert_eq!(
+            adapter.get_object(&selector).unwrap_err().error_code(),
+            ErrorCode::NotFound
+        );
+    }
+
+    #[test]
+    fn get_object_reports_ambiguous_selector_for_multiple_candidates() {
+        let adapter = adapter_with(|_| {
+            let mut layers = fake_layers();
+            // 同じ開始フレームの候補を 2 件にする。
+            layers[1].objects = vec![
+                object(1, 100, 200, Some("立ち絵")),
+                object(1, 100, 250, Some("立ち絵")),
+            ];
+            FakeHost {
+                layers,
+                ..FakeHost::new()
+            }
+        });
+        let selector = sample_selector(&adapter);
+
+        let error = adapter.get_object(&selector).unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::AmbiguousSelector);
+        assert_eq!(error.details()["candidate_count"], 2);
+    }
+
+    #[test]
+    fn get_object_reports_precondition_failed_for_fingerprint_mismatch() {
+        let adapter = adapter_with(|_| {
+            let mut layers = fake_layers();
+            // 位置と名前は同じまま alias だけ変える。
+            layers[1].objects[0].alias = "[changed]".to_string();
+            FakeHost {
+                layers,
+                ..FakeHost::new()
+            }
+        });
+        let selector = sample_selector(&adapter);
+
+        assert_eq!(
+            adapter.get_object(&selector).unwrap_err().error_code(),
+            ErrorCode::PreconditionFailed
+        );
+    }
+
+    #[test]
+    fn get_object_reports_precondition_failed_for_scene_mismatch() {
+        let adapter = adapter();
+        let mut selector = sample_selector(&adapter);
+        selector.scene_id = 5;
+
+        let error = adapter.get_object(&selector).unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+        assert_eq!(error.details()["expected_scene_id"], 5);
+    }
+
+    #[test]
+    fn get_object_reports_precondition_failed_for_epoch_mismatch() {
+        let adapter = adapter();
+        let mut selector = sample_selector(&adapter);
+        selector.project_epoch = "00000000-0000-0000-0000-000000000000".to_string();
+
+        let error = adapter.get_object(&selector).unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+        assert!(
+            !adapter.host.calls().contains(&"enter_read_section"),
+            "epoch 不一致で参照区間へ入りました"
+        );
+    }
+
+    #[test]
+    fn get_object_reports_precondition_failed_for_algorithm_mismatch() {
+        let adapter = adapter();
+        let mut selector = sample_selector(&adapter);
+        selector.fingerprint_algorithm = FingerprintAlgorithm::NormalizedAliasV1;
+
+        let error = adapter.get_object(&selector).unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+        assert_eq!(
+            error.details()["requested_fingerprint_algorithm"],
+            "sha256-alias-v1"
+        );
+        assert!(
+            !adapter.host.calls().contains(&"enter_read_section"),
+            "方式不一致で参照区間へ入りました"
+        );
+    }
+
+    #[test]
+    fn list_available_effects_returns_catalog() {
+        let adapter = adapter();
+        let snapshot = adapter.list_available_effects(None).unwrap();
+        assert_eq!(snapshot.items.len(), 2);
+    }
+
+    #[test]
+    fn list_available_effects_filters_by_type() {
+        let adapter = adapter();
+        let snapshot = adapter
+            .list_available_effects(Some(&EffectType::Input))
+            .unwrap();
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0].name, "動画ファイル");
+
+        let none = adapter
+            .list_available_effects(Some(&EffectType::Output))
+            .unwrap();
+        assert!(none.items.is_empty());
+    }
+
+    #[test]
+    fn list_available_effects_does_not_enter_read_section() {
+        let adapter = adapter();
+        adapter.list_available_effects(None).unwrap();
+        assert!(!adapter.host.calls().contains(&"enter_read_section"));
+    }
+
+    #[test]
+    fn each_operation_enters_read_section_at_most_once() {
+        for expected in [0usize, 1] {
+            let adapter = adapter();
+            let selector = sample_selector(&adapter);
+            match expected {
+                0 => {
+                    adapter.list_available_effects(None).unwrap();
+                }
+                _ => {
+                    adapter.get_object(&selector).unwrap();
+                }
+            }
+            let entries = adapter
+                .host
+                .calls()
+                .iter()
+                .filter(|call| **call == "enter_read_section")
+                .count();
+            assert_eq!(entries, expected);
+        }
+    }
+
+    #[test]
+    fn read_results_do_not_expose_handles() {
+        let adapter = adapter();
+        let selector = sample_selector(&adapter);
+        let mut documents = vec![
+            serde_json::to_string(&adapter.get_edit_info().unwrap()).unwrap(),
+            serde_json::to_string(&adapter.get_object(&selector).unwrap()).unwrap(),
+            serde_json::to_string(&adapter.list_objects(0, None).unwrap().items).unwrap(),
+            serde_json::to_string(&adapter.list_layers(0).unwrap().items).unwrap(),
+        ];
+        documents.push(serde_json::to_string(&adapter.get_current_scene().unwrap().0).unwrap());
+
+        for document in documents {
+            let lowered = document.to_lowercase();
+            for forbidden in ["handle", "pointer", "0x"] {
+                assert!(
+                    !lowered.contains(forbidden),
+                    "{forbidden} が応答に含まれます: {document}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn object_fingerprint_matches_between_summary_and_selector() {
+        let adapter = adapter();
+        for summary in adapter.list_objects(0, None).unwrap().items {
+            assert_eq!(summary.fingerprint, summary.selector.fingerprint);
+            assert_eq!(
+                summary.fingerprint_algorithm,
+                FingerprintAlgorithm::GENERATED
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_candidate_requires_exact_start_frame() {
+        let objects = vec![object(1, 100, 200, None)];
+        assert!(matches!(
+            resolve_candidate(objects.clone(), 150, None),
+            Err(ReadError::ObjectNotFound)
+        ));
+        assert_eq!(
+            resolve_candidate(objects, 100, None).unwrap().frame_start,
+            100
+        );
+    }
+
+    #[test]
+    fn layer_range_is_clamped_to_existing_layers() {
+        assert_eq!(layer_range(None, 5), 0..=5);
+        let filter = ObjectFilter {
+            layer_min: Some(2),
+            layer_max: Some(9),
+        };
+        assert_eq!(layer_range(Some(&filter), 5), 2..=5);
+    }
+
+    #[test]
+    fn fingerprint_of_unknown_object_differs() {
+        let base = object(1, 100, 200, Some("立ち絵"));
+        let moved = object(1, 101, 200, Some("立ち絵"));
+        assert_ne!(
+            object_fingerprint(fingerprint_input(0, &base)),
+            object_fingerprint(fingerprint_input(0, &moved))
+        );
+    }
+
+    #[test]
+    fn selector_fingerprint_is_canonical() {
+        let adapter = adapter();
+        let selector = sample_selector(&adapter);
+        let parsed: Fingerprint = selector.fingerprint.as_str().parse().unwrap();
+        assert_eq!(parsed, selector.fingerprint);
+    }
+}

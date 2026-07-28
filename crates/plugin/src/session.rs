@@ -7,6 +7,7 @@
 use crate::lifecycle::Lifecycle;
 use crate::pipe::PipeStream;
 use crate::project::ProjectState;
+use crate::read::ReadAdapter;
 use anyhow::{Context, Result};
 use aviutl2_mcp_core::{
     ClientAuth, ClientHello, ErrorCode, ErrorObject, InstanceId, Nonce, ProtocolVersion,
@@ -42,10 +43,12 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// 1 接続の処理を panic boundary で包んで実行する。
 ///
 /// プロジェクト状態は全接続で共有される読み取り用の状態として受け取る。
+/// 読み取り口も同様に全接続で共有し、SDK 呼び出しはその内側へ閉じる。
 pub fn handle_connection(
     stream: PipeStream,
     lifecycle: Arc<Lifecycle>,
     _project_state: Arc<ProjectState>,
+    _read_adapter: Arc<dyn ReadAdapter>,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if let Err(e) = run_connection(&stream, &lifecycle) {

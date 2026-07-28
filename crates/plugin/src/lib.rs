@@ -12,6 +12,8 @@ pub mod pipe;
 #[cfg(windows)]
 pub mod project;
 #[cfg(windows)]
+pub mod read;
+#[cfg(windows)]
 pub mod registry;
 #[cfg(windows)]
 pub mod security;
@@ -30,7 +32,8 @@ use aviutl2_mcp_core::DescriptorProject;
 
 /// 編集ハンドル。plugin 初期化時に一度だけ設定される。
 #[cfg(windows)]
-static EDIT_HANDLE: aviutl2::generic::GlobalEditHandle = aviutl2::generic::GlobalEditHandle::new();
+pub(crate) static EDIT_HANDLE: aviutl2::generic::GlobalEditHandle =
+    aviutl2::generic::GlobalEditHandle::new();
 
 /// named pipe server 停止時の bounded join 上限。
 ///
@@ -147,13 +150,15 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
             }
         };
 
-        let pipe_server = match pipe::PipeServer::start(lifecycle.clone(), project_state) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("named pipe server の起動に失敗しました: {e:?}");
-                return;
-            }
-        };
+        let read_adapter = read::sdk_read_adapter(project_state.clone());
+        let pipe_server =
+            match pipe::PipeServer::start(lifecycle.clone(), project_state, read_adapter) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("named pipe server の起動に失敗しました: {e:?}");
+                    return;
+                }
+            };
 
         tracing::info!(
             instance_id = %instance_id,
