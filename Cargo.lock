@@ -125,7 +125,6 @@ dependencies = [
 name = "aviutl2-mcp-server"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "aviutl2-mcp-core",
  "chrono",
  "serde",

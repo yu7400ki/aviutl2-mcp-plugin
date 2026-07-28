@@ -24,7 +24,6 @@ name = "live_host_acceptance"
 path = "examples/live_host_acceptance.rs"
 
 [dependencies]
-anyhow = { workspace = true }
 aviutl2-mcp-core = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
