@@ -213,6 +213,16 @@ impl EffectType {
         }
     }
 
+    /// 種別を一意に表す名前を返す。
+    ///
+    /// 表現は [`fmt::Display`] と同じで、既知の種別は snake_case 名、未知の種別は
+    /// raw 値を含む別形式になる。raw 値そのものではなく名前で識別するため、
+    /// 既知の種別と同じ raw を持つ [`EffectType::Unknown`] が既知の種別と
+    /// 同じ表現になることはない。
+    pub fn kind_name(&self) -> String {
+        kind_name(self.name(), self.as_raw())
+    }
+
     fn from_name(name: &str) -> Option<Self> {
         match name {
             "filter" => Some(EffectType::Filter),
@@ -324,6 +334,16 @@ impl EffectItemType {
         }
     }
 
+    /// 種別を一意に表す名前を返す。
+    ///
+    /// 表現は [`fmt::Display`] と同じで、既知の種別は snake_case 名、未知の種別は
+    /// raw 値を含む別形式になる。raw 値そのものではなく名前で識別するため、
+    /// 既知の種別と同じ raw を持つ [`EffectItemType::Unknown`] が既知の種別と
+    /// 同じ表現になることはない。
+    pub fn kind_name(&self) -> String {
+        kind_name(self.name(), self.as_raw())
+    }
+
     fn from_name(name: &str) -> Option<Self> {
         match name {
             "integer" => Some(EffectItemType::Integer),
@@ -344,6 +364,17 @@ impl EffectItemType {
             "folder" => Some(EffectItemType::Folder),
             _ => None,
         }
+    }
+}
+
+/// 種別を一意に表す名前を組み立てる。
+///
+/// 既知の種別は snake_case 名をそのまま用い、未知の種別は raw 値を括弧で
+/// 添えた形にする。既知の名前に括弧は現れないため、両者の表現が重なることはない。
+fn kind_name(name: Option<&str>, raw: i32) -> String {
+    match name {
+        Some(name) => name.to_string(),
+        None => format!("{UNKNOWN_TAG}({raw})"),
     }
 }
 
@@ -441,10 +472,7 @@ impl<'de> Deserialize<'de> for EffectType {
 
 impl fmt::Display for EffectType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.name() {
-            Some(name) => write!(f, "{name}"),
-            None => write!(f, "{UNKNOWN_TAG}({})", self.as_raw()),
-        }
+        f.write_str(&self.kind_name())
     }
 }
 
@@ -493,10 +521,7 @@ impl<'de> Deserialize<'de> for EffectItemType {
 
 impl fmt::Display for EffectItemType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.name() {
-            Some(name) => write!(f, "{name}"),
-            None => write!(f, "{UNKNOWN_TAG}({})", self.as_raw()),
-        }
+        f.write_str(&self.kind_name())
     }
 }
 
@@ -696,6 +721,56 @@ mod tests {
         ] {
             let result: Result<EffectType, _> = serde_json::from_str(s);
             assert!(result.is_err(), "{s} が受理された");
+        }
+    }
+
+    #[test]
+    fn kind_name_separates_unknown_from_the_known_type_of_the_same_raw() {
+        // `Unknown` は public な variant であり、既知値を持つ値も構築できる。
+        // raw 値で識別すると既知の種別と区別が付かなくなる。
+        for effect_type in known_effect_types() {
+            let unknown = EffectType::Unknown(effect_type.as_raw());
+            assert_eq!(unknown.as_raw(), effect_type.as_raw());
+            assert_ne!(unknown, effect_type);
+            assert_ne!(
+                unknown.kind_name(),
+                effect_type.kind_name(),
+                "{effect_type} と同じ名前になりました"
+            );
+        }
+
+        for item_type in known_item_types() {
+            let unknown = EffectItemType::Unknown(item_type.as_raw());
+            assert_eq!(unknown.as_raw(), item_type.as_raw());
+            assert_ne!(unknown, item_type);
+            assert_ne!(
+                unknown.kind_name(),
+                item_type.kind_name(),
+                "{item_type} と同じ名前になりました"
+            );
+        }
+    }
+
+    #[test]
+    fn kind_name_is_unique_across_known_types() {
+        let mut names: Vec<String> = known_item_types()
+            .iter()
+            .map(EffectItemType::kind_name)
+            .collect();
+        let total = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), total, "既知種別の名前が重複しています");
+    }
+
+    #[test]
+    fn kind_name_matches_display() {
+        assert_eq!(EffectType::Filter.kind_name(), "filter");
+        assert_eq!(EffectType::Unknown(1).kind_name(), "unknown(1)");
+        assert_eq!(EffectItemType::Number.kind_name(), "number");
+        assert_eq!(EffectItemType::Unknown(2).kind_name(), "unknown(2)");
+        for item_type in known_item_types() {
+            assert_eq!(item_type.kind_name(), item_type.to_string());
         }
     }
 

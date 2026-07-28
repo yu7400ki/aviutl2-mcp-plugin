@@ -379,7 +379,10 @@ pub fn effect_fingerprint(input: EffectFingerprintInput<'_>) -> Fingerprint {
     bytes.count("item_count", input.items.len());
     for item in input.items {
         bytes.text("item_name", &item.name);
-        bytes.integer("item_type", i64::from(item.item_type.as_raw()));
+        // 種別値ではなく種別の名前を書く。値で書くと、既知値と同じ raw を持つ
+        // 未知種別が既知種別と同じバイト列になり、等しくない値が同じ
+        // ダイジェストへ潰れる。
+        bytes.text("item_type", &item.item_type.kind_name());
         write_item_value(&mut bytes, &item.value);
         write_track(&mut bytes, item.track.as_ref());
     }
@@ -571,6 +574,38 @@ mod tests {
         ] {
             assert_ne!(effect_fingerprint(base), effect_fingerprint(changed));
         }
+    }
+
+    #[test]
+    fn effect_fingerprint_distinguishes_item_types() {
+        let make = |item_type: EffectItemType| {
+            effect_with(&[EffectItem {
+                name: "項目".to_string(),
+                item_type,
+                value: ItemValue::Unknown {
+                    raw: "v".to_string(),
+                },
+                track: None,
+            }])
+        };
+
+        // 既知種別と、同じ raw 値を持つ未知種別は等しくない値であり、
+        // ダイジェストも異なる。
+        assert_ne!(EffectItemType::Unknown(2), EffectItemType::Number);
+        assert_eq!(
+            EffectItemType::Unknown(2).as_raw(),
+            EffectItemType::Number.as_raw()
+        );
+        assert_ne!(
+            make(EffectItemType::Unknown(2)),
+            make(EffectItemType::Number)
+        );
+
+        assert_ne!(
+            make(EffectItemType::Integer),
+            make(EffectItemType::Number),
+            "既知種別どうしが同じダイジェストになりました"
+        );
     }
 
     #[test]
