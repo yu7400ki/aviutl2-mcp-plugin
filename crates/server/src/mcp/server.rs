@@ -561,10 +561,13 @@ impl ServerHandler for AviUtl2McpServer {
             .take(RESOURCES_PAGE_SIZE)
             .collect();
         for instance_id in &page {
+            // 表示名には完全な instance_id を載せる。URI が同じ値をそのまま
+            // 運ぶため削っても秘匿にならず、[`redact`] はログ専用である。
+            // 削った名前は同じ接頭辞を持つインスタンスを見分けられなくする。
             resources.push(
                 Resource::new(
                     edit_info_resource_uri(instance_id),
-                    format!("aviutl2 edit info {}", redact::instance_id(instance_id)),
+                    format!("aviutl2 edit info {instance_id}"),
                 )
                 .with_description("インスタンスの現在の編集情報")
                 .with_mime_type(RESOURCE_MIME_TYPE),

@@ -41,13 +41,21 @@ fn instance_line(info: &InstanceInfo) -> String {
         .and_then(|p| p.display_name.as_deref())
         .map(|name| clamp_chars(name, MAX_NAME_CHARS))
         .unwrap_or_else(|| "-".to_string());
+    // 未保存の変更の有無は保存を促すかどうかを分ける。structuredContent を
+    // 読まない呼び出し側にも届くよう、行に載せる。
+    let modified = info
+        .project
+        .as_ref()
+        .and_then(|p| p.modified)
+        .map(|modified| format!("modified={modified}"))
+        .unwrap_or_else(|| "modified=未取得".to_string());
     let scene = info
         .scene
         .as_ref()
         .map(|s| format!("scene_id={}", s.id))
         .unwrap_or_else(|| "scene=未取得".to_string());
     format!(
-        "- {} state={} pid={} project={project} {scene}",
+        "- {} state={} pid={} project={project} {modified} {scene}",
         info.instance_id,
         info.state.as_snake_case(),
         info.pid,
@@ -308,6 +316,43 @@ mod tests {
         let text = instances(&response);
         assert!(text.contains(&id.to_string()));
         assert!(text.contains("ready"));
+        // project を持たない候補では未保存の変更の有無を判断できない。
+        assert!(text.contains("modified=未取得"), "{text}");
+    }
+
+    #[test]
+    fn instances_text_reports_unsaved_changes() {
+        // 未保存の変更の有無は保存を促すかどうかを分ける。text だけを読む
+        // 呼び出し側にも届かなければならない。
+        for (modified, expected) in [
+            (Some(true), "modified=true"),
+            (Some(false), "modified=false"),
+            (None, "modified=未取得"),
+        ] {
+            let response = ListInstancesResponse {
+                instances: vec![InstanceInfo {
+                    instance_id: InstanceId::new_v4(),
+                    state: InstanceState::Ready,
+                    pid: 1234,
+                    started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
+                    project: Some(InstanceProject {
+                        display_name: None,
+                        path: None,
+                        epoch: None,
+                        revision: None,
+                        modified,
+                    }),
+                    scene: None,
+                }],
+                total_count: 1,
+                count: 1,
+                offset: 0,
+                has_more: false,
+                next_offset: None,
+            };
+            let text = instances(&response);
+            assert!(text.contains(expected), "{modified:?}: {text}");
+        }
     }
 
     #[test]
