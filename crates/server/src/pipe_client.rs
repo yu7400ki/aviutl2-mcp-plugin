@@ -199,7 +199,7 @@ impl PipeClient {
     {
         let params = serde_json::to_value(params).map_err(|_| PipeClientError::Json)?;
         let result = self.request(operation, params, deadline)?;
-        decode_result(&result)
+        self.decode_result(&result)
     }
 
     /// ping を送信し、応答を検証する。
@@ -213,7 +213,7 @@ impl PipeClient {
                 .with_deadline(deadline_to_unix_ms(deadline));
 
         let result = self.exchange(request, deadline)?;
-        let pong: PongResult = decode_result(&result)?;
+        let pong: PongResult = self.decode_result(&result)?;
         if pong.instance_id != self.instance_id {
             warn!("instance_id in ping result mismatch");
             return Err(PipeClientError::InstanceStale);
@@ -248,8 +248,10 @@ impl PipeClient {
             .map_err(|_| self.poison_on_desync(PipeClientError::Json))?;
 
         if response.request_id != request_id {
+            // 他の交換に属するフレームを読んだということであり、以降は要求と
+            // 応答の対応が 1 つずつずれたまま解釈される。
             warn!("request_id mismatch");
-            return Err(PipeClientError::InvalidResponse);
+            return Err(self.poison_on_desync(PipeClientError::InvalidResponse));
         }
         if response.instance_id != self.instance_id {
             warn!("instance_id mismatch in response");
@@ -269,13 +271,27 @@ impl PipeClient {
         }
     }
 
-    /// フレーム境界を保てない失敗を観測した接続に印を付ける。
+    /// 成功応答の `result` を型付きで読み取る。
+    ///
+    /// 読み取れない `result` は相手が契約から外れていることを意味するため、
+    /// envelope の破れと同じく接続を毒化する。判定を [`PipeClient`] のメソッドに
+    /// 置くことで、`exchange` の外で読む経路でも毒化が飛ばされないようにしている。
+    fn decode_result<R: DeserializeOwned>(
+        &self,
+        result: &serde_json::Value,
+    ) -> Result<R, PipeClientError> {
+        decode_result_value(result).map_err(|err| self.poison_on_desync(err))
+    }
+
+    /// 以降のやり取りを信頼できない失敗を観測した接続に印を付ける。
     ///
     /// 期限超過・部分転送・切断のあとは、送りかけたフレームや読み残したバイトが
     /// pipe に残る。同じ接続で次の要求を送ると境界がずれたまま解釈され、
     /// 接続が壊れているのに framing や schema の誤りとして報告されてしまう。
-    /// 応答本体を読み切ったあとの schema 破れも、相手が契約から外れている以上
-    /// 以降のやり取りを信頼できないため同様に扱う。
+    ///
+    /// 契約から外れた応答も同じく扱う。envelope・`result` のどちらが破れていても
+    /// 相手が契約どおりに応答していないことに変わりはなく、`request_id` の不一致は
+    /// 他の交換に属するフレームを読んだという最も明確な desync である。
     fn poison_on_desync(&self, err: PipeClientError) -> PipeClientError {
         if matches!(
             err,
@@ -283,6 +299,7 @@ impl PipeClient {
                 | PipeClientError::Io(_)
                 | PipeClientError::Framing
                 | PipeClientError::Json
+                | PipeClientError::InvalidResponse
         ) {
             warn!("connection lost frame alignment; refusing further requests");
             self.desynced.set(true);
@@ -405,7 +422,11 @@ struct PongResult {
 ///
 /// いったんバイト列へ戻して [`deserialize_json`] を通し、応答の読み取りを
 /// 重複 key と非有限数を拒否する経路へ統一する。
-fn decode_result<R: DeserializeOwned>(result: &serde_json::Value) -> Result<R, PipeClientError> {
+///
+/// 接続の毒化は [`PipeClient::decode_result`] が行う。
+fn decode_result_value<R: DeserializeOwned>(
+    result: &serde_json::Value,
+) -> Result<R, PipeClientError> {
     let bytes = serde_json::to_vec(result).map_err(|_| PipeClientError::Json)?;
     deserialize_json(&bytes).map_err(|_| PipeClientError::InvalidResponse)
 }
@@ -844,6 +865,9 @@ mod tests {
             matches!(failure, PipeClientError::InvalidResponse),
             "実際のエラー: {failure:?}"
         );
+
+        // 他の交換に属するフレームを読んでおり、以降の応答は 1 つずつずれる。
+        assert_rejects_without_io(&client);
     }
 
     #[test]
@@ -1122,6 +1146,38 @@ mod tests {
             matches!(failure, PipeClientError::InvalidResponse),
             "実際のエラー: {failure:?}"
         );
+
+        // envelope が読めても result が契約から外れていれば、相手が契約どおりに
+        // 応答していないことに変わりはない。
+        assert_rejects_without_io(&client);
+    }
+
+    #[test]
+    fn ping_result_of_wrong_shape_poisons_connection() {
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+
+        let responder = respond_once(&peer, move |request| {
+            let response = response_for(
+                request,
+                instance_id,
+                ResponseResult::Ok {
+                    result: serde_json::json!({ "state": 1 }),
+                },
+            );
+            serde_json::to_vec(&response).unwrap()
+        });
+
+        let failure = client
+            .ping(test_deadline())
+            .expect_err("型が合わない ping の result は拒否される");
+        responder.join().unwrap();
+        assert!(
+            matches!(failure, PipeClientError::InvalidResponse),
+            "実際のエラー: {failure:?}"
+        );
+
+        assert_rejects_without_io(&client);
     }
 
     #[test]
