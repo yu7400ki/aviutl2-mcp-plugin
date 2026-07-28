@@ -41,6 +41,9 @@ impl ReadHost for SdkReadHost {
 
     fn edit_info(&self) -> Result<HostEditInfo, ReadError> {
         // 参照区間の外で取得する。区間の内側では公開されていない。
+        //
+        // この呼び出しはフレームレートを有理数へ畳む際、分母が 0 だと panic
+        // する。呼び出し側が捕捉層で包むことを前提にしている。
         let info = EDIT_HANDLE.get_edit_info();
         let size = |value: usize| u32::try_from(value).map_err(|_| sdk("get_edit_info"));
         Ok(HostEditInfo {

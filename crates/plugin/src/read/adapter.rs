@@ -41,10 +41,29 @@ impl<H: ReadHost> HostReadAdapter<H> {
         if !self.host.is_ready() {
             return Err(ReadError::NotReady);
         }
-        match self.host.edit_state()? {
+        match self.edit_state()? {
             EditState::Edit => Ok(()),
             state => Err(ReadError::EditBlocked { state }),
         }
+    }
+
+    /// 現在の編集状態を取得する。
+    fn edit_state(&self) -> Result<EditState, ReadError> {
+        guard(|| self.host.edit_state())
+    }
+
+    /// 参照区間の外で編集情報を取得する。
+    ///
+    /// この取得はフレームレートの分母が 0 のとき panic する。参照区間の外、
+    /// つまり通常の Rust スレッドで起きるため、捕捉しなければ接続の境界まで
+    /// 巻き戻り、応答を返さないまま切断してしまう。ここで型付きの失敗へ落とす。
+    fn edit_info(&self) -> Result<HostEditInfo, ReadError> {
+        guard(|| self.host.edit_info())
+    }
+
+    /// 登録済み effect のカタログを取得する。
+    fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError> {
+        guard(|| self.host.effect_catalog())
     }
 
     /// panic を捕捉した状態で参照区間へ入る。
@@ -76,7 +95,7 @@ fn guard<T>(f: impl FnOnce() -> Result<T, ReadError>) -> Result<T, ReadError> {
 impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
     fn get_edit_info(&self) -> Result<EditInfo, ReadError> {
         self.ensure_readable()?;
-        let info = self.host.edit_info()?;
+        let info = self.edit_info()?;
         let epoch = self.project.epoch();
         let project = self.project.as_ref();
 
@@ -112,7 +131,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
 
     fn get_current_scene(&self) -> Result<(SceneInfo, u64), ReadError> {
         self.ensure_readable()?;
-        let info = self.host.edit_info()?;
+        let info = self.edit_info()?;
         let project = self.project.as_ref();
 
         let (revision, scene_name) =
@@ -123,7 +142,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
 
     fn list_layers(&self, expected_scene_id: i32) -> Result<Snapshot<LayerInfo>, ReadError> {
         self.ensure_readable()?;
-        let info = self.host.edit_info()?;
+        let info = self.edit_info()?;
         ensure_scene(&info, expected_scene_id)?;
         let layer_max = info.layer_max;
         let project = self.project.as_ref();
@@ -160,7 +179,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
         if let Some(filter) = filter {
             filter.validate()?;
         }
-        let info = self.host.edit_info()?;
+        let info = self.edit_info()?;
         ensure_scene(&info, expected_scene_id)?;
         let layers = layer_range(filter, info.layer_max);
         let scene_id = info.scene_id;
@@ -187,7 +206,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
 
     fn get_object(&self, selector: &ObjectSelector) -> Result<ObjectDetail, ReadError> {
         self.ensure_readable()?;
-        let info = self.host.edit_info()?;
+        let info = self.edit_info()?;
         ensure_scene(&info, selector.scene_id)?;
 
         let epoch = self.project.epoch();
@@ -229,7 +248,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
         self.ensure_readable()?;
         // カタログは参照区間を必要としないため、列挙の直前の revision を採る。
         let snapshot_revision = self.project.revision();
-        let mut items = self.host.effect_catalog()?;
+        let mut items = self.effect_catalog()?;
         if let Some(effect_type) = effect_type {
             items.retain(|effect| effect.effect_type == *effect_type);
         }
@@ -389,10 +408,14 @@ mod tests {
     };
     use std::sync::Mutex;
 
-    /// 参照区間の内側で panic させる位置。
+    /// panic させる位置。
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum PanicPoint {
+        /// 参照区間の外。編集情報の取得で落ちる。
+        EditInfo,
+        /// 参照区間の内側。
         SceneName,
+        /// 参照区間の内側。
         ObjectsInLayer,
     }
 
@@ -463,6 +486,11 @@ mod tests {
 
         fn edit_info(&self) -> Result<HostEditInfo, ReadError> {
             self.record("edit_info");
+            assert_ne!(
+                self.panic_at,
+                Some(PanicPoint::EditInfo),
+                "参照区間の外で panic させます"
+            );
             Ok(self.info.clone())
         }
 
@@ -805,6 +833,32 @@ mod tests {
 
         let error = with_silent_panic_hook(|| adapter.get_object(&selector).unwrap_err());
         assert_eq!(error.error_code(), ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn panic_outside_the_read_section_becomes_internal_error() {
+        // 編集情報の取得はフレームレートの分母が 0 のとき panic する。参照区間の
+        // 外で起きるため、捕捉しなければ接続の境界まで巻き戻り、応答を返さない
+        // まま切断される。
+        let adapter = adapter_with(|_| FakeHost {
+            panic_at: Some(PanicPoint::EditInfo),
+            ..FakeHost::new()
+        });
+
+        with_silent_panic_hook(|| {
+            for error in [
+                adapter.get_edit_info().unwrap_err(),
+                adapter.get_current_scene().unwrap_err(),
+                adapter.list_layers(0).unwrap_err(),
+                adapter.list_objects(0, None).unwrap_err(),
+            ] {
+                assert_eq!(error.error_code(), ErrorCode::InternalError);
+            }
+        });
+        assert!(
+            !adapter.host.calls().contains(&"enter_read_section"),
+            "編集情報を取得できないまま参照区間へ入りました"
+        );
     }
 
     #[test]
