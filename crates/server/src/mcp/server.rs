@@ -765,17 +765,21 @@ fn error_result(error: &ErrorObject) -> CallToolResult {
 ///
 /// resource には tool result のような失敗表現が無く、protocol error だけが
 /// 返せる。コードを潰すと恒久的な失敗と区別できなくなるため、対象が今この
-/// server から見えないことを表すコードは `resource_not_found` へ写し、
+/// server から取得できないことを表すコードは `resource_not_found` へ写し、
 /// リトライ可否や `retry_after_ms` は `data` に残して呼び出し側へ渡す。
 fn to_mcp_error(error: &ErrorObject) -> McpError {
     let message = failure::text(error);
     let data = Some(failure::structured(error));
     match error.code {
-        // 登録が無い場合と、登録はあるが生存確認に失敗した場合のいずれも、
-        // 一覧を取り直せば解消し得る「今は存在しない resource」である。
-        ErrorCode::InstanceNotFound | ErrorCode::InstanceStale => {
-            McpError::resource_not_found(message, data)
-        }
+        // 登録が無い、生存確認に失敗した、インスタンスが今は応じられないの
+        // いずれも「今は取得できないが後で取得し得る resource」である。
+        // `internal_error` は server 自身の不具合を意味するため、待てば解消する
+        // 失敗をそこへ寄せると恒久的な障害と読まれてしまう。
+        ErrorCode::InstanceNotFound
+        | ErrorCode::InstanceStale
+        | ErrorCode::HostBusy
+        | ErrorCode::EditBlocked
+        | ErrorCode::Timeout => McpError::resource_not_found(message, data),
         ErrorCode::InvalidArgument => McpError::invalid_params(message, data),
         _ => McpError::internal_error(message, data),
     }
@@ -1132,8 +1136,37 @@ mod tests {
     }
 
     #[test]
+    fn transient_failures_become_resource_not_found() {
+        // 待てば取得し得る失敗を server の不具合と読ませない。
+        for code in [
+            ErrorCode::HostBusy,
+            ErrorCode::EditBlocked,
+            ErrorCode::Timeout,
+        ] {
+            let error = failure::from_code(code.clone(), "失敗");
+            assert!(error.retryable, "{code}");
+            let mcp_error = to_mcp_error(&error);
+            assert_eq!(
+                mcp_error.code,
+                rmcp::model::ErrorCode::RESOURCE_NOT_FOUND,
+                "{code}"
+            );
+            assert_eq!(
+                mcp_error.data.expect("data がある")["retryable"],
+                serde_json::json!(true),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
     fn other_errors_become_internal_error() {
-        for code in [ErrorCode::HostBusy, ErrorCode::Timeout, ErrorCode::SdkError] {
+        for code in [
+            ErrorCode::SdkError,
+            ErrorCode::InternalError,
+            ErrorCode::UnsupportedOperation,
+            ErrorCode::AuthenticationFailed,
+        ] {
             let mcp_error = to_mcp_error(&failure::from_code(code.clone(), "失敗"));
             assert_eq!(
                 mcp_error.code,
