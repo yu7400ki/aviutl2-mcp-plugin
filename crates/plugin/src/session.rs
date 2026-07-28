@@ -230,6 +230,9 @@ fn run_request_loop(
             continue;
         }
 
+        // operation の対応付けはライフサイクル状態の確認より先に行う。未対応の
+        // operation は状態が変わっても対応されることが無く、状態由来の再試行可能な
+        // エラーで返すと要求元に解消しない再試行を促してしまう。
         let operation = match classify_operation(&request.operation) {
             Ok(operation) => operation,
             Err(error) => {
@@ -495,16 +498,26 @@ fn resolve_read_response(
 /// ないため、間隔を空けた再試行を案内する。再生・出力中の判別は編集状態を
 /// 確かめられる読み取り口の責務であり、`busy` はここでは通す。
 fn admit_read(state: &InstanceState) -> Result<(), ErrorObject> {
-    let message = match state {
-        InstanceState::Ready | InstanceState::Busy => return Ok(()),
-        InstanceState::Starting => "起動処理中のため読み取りを受け付けられません",
-        InstanceState::Draining | InstanceState::Gone => {
-            "終了処理中のため読み取りを受け付けられません"
-        }
-        InstanceState::Unknown(_) => "読み取りを受け付けられない状態です",
-    };
-    Err(error_object(ErrorCode::HostBusy, message)
-        .with_details(json!({ "retry_after_ms": HOST_BUSY_RETRY_AFTER_MS })))
+    match state {
+        InstanceState::Ready | InstanceState::Busy => Ok(()),
+        InstanceState::Starting => Err(host_busy("起動処理中のため読み取りを受け付けられません")),
+        InstanceState::Draining => Err(host_busy("終了処理中のため読み取りを受け付けられません")),
+        // 接続済みの経路では観測されない。この状態へ移る際は descriptor の削除と
+        // pipe の切断が先立ち、要求元は接続の失敗として先に検出する。同じ
+        // インスタンスが戻ることはないため再試行の間隔を案内せず、インスタンスを
+        // 探し直すべき状態として返す。
+        InstanceState::Gone => Err(error_object(
+            ErrorCode::InstanceStale,
+            "インスタンスは既に終了しています",
+        )),
+        InstanceState::Unknown(_) => Err(host_busy("読み取りを受け付けられない状態です")),
+    }
+}
+
+/// 一時的に読み取りを受け付けられないことを、再試行の案内つきで返す。
+fn host_busy(message: &str) -> ErrorObject {
+    error_object(ErrorCode::HostBusy, message)
+        .with_details(json!({ "retry_after_ms": HOST_BUSY_RETRY_AFTER_MS }))
 }
 
 /// 読み取りを実行し、応答へ載せる result を組み立てる。
@@ -597,6 +610,9 @@ fn catalog_page_request(page: &PageRequest) -> PageRequest {
 }
 
 /// operation 別の params へ復号する。
+///
+/// 失敗の説明には、不足したフィールド名や受理できないフィールド名が含まれる。
+/// いずれも要求元が送った内容と入力型の定義だけに由来し、秘匿値は含まない。
 fn decode_params<T: DeserializeOwned>(params: &Value) -> Result<T, ErrorObject> {
     serde_json::from_value(params.clone()).map_err(|e| {
         error_object(
@@ -1536,7 +1552,6 @@ mod tests {
         for state in [
             InstanceState::Starting,
             InstanceState::Draining,
-            InstanceState::Gone,
             InstanceState::Unknown("future".to_string()),
         ] {
             let error = admit_read(&state).unwrap_err();
@@ -1544,6 +1559,15 @@ mod tests {
             assert!(error.retryable);
             assert_eq!(error.details["retry_after_ms"], 500);
         }
+    }
+
+    #[test]
+    fn gone_instance_is_not_advised_to_retry() {
+        // 終了済みのインスタンスは同じ相手として戻らない。再試行の間隔を案内すると
+        // 待てば復活するかのように読める。
+        let error = admit_read(&InstanceState::Gone).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InstanceStale);
+        assert_eq!(error.details.get("retry_after_ms"), None);
     }
 
     /// 読み取りの失敗の全 variant。新しい variant を足したらここへも足す。
