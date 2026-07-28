@@ -190,8 +190,12 @@ pub struct ClientHello {
 }
 
 /// plugin から client への認証応答。
+///
+/// 応答型であるため未知フィールドを拒否しない。将来の MINOR で追加された
+/// フィールドを含む応答を、旧版の受信側がそのまま受理できるようにする。
+/// 要求型（[`ClientHello`] / [`ClientAuth`]）が未知フィールドを拒否するのと
+/// 非対称なのは意図的である。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ServerAuth {
     /// negotiation 結果のプロトコルバージョン。
     pub protocol_version: ProtocolVersion,
@@ -381,14 +385,15 @@ mod tests {
     }
 
     #[test]
-    fn server_auth_rejects_unknown_field() {
+    fn server_auth_allows_unknown_field() {
         let auth = sample_server_auth();
         let restored: ServerAuth =
             serde_json::from_value(serde_json::to_value(&auth).unwrap()).unwrap();
         assert_eq!(restored, auth);
 
-        let result: Result<ServerAuth, _> = serde_json::from_value(with_unknown_field(&auth));
-        assert!(result.is_err());
+        // 応答型は将来の MINOR で追加されたフィールドを受理し、既知フィールドは保つ。
+        let restored: ServerAuth = serde_json::from_value(with_unknown_field(&auth)).unwrap();
+        assert_eq!(restored, auth);
     }
 
     #[test]
