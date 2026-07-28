@@ -192,9 +192,30 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
         tracing::debug!("キャッシュ破棄イベントを受信しました");
     }
 
-    fn event_update_object_info(&mut self) {}
+    /// 対象の更新を revision へ反映する。
+    ///
+    /// イベントハンドラはホストのグローバル write lock を保持したまま呼ばれる。
+    /// 行うのは atomic な状態更新と通知の投入だけで、SDK の read/edit section
+    /// 呼び出しや descriptor の書き込みは行わない。
+    fn event_update_object_info(&mut self) {
+        if let Some(project_state) = &self.project_state {
+            project_state.on_object_updated();
+        }
+    }
+
+    /// 編集フレームの移動は対象の構造を変えないため revision を更新しない。
     fn event_change_edit_frame(&mut self) {}
-    fn event_change_scene_info(&mut self) {}
+
+    /// シーンの変更を revision へ反映する。
+    ///
+    /// `event_update_object_info` と同じく、SDK 呼び出しを伴わない更新に限る。
+    fn event_change_scene_info(&mut self) {
+        if let Some(project_state) = &self.project_state {
+            project_state.on_scene_changed();
+        }
+    }
+
+    /// フォーカスの変更は対象の構造を変えないため revision を更新しない。
     fn event_change_focus_object(&mut self) {}
 }
 
@@ -369,6 +390,90 @@ mod tests {
         with_silent_panic_hook(|| {
             run_shutdown_sequence(|| panic!("pipe"), || panic!("drain"), || panic!("remove"));
         });
+    }
+
+    /// registry ルートを一時ディレクトリに向けたライフサイクルを作る。
+    fn temp_lifecycle() -> (Arc<lifecycle::Lifecycle>, std::path::PathBuf) {
+        let id = aviutl2_mcp_core::InstanceId::new_v4();
+        let dir = std::env::temp_dir().join(format!("aviutl2-mcp-plugin-test-{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lifecycle = lifecycle::Lifecycle::new(
+            id,
+            aviutl2_mcp_core::AuthSecret::generate(),
+            std::process::id(),
+            "2026-01-01T00:00:00.0000000Z".to_string(),
+            Some("0x0".to_string()),
+            "2026-01-01T00:00:00.0000000Z".to_string(),
+            registry::RegistryWriter::for_dir(dir.clone()),
+        )
+        .unwrap();
+        (Arc::new(lifecycle), dir)
+    }
+
+    /// registry ルート配下の descriptor パス。
+    fn descriptor_path(
+        root: &std::path::Path,
+        id: aviutl2_mcp_core::InstanceId,
+    ) -> std::path::PathBuf {
+        root.join("instances").join(format!("{id}.json"))
+    }
+
+    /// イベントハンドラがプロジェクト状態だけを更新することを確かめる。
+    ///
+    /// このテストでは `EDIT_HANDLE` を初期化していない。ハンドラが read/edit
+    /// section へ入ろうとすれば未初期化の編集ハンドルを参照して panic するため、
+    /// 完走できること自体が SDK を呼んでいないことの担保になる。descriptor が
+    /// イベントの前後で一致することは、ハンドラがファイル I/O を伴わないことを示す。
+    #[test]
+    fn event_handlers_update_project_state_only() {
+        use aviutl2::generic::GenericPlugin;
+
+        let (lifecycle, dir) = temp_lifecycle();
+        let descriptor_file = descriptor_path(&dir, lifecycle.instance_id());
+        let project_state = Arc::new(project::ProjectState::new());
+        project_state.on_project_load(Some(r"C:\projects\sample.aup2"));
+        let epoch = project_state.epoch();
+        let descriptor_before = std::fs::read_to_string(&descriptor_file).unwrap();
+
+        let mut plugin = AviUtl2McpPlugin {
+            lifecycle: Some(lifecycle),
+            project_state: Some(project_state.clone()),
+            pipe_server: None,
+        };
+
+        plugin.event_change_edit_frame();
+        plugin.event_change_focus_object();
+        assert_eq!(
+            project_state.revision(),
+            0,
+            "構造が変わらないイベントで revision が進みました"
+        );
+        assert!(!project_state.modified());
+
+        plugin.event_update_object_info();
+        assert_eq!(project_state.revision(), 1);
+        assert!(project_state.modified());
+
+        plugin.event_change_scene_info();
+        assert_eq!(project_state.revision(), 2);
+        assert_eq!(
+            project_state.epoch(),
+            epoch,
+            "identity 確定後のシーン変更で epoch が変わりました"
+        );
+
+        let pending = project_state.take_pending_changes();
+        assert!(pending.contains(project::ChangeKind::ProjectRevision));
+        assert!(pending.contains(project::ChangeKind::CurrentScene));
+
+        assert_eq!(
+            descriptor_before,
+            std::fs::read_to_string(&descriptor_file).unwrap(),
+            "イベントハンドラが descriptor を書き換えました"
+        );
+
+        drop(plugin);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
