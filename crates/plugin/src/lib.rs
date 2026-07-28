@@ -15,6 +15,8 @@ pub mod registry;
 pub mod security;
 #[cfg(windows)]
 pub mod session;
+#[cfg(windows)]
+mod win_io;
 
 #[cfg(windows)]
 use std::sync::Arc;
