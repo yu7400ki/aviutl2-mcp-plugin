@@ -1,11 +1,12 @@
 //! AviUtl2 MCP Plugin 用 stdio MCP server のライブラリ。
 //!
 //! stdout は MCP プロトコル専用とし、ログは stderr へ出力する。
-//! discovery / ping / `aviutl2_list_instances` を提供する。
+//! discovery と読み取り operation を MCP の read tool / resource として提供する。
 
 pub mod api;
 pub mod discovery;
 pub mod identity;
+pub mod mcp;
 pub mod pipe_client;
 pub mod win_io;
 
