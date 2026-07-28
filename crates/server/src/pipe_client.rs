@@ -199,21 +199,16 @@ impl PipeClient {
     }
 
     /// ping を送信し、応答を検証する。
+    ///
+    /// 接続先が ping を拒否した場合は [`PipeClientError::Remote`] を返す。拒否理由は
+    /// 「起動中で今は応じられない」と「生存確認に失敗した」を区別するために要る。
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
     pub fn ping(&self, deadline: Instant) -> Result<InstanceState, PipeClientError> {
         let request =
             RequestEnvelope::ping(self.protocol_version, RequestId::new(), self.instance_id)
                 .with_deadline(deadline_to_unix_ms(deadline));
 
-        let result = self.exchange(request, deadline).map_err(|err| match err {
-            // ping は生存確認であり、拒否理由の内訳を呼び出し側へ渡さない。
-            PipeClientError::Remote(error) => {
-                warn!(code = %error.code, "ping returned error");
-                PipeClientError::InvalidResponse
-            }
-            other => other,
-        })?;
-
+        let result = self.exchange(request, deadline)?;
         let pong: PongResult = decode_result(&result)?;
         if pong.instance_id != self.instance_id {
             warn!("instance_id in ping result mismatch");
@@ -1123,18 +1118,16 @@ mod tests {
     }
 
     #[test]
-    fn ping_hides_remote_error_detail() {
+    fn ping_preserves_remote_error() {
         let (peer, client) = MockPeer::connected();
         let instance_id = client.instance_id;
+        let error = ErrorObject::new(ErrorCode::HostBusy, "起動中です", true)
+            .with_details(serde_json::json!({ "retry_after_ms": 500 }));
 
+        let payload = error.clone();
         let responder = respond_once(&peer, move |request| {
-            let response = response_for(
-                request,
-                instance_id,
-                ResponseResult::Err {
-                    error: ErrorObject::new(ErrorCode::HostBusy, "busy", true),
-                },
-            );
+            let response =
+                response_for(request, instance_id, ResponseResult::Err { error: payload });
             serde_json::to_vec(&response).unwrap()
         });
 
@@ -1142,10 +1135,12 @@ mod tests {
             .ping(test_deadline())
             .expect_err("エラー応答の ping は失敗する");
         responder.join().unwrap();
-        assert!(
-            matches!(failure, PipeClientError::InvalidResponse),
-            "ping は拒否理由の内訳を持ち出さない: {failure:?}"
-        );
+
+        let PipeClientError::Remote(remote) = &failure else {
+            panic!("ping の拒否理由が失われています: {failure:?}");
+        };
+        assert_eq!(**remote, error);
+        assert_eq!(failure.error_code(), ErrorCode::HostBusy);
     }
 
     #[test]

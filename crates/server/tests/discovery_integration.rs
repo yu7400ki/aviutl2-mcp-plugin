@@ -7,7 +7,7 @@ use aviutl2_mcp_core::{
     compute_server_mac, encode_frame, format_utc_timestamp, negotiate, pipe_name_for, verify_mac,
 };
 use aviutl2_mcp_server::discovery::{
-    DiscoveryConfig, ResolveInstanceError, find_instances, resolve_instance,
+    DiscoveryConfig, ExclusionReason, ResolveInstanceError, find_instances, resolve_instance,
 };
 use aviutl2_mcp_server::pipe_client::PipeClientError;
 use aviutl2_mcp_server::win_io::{self, EventHandle, IoIssue, OverlappedOp, WaitAnyOutcome};
@@ -34,11 +34,22 @@ fn io_deadline() -> Instant {
 struct SendHandle(HANDLE);
 unsafe impl Send for SendHandle {}
 
-/// operation 名から成功応答の `result` への対応表。
+/// operation 名から応答内容への対応表。
 ///
 /// テストはここへ応答を注入し、mock server に read operation を演じさせる。
-/// 表に無い operation へは `unsupported_operation` のエラー応答を返す。
-type OperationResponses = HashMap<String, serde_json::Value>;
+/// `ping` を含む任意の operation を差し替えられる。表に無い operation は、
+/// `ping` なら生存応答、それ以外は `unsupported_operation` のエラー応答になる。
+type OperationResponses = HashMap<String, ResponseResult>;
+
+/// 成功応答を組み立てる。
+fn ok_result(value: serde_json::Value) -> ResponseResult {
+    ResponseResult::Ok { result: value }
+}
+
+/// エラー応答を組み立てる。
+fn err_result(error: ErrorObject) -> ResponseResult {
+    ResponseResult::Err { error }
+}
 
 /// mock server がクライアントへ提示する identity と応答。
 struct MockBehavior {
@@ -258,26 +269,21 @@ fn build_response(
     behavior: &MockBehavior,
     negotiated: ProtocolVersion,
 ) -> ResponseEnvelope {
-    if request.operation == "ping" {
-        return ResponseEnvelope::pong(
-            negotiated,
-            request.request_id,
-            behavior.instance_id,
-            behavior.state.clone(),
-        );
-    }
-
     let result = match behavior.responses.get(&request.operation) {
-        Some(result) => ResponseResult::Ok {
-            result: result.clone(),
-        },
-        None => ResponseResult::Err {
-            error: ErrorObject::new(
-                ErrorCode::UnsupportedOperation,
-                "未対応の operation です",
-                false,
-            ),
-        },
+        Some(result) => result.clone(),
+        None if request.operation == "ping" => {
+            return ResponseEnvelope::pong(
+                negotiated,
+                request.request_id,
+                behavior.instance_id,
+                behavior.state.clone(),
+            );
+        }
+        None => err_result(ErrorObject::new(
+            ErrorCode::UnsupportedOperation,
+            "未対応の operation です",
+            false,
+        )),
     };
 
     ResponseEnvelope {
@@ -373,8 +379,8 @@ fn resolved_client_serves_multiple_requests() {
     let edit_info = serde_json::json!({ "project_revision": 7 });
     let layers = serde_json::json!({ "items": [], "page": { "total_count": 0 } });
     let responses = OperationResponses::from([
-        ("get_edit_info".to_string(), edit_info.clone()),
-        ("list_layers".to_string(), layers.clone()),
+        ("get_edit_info".to_string(), ok_result(edit_info.clone())),
+        ("list_layers".to_string(), ok_result(layers.clone())),
     ]);
 
     let server = MockPipeServer::start_with_operations(
@@ -466,6 +472,101 @@ fn resolve_instance_reports_authentication_failed_for_wrong_secret() {
         "登録済みだが検証に落ちた扱いになる: {error:?}"
     );
     assert_eq!(error.error_code(), ErrorCode::AuthenticationFailed);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ping が指定のエラーを返す mock を起こし、descriptor を書く。
+fn start_server_with_ping_error(
+    dir: &std::path::Path,
+    id: InstanceId,
+    error: ErrorObject,
+) -> MockPipeServer {
+    let server = MockPipeServer::start_with_operations(
+        id,
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        OperationResponses::from([("ping".to_string(), err_result(error))]),
+    );
+    server.write_descriptor(dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+    server
+}
+
+#[test]
+fn resolve_instance_surfaces_host_busy_from_ping() {
+    let dir = temp_registry_dir();
+    let id = InstanceId::new_v4();
+    let error = ErrorObject::new(ErrorCode::HostBusy, "起動処理中です", true)
+        .with_details(serde_json::json!({ "retry_after_ms": 500 }));
+    let _server = start_server_with_ping_error(&dir, id, error.clone());
+
+    let failure = resolve_instance(&dir, id, DiscoveryConfig::default())
+        .err()
+        .expect("host_busy を返すインスタンスは解決できない");
+
+    // 一覧を取り直しても同じ ID が返るだけなので、待ち直しへ誘導する。
+    assert_eq!(failure.error_code(), ErrorCode::HostBusy);
+    assert_eq!(
+        failure.remote_error(),
+        Some(&error),
+        "retry_after_ms を含むエラー応答がそのまま届く"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resolve_instance_hides_other_ping_errors() {
+    let dir = temp_registry_dir();
+    let id = InstanceId::new_v4();
+    let _server = start_server_with_ping_error(
+        &dir,
+        id,
+        ErrorObject::new(ErrorCode::InternalError, "想定外の失敗", false),
+    );
+
+    let failure = resolve_instance(&dir, id, DiscoveryConfig::default())
+        .err()
+        .expect("ping を拒否するインスタンスは解決できない");
+
+    // 使えることを確認できていないため、生存確認の失敗と同じ扱いにする。
+    assert!(
+        matches!(
+            failure,
+            ResolveInstanceError::Excluded(ExclusionReason::PingFailed)
+        ),
+        "実際のエラー: {failure:?}"
+    );
+    assert_eq!(failure.error_code(), ErrorCode::InstanceStale);
+    assert_eq!(failure.remote_error(), None);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn discovery_excludes_instance_whose_ping_is_rejected() {
+    let dir = temp_registry_dir();
+    let id = InstanceId::new_v4();
+    let _server = start_server_with_ping_error(
+        &dir,
+        id,
+        ErrorObject::new(ErrorCode::HostBusy, "起動処理中です", true),
+    );
+
+    // 一覧は生存確認済みの候補だけを返す。host_busy でも一覧には出さない。
+    let instances = find_instances(&dir, DiscoveryConfig::default(), true)
+        .expect("registry ディレクトリを列挙できる");
+    assert!(
+        instances.is_empty(),
+        "ping を拒否した候補は一覧に含まれない"
+    );
+    assert!(
+        dir.join(format!("{}.json", id)).exists(),
+        "生存中の descriptor は削除されない"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

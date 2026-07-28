@@ -6,8 +6,8 @@
 use crate::identity::{ProcessLookup, lookup_process};
 use crate::pipe_client::{PipeClient, PipeClientError};
 use aviutl2_mcp_core::{
-    ErrorCode, InstanceDescriptor, InstanceId, InstanceInfo, InstanceProject, InstanceState,
-    ProtocolVersion, deserialize_json, parse_utc_timestamp, pipe_name_for,
+    ErrorCode, ErrorObject, InstanceDescriptor, InstanceId, InstanceInfo, InstanceProject,
+    InstanceState, ProtocolVersion, deserialize_json, parse_utc_timestamp, pipe_name_for,
 };
 
 #[cfg(test)]
@@ -89,6 +89,9 @@ pub enum ResolveInstanceError {
     /// descriptor は見つかったが、生存確認に失敗した。
     #[error("インスタンスの生存確認に失敗しました: {}", .0.as_code())]
     Excluded(ExclusionReason),
+    /// インスタンスは応答したが、今は要求に応じられない。
+    #[error("インスタンスが要求を拒否しました: {}", .0.code)]
+    Rejected(Box<ErrorObject>),
 }
 
 impl ResolveInstanceError {
@@ -99,6 +102,30 @@ impl ResolveInstanceError {
             // 区別する。前者は指定 ID の instance が存在しないことを意味する。
             ResolveInstanceError::NotRegistered => ErrorCode::InstanceNotFound,
             ResolveInstanceError::Excluded(reason) => reason.error_code(),
+            ResolveInstanceError::Rejected(error) => error.code.clone(),
+        }
+    }
+
+    /// インスタンスが返したエラー応答。保持していない場合は `None`。
+    ///
+    /// `retry_after_ms` のような補助情報を呼び出し側がそのまま使えるようにする。
+    pub fn remote_error(&self) -> Option<&ErrorObject> {
+        match self {
+            ResolveInstanceError::Rejected(error) => Some(error),
+            ResolveInstanceError::NotRegistered | ResolveInstanceError::Excluded(_) => None,
+        }
+    }
+
+    /// 除外された候補を解決失敗へ変換する。
+    ///
+    /// `host_busy` を返したインスタンスは生きており、待てば使えるようになる。
+    /// 一覧を取り直しても同じ ID が返るだけなので、この場合はエラー応答を
+    /// そのまま伝えて待ち直しへ誘導する。それ以外の拒否は、そのインスタンスを
+    /// 使えることを確認できていない点で生存確認の失敗と変わらない。
+    fn from_excluded(excluded: ExcludedCandidate) -> Self {
+        match excluded.rejection {
+            Some(error) if error.code == ErrorCode::HostBusy => Self::Rejected(error),
+            _ => Self::Excluded(excluded.reason),
         }
     }
 }
@@ -259,6 +286,18 @@ struct VerifiedCandidate {
 struct ExcludedCandidate {
     instance_id: Option<InstanceId>,
     reason: ExclusionReason,
+    /// インスタンスが返したエラー応答。応答があった場合のみ入る。
+    rejection: Option<Box<ErrorObject>>,
+}
+
+impl ExcludedCandidate {
+    fn new(instance_id: Option<InstanceId>, reason: ExclusionReason) -> Self {
+        Self {
+            instance_id,
+            reason,
+            rejection: None,
+        }
+    }
 }
 
 /// `instance_id` を指定して 1 件のインスタンスを解決する。
@@ -297,7 +336,7 @@ pub fn resolve_instance(
         }),
         Ok(Err(excluded)) => {
             warn!(reason = excluded.reason.as_code(), "instance excluded");
-            Err(ResolveInstanceError::Excluded(excluded.reason))
+            Err(ResolveInstanceError::from_excluded(excluded))
         }
         Err(_) => {
             warn!("instance resolution panicked; isolating");
@@ -337,14 +376,9 @@ fn verify_candidate(
     let deadline = Instant::now() + config.per_candidate_deadline;
 
     // descriptor 検証。
-    let descriptor = validate_descriptor_file(path).map_err(|reason| ExcludedCandidate {
-        instance_id: None,
-        reason,
-    })?;
-    let excluded = |reason| ExcludedCandidate {
-        instance_id: Some(descriptor.instance_id),
-        reason,
-    };
+    let descriptor =
+        validate_descriptor_file(path).map_err(|reason| ExcludedCandidate::new(None, reason))?;
+    let excluded = |reason| ExcludedCandidate::new(Some(descriptor.instance_id), reason);
 
     // PID とプロセス作成時刻。
     let process_identity = match lookup_process(descriptor.pid) {
@@ -360,7 +394,16 @@ fn verify_candidate(
     }
 
     // pipe 接続、handshake、ping。
-    let (client, state) = run_pipe_handshake_and_ping(&descriptor, deadline).map_err(excluded)?;
+    let (client, state) =
+        run_pipe_handshake_and_ping(&descriptor, deadline).map_err(|err| ExcludedCandidate {
+            instance_id: Some(descriptor.instance_id),
+            reason: map_pipe_error(&err),
+            // インスタンスが応答した場合のみ、その内容を上位の判断へ残す。
+            rejection: match err {
+                PipeClientError::Remote(error) => Some(error),
+                _ => None,
+            },
+        })?;
 
     if matches!(state, InstanceState::Draining | InstanceState::Gone) {
         return Err(excluded(ExclusionReason::PingFailed));
@@ -409,22 +452,21 @@ fn validate_descriptor_file(path: &Path) -> Result<InstanceDescriptor, Exclusion
 fn run_pipe_handshake_and_ping(
     descriptor: &InstanceDescriptor,
     deadline: Instant,
-) -> Result<(PipeClient, InstanceState), ExclusionReason> {
+) -> Result<(PipeClient, InstanceState), PipeClientError> {
     let client = PipeClient::connect_and_handshake(
         descriptor.instance_id,
         descriptor.pid,
         &descriptor.process_created_at,
         &descriptor.auth_secret,
         deadline,
-    )
-    .map_err(map_pipe_error)?;
+    )?;
 
-    let state = client.ping(deadline).map_err(map_pipe_error)?;
+    let state = client.ping(deadline)?;
     Ok((client, state))
 }
 
 /// `PipeClientError` を `ExclusionReason` へ対応付ける。
-fn map_pipe_error(err: PipeClientError) -> ExclusionReason {
+fn map_pipe_error(err: &PipeClientError) -> ExclusionReason {
     match err {
         PipeClientError::ConnectFailed
         | PipeClientError::Timeout
