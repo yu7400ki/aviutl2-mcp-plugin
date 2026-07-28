@@ -85,11 +85,11 @@ pub struct InstanceDescriptor {
     pub pipe_name: String,
     pub auth_secret: AuthSecret,
     pub pid: u32,
-    /// プロセス作成時刻（RFC3339 / ISO8601 UTC）。
+    /// プロセス作成時刻。書式は [`crate::format_utc_timestamp`]。
     pub process_created_at: String,
-    /// HWND（取得不能時は None）。
+    /// HWND。書式は [`crate::format_hwnd`]。取得不能時は None。
     pub hwnd: Option<String>,
-    /// 起動時刻（RFC3339 UTC）。
+    /// 起動時刻。書式は [`crate::format_utc_timestamp`]。
     pub started_at: String,
     pub state: InstanceState,
     pub project: Option<DescriptorProject>,
@@ -109,7 +109,7 @@ pub struct InstanceInfo {
     pub instance_id: InstanceId,
     pub state: InstanceState,
     pub pid: u32,
-    /// 起動時刻（RFC3339 UTC）。
+    /// 起動時刻。書式は [`crate::format_utc_timestamp`]。
     pub started_at: String,
     pub project: Option<InstanceProject>,
 }
@@ -152,9 +152,9 @@ mod tests {
             pipe_name: r"\\.\pipe\aviutl2-mcp\v1\test".to_string(),
             auth_secret: AuthSecret::generate(),
             pid: 1234,
-            process_created_at: "2026-01-01T00:00:00Z".to_string(),
-            hwnd: Some("0x12345678".to_string()),
-            started_at: "2026-01-01T00:00:00Z".to_string(),
+            process_created_at: "2026-01-01T00:00:00.0000000Z".to_string(),
+            hwnd: Some("0x0000000012345678".to_string()),
+            started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
             state: InstanceState::Ready,
             project: Some(DescriptorProject {
                 display_name: "Project".to_string(),
@@ -181,7 +181,7 @@ mod tests {
             instance_id: InstanceId::new_v4(),
             state: InstanceState::Busy,
             pid: 5678,
-            started_at: "2026-01-01T00:00:00Z".to_string(),
+            started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
             project: Some(InstanceProject {
                 display_name: "Project".to_string(),
                 path: r"C:\project.aup".to_string(),

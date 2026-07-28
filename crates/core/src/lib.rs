@@ -12,6 +12,7 @@ pub mod identifier;
 pub mod json;
 pub mod state;
 pub mod version;
+pub mod wire_format;
 
 #[cfg(test)]
 mod tests;
@@ -32,3 +33,4 @@ pub use identifier::{InstanceId, ProtocolVersion, RequestId, pipe_name_for};
 pub use json::{JsonStrictError, deserialize_json, parse_json};
 pub use state::InstanceState;
 pub use version::negotiate;
+pub use wire_format::{format_hwnd, format_utc_timestamp, parse_utc_timestamp};

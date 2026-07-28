@@ -203,7 +203,7 @@ pub struct ServerAuth {
     pub instance_id: InstanceId,
     pub server_nonce: Nonce,
     pub pid: u32,
-    /// 実プロセス作成時刻（RFC3339 / ISO8601 UTC）。
+    /// 実プロセス作成時刻。書式は [`crate::format_utc_timestamp`]。
     pub process_created_at: String,
     pub server_mac: Mac,
 }
@@ -361,7 +361,7 @@ mod tests {
             instance_id: fixed_instance_id(),
             server_nonce: fixed_server_nonce(),
             pid: 4321,
-            process_created_at: "2026-01-01T00:00:00+00:00".to_string(),
+            process_created_at: "2026-01-01T00:00:00.0000000Z".to_string(),
             server_mac: Mac::from_bytes([0xAB; 32]),
         }
     }
