@@ -216,7 +216,9 @@ fn server_loop(
 
 /// クライアントの接続を待つ。停止要求で待機を打ち切った場合は `false` を返す。
 fn accept_connection(handle: HANDLE, stop_event: HANDLE) -> bool {
-    let mut op = OverlappedOp::new(handle).unwrap();
+    // SAFETY: `handle` は MockPipeServer が所有し、スレッドの join 後にのみ閉じられる。
+    // `op` は本関数のスコープを出るときに drop されるため handle より長生きしない。
+    let mut op = unsafe { OverlappedOp::new(handle) }.unwrap();
     if op.begin().is_err() {
         return false;
     }

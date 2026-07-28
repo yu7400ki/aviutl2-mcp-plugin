@@ -7,8 +7,10 @@
 
 use std::io;
 use std::time::{Duration, Instant};
+use tracing::error;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, HANDLE, WAIT_ABANDONED_0, WAIT_FAILED,
+    CloseHandle, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_IO_INCOMPLETE,
+    ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, HANDLE, WAIT_ABANDONED_0, WAIT_FAILED,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
@@ -125,9 +127,19 @@ pub struct OverlappedOp {
 impl OverlappedOp {
     /// `handle` に対する I/O 用の `OVERLAPPED` を作成する。
     ///
-    /// `handle` の所有権は移動しない。呼び出し側は本型が破棄されるまで
-    /// `handle` を有効に保つ必要がある。
-    pub fn new(handle: HANDLE) -> io::Result<Self> {
+    /// `handle` の所有権は移動せず、生の値としてコピー保持する。
+    ///
+    /// # Safety
+    ///
+    /// `handle` は本 `OverlappedOp` が drop されるまで有効であり続けなければならない。
+    /// `Drop` は保留中の I/O をキャンセルするため `handle` に対して `CancelIoEx` と
+    /// `GetOverlappedResult` を実行する。先に閉じられていると、OS が同じ値を別の
+    /// カーネルオブジェクトへ再割り当てした場合に無関係なオブジェクトを操作し、
+    /// さらに保留 I/O を残したまま転送バッファが解放され得る。
+    ///
+    /// 構造体のフィールドとして保持する場合は、宣言順（drop 順）で
+    /// `OverlappedOp` が handle の所有者より先に drop されるようにすること。
+    pub unsafe fn new(handle: HANDLE) -> io::Result<Self> {
         let event = EventHandle::new_manual_reset()?;
         let overlapped = Box::new(OVERLAPPED {
             hEvent: event.handle(),
@@ -208,12 +220,18 @@ impl OverlappedOp {
     ///
     /// `GetOverlappedResult` を bWait = TRUE で呼ぶため、戻った時点で
     /// カーネルはこの `OVERLAPPED` と転送バッファを参照しない。
-    /// `ERROR_OPERATION_ABORTED` は正常なキャンセル完了である。
+    /// `ERROR_OPERATION_ABORTED` は正常なキャンセル完了であり、相手の切断などによる
+    /// エラー完了も「カーネルが I/O を手放した」点では同じく排出成功として扱う。
+    ///
+    /// `new` の安全性要件どおり `handle` が有効である限り、この排出が
+    /// I/O を保留したまま失敗することはない。すなわち失敗は不変条件の違反であり、
+    /// 保留 I/O を残したまま転送バッファが解放される直前の状態を意味する。
+    /// 復帰手段が無いため、その場合はログを残してプロセスを異常終了させる。
     pub fn cancel_and_drain(&mut self) {
         if !self.pending {
             return;
         }
-        // SAFETY: `self.handle` は呼び出し側が有効に保っており、`overlapped` は
+        // SAFETY: `self.handle` は `new` の安全性要件により有効であり、`overlapped` は
         // この I/O の発行に使ったものと同一アドレスである。
         unsafe {
             let _ = CancelIoEx(
@@ -222,28 +240,57 @@ impl OverlappedOp {
             );
         }
         // キャンセル済み・完了済みのいずれでも完了状態が確定するまで待つ。
-        let _ = self.overlapped_result(true);
+        if let Err(err) = self.raw_overlapped_result(true)
+            && leaves_io_pending(&err)
+        {
+            error!(
+                handle = ?self.handle.0,
+                error = %err,
+                "保留中の I/O を排出できませんでした。転送バッファの解放を防ぐためプロセスを終了します"
+            );
+            std::process::abort();
+        }
         self.pending = false;
     }
 
     fn overlapped_result(&mut self, wait: bool) -> io::Result<u32> {
+        match self.raw_overlapped_result(wait) {
+            Ok(transferred) => Ok(transferred),
+            // キャンセル完了は転送 0 バイトの完了として扱う。
+            Err(err) if err.code() == ERROR_OPERATION_ABORTED.into() => Ok(0),
+            Err(err) => Err(to_io_error(err)),
+        }
+    }
+
+    fn raw_overlapped_result(&self, wait: bool) -> windows::core::Result<u32> {
         let mut transferred = 0u32;
-        // SAFETY: `self.handle` は有効であり、`overlapped` は発行時と同一アドレスの
-        // 生存中の構造体を指す。`transferred` はスタック上の有効な書き込み先。
-        let result = unsafe {
+        // SAFETY: `self.handle` は `new` の安全性要件により有効であり、`overlapped` は
+        // 発行時と同一アドレスの生存中の構造体を指す。
+        // `transferred` はスタック上の有効な書き込み先。
+        unsafe {
             GetOverlappedResult(
                 self.handle,
                 self.overlapped.as_ref() as *const OVERLAPPED,
                 &mut transferred,
                 wait,
             )
-        };
-        match result {
-            Ok(()) => Ok(transferred),
-            Err(err) if err.code() == ERROR_OPERATION_ABORTED.into() => Ok(0),
-            Err(err) => Err(to_io_error(err)),
-        }
+        }?;
+        Ok(transferred)
     }
+}
+
+/// `GetOverlappedResult(bWait = TRUE)` の失敗のうち、I/O がカーネルに
+/// 保留されたままである可能性を示すものかどうかを判定する。
+///
+/// 通常の失敗は I/O 自体の完了状態（相手の切断など）であり、カーネルは既に
+/// `OVERLAPPED` と転送バッファを手放している。一方ここで真になるのは
+/// ハンドルや引数が無効で完了状態を取得できなかった場合であり、
+/// `OverlappedOp::new` の安全性要件が破られたときにのみ起こる。
+fn leaves_io_pending(err: &windows::core::Error) -> bool {
+    let code = err.code();
+    code == ERROR_INVALID_HANDLE.into()
+        || code == ERROR_INVALID_PARAMETER.into()
+        || code == ERROR_IO_INCOMPLETE.into()
 }
 
 impl Drop for OverlappedOp {
@@ -260,7 +307,9 @@ impl Drop for OverlappedOp {
 /// `buf` は本関数の実行中のみカーネルへ渡される。期限超過時も I/O のキャンセル完了を
 /// 待ってから戻るため、戻った後に `buf` が書き換わることはない。
 pub fn read_exact(handle: HANDLE, buf: &mut [u8], deadline: Instant) -> Result<(), WinIoError> {
-    let mut op = OverlappedOp::new(handle)?;
+    // SAFETY: `handle` は本関数の呼び出し中ずっと呼び出し側が有効に保つ。
+    // `op` は本関数のスコープを出るときに drop されるため handle より長生きしない。
+    let mut op = unsafe { OverlappedOp::new(handle) }?;
     let mut total = 0usize;
     while total < buf.len() {
         op.begin()?;
@@ -298,7 +347,9 @@ pub fn read_exact(handle: HANDLE, buf: &mut [u8], deadline: Instant) -> Result<(
 /// `buf` は本関数の実行中のみカーネルへ渡される。期限超過時も I/O のキャンセル完了を
 /// 待ってから戻るため、戻った後にカーネルが `buf` を読むことはない。
 pub fn write_all(handle: HANDLE, buf: &[u8], deadline: Instant) -> Result<(), WinIoError> {
-    let mut op = OverlappedOp::new(handle)?;
+    // SAFETY: `handle` は本関数の呼び出し中ずっと呼び出し側が有効に保つ。
+    // `op` は本関数のスコープを出るときに drop されるため handle より長生きしない。
+    let mut op = unsafe { OverlappedOp::new(handle) }?;
     let mut total = 0usize;
     while total < buf.len() {
         op.begin()?;
