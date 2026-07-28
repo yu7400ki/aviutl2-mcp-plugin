@@ -11,6 +11,7 @@ use crate::mcp::input::{
     GetObjectInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput, ListLayersInput,
     ListObjectsInput, parse_instance_id,
 };
+use crate::mcp::summary::{MAX_TEXT_CHARS, clamp_chars};
 use crate::mcp::{describe, failure};
 use crate::redact;
 use aviutl2_mcp_core::{
@@ -128,7 +129,7 @@ impl AviUtl2McpServer {
         match joined {
             Ok(Ok(success)) => {
                 tracing::info!(duration_ms, result = "ok", "tool call succeeded");
-                let mut result = CallToolResult::success(vec![ContentBlock::text(success.text)]);
+                let mut result = CallToolResult::success(vec![text_content(&success.text)]);
                 result.structured_content = Some(success.structured);
                 result
             }
@@ -651,9 +652,22 @@ fn to_structured<T: Serialize>(value: &T) -> Result<Value, ErrorObject> {
     serde_json::to_value(value).map_err(|_| failure::internal_error("応答を直列化できませんでした"))
 }
 
+/// text content を上限内へ収めて 1 ブロックにする。
+///
+/// [`describe`] は予算を管理して組み立てるが、tool を足すときに素の文字列を
+/// 渡しても上限を破れないよう、応答を作る唯一の経路をここへ通す。
+fn text_content(text: &str) -> ContentBlock {
+    ContentBlock::text(clamp_chars(text, MAX_TEXT_CHARS))
+}
+
 /// エラーを `isError: true` の tool result へ変換する。
+///
+/// `structuredContent` は宣言済みの `outputSchema`（成功時の result DTO）には
+/// 適合しない。MCP は失敗を tool result で表す経路に別 schema を持たず、
+/// 呼び出し側が機械的に扱えるのは code / retryable / details / correlation_id で
+/// あるため、成功時の形に寄せるより失敗の内訳を残す方を採る。
 fn error_result(error: &ErrorObject) -> CallToolResult {
-    let mut result = CallToolResult::error(vec![ContentBlock::text(failure::text(error))]);
+    let mut result = CallToolResult::error(vec![text_content(&failure::text(error))]);
     result.structured_content = Some(failure::structured(error));
     result
 }
@@ -671,7 +685,7 @@ fn to_mcp_error(error: &ErrorObject) -> McpError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::summary::MAX_TEXT_CHARS;
+
     use rmcp::model::Tool;
 
     /// 現在登録されている全 tool の一覧。読み取り専用の read tool のみで構成される。
@@ -822,6 +836,30 @@ mod tests {
                 .and_then(|c| c.as_text())
                 .map(|t| t.text.clone()),
             Some("ok".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_tool_text_is_clamped_by_the_call_boundary() {
+        // describe を経ずに素の文字列を返す tool を足しても上限は破れない。
+        let result = server()
+            .run("test_tool", || {
+                Ok(ToolSuccess {
+                    text: "あ".repeat(MAX_TEXT_CHARS * 3),
+                    structured: serde_json::json!({}),
+                })
+            })
+            .await;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("text content がある");
+        assert!(
+            text.chars().count() <= MAX_TEXT_CHARS,
+            "上限を超えています: {}",
+            text.chars().count()
         );
     }
 

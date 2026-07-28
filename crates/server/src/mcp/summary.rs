@@ -99,11 +99,17 @@ fn clamp_line(line: &str) -> String {
 }
 
 /// 任意の文字列を指定文字数以内へ切り詰める。
+///
+/// 切り詰めた場合は末尾を [`ELLIPSIS`] に置き換えるため、結果は必ず
+/// `max_chars` 文字以内に収まる。`max_chars` が 0 のときは空文字列を返す。
 pub fn clamp_chars(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
     }
-    let mut clamped: String = value.chars().take(max_chars.saturating_sub(1)).collect();
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut clamped: String = value.chars().take(max_chars - 1).collect();
     clamped.push(ELLIPSIS);
     clamped
 }
@@ -191,5 +197,17 @@ mod tests {
         let clamped = clamp_chars(&"長".repeat(20), 5);
         assert_eq!(clamped.chars().count(), 5);
         assert!(clamped.ends_with(ELLIPSIS));
+    }
+
+    #[test]
+    fn clamp_chars_never_exceeds_requested_length() {
+        for max_chars in 0..8 {
+            let clamped = clamp_chars(&"長".repeat(20), max_chars);
+            assert!(
+                clamped.chars().count() <= max_chars,
+                "max_chars={max_chars} で {} 文字返っています",
+                clamped.chars().count()
+            );
+        }
     }
 }
