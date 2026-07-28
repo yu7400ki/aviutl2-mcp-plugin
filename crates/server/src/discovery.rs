@@ -336,12 +336,14 @@ fn build_instance_info(descriptor: InstanceDescriptor, state: InstanceState) -> 
         state,
         pid: descriptor.pid,
         started_at: descriptor.started_at,
+        // registry の descriptor は epoch / revision / modified / scene を持たない。
+        // 既定値で埋めると「未取得」と実測値が区別できなくなるため欠落のままとする。
         project: descriptor.project.map(|p| InstanceProject {
             display_name: p.display_name,
             path: Some(p.path),
-            epoch: String::new(),
-            revision: 0,
-            modified: false,
+            epoch: None,
+            revision: None,
+            modified: None,
         }),
         scene: None,
     }
