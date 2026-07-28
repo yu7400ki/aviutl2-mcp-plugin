@@ -1,26 +1,30 @@
 //! プロジェクト境界（epoch / identity）と変更 revision の管理。
 //!
-//! ここで保持する値は、ホストのイベントスレッドとインスタンスの要求処理
-//! スレッドの双方から触られる。イベントスレッドはホストのグローバル write lock
-//! を保持したまま呼ばれるため、更新経路は待たされてはならない。そのため
-//! `revision` と `modified` の更新、および変更通知の投入は、いずれもロックを
-//! 取らない atomic 操作だけで完結させる。
+//! ここで保持する値は、ホストのイベントスレッドと要求処理スレッドの双方から
+//! 触られる。イベントスレッドはホストのグローバル write lock を保持したまま
+//! 呼ばれるため、更新経路は待たされてはならない。そのため `revision`・
+//! `modified`・変更の記録は、いずれもロックを取らない atomic 操作だけで完結させる。
+//!
+//! これらの atomic は値そのものだけが意味を持ち、他のデータを公開しないため
+//! [`Ordering::Relaxed`] で扱う。epoch と revision のように複数の値へ跨る一貫性は
+//! atomic では得られず、まとめて読み取る手段も用意しない。対象の同一性は
+//! epoch と revision だけでは判断せず、scene_id と fingerprint の照合で確かめる。
 //!
 //! epoch と identity はプロジェクト境界でしか変わらないため [`Mutex`] で保護する。
-//! この Mutex を保持する区間は文字列の複製と差し替えに限られ、SDK 呼び出し・
-//! ファイル I/O・ログ出力を挟まない。要求処理側も epoch/identity を読み取る
-//! 短い区間でしか取得しないため、どちらのスレッドが先に取得しても相手を
-//! 待たせる時間は一定であり、保持したまま他のロックを要求する経路も無い。
+//! 保持区間は文字列の複製と差し替えに限られ、SDK 呼び出し・ファイル I/O・
+//! ログ出力を挟まない。アクセサ経由の読み取りも値を複製して即座に抜けるため、
+//! どちらのスレッドが先に取得しても待たされる時間は一定であり、保持したまま
+//! 他のロックを要求する経路も無い。
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// 同一インスタンスに対する変更通知の最小間隔。10 Hz に相当する。
+/// 同一インスタンスから変更を取り出す最小間隔。10 Hz に相当する。
 const NOTIFY_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
-/// 通知を一度も投入していないことを表す番兵値。
-const NEVER_ADMITTED: u64 = u64::MAX;
+/// 変更を一度も取り出していないことを表す番兵値。
+const NEVER_TAKEN: u64 = u64::MAX;
 
 /// プロジェクトの同一性。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,9 +43,9 @@ pub enum ProjectIdentity {
     },
 }
 
-/// 変更通知の種別。
+/// 変更の種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChangeKind {
+pub(crate) enum ChangeKind {
     /// プロジェクト境界が変わった。
     ProjectEpoch,
     /// プロジェクトの内容が変わった。
@@ -51,13 +55,6 @@ pub enum ChangeKind {
 }
 
 impl ChangeKind {
-    /// 取り出し時の走査に使う全種別。
-    const ALL: [ChangeKind; 3] = [
-        ChangeKind::ProjectEpoch,
-        ChangeKind::ProjectRevision,
-        ChangeKind::CurrentScene,
-    ];
-
     /// 集合表現でのビット位置。
     const fn bit(self) -> u32 {
         match self {
@@ -68,56 +65,43 @@ impl ChangeKind {
     }
 }
 
-/// 未取り出しの変更種別の集合。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct PendingChanges {
+/// 取り出した変更種別の集合。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PendingChanges {
     bits: u32,
 }
 
 impl PendingChanges {
-    /// 未取り出しの変更が無いか。
-    pub fn is_empty(self) -> bool {
-        self.bits == 0
-    }
-
     /// 指定した種別の変更を含むか。
-    pub fn contains(self, kind: ChangeKind) -> bool {
+    // 現時点の呼び出し元はテストのみ。
+    #[allow(dead_code)]
+    pub(crate) fn contains(self, kind: ChangeKind) -> bool {
         self.bits & kind.bit() != 0
-    }
-
-    /// 含まれる変更種別を列挙する。
-    pub fn kinds(self) -> impl Iterator<Item = ChangeKind> {
-        ChangeKind::ALL
-            .into_iter()
-            .filter(move |k| self.contains(*k))
     }
 }
 
-/// 直近の投入時刻から `min_interval` 以上経過しているかを判定する。
+/// 直近の取り出しから `min_interval` 以上経過しているかを判定する。
 ///
-/// `last_admitted` が `None` の場合は一度も投入していないため常に許可する。
+/// `last_taken` が `None` の場合は一度も取り出していないため常に許可する。
 /// 単調時計であっても比較の向きを取り違えないよう、経過時間は飽和減算で求める。
-fn admits_notification(
-    last_admitted: Option<Instant>,
-    now: Instant,
-    min_interval: Duration,
-) -> bool {
-    match last_admitted {
+fn admits_notification(last_taken: Option<Instant>, now: Instant, min_interval: Duration) -> bool {
+    match last_taken {
         None => true,
         Some(last) => now.saturating_duration_since(last) >= min_interval,
     }
 }
 
-/// 変更通知の集約。
+/// 変更の集約。
 ///
-/// 変更種別ごとの未取り出しフラグと、直近に通知を投入した時刻だけを持つ。
-/// 投入が抑止された変更もフラグとしては残るため、次に取り出した時点で
-/// まとめて観測できる。取り出しが遅れて通知が欠けても、revision の照合で
-/// 変更の見落としは検出できる。
+/// 変更種別ごとの未取り出しフラグと、直近に取り出した時刻だけを持つ。
+/// 記録は無制限に行い、取り出しを [`NOTIFY_MIN_INTERVAL`] で制限する。
+/// 制限中に生じた変更はフラグとして残るため、次の取り出しでまとめて観測できる。
+/// 取り出しが遅れて個々の変更を観測できなくても、revision の照合で変更の
+/// 見落としは検出できる。
 struct ChangeNotifier {
     pending: AtomicU32,
-    /// 直近に通知を投入した時刻。`origin` からの経過ナノ秒で保持する。
-    last_admitted_nanos: AtomicU64,
+    /// 直近に変更を取り出した時刻。`origin` からの経過ナノ秒で保持する。
+    last_taken_nanos: AtomicU64,
     /// 経過ナノ秒の基準時刻。
     origin: Instant,
 }
@@ -126,37 +110,47 @@ impl ChangeNotifier {
     fn new() -> Self {
         Self {
             pending: AtomicU32::new(0),
-            last_admitted_nanos: AtomicU64::new(NEVER_ADMITTED),
+            last_taken_nanos: AtomicU64::new(NEVER_TAKEN),
             origin: Instant::now(),
         }
     }
 
-    /// 変更を記録し、新たな通知を投入したかを返す。
-    ///
-    /// 記録そのものは常に行い、投入だけを [`NOTIFY_MIN_INTERVAL`] で制限する。
-    fn record(&self, kind: ChangeKind, now: Instant) -> bool {
-        self.pending.fetch_or(kind.bit(), Ordering::AcqRel);
-        self.admit(now)
+    /// 変更を記録する。イベントスレッドから呼ばれるため待ち時間を持たない。
+    fn record(&self, kind: ChangeKind) {
+        self.pending.fetch_or(kind.bit(), Ordering::Relaxed);
     }
 
-    /// 最小間隔を満たす場合にのみ投入時刻を更新する。
+    /// 最小間隔を満たしていれば、未取り出しの変更を取り出してクリアする。
     ///
-    /// 複数スレッドが同時に投入しようとしても、compare-exchange に成功した
+    /// 未取り出しの変更が無い場合は間隔を消費せずに `None` を返す。
+    fn take(&self, now: Instant) -> Option<PendingChanges> {
+        if self.pending.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        if !self.admit(now) {
+            return None;
+        }
+        let bits = self.pending.swap(0, Ordering::Relaxed);
+        (bits != 0).then_some(PendingChanges { bits })
+    }
+
+    /// 最小間隔を満たす場合にのみ取り出し時刻を更新する。
+    ///
+    /// 複数スレッドが同時に取り出そうとしても、compare-exchange に成功した
     /// 一つだけが許可される。
     fn admit(&self, now: Instant) -> bool {
         let now_nanos = self.nanos_since_origin(now);
-        let mut stored = self.last_admitted_nanos.load(Ordering::Acquire);
+        let mut stored = self.last_taken_nanos.load(Ordering::Relaxed);
         loop {
-            let last =
-                (stored != NEVER_ADMITTED).then(|| self.origin + Duration::from_nanos(stored));
+            let last = (stored != NEVER_TAKEN).then(|| self.origin + Duration::from_nanos(stored));
             if !admits_notification(last, now, NOTIFY_MIN_INTERVAL) {
                 return false;
             }
-            match self.last_admitted_nanos.compare_exchange_weak(
+            match self.last_taken_nanos.compare_exchange_weak(
                 stored,
                 now_nanos,
-                Ordering::AcqRel,
-                Ordering::Acquire,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => return true,
                 Err(actual) => stored = actual,
@@ -164,17 +158,10 @@ impl ChangeNotifier {
         }
     }
 
-    /// 未取り出しの変更種別を取り出してクリアする。
-    fn take(&self) -> PendingChanges {
-        PendingChanges {
-            bits: self.pending.swap(0, Ordering::AcqRel),
-        }
-    }
-
     /// 基準時刻からの経過ナノ秒。番兵値と衝突しないよう丸める。
     fn nanos_since_origin(&self, now: Instant) -> u64 {
         let elapsed = now.saturating_duration_since(self.origin).as_nanos();
-        u64::try_from(elapsed).unwrap_or(NEVER_ADMITTED - 1)
+        u64::try_from(elapsed).unwrap_or(NEVER_TAKEN - 1)
     }
 }
 
@@ -267,12 +254,16 @@ impl ProjectState {
     }
 
     /// 現在の identity。
-    pub fn identity(&self) -> ProjectIdentity {
+    // 現時点の呼び出し元はテストのみ。
+    #[allow(dead_code)]
+    pub(crate) fn identity(&self) -> ProjectIdentity {
         self.lock_boundary().identity.clone()
     }
 
     /// 保存済みプロジェクトのパス。未保存なら `None`。
-    pub fn identity_path(&self) -> Option<String> {
+    // 現時点の呼び出し元はテストのみ。
+    #[allow(dead_code)]
+    pub(crate) fn identity_path(&self) -> Option<String> {
         match &self.lock_boundary().identity {
             ProjectIdentity::Path { path, .. } => Some(path.clone()),
             ProjectIdentity::Unsaved { .. } => None,
@@ -281,12 +272,12 @@ impl ProjectState {
 
     /// 現在の revision。
     pub fn revision(&self) -> u64 {
-        self.revision.load(Ordering::Acquire)
+        self.revision.load(Ordering::Relaxed)
     }
 
-    /// 最後の load/save 以降に更新イベントを受け取ったか。
+    /// 最後の load/save 以降に対象の更新イベントを受け取ったか。
     pub fn modified(&self) -> bool {
-        self.modified.load(Ordering::Acquire)
+        self.modified.load(Ordering::Relaxed)
     }
 
     /// プロジェクトのロードを反映する。
@@ -295,10 +286,9 @@ impl ProjectState {
     /// revision を 0 へ戻す。
     pub fn on_project_load(&self, path: Option<&str>) {
         self.update_boundary(path, true);
-        self.revision.store(0, Ordering::Release);
-        self.modified.store(false, Ordering::Release);
-        self.notifier
-            .record(ChangeKind::ProjectEpoch, Instant::now());
+        self.revision.store(0, Ordering::Relaxed);
+        self.modified.store(false, Ordering::Relaxed);
+        self.notifier.record(ChangeKind::ProjectEpoch);
     }
 
     /// プロジェクトの保存を反映する。
@@ -307,15 +297,14 @@ impl ProjectState {
     /// パスの確定と未保存状態の解消だけを反映する。
     pub fn on_project_save(&self, path: Option<&str>) {
         self.update_boundary(path, false);
-        self.modified.store(false, Ordering::Release);
+        self.modified.store(false, Ordering::Relaxed);
     }
 
     /// 対象更新イベントを反映する。
     pub fn on_object_updated(&self) {
-        self.revision.fetch_add(1, Ordering::AcqRel);
-        self.modified.store(true, Ordering::Release);
-        self.notifier
-            .record(ChangeKind::ProjectRevision, Instant::now());
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        self.modified.store(true, Ordering::Relaxed);
+        self.notifier.record(ChangeKind::ProjectRevision);
     }
 
     /// シーン変更イベントを反映する。
@@ -328,14 +317,19 @@ impl ProjectState {
     /// シーンの切り替えは編集対象を変えるだけで未保存の変更を生まないため、
     /// `modified` も据え置く。
     pub fn on_scene_changed(&self) {
-        self.revision.fetch_add(1, Ordering::AcqRel);
-        self.notifier
-            .record(ChangeKind::CurrentScene, Instant::now());
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        self.notifier.record(ChangeKind::CurrentScene);
     }
 
-    /// 未取り出しの変更種別を取り出してクリアする。
-    pub fn take_pending_changes(&self) -> PendingChanges {
-        self.notifier.take()
+    /// 未取り出しの変更を取り出してクリアする。
+    ///
+    /// 直近の取り出しから [`NOTIFY_MIN_INTERVAL`] が経過していない場合と、
+    /// 未取り出しの変更が無い場合は `None` を返す。抑止された変更は次の
+    /// 取り出しでまとめて観測できる。
+    // 現時点の呼び出し元はテストのみ。
+    #[allow(dead_code)]
+    pub(crate) fn take_pending_changes(&self, now: Instant) -> Option<PendingChanges> {
+        self.notifier.take(now)
     }
 
     /// 境界を更新する。`renew_epoch` が真なら epoch も再発行する。
@@ -443,7 +437,7 @@ mod tests {
     #[test]
     fn scene_change_keeps_epoch_after_project_load() {
         let state = ProjectState::new();
-        state.on_project_load(None);
+        state.on_project_load(Some(r"C:\projects\sample.aup2"));
         let epoch = state.epoch();
 
         state.on_scene_changed();
@@ -518,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn notification_is_not_admitted_more_than_ten_times_per_second() {
+    fn admits_notification_requires_minimum_interval() {
         let origin = Instant::now();
 
         assert!(admits_notification(None, origin, NOTIFY_MIN_INTERVAL));
@@ -535,47 +529,79 @@ mod tests {
     }
 
     #[test]
-    fn notifier_suppresses_admission_within_minimum_interval() {
-        let notifier = ChangeNotifier::new();
-        let origin = notifier.origin;
+    fn changes_are_not_taken_more_than_ten_times_per_second() {
+        let state = ProjectState::new();
+        let origin = Instant::now();
 
-        assert!(notifier.record(ChangeKind::ProjectRevision, origin));
-        assert!(!notifier.record(
-            ChangeKind::ProjectRevision,
-            origin + Duration::from_millis(99)
-        ));
-        assert!(notifier.record(
-            ChangeKind::ProjectRevision,
-            origin + Duration::from_millis(100)
-        ));
+        state.on_object_updated();
+        assert!(
+            state.take_pending_changes(origin).is_some(),
+            "最初の取り出しが抑止されました"
+        );
+
+        state.on_scene_changed();
+        assert!(
+            state
+                .take_pending_changes(origin + Duration::from_millis(99))
+                .is_none(),
+            "100ms 未満の間隔で取り出せてしまいました"
+        );
     }
 
     #[test]
-    fn suppressed_changes_remain_pending() {
-        let notifier = ChangeNotifier::new();
-        let origin = notifier.origin;
+    fn suppressed_changes_are_taken_after_minimum_interval() {
+        let state = ProjectState::new();
+        let origin = Instant::now();
 
-        notifier.record(ChangeKind::ProjectEpoch, origin);
-        notifier.record(ChangeKind::CurrentScene, origin + Duration::from_millis(1));
+        state.on_object_updated();
+        state.take_pending_changes(origin).unwrap();
 
-        let pending = notifier.take();
-        assert!(pending.contains(ChangeKind::ProjectEpoch));
-        assert!(pending.contains(ChangeKind::CurrentScene));
-        assert!(!pending.contains(ChangeKind::ProjectRevision));
-        assert_eq!(
-            pending.kinds().count(),
-            2,
-            "取り出した変更種別の数が一致しません"
+        // 抑止される間の変更は取り出し可能になった時点でまとめて観測できる。
+        state.on_scene_changed();
+        assert!(
+            state
+                .take_pending_changes(origin + Duration::from_millis(50))
+                .is_none()
         );
+        state.on_project_load(None);
+
+        let taken = state
+            .take_pending_changes(origin + Duration::from_millis(100))
+            .expect("最小間隔の経過後も取り出せませんでした");
+        assert!(taken.contains(ChangeKind::CurrentScene));
+        assert!(taken.contains(ChangeKind::ProjectEpoch));
+        assert!(!taken.contains(ChangeKind::ProjectRevision));
     }
 
     #[test]
     fn taking_changes_clears_them() {
         let state = ProjectState::new();
+        let origin = Instant::now();
         state.on_object_updated();
 
-        let pending = state.take_pending_changes();
-        assert!(pending.contains(ChangeKind::ProjectRevision));
-        assert!(state.take_pending_changes().is_empty());
+        let taken = state.take_pending_changes(origin).unwrap();
+        assert!(taken.contains(ChangeKind::ProjectRevision));
+        assert!(
+            state
+                .take_pending_changes(origin + Duration::from_millis(100))
+                .is_none(),
+            "取り出し済みの変更が再度取り出されました"
+        );
+    }
+
+    #[test]
+    fn taking_without_changes_does_not_consume_the_interval() {
+        let state = ProjectState::new();
+        let origin = Instant::now();
+
+        assert!(state.take_pending_changes(origin).is_none());
+
+        state.on_object_updated();
+        assert!(
+            state
+                .take_pending_changes(origin + Duration::from_millis(1))
+                .is_some(),
+            "変更が無い取り出しが間隔を消費しました"
+        );
     }
 }

@@ -462,9 +462,11 @@ mod tests {
             "シーンの変更で epoch が更新されました"
         );
 
-        let pending = project_state.take_pending_changes();
-        assert!(pending.contains(project::ChangeKind::ProjectRevision));
-        assert!(pending.contains(project::ChangeKind::CurrentScene));
+        let taken = project_state
+            .take_pending_changes(std::time::Instant::now())
+            .expect("イベントの変更が記録されていません");
+        assert!(taken.contains(project::ChangeKind::ProjectRevision));
+        assert!(taken.contains(project::ChangeKind::CurrentScene));
 
         assert_eq!(
             descriptor_before,
