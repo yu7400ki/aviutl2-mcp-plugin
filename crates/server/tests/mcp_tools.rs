@@ -636,3 +636,107 @@ async fn read_that_outlasts_the_request_budget_becomes_timeout() {
         "打ち切る側の期限が要求へ載っていません"
     );
 }
+
+/// 注入したエラーを `aviutl2_get_object` の tool result として受け取る。
+async fn get_object_failure(error: ErrorObject) -> CallToolResult {
+    let harness = Harness::start(OperationResponses::from([(
+        "get_object".to_string(),
+        err_result(error),
+    )]));
+    harness
+        .server
+        .aviutl2_get_object(Parameters(GetObjectInput {
+            instance_id: harness.instance_id(),
+            selector: selector_input(),
+        }))
+        .await
+}
+
+#[tokio::test]
+async fn ambiguous_selector_reaches_the_tool_result_with_candidate_count() {
+    let result = get_object_failure(
+        ErrorObject::new(
+            ErrorCode::AmbiguousSelector,
+            "セレクターが複数のオブジェクトに一致しました",
+            false,
+        )
+        .with_details(json!({ "candidate_count": 3 })),
+    )
+    .await;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("ambiguous_selector"));
+    assert_eq!(structured["retryable"], json!(false));
+    assert_eq!(structured["details"]["candidate_count"], json!(3));
+    let text = text_of(&result);
+    assert!(text.contains("ambiguous_selector"), "{text}");
+    assert!(text.contains("複数のオブジェクト"), "{text}");
+}
+
+#[tokio::test]
+async fn edit_blocked_reaches_the_tool_result_with_edit_state() {
+    let result = get_object_failure(
+        ErrorObject::new(
+            ErrorCode::EditBlocked,
+            "プレビュー中のため読み取れません",
+            true,
+        )
+        .with_details(json!({ "edit_state": "preview", "retry_after_ms": 250 })),
+    )
+    .await;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("edit_blocked"));
+    assert_eq!(structured["retryable"], json!(true));
+    // 待ち直しの判断に要る内訳は落とさない。
+    assert_eq!(structured["details"]["edit_state"], json!("preview"));
+    assert_eq!(structured["details"]["retry_after_ms"], json!(250));
+    let text = text_of(&result);
+    assert!(text.contains("edit_blocked"), "{text}");
+    assert!(text.contains("リトライ可能"), "{text}");
+}
+
+#[tokio::test]
+async fn not_found_selector_reaches_the_tool_result() {
+    let result = get_object_failure(ErrorObject::new(
+        ErrorCode::NotFound,
+        "セレクターに一致するオブジェクトがありません",
+        false,
+    ))
+    .await;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("not_found"));
+    assert_eq!(structured["retryable"], json!(false));
+    let text = text_of(&result);
+    assert!(text.contains("not_found"), "{text}");
+    assert!(text.contains("一致するオブジェクト"), "{text}");
+}
+
+#[tokio::test]
+async fn precondition_failed_reaches_the_tool_result_with_current_revision() {
+    let result = get_object_failure(
+        ErrorObject::new(
+            ErrorCode::PreconditionFailed,
+            "プロジェクトが変化しました",
+            true,
+        )
+        .with_details(json!({
+            "current_project_revision": 12,
+            "expected_project_revision": 7,
+        })),
+    )
+    .await;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("precondition_failed"));
+    assert_eq!(structured["retryable"], json!(true));
+    // 取り直しの基準になる revision を落とさない。
+    assert_eq!(structured["details"]["current_project_revision"], json!(12));
+    assert_eq!(structured["details"]["expected_project_revision"], json!(7));
+    assert!(text_of(&result).contains("precondition_failed"));
+}
