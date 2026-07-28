@@ -2,6 +2,9 @@
 //!
 //! 参照区間の内側でだけ opaque handle を扱い、区間を抜ける前に所有型へ写す。
 //! ハンドルは戻り値・ログ・エラーのいずれにも現れない。
+//!
+//! SDK に触れる部分と、そこから得た値を組み替える部分を分けている。後者は
+//! 自由関数として切り出してあり、SDK 無しで検証できる。
 
 use crate::EDIT_HANDLE;
 use crate::read::error::ReadError;
@@ -15,6 +18,7 @@ use aviutl2_mcp_core::{
     FiniteF64, ItemValue, SectionRange,
 };
 use std::collections::HashMap;
+use std::ops::Range;
 
 /// SDK 呼び出しの失敗を、失敗した関数名つきの型付きエラーにする。
 fn sdk(operation: &'static str) -> ReadError {
@@ -51,7 +55,8 @@ impl ReadHost for SdkReadHost {
             width: size(info.width)?,
             height: size(info.height)?,
             // 有理数へ畳まれた後の分子・分母であり、ホストが保持する生の
-            // rate/scale は約分によって失われている。
+            // rate/scale は約分によって失われている。分母は有理数を構築できた
+            // 時点で 0 にならない。
             fps_rate: *info.fps.numer(),
             fps_scale: *info.fps.denom(),
             sample_rate: size(info.sample_rate)?,
@@ -145,27 +150,13 @@ impl SceneReader for SdkSceneReader<'_> {
     }
 
     fn objects_in_layer(&self, layer: usize) -> Result<Vec<HostObject>, ReadError> {
-        // ラッパーのイテレータは失敗と終端を区別せず打ち切るため、自前で走査して
-        // 途中の失敗を取りこぼさないようにする。
-        let mut objects = Vec::new();
-        let mut next_frame = 0usize;
-        loop {
-            let Some(handle) = self
-                .section
-                .find_object_after(layer, next_frame)
-                .map_err(|_| sdk("find_object"))?
-            else {
-                return Ok(objects);
+        scan_layer(|frame| {
+            let Some(handle) = self.find_object_from(layer, frame)? else {
+                return Ok(None);
             };
             let object = self.object_at(handle)?;
-            let advanced = object.frame_end.saturating_add(1);
-            if !objects.is_empty() && advanced <= next_frame {
-                // 探索位置が前進しない場合は同じ対象を返し続けるため打ち切る。
-                return Ok(objects);
-            }
-            next_frame = advanced;
-            objects.push(object);
-        }
+            Ok(Some((object.frame_end, object)))
+        })
     }
 
     fn object_detail(
@@ -174,26 +165,15 @@ impl SceneReader for SdkSceneReader<'_> {
         frame_start: usize,
     ) -> Result<HostObjectDetail, ReadError> {
         let handle = self
-            .section
-            .find_object_after(layer, frame_start)
-            .map_err(|_| sdk("find_object"))?
+            .find_object_from(layer, frame_start)?
             .ok_or(ReadError::ObjectNotFound)?;
-        let object = self.object_at(handle)?;
-        // 「指定フレーム以降」の探索であるため、開始フレームの一致を確かめる。
-        if object.frame_start != frame_start {
-            return Err(ReadError::ObjectNotFound);
-        }
+        let object = ensure_start_frame(self.object_at(handle)?, frame_start)?;
 
-        let sections = self
-            .section
-            .get_object_section_ranges(handle)
-            .map_err(|_| sdk("get_object_section_frame"))?
-            .into_iter()
-            .map(|range| SectionRange {
-                start: range.start,
-                end: range.end.saturating_sub(1),
-            })
-            .collect();
+        let sections = to_inclusive_sections(
+            self.section
+                .get_object_section_ranges(handle)
+                .map_err(|_| sdk("get_object_section_frame"))?,
+        );
 
         Ok(HostObjectDetail {
             object,
@@ -204,6 +184,17 @@ impl SceneReader for SdkSceneReader<'_> {
 }
 
 impl SdkSceneReader<'_> {
+    /// 指定フレーム以降で最初に見つかる対象のハンドル。
+    fn find_object_from(
+        &self,
+        layer: usize,
+        frame: usize,
+    ) -> Result<Option<ObjectHandle>, ReadError> {
+        self.section
+            .find_object_after(layer, frame)
+            .map_err(|_| sdk("find_object"))
+    }
+
     /// ハンドルが指すオブジェクトを所有型へ写す。
     fn object_at(&self, handle: ObjectHandle) -> Result<HostObject, ReadError> {
         let position = self
@@ -244,17 +235,18 @@ impl SdkSceneReader<'_> {
             Err(_) => return Ok(Vec::new()),
         };
 
-        let mut seen: HashMap<String, usize> = HashMap::new();
-        let mut effects = Vec::with_capacity(handles.len());
-        for handle in handles {
-            let name = self
-                .section
-                .get_effect_name(handle)
-                .map_err(|_| sdk("get_effect_name"))?;
-            let index = seen.entry(name.clone()).or_insert(0);
-            let effect_index = *index;
-            *index += 1;
+        let mut names = Vec::with_capacity(handles.len());
+        for handle in &handles {
+            names.push(
+                self.section
+                    .get_effect_name(*handle)
+                    .map_err(|_| sdk("get_effect_name"))?,
+            );
+        }
+        let indices = assign_effect_indices(&names);
 
+        let mut effects = Vec::with_capacity(handles.len());
+        for ((handle, name), index) in handles.into_iter().zip(names).zip(indices) {
             effects.push(HostEffect {
                 enabled: self
                     .section
@@ -266,7 +258,7 @@ impl SdkSceneReader<'_> {
                     .map_err(|_| sdk("get_effect_lock"))?,
                 items: self.effect_items(handle, &name)?,
                 name,
-                index: effect_index,
+                index,
             });
         }
         Ok(effects)
@@ -309,6 +301,67 @@ impl SdkSceneReader<'_> {
     }
 }
 
+/// レイヤーを開始フレームの昇順に走査する。
+///
+/// `next` は「指定フレーム以降で最初に見つかる対象」の終了フレームと値を返し、
+/// 対象が無ければ `None` を返す。次の探索は終了フレームの次から始める。
+///
+/// 探索位置が前進しない場合は同じ対象を返し続けるため打ち切る。
+fn scan_layer<T>(
+    mut next: impl FnMut(usize) -> Result<Option<(usize, T)>, ReadError>,
+) -> Result<Vec<T>, ReadError> {
+    let mut items = Vec::new();
+    let mut next_frame = 0usize;
+    loop {
+        let Some((frame_end, item)) = next(next_frame)? else {
+            return Ok(items);
+        };
+        let advanced = frame_end.saturating_add(1);
+        if !items.is_empty() && advanced <= next_frame {
+            return Ok(items);
+        }
+        next_frame = advanced;
+        items.push(item);
+    }
+}
+
+/// 開始フレームが要求と完全に一致することを確かめる。
+///
+/// 探索は「指定フレーム以降」であり、途中フレームを指定すると後続の対象が
+/// 返る。開始フレームで一致する対象だけを受け入れる。
+fn ensure_start_frame(object: HostObject, frame_start: usize) -> Result<HostObject, ReadError> {
+    if object.frame_start == frame_start {
+        Ok(object)
+    } else {
+        Err(ReadError::ObjectNotFound)
+    }
+}
+
+/// 終端を含まない区間を、終端を含む区間へ変換する。
+fn to_inclusive_sections(ranges: Vec<Range<usize>>) -> Vec<SectionRange> {
+    ranges
+        .into_iter()
+        .map(|range| SectionRange {
+            start: range.start,
+            end: range.end.saturating_sub(1),
+        })
+        .collect()
+}
+
+/// 同名 effect へ出現順の 0 始まりインデックスを割り当てる。
+fn assign_effect_indices(names: &[String]) -> Vec<usize> {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    names
+        .iter()
+        .map(|name| {
+            let next = seen.entry(name.as_str()).or_insert(0);
+            let index = *next;
+            *next += 1;
+            index
+        })
+        .collect()
+}
+
 /// トラックバーの移動情報を所有型へ写す。
 fn track_info(track: aviutl2::generic::TrackInfo) -> aviutl2_mcp_core::TrackInfo {
     aviutl2_mcp_core::TrackInfo {
@@ -337,11 +390,12 @@ fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
             Ok(value) => ItemValue::Integer { value },
             Err(_) => ItemValue::Unknown { raw },
         },
-        EffectItemType::Number => match raw.trim().parse::<f64>().ok().and_then(FiniteF64::try_new)
-        {
-            Some(value) => ItemValue::Number { value },
-            None => ItemValue::Unknown { raw },
-        },
+        EffectItemType::Number => {
+            match raw.trim().parse::<f64>().ok().and_then(FiniteF64::try_new) {
+                Some(value) => ItemValue::Number { value },
+                None => ItemValue::Unknown { raw },
+            }
+        }
         EffectItemType::Check => match parse_check(&raw) {
             Some(value) => ItemValue::Bool { value },
             None => ItemValue::Unknown { raw },
@@ -376,6 +430,120 @@ fn parse_check(raw: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn object(frame_start: usize, frame_end: usize) -> HostObject {
+        HostObject {
+            layer: 1,
+            frame_start,
+            frame_end,
+            name: None,
+            alias: format!("[{frame_start}]"),
+        }
+    }
+
+    /// 開始・終了フレームの組を並べたレイヤーに対する「指定フレーム以降」の探索。
+    ///
+    /// 指定フレームより後ろに終端がある最初の対象を返す。SDK の `find_object`
+    /// と同じく、途中フレームを指定してもその対象が返る。
+    fn layer_scan(
+        placements: Vec<(usize, usize)>,
+    ) -> impl FnMut(usize) -> Result<Option<(usize, HostObject)>, ReadError> {
+        move |frame| {
+            Ok(placements
+                .iter()
+                .find(|(_, end)| *end >= frame)
+                .map(|(start, end)| (*end, object(*start, *end))))
+        }
+    }
+
+    #[test]
+    fn scan_layer_collects_objects_in_start_frame_order() {
+        let objects = scan_layer(layer_scan(vec![(0, 99), (100, 200), (300, 400)])).unwrap();
+        assert_eq!(
+            objects
+                .iter()
+                .map(|object| object.frame_start)
+                .collect::<Vec<_>>(),
+            vec![0, 100, 300]
+        );
+    }
+
+    #[test]
+    fn scan_layer_returns_empty_for_empty_layer() {
+        assert!(scan_layer(layer_scan(Vec::new())).unwrap().is_empty());
+    }
+
+    #[test]
+    fn scan_layer_accepts_an_object_at_frame_zero() {
+        // 0 フレームで始まり 0 フレームで終わる対象でも打ち切られない。
+        let objects = scan_layer(layer_scan(vec![(0, 0), (1, 1)])).unwrap();
+        assert_eq!(objects.len(), 2);
+    }
+
+    #[test]
+    fn scan_layer_propagates_failures() {
+        let error = scan_layer::<()>(|_| Err(sdk("get_object_layer_frame"))).unwrap_err();
+        assert_eq!(error.details()["sdk_operation"], "get_object_layer_frame");
+    }
+
+    #[test]
+    fn ensure_start_frame_requires_exact_match() {
+        assert_eq!(
+            ensure_start_frame(object(100, 200), 100)
+                .unwrap()
+                .frame_start,
+            100
+        );
+        for frame in [99usize, 101, 150, 200] {
+            assert!(
+                matches!(
+                    ensure_start_frame(object(100, 200), frame),
+                    Err(ReadError::ObjectNotFound)
+                ),
+                "フレーム {frame} が開始フレームとして受理されました"
+            );
+        }
+    }
+
+    #[test]
+    fn sections_drop_the_exclusive_end() {
+        assert_eq!(
+            to_inclusive_sections(vec![120..180, 180..241]),
+            vec![
+                SectionRange {
+                    start: 120,
+                    end: 179
+                },
+                SectionRange {
+                    start: 180,
+                    end: 240
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_section_does_not_underflow() {
+        let empty: Range<usize> = 0..0;
+        assert_eq!(
+            to_inclusive_sections(vec![empty]),
+            vec![SectionRange { start: 0, end: 0 }]
+        );
+        assert!(to_inclusive_sections(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn effect_indices_count_per_name_in_order() {
+        let names = ["ぼかし", "動画ファイル", "ぼかし", "ぼかし", "動画ファイル"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(assign_effect_indices(&names), vec![0, 0, 1, 2, 1]);
+    }
+
+    #[test]
+    fn effect_indices_are_empty_for_no_effects() {
+        assert!(assign_effect_indices(&[]).is_empty());
+    }
 
     #[test]
     fn item_value_follows_item_type() {
