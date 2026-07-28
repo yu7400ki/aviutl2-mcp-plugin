@@ -4,11 +4,13 @@
 //! バージョン交渉、HMAC handshake）を提供する。
 
 pub mod descriptor;
+pub mod edit_info;
 pub mod envelope;
 pub mod error;
 pub mod framing;
 pub mod handshake;
 pub mod identifier;
+pub mod item_value;
 pub mod json;
 pub mod number;
 pub mod page;
@@ -22,6 +24,7 @@ mod tests;
 pub use descriptor::{
     AuthSecret, DescriptorProject, InstanceDescriptor, InstanceInfo, InstanceProject,
 };
+pub use edit_info::{Cursor, DisplayRange, EditInfo, Extent, FrameRange, SceneInfo, SceneRef};
 pub use envelope::{RequestEnvelope, RequestKind, ResponseEnvelope, ResponseKind, ResponseResult};
 pub use error::{ErrorCode, ErrorObject};
 pub use framing::{
@@ -32,6 +35,7 @@ pub use handshake::{
     verify_mac,
 };
 pub use identifier::{InstanceId, ProtocolVersion, RequestId, pipe_name_for};
+pub use item_value::ItemValue;
 pub use json::{JsonStrictError, deserialize_json, parse_json};
 pub use number::FiniteF64;
 pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
