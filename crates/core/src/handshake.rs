@@ -191,6 +191,7 @@ pub struct ClientHello {
 
 /// plugin から client への認証応答。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerAuth {
     /// negotiation 結果のプロトコルバージョン。
     pub protocol_version: ProtocolVersion,
@@ -340,6 +341,65 @@ mod tests {
         assert!(!s.contains("AB"));
         let mac2: Mac = serde_json::from_str(&s).unwrap();
         assert_eq!(mac.as_bytes(), mac2.as_bytes());
+    }
+
+    fn sample_client_hello() -> ClientHello {
+        ClientHello {
+            protocol_version: ProtocolVersion { major: 1, minor: 0 },
+            instance_id: fixed_instance_id(),
+            client_nonce: fixed_client_nonce(),
+        }
+    }
+
+    fn sample_server_auth() -> ServerAuth {
+        ServerAuth {
+            protocol_version: ProtocolVersion { major: 1, minor: 0 },
+            instance_id: fixed_instance_id(),
+            server_nonce: fixed_server_nonce(),
+            pid: 4321,
+            process_created_at: "2026-01-01T00:00:00+00:00".to_string(),
+            server_mac: Mac::from_bytes([0xAB; 32]),
+        }
+    }
+
+    fn sample_client_auth() -> ClientAuth {
+        ClientAuth {
+            client_mac: Mac::from_bytes([0xCD; 32]),
+        }
+    }
+
+    /// 既知の値へ未知フィールドを 1 つ足した JSON を作る。
+    fn with_unknown_field<T: Serialize>(value: &T) -> serde_json::Value {
+        let mut obj = match serde_json::to_value(value).unwrap() {
+            serde_json::Value::Object(obj) => obj,
+            other => {
+                panic!("handshake メッセージは JSON オブジェクトである必要があります: {other}")
+            }
+        };
+        obj.insert("future_field".to_string(), serde_json::json!(1));
+        serde_json::Value::Object(obj)
+    }
+
+    #[test]
+    fn server_auth_rejects_unknown_field() {
+        let auth = sample_server_auth();
+        let restored: ServerAuth =
+            serde_json::from_value(serde_json::to_value(&auth).unwrap()).unwrap();
+        assert_eq!(restored, auth);
+
+        let result: Result<ServerAuth, _> = serde_json::from_value(with_unknown_field(&auth));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn client_messages_reject_unknown_field() {
+        let hello = sample_client_hello();
+        let result: Result<ClientHello, _> = serde_json::from_value(with_unknown_field(&hello));
+        assert!(result.is_err());
+
+        let auth = sample_client_auth();
+        let result: Result<ClientAuth, _> = serde_json::from_value(with_unknown_field(&auth));
+        assert!(result.is_err());
     }
 
     #[test]

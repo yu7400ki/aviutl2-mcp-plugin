@@ -168,7 +168,8 @@ impl<'de> Deserialize<'de> for ResponseResult {
                         "result" => result = Some(map.next_value::<serde_json::Value>()?),
                         "error" => error = Some(map.next_value::<ErrorObject>()?),
                         _ => {
-                            // result オブジェクト内の未知フィールドは許容しない。
+                            // 前方互換のため、将来の MINOR で追加される未知フィールドは
+                            // 読み飛ばして許容する。
                             map.next_value::<serde_json::Value>()?;
                         }
                     }
@@ -289,7 +290,8 @@ impl<'de> Deserialize<'de> for ResponseEnvelope {
                         "result" => result = Some(map.next_value::<serde_json::Value>()?),
                         "error" => error = Some(map.next_value::<ErrorObject>()?),
                         _ => {
-                            // 未知の optional フィールドを許容する。
+                            // 前方互換のため、将来の MINOR で追加される未知フィールドは
+                            // 読み飛ばして許容する。
                             map.next_value::<serde_json::Value>()?;
                         }
                     }

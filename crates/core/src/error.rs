@@ -13,6 +13,10 @@ pub struct ErrorObject {
     /// リトライ可能かどうか。
     pub retryable: bool,
     /// 安全な補助情報のみを含む追加情報。
+    ///
+    /// 直列化では常に出力する。逆直列化では前方互換のため省略を許容し、
+    /// 省略時は `null` として扱う。
+    #[serde(default)]
     pub details: serde_json::Value,
     /// 相関 ID。server が UUID v7 で付与する。
     pub correlation_id: Option<String>,
@@ -187,6 +191,21 @@ mod tests {
         let s = serde_json::to_string(&err).unwrap();
         let err2: ErrorObject = serde_json::from_str(&s).unwrap();
         assert_eq!(err, err2);
+    }
+
+    #[test]
+    fn error_object_allows_omitted_details() {
+        let s = r#"{"code":"host_busy","message":"busy","retryable":true}"#;
+        let err: ErrorObject = serde_json::from_str(s).unwrap();
+        assert_eq!(err.details, serde_json::Value::Null);
+        assert_eq!(err.correlation_id, None);
+    }
+
+    #[test]
+    fn error_object_always_serializes_details() {
+        let err = ErrorObject::new(ErrorCode::HostBusy, "busy", true);
+        let s = serde_json::to_string(&err).unwrap();
+        assert!(s.contains("\"details\""));
     }
 
     #[test]
