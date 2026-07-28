@@ -2,8 +2,8 @@
 //!
 //! 重複 JSON key、非有限数、不正 UTF-8、必須フィールド欠落を拒否する。
 
-use serde::de::{self, Deserialize, Deserializer, Error as DeError, MapAccess, SeqAccess, Visitor};
-use serde::ser::{Serialize, Serializer};
+use serde::de::{self, Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::fmt;
 
@@ -27,27 +27,49 @@ pub enum JsonStrictError {
     StructureError(String),
 }
 
-const DUPLICATE_KEY_PREFIX: &str = "__DUPLICATE_KEY__:";
-const NON_FINITE_FLOAT_MARKER: &str = "__NON_FINITE_FLOAT__";
-
+/// `serde_json` 由来のエラーは素の構文エラーとして扱う。
+///
+/// strict 規則（重複 key / 非有限数）による拒否の種別は検出時点で記録した
+/// [`StrictReject`] から決めるため、この変換はエラーメッセージを解析しない。
 impl From<serde_json::Error> for JsonStrictError {
     fn from(e: serde_json::Error) -> Self {
-        let s = e.to_string();
-        if let Some(idx) = s.find(DUPLICATE_KEY_PREFIX) {
-            let rest = &s[idx + DUPLICATE_KEY_PREFIX.len()..];
-            let key = rest.split(" at line ").next().unwrap_or(rest);
-            return JsonStrictError::DuplicateKey(key.to_string());
-        }
-        if s.contains(NON_FINITE_FLOAT_MARKER) {
-            return JsonStrictError::NonFiniteFloat;
-        }
-        JsonStrictError::ParseError(s)
+        JsonStrictError::ParseError(e.to_string())
     }
 }
 
 impl From<JsonStrictError> for serde_json::Error {
     fn from(e: JsonStrictError) -> Self {
         serde::de::Error::custom(e.to_string())
+    }
+}
+
+/// strict 規則で拒否した理由。
+///
+/// serde の `Error::custom` は文字列しか運べず、`serde_json::Error` は独自の
+/// エラー種別を保持できない。そのため拒否を検出した visitor が理由をこの型で
+/// [`RejectSlot`] へ記録し、呼び出し側はそれだけを見て種別を決める。
+/// 判定は `serde_json` のメッセージ書式に一切依存しない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StrictReject {
+    DuplicateKey(String),
+    NonFiniteFloat,
+}
+
+/// 拒否理由の記録先。パース 1 回ごとに新規作成し、visitor と共有する。
+type RejectSlot = Cell<Option<StrictReject>>;
+
+/// 最初に検出した拒否理由を記録する。
+fn record_reject(slot: &RejectSlot, reject: StrictReject) {
+    let current = slot.take();
+    slot.set(current.or(Some(reject)));
+}
+
+/// パース失敗を、記録された拒否理由に基づいて分類する。
+fn classify_error(slot: &RejectSlot, error: serde_json::Error) -> JsonStrictError {
+    match slot.take() {
+        Some(StrictReject::DuplicateKey(key)) => JsonStrictError::DuplicateKey(key),
+        Some(StrictReject::NonFiniteFloat) => JsonStrictError::NonFiniteFloat,
+        None => JsonStrictError::ParseError(error.to_string()),
     }
 }
 
@@ -62,11 +84,13 @@ impl From<JsonStrictError> for serde_json::Error {
 /// `#[serde(deny_unknown_fields)]` で制御すること。
 pub fn parse_json(bytes: &[u8]) -> Result<serde_json::Value, JsonStrictError> {
     let s = std::str::from_utf8(bytes).map_err(|_| JsonStrictError::InvalidUtf8)?;
+    let reject = RejectSlot::new(None);
     let mut de = serde_json::Deserializer::from_str(s);
-    let value = StrictValue::deserialize(&mut de)?;
-    de.end()
-        .map_err(|e| JsonStrictError::ParseError(e.to_string()))?;
-    Ok(value.0)
+    let value = StrictValueSeed { reject: &reject }
+        .deserialize(&mut de)
+        .map_err(|e| classify_error(&reject, e))?;
+    de.end().map_err(|e| classify_error(&reject, e))?;
+    Ok(value)
 }
 
 /// バイト列を strict JSON として検証し、指定の型へ逆直列化する。
@@ -78,30 +102,32 @@ where
     serde_json::from_value(value).map_err(|e| JsonStrictError::StructureError(e.to_string()))
 }
 
-struct StrictValue(serde_json::Value);
+/// strict 規則で 1 個の JSON 値を読む seed。
+///
+/// 拒否理由の記録先を入れ子の値へ伝播させるため、`Deserialize` ではなく
+/// `DeserializeSeed` として実装する。
+struct StrictValueSeed<'a> {
+    reject: &'a RejectSlot,
+}
 
-impl<'de> Deserialize<'de> for StrictValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+impl<'de> DeserializeSeed<'de> for StrictValueSeed<'_> {
+    type Value = serde_json::Value;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let value = deserializer.deserialize_any(StrictVisitor)?;
-        Ok(StrictValue(value))
+        deserializer.deserialize_any(StrictVisitor {
+            reject: self.reject,
+        })
     }
 }
 
-impl Serialize for StrictValue {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.0.serialize(serializer)
-    }
+struct StrictVisitor<'a> {
+    reject: &'a RejectSlot,
 }
 
-struct StrictVisitor;
-
-impl<'de> Visitor<'de> for StrictVisitor {
+impl<'de> Visitor<'de> for StrictVisitor<'_> {
     type Value = serde_json::Value;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -124,12 +150,13 @@ impl<'de> Visitor<'de> for StrictVisitor {
     where
         E: de::Error,
     {
-        if !v.is_finite() {
-            return Err(E::custom(NON_FINITE_FLOAT_MARKER));
+        match serde_json::Number::from_f64(v).filter(|_| v.is_finite()) {
+            Some(number) => Ok(serde_json::Value::Number(number)),
+            None => {
+                record_reject(self.reject, StrictReject::NonFiniteFloat);
+                Err(E::custom("非有限数 (NaN / Infinity) は許可されません"))
+            }
         }
-        Ok(serde_json::Value::Number(
-            serde_json::Number::from_f64(v).ok_or_else(|| E::custom(NON_FINITE_FLOAT_MARKER))?,
-        ))
     }
 
     fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
@@ -155,7 +182,10 @@ impl<'de> Visitor<'de> for StrictVisitor {
     where
         D: Deserializer<'de>,
     {
-        Deserialize::deserialize(deserializer)
+        StrictValueSeed {
+            reject: self.reject,
+        }
+        .deserialize(deserializer)
     }
 
     fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -163,8 +193,10 @@ impl<'de> Visitor<'de> for StrictVisitor {
         A: SeqAccess<'de>,
     {
         let mut arr = Vec::new();
-        while let Some(v) = seq.next_element::<StrictValue>()? {
-            arr.push(v.0);
+        while let Some(v) = seq.next_element_seed(StrictValueSeed {
+            reject: self.reject,
+        })? {
+            arr.push(v);
         }
         Ok(serde_json::Value::Array(arr))
     }
@@ -177,10 +209,13 @@ impl<'de> Visitor<'de> for StrictVisitor {
         let mut seen = HashSet::new();
         while let Some(key) = map.next_key::<String>()? {
             if !seen.insert(key.clone()) {
-                return Err(A::Error::custom(format!("{DUPLICATE_KEY_PREFIX}{key}")));
+                record_reject(self.reject, StrictReject::DuplicateKey(key.clone()));
+                return Err(de::Error::custom(format!("重複した JSON key です: {key}")));
             }
-            let value = map.next_value::<StrictValue>()?;
-            obj.insert(key, value.0);
+            let value = map.next_value_seed(StrictValueSeed {
+                reject: self.reject,
+            })?;
+            obj.insert(key, value);
         }
         Ok(serde_json::Value::Object(obj))
     }
@@ -190,6 +225,8 @@ impl<'de> Visitor<'de> for StrictVisitor {
 mod tests {
     use super::*;
     use serde::Deserialize;
+    use serde::de::IntoDeserializer;
+    use serde::de::value::{Error as ValueError, F64Deserializer};
 
     #[derive(Debug, Deserialize)]
     struct Sample {
@@ -230,15 +267,76 @@ mod tests {
 
     #[test]
     fn parse_json_rejects_out_of_range_float() {
-        // 表現可能範囲を超える指数は非有限数として拒否される。
+        // 表現可能範囲を超える指数は serde_json の数値パース自体が拒否するため、
+        // visitor の非有限数チェックまでは到達しない。
         let result = parse_json(br#"{"x":1e309}"#);
+        assert!(matches!(result, Err(JsonStrictError::ParseError(_))));
+    }
+
+    #[test]
+    fn non_finite_float_is_recorded_as_reject() {
+        // 非有限数を直接 visitor へ渡し、拒否理由が記録されることを確認する。
+        let slot = RejectSlot::new(None);
+        let deserializer: F64Deserializer<ValueError> = f64::INFINITY.into_deserializer();
+        let result = StrictValueSeed { reject: &slot }.deserialize(deserializer);
         assert!(result.is_err());
+        assert_eq!(slot.take(), Some(StrictReject::NonFiniteFloat));
     }
 
     #[test]
     fn parse_json_rejects_invalid_utf8() {
         let result = parse_json(&[0x80, 0x81, 0x82]);
         assert!(matches!(result, Err(JsonStrictError::InvalidUtf8)));
+    }
+
+    #[test]
+    fn duplicate_key_is_reported_verbatim() {
+        // key がエラーメッセージの断片に似ていても、記録した key がそのまま返る。
+        // 種別も key もパーサのメッセージ書式から復元していないことを示す。
+        let result = parse_json(br#"{"a at line 1 column 2":1,"a at line 1 column 2":2}"#);
+        assert_eq!(
+            result,
+            Err(JsonStrictError::DuplicateKey(
+                "a at line 1 column 2".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn classify_error_uses_recorded_reject() {
+        let syntax_error = || serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+
+        let slot = RejectSlot::new(None);
+        record_reject(&slot, StrictReject::DuplicateKey("k".to_string()));
+        assert_eq!(
+            classify_error(&slot, syntax_error()),
+            JsonStrictError::DuplicateKey("k".to_string())
+        );
+
+        let slot = RejectSlot::new(None);
+        record_reject(&slot, StrictReject::NonFiniteFloat);
+        assert_eq!(
+            classify_error(&slot, syntax_error()),
+            JsonStrictError::NonFiniteFloat
+        );
+
+        // 記録が無い場合のみ、素の構文エラーとして扱う。
+        let slot = RejectSlot::new(None);
+        assert!(matches!(
+            classify_error(&slot, syntax_error()),
+            JsonStrictError::ParseError(_)
+        ));
+    }
+
+    #[test]
+    fn record_reject_keeps_first_reason() {
+        let slot = RejectSlot::new(None);
+        record_reject(&slot, StrictReject::DuplicateKey("first".to_string()));
+        record_reject(&slot, StrictReject::NonFiniteFloat);
+        assert_eq!(
+            slot.take(),
+            Some(StrictReject::DuplicateKey("first".to_string()))
+        );
     }
 
     #[test]
