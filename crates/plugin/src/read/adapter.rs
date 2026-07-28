@@ -254,8 +254,9 @@ fn ensure_scene(info: &HostEditInfo, expected_scene_id: i32) -> Result<(), ReadE
 
 /// 絞り込み条件を現在のレイヤー数で丸めた走査範囲。
 ///
-/// 下限が上限を上回る指定は要求の誤りとして事前に弾いているため、ここでは
-/// 空の範囲にならない。上限だけが現在のレイヤー数を超える指定は丸める。
+/// 上限が現在のレイヤー数を超える指定は丸める。下限が現在のレイヤー数を超える
+/// 場合は空の範囲になり、結果 0 件として扱う。下限が上限を上回る指定は要求の
+/// 誤りとして呼び出し側が先に弾く。
 fn layer_range(filter: Option<&ObjectFilter>, layer_max: usize) -> RangeInclusive<usize> {
     let min = filter.and_then(|filter| filter.layer_min).unwrap_or(0);
     let max = filter
@@ -1127,33 +1128,41 @@ mod tests {
     }
 
     #[test]
-    fn list_available_effects_does_not_enter_read_section() {
-        let adapter = adapter();
-        adapter.list_available_effects(None).unwrap();
-        assert!(!adapter.host.calls().contains(&"enter_read_section"));
-    }
-
-    #[test]
-    fn each_operation_enters_read_section_at_most_once() {
-        for expected in [0usize, 1] {
-            let adapter = adapter();
-            let selector = sample_selector(&adapter);
-            match expected {
-                0 => {
-                    adapter.list_available_effects(None).unwrap();
-                }
-                _ => {
-                    adapter.get_object(&selector).unwrap();
-                }
-            }
-            let entries = adapter
+    fn each_operation_enters_the_read_section_at_most_once() {
+        fn entries(adapter: &HostReadAdapter<FakeHost>) -> usize {
+            adapter
                 .host
                 .calls()
                 .iter()
                 .filter(|call| **call == "enter_read_section")
-                .count();
-            assert_eq!(entries, expected);
+                .count()
         }
+
+        let edit_info = adapter();
+        edit_info.get_edit_info().unwrap();
+        assert_eq!(entries(&edit_info), 1, "get_edit_info");
+
+        let current_scene = adapter();
+        current_scene.get_current_scene().unwrap();
+        assert_eq!(entries(&current_scene), 1, "get_current_scene");
+
+        let layers = adapter();
+        layers.list_layers(0).unwrap();
+        assert_eq!(entries(&layers), 1, "list_layers");
+
+        let objects = adapter();
+        objects.list_objects(0, None).unwrap();
+        assert_eq!(entries(&objects), 1, "list_objects");
+
+        let object = adapter();
+        let selector = sample_selector(&object);
+        object.get_object(&selector).unwrap();
+        assert_eq!(entries(&object), 1, "get_object");
+
+        // effect のカタログは編集ハンドルから直接得られ、参照区間を必要としない。
+        let effects = adapter();
+        effects.list_available_effects(None).unwrap();
+        assert_eq!(entries(&effects), 0, "list_available_effects");
     }
 
     #[test]
