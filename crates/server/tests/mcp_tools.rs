@@ -10,16 +10,17 @@ use aviutl2_mcp_core::{
     ObjectDetail, ObjectFingerprintInput, ObjectSummary, PageMeta, RequestEnvelope, SceneInfo,
     SectionRange,
 };
-use aviutl2_mcp_server::mcp::AviUtl2McpServer;
 use aviutl2_mcp_server::mcp::input::{
     AvailableEffectsPageInput, GetObjectInput, InstanceInput, ListAvailableEffectsInput,
     ListInstancesInput, ListLayersInput, ListObjectsInput, ObjectFilterInput, ObjectSelectorInput,
     PageInput,
 };
+use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::time::Duration;
 use support::{
     MOCK_STARTUP_GRACE, MockPipeServer, OperationResponses, current_process_created_at, err_result,
     ok_result, temp_registry_dir,
@@ -35,19 +36,32 @@ struct Harness {
 impl Harness {
     /// 指定の operation 応答を返す mock を起こす。
     fn start(responses: OperationResponses) -> Self {
+        Self::start_with_delay(responses, Duration::ZERO, CallLimits::default())
+    }
+
+    /// read operation の応答を遅らせる mock と、実行予算を縮めたサーバーを起こす。
+    ///
+    /// 遅延は生存確認の `ping` には掛からないため、期限を使い切るのは read の
+    /// 往復だけになる。
+    fn start_with_delay(
+        responses: OperationResponses,
+        response_delay: Duration,
+        limits: CallLimits,
+    ) -> Self {
         let registry_dir = temp_registry_dir();
-        let mock = MockPipeServer::start_with_operations(
+        let mock = MockPipeServer::start_with_delayed_operations(
             InstanceId::new_v4(),
             AuthSecret::generate(),
             std::process::id(),
             current_process_created_at(),
             InstanceState::Ready,
             responses,
+            response_delay,
         );
         mock.write_descriptor(&registry_dir);
         std::thread::sleep(MOCK_STARTUP_GRACE);
         Self {
-            server: AviUtl2McpServer::new(registry_dir.clone()),
+            server: AviUtl2McpServer::with_limits(registry_dir.clone(), limits),
             mock,
             registry_dir,
         }
@@ -576,4 +590,49 @@ async fn each_tool_call_uses_a_fresh_connection() {
     let pings = all.iter().filter(|r| r.operation == "ping").count();
     assert_eq!(pings, 3, "tool call ごとに接続を張り直す");
     assert_eq!(harness.read_requests().len(), 3);
+}
+
+/// 応答しないインスタンスを演じる時間。要求予算を確実に超える長さにする。
+const SLOW_READ: Duration = Duration::from_millis(500);
+
+/// 期限超過を起こすために縮めた read operation の予算。
+///
+/// [`SLOW_READ`] より十分短く、接続と生存確認が終わるだけの余裕はある値を選ぶ。
+const SHORT_REQUEST_BUDGET: Duration = Duration::from_millis(200);
+
+#[tokio::test]
+async fn read_that_outlasts_the_request_budget_becomes_timeout() {
+    // 期限超過は接続先の応答ではなく server 側の打ち切りで起きるため、
+    // 正常な結果を返す mock を遅らせるだけで再現できる。
+    let expected = serde_json::to_value(sample_edit_info()).expect("直列化できる");
+    let harness = Harness::start_with_delay(
+        responses("get_edit_info", expected),
+        SLOW_READ,
+        CallLimits {
+            request: SHORT_REQUEST_BUDGET,
+            ..CallLimits::default()
+        },
+    );
+
+    let result = harness
+        .server
+        .aviutl2_get_edit_info(Parameters(InstanceInput {
+            instance_id: harness.instance_id(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true), "{}", text_of(&result));
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("timeout"), "{structured}");
+    assert_eq!(structured["retryable"], json!(true), "{structured}");
+    assert!(structured["correlation_id"].is_string(), "{structured}");
+    assert!(text_of(&result).contains("timeout"), "{}", text_of(&result));
+
+    // 要求自体は届いており、接続先も期限を知らされている。
+    let requests = harness.read_requests();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(
+        requests[0].deadline_unix_ms.is_some(),
+        "打ち切る側の期限が要求へ載っていません"
+    );
 }
