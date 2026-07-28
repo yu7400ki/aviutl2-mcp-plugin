@@ -119,8 +119,21 @@ mod tests {
     use super::*;
     use aviutl2_mcp_core::{
         AuthSecret, DescriptorProject, InstanceDescriptor, InstanceId, InstanceState,
-        ProtocolVersion, pipe_name_for,
+        ProtocolVersion, format_utc_timestamp, pipe_name_for,
     };
+    use chrono::{TimeZone, Utc};
+
+    /// descriptor の時刻フィールドに使う固定値。
+    ///
+    /// 書き手と同じヘルパーを通して整形し、時刻の正準書式から外れた値を
+    /// テスト固定値として持ち込まない。
+    fn fixed_timestamp() -> String {
+        let value = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("UTC の固定日時は一意に定まる");
+        format_utc_timestamp(value)
+    }
 
     fn temp_registry_dir() -> std::path::PathBuf {
         let dir =
@@ -137,9 +150,9 @@ mod tests {
             pipe_name: pipe_name_for(&id),
             auth_secret: AuthSecret::generate(),
             pid,
-            process_created_at: "2026-01-01T00:00:00Z".to_string(),
+            process_created_at: fixed_timestamp(),
             hwnd: None,
-            started_at: "2026-01-01T00:00:00Z".to_string(),
+            started_at: fixed_timestamp(),
             state: InstanceState::Ready,
             project: Some(DescriptorProject {
                 display_name: "Test".to_string(),

@@ -800,7 +800,7 @@ mod tests {
     #[test]
     fn undetermined_process_lookup_is_not_absence() {
         let identity = self_identity();
-        let created_at = identity.created_at.to_rfc3339();
+        let created_at = format_utc_timestamp(identity.created_at);
 
         assert!(
             !absence_confirmed(ProcessLookup::Undetermined, &created_at),
