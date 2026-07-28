@@ -217,9 +217,9 @@ mod tests {
             pipe_name: pipe_name_for(&id),
             auth_secret: AuthSecret::generate(),
             pid: std::process::id(),
-            process_created_at: "2026-01-01T00:00:00Z".to_string(),
+            process_created_at: "2026-01-01T00:00:00.0000000Z".to_string(),
             hwnd: None,
-            started_at: "2026-01-01T00:00:00Z".to_string(),
+            started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
             state: InstanceState::Starting,
             project: None,
         }
@@ -233,9 +233,9 @@ mod tests {
             pipe_name: pipe_name_for(&id),
             auth_secret: AuthSecret::generate(),
             pid: std::process::id(),
-            process_created_at: "2026-01-01T00:00:00Z".to_string(),
+            process_created_at: "2026-01-01T00:00:00.0000000Z".to_string(),
             hwnd: Some("0x0".to_string()),
-            started_at: "2026-01-01T00:00:00Z".to_string(),
+            started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
             state: InstanceState::Ready,
             project: Some(DescriptorProject {
                 display_name: "Test Project".to_string(),
