@@ -12,7 +12,7 @@ use crate::read::host::{
     EditState, HostEditInfo, HostEffect, HostLayer, HostObject, HostObjectDetail, ReadHost,
     SceneReader,
 };
-use aviutl2::generic::{EffectHandle, ObjectHandle, ReadSection};
+use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection};
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, EffectType,
     FiniteF64, ItemValue, SectionRange,
@@ -237,18 +237,30 @@ impl SdkSceneReader<'_> {
 
     /// オブジェクトに付与された effect を所有型へ写す。
     ///
-    /// 一覧の取得は effect が 0 件でも失敗を返すため、失敗した場合は先頭 effect を
-    /// 引いて 0 件と一覧取得の失敗を切り分ける。先頭が引けるなら effect は存在し、
-    /// 一覧の取得だけが失敗している。空の列を返すと「effect が付いていない」という
-    /// 誤った主張になるため、失敗として返す。
+    /// 一覧の取得は effect が 0 件でも失敗を返すため、失敗した場合は
+    /// [`classify_effect_list`] で 0 件と失敗を切り分ける。
     fn effects_of(&self, object: ObjectHandle) -> Result<Vec<HostEffect>, ReadError> {
         let handles = match self.section.get_effects(object) {
             Ok(handles) => handles,
-            Err(_) if self.section.get_first_effect(object).is_ok() => {
-                tracing::warn!("effect の一覧を取得できませんでした");
-                return Err(sdk("get_effect_list"));
+            Err(error) => {
+                // 先頭 effect の取得はオブジェクトが存在しないと判断できたときだけ
+                // 行う。一覧の失敗が既にオブジェクトの不在を示していれば、同じ
+                // 理由で失敗するだけの呼び出しになる。
+                let decision = classify_effect_list(section_failure(&error), || {
+                    self.section
+                        .get_first_effect(object)
+                        .err()
+                        .map(|error| section_failure(&error))
+                });
+                return match decision {
+                    EffectListDecision::Empty => Ok(Vec::new()),
+                    EffectListDecision::ObjectNotFound => Err(ReadError::ObjectNotFound),
+                    EffectListDecision::ListFailed => {
+                        tracing::warn!("effect の一覧を取得できませんでした");
+                        Err(sdk("get_effect_list"))
+                    }
+                };
             }
-            Err(_) => return Ok(Vec::new()),
         };
 
         let mut names = Vec::with_capacity(handles.len());
@@ -314,6 +326,60 @@ impl SdkSceneReader<'_> {
             });
         }
         Ok(items)
+    }
+}
+
+/// 参照区間の呼び出しが失敗した理由のうち、判別に用いる区別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SectionFailure {
+    /// 対象のオブジェクトが存在しない。
+    ObjectMissing,
+    /// 呼び出しそのものが失敗した。
+    CallFailed,
+}
+
+/// effect 一覧の取得に失敗した対象をどう扱うか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectListDecision {
+    /// effect が付いていない。
+    Empty,
+    /// オブジェクトが存在しない。
+    ObjectNotFound,
+    /// 一覧の取得だけが失敗した。
+    ListFailed,
+}
+
+/// 失敗した理由を判別に用いる区別へ写す。
+fn section_failure(error: &EditSectionError) -> SectionFailure {
+    match error {
+        EditSectionError::ObjectDoesNotExist => SectionFailure::ObjectMissing,
+        _ => SectionFailure::CallFailed,
+    }
+}
+
+/// effect 一覧の取得失敗を、0 件・オブジェクト不在・列挙の失敗へ切り分ける。
+///
+/// 一覧の取得は effect が 0 件でも失敗を返すため、失敗そのものからは 0 件かを
+/// 判断できない。`probe` は先頭 effect を引く試行の失敗理由（成功なら `None`）を
+/// 返し、これを独立した信号として用いる。
+///
+/// オブジェクトが存在しない場合は effect の有無を判定できない。空の列を返すと
+/// 「effect が付いていない」という誤った主張になるため、失敗として返す。この
+/// 区別は一覧の失敗理由そのものに現れるため、先頭 effect を引くまでもなく決まる。
+///
+/// 先頭が引けるなら effect は存在し、一覧の取得だけが失敗している。先頭も
+/// 引けず、かつオブジェクトは存在するなら、付与された effect が無い。
+fn classify_effect_list(
+    list: SectionFailure,
+    probe: impl FnOnce() -> Option<SectionFailure>,
+) -> EffectListDecision {
+    match list {
+        SectionFailure::ObjectMissing => EffectListDecision::ObjectNotFound,
+        SectionFailure::CallFailed => match probe() {
+            None => EffectListDecision::ListFailed,
+            Some(SectionFailure::ObjectMissing) => EffectListDecision::ObjectNotFound,
+            Some(SectionFailure::CallFailed) => EffectListDecision::Empty,
+        },
     }
 }
 
@@ -534,6 +600,63 @@ mod tests {
             ErrorCode::SdkError,
             "後退する探索が成功として返りました"
         );
+    }
+
+    #[test]
+    fn missing_object_is_not_reported_as_zero_effects() {
+        // 一覧の失敗がオブジェクトの不在を示すなら、effect の有無は判定できない。
+        // 空の列を返すと「effect が付いていない」という誤った主張になる。
+        let mut probed = false;
+        let decision = classify_effect_list(SectionFailure::ObjectMissing, || {
+            probed = true;
+            Some(SectionFailure::CallFailed)
+        });
+        assert_eq!(decision, EffectListDecision::ObjectNotFound);
+        assert!(!probed, "不在が分かっているのに先頭 effect を引きました");
+    }
+
+    #[test]
+    fn zero_effects_requires_the_object_to_exist() {
+        // 一覧も先頭も引けず、どちらも呼び出しの失敗であれば 0 件として扱う。
+        assert_eq!(
+            classify_effect_list(SectionFailure::CallFailed, || Some(
+                SectionFailure::CallFailed
+            )),
+            EffectListDecision::Empty
+        );
+        // 先頭を引く段でオブジェクトの不在が分かった場合は 0 件にしない。
+        assert_eq!(
+            classify_effect_list(SectionFailure::CallFailed, || Some(
+                SectionFailure::ObjectMissing
+            )),
+            EffectListDecision::ObjectNotFound
+        );
+    }
+
+    #[test]
+    fn list_failure_with_a_first_effect_is_a_failure() {
+        assert_eq!(
+            classify_effect_list(SectionFailure::CallFailed, || None),
+            EffectListDecision::ListFailed
+        );
+    }
+
+    #[test]
+    fn only_missing_object_maps_to_object_missing() {
+        assert_eq!(
+            section_failure(&EditSectionError::ObjectDoesNotExist),
+            SectionFailure::ObjectMissing
+        );
+        for error in [
+            EditSectionError::ApiCallFailed,
+            EditSectionError::EffectDoesNotExist,
+        ] {
+            assert_eq!(
+                section_failure(&error),
+                SectionFailure::CallFailed,
+                "{error} が不在として扱われました"
+            );
+        }
     }
 
     #[test]
