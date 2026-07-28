@@ -570,7 +570,7 @@ fn dispatch_read(
             let (items, page) = take_page(
                 &snapshot.items,
                 &catalog_page_request(&params.page),
-                EFFECT_CATALOG_SNAPSHOT_REVISION,
+                snapshot.snapshot_revision,
             )
             .map_err(page_error)?;
             to_result(&ListAvailableEffectsResult { items, page })
@@ -578,19 +578,17 @@ fn dispatch_read(
     }
 }
 
-/// 登録済み effect の一覧に添える snapshot revision。
-///
-/// この一覧は登録済みプラグインの集合であり、プロジェクトの編集内容から独立して
-/// いる。列挙時点のプロジェクト revision を添えると、一覧と無関係な編集で値が
-/// 進んだだけでページ間の照合が食い違い、要求元は先頭からの取り直しを強いられる。
-/// 一方でカタログ自身の変化はその値に現れないため、照合しても取りこぼしは
-/// 防げない。照合に使える revision を持たないことを表す固定値を添える。
-const EFFECT_CATALOG_SNAPSHOT_REVISION: u64 = 0;
-
 /// 登録済み effect の一覧に対するページ要求から revision の照合指定を落とす。
 ///
-/// 要求元が前ページの値を送り返しても照合しない。理由は
-/// [`EFFECT_CATALOG_SNAPSHOT_REVISION`] と同じである。
+/// この一覧は登録済みプラグインの集合であり、プロジェクトの編集内容から独立して
+/// いる。要求元が前ページの revision を送り返しても照合しない。照合すると、一覧と
+/// 無関係な編集で値が進んだだけでページ間の照合が食い違い、要求元は先頭からの
+/// 取り直しを強いられる。一方でカタログ自身の変化はその値に現れないため、照合
+/// しても取りこぼしは防げない。
+///
+/// 応答へ載せる revision は落とさない。それは列挙を始めた時点のプロジェクト
+/// revision であり、ページのメタ情報が表す意味そのものである。照合に使えない
+/// ことを表す固定値へ置き換えても、実在し得る revision と区別が付かない。
 fn catalog_page_request(page: &PageRequest) -> PageRequest {
     PageRequest {
         snapshot_revision: None,
@@ -1479,10 +1477,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(result["items"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            result["page"]["snapshot_revision"],
-            EFFECT_CATALOG_SNAPSHOT_REVISION
-        );
+    }
+
+    #[test]
+    fn effect_catalog_page_reports_the_revision_of_the_enumeration() {
+        // 照合しないことと、ページのメタ情報へ何を載せるかは別である。0 のような
+        // 固定値は実在し得る revision と区別が付かず、他の一覧から得た値と混同
+        // され得るため、列挙時点の revision をそのまま載せる。
+        let adapter = FakeAdapter::new();
+        let result = read(&adapter, ReadOperation::ListAvailableEffects, json!({})).unwrap();
+
+        assert_eq!(result["page"]["snapshot_revision"], 7);
+        assert_eq!(result["page"]["snapshot_revision"], REVISION);
     }
 
     #[test]
