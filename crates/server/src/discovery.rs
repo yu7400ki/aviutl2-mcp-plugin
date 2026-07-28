@@ -7,7 +7,7 @@ use crate::identity::{ProcessLookup, lookup_process};
 use crate::pipe_client::{PipeClient, PipeClientError};
 use aviutl2_mcp_core::{
     InstanceDescriptor, InstanceId, InstanceInfo, InstanceProject, InstanceState, ProtocolVersion,
-    deserialize_json, pipe_name_for,
+    deserialize_json, parse_utc_timestamp, pipe_name_for,
 };
 
 #[cfg(test)]
@@ -320,14 +320,13 @@ fn map_pipe_error(err: PipeClientError) -> ExclusionReason {
     }
 }
 
-/// プロセス作成時刻が descriptor 記載値と一致するか判定する（1 秒の許容）。
+/// プロセス作成時刻が descriptor 記載値と厳密に一致するか判定する。
+///
+/// descriptor へは 100 ナノ秒粒度の `FILETIME` を欠落なく記録するため、
+/// OS から取得した時刻と時点として完全に一致する。許容幅を設けると、その幅の
+/// 間に再利用された PID を同一プロセスと誤認する余地が残る。
 fn process_created_at_matches(descriptor_value: &str, actual: DateTime<Utc>) -> bool {
-    let parsed = match DateTime::parse_from_rfc3339(descriptor_value) {
-        Ok(dt) => dt.with_timezone(&Utc),
-        Err(_) => return false,
-    };
-    let diff = (actual - parsed).num_seconds().abs();
-    diff <= 1
+    parse_utc_timestamp(descriptor_value).is_ok_and(|parsed| parsed == actual)
 }
 
 /// `InstanceDescriptor` と ping 応答から `InstanceInfo` を生成する。
@@ -424,7 +423,7 @@ fn absence_confirmed(lookup: ProcessLookup, descriptor_created_at: &str) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::{AuthSecret, ProtocolVersion};
+    use aviutl2_mcp_core::{AuthSecret, ProtocolVersion, format_utc_timestamp};
 
     fn temp_registry_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -452,9 +451,9 @@ mod tests {
             pipe_name: pipe_name_for(&id),
             auth_secret: AuthSecret::generate(),
             pid: std::process::id(),
-            process_created_at: identity.created_at.to_rfc3339(),
+            process_created_at: format_utc_timestamp(identity.created_at),
             hwnd: None,
-            started_at: identity.created_at.to_rfc3339(),
+            started_at: format_utc_timestamp(identity.created_at),
             state: InstanceState::Ready,
             project: Some(DescriptorProject {
                 display_name: "Test".to_string(),
@@ -467,18 +466,34 @@ mod tests {
     fn process_created_at_matches_self() {
         let identity = self_identity();
         assert!(process_created_at_matches(
-            &identity.created_at.to_rfc3339(),
+            &format_utc_timestamp(identity.created_at),
             identity.created_at
         ));
     }
 
     #[test]
-    fn process_created_at_mismatch_outside_tolerance() {
+    fn process_created_at_rejects_sub_second_difference() {
         let identity = self_identity();
-        let different = identity.created_at + chrono::Duration::seconds(10);
+        let text = format_utc_timestamp(identity.created_at);
+        for delta in [
+            chrono::Duration::nanoseconds(100),
+            chrono::Duration::milliseconds(1),
+            chrono::Duration::seconds(1),
+        ] {
+            assert!(
+                !process_created_at_matches(&text, identity.created_at + delta),
+                "{delta} のずれは別プロセスとして扱う"
+            );
+        }
+    }
+
+    #[test]
+    fn process_created_at_rejects_unparsable_value() {
+        let identity = self_identity();
+        assert!(!process_created_at_matches("", identity.created_at));
         assert!(!process_created_at_matches(
-            &identity.created_at.to_rfc3339(),
-            different
+            "2026-01-01 00:00:00",
+            identity.created_at
         ));
     }
 
