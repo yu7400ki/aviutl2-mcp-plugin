@@ -44,6 +44,12 @@ const ACCEPT_RETRY_MIN_INTERVAL: Duration = Duration::from_millis(200);
 /// 失敗が続いた場合の再試行間隔の上限。
 const ACCEPT_RETRY_MAX_INTERVAL: Duration = Duration::from_secs(10);
 
+/// [`PipeServer`] 停止時の bounded join 上限。
+///
+/// ホスト終了時に無期限で待たないため有限にする。期限内に終了しなければ
+/// スレッドを切り離してログ化する。
+pub const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// pipe I/O のエラー。
 #[derive(Debug, thiserror::Error)]
 pub enum PipeError {
@@ -361,7 +367,7 @@ impl PipeServer {
 impl Drop for PipeServer {
     fn drop(&mut self) {
         // 明示的な `stop` が呼ばれなかった場合の保険。`stop` は冪等。
-        self.stop(Duration::from_secs(5));
+        self.stop(STOP_TIMEOUT);
     }
 }
 
@@ -576,6 +582,7 @@ fn to_wide(s: &str) -> Vec<u16> {
 mod tests {
     use super::*;
     use crate::project::ProjectState;
+    use crate::test_support::with_silent_panic_hook;
     use aviutl2_mcp_core::{AuthSecret, InstanceId, InstanceState, ProtocolVersion};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING,
@@ -817,17 +824,6 @@ mod tests {
             PanickingReadHost,
             Arc::new(ProjectState::new()),
         ))
-    }
-
-    /// panic のたびに既定フックが標準エラーへ出力するのを抑える。
-    ///
-    /// フックはプロセス全体で共有されるため、復元まで含めて呼び出し側が行う。
-    fn with_silent_panic_hook<T>(f: impl FnOnce() -> T) -> T {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        std::panic::set_hook(previous);
-        result.expect("panic が呼び出し側へ漏れました")
     }
 
     fn cleanup(dir: std::path::PathBuf) {

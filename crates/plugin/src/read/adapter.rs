@@ -37,8 +37,12 @@ impl<H: ReadHost> HostReadAdapter<H> {
     ///
     /// 準備前の編集ハンドルは読み取り API の呼び出し自体が許されないため、
     /// ここを通らない限り [`ReadHost`] の他のメソッドを呼ばない。
+    ///
+    /// 準備状態の問い合わせも捕捉層で包む。[`ReadHost`] の呼び出しは実装ごとに
+    /// panic し得るため、どのメソッドから入っても接続の境界まで巻き戻らない形を
+    /// 保つ。
     fn ensure_readable(&self) -> Result<(), ReadError> {
-        if !self.host.is_ready() {
+        if !catch(|| self.host.is_ready())? {
             return Err(ReadError::NotReady);
         }
         match self.edit_state()? {
@@ -434,6 +438,7 @@ fn selected_range(info: &HostEditInfo) -> Option<FrameRange> {
 mod tests {
     use super::*;
     use crate::read::host::HostLayer;
+    use crate::test_support::with_silent_panic_hook;
     use aviutl2_mcp_core::{
         AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
         ItemValue, SectionRange,
@@ -445,6 +450,8 @@ mod tests {
     /// panic させる位置。
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum PanicPoint {
+        /// 参照区間の外。準備状態の問い合わせで落ちる。
+        IsReady,
         /// 参照区間の外。編集情報の取得で落ちる。
         EditInfo,
         /// 参照区間へ入る呼び出しそのもの。クロージャは呼ばれない。
@@ -532,6 +539,11 @@ mod tests {
 
     impl ReadHost for FakeHost {
         fn is_ready(&self) -> bool {
+            assert_ne!(
+                self.panic_at,
+                Some(PanicPoint::IsReady),
+                "準備状態の問い合わせで panic させます"
+            );
             self.ready
         }
 
@@ -812,15 +824,6 @@ mod tests {
         object_summary(&adapter.project.epoch(), 0, &object).selector
     }
 
-    /// panic のたびに既定フックが標準エラーへ出力するのを抑える。
-    fn with_silent_panic_hook<T>(f: impl FnOnce() -> T) -> T {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let result = std::panic::catch_unwind(AssertUnwindSafe(f));
-        std::panic::set_hook(previous);
-        result.expect("panic が呼び出し側へ漏れました")
-    }
-
     #[test]
     fn not_ready_rejects_every_operation_without_touching_sdk() {
         let adapter = adapter_with(|_| FakeHost {
@@ -957,6 +960,22 @@ mod tests {
             catch::<()>(|| panic!("参照区間へ入る呼び出しで panic させます")).unwrap_err()
         });
         assert_eq!(error.error_code(), ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn panic_while_asking_readiness_becomes_internal_error() {
+        // 受付判定の最初の一手も捕捉層の内側に置く。ここだけ素通しにすると、
+        // 準備状態の問い合わせが落ちた場合に限って接続の境界まで巻き戻る。
+        let adapter = adapter_with(|_| FakeHost {
+            panic_at: Some(PanicPoint::IsReady),
+            ..FakeHost::new()
+        });
+
+        with_silent_panic_hook(|| {
+            for code in error_codes_of_all_operations(&adapter) {
+                assert_eq!(code, ErrorCode::InternalError);
+            }
+        });
     }
 
     #[test]

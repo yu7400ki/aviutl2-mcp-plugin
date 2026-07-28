@@ -21,6 +21,8 @@ pub mod registry;
 pub mod security;
 #[cfg(windows)]
 pub mod session;
+#[cfg(all(windows, test))]
+mod test_support;
 #[cfg(windows)]
 mod win_io;
 
@@ -36,13 +38,6 @@ use aviutl2_mcp_core::DescriptorProject;
 #[cfg(windows)]
 pub(crate) static EDIT_HANDLE: aviutl2::generic::GlobalEditHandle =
     aviutl2::generic::GlobalEditHandle::new();
-
-/// named pipe server 停止時の bounded join 上限。
-///
-/// ホスト終了時に無期限で待たないため有限にする。期限内に終了しなければ
-/// スレッドを切り離してログ化する。
-#[cfg(windows)]
-const PIPE_SERVER_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// ログ出力レベルを上書きする環境変数名。
 #[cfg(windows)]
@@ -368,7 +363,7 @@ impl Drop for AviUtl2McpPlugin {
         run_shutdown_sequence(
             || {
                 if let Some(pipe_server) = pipe_server {
-                    pipe_server.stop(PIPE_SERVER_STOP_TIMEOUT);
+                    pipe_server.stop(pipe::STOP_TIMEOUT);
                 }
             },
             || {
@@ -400,17 +395,7 @@ pub fn placeholder() {}
 #[cfg(all(windows, test))]
 mod tests {
     use super::*;
-
-    /// panic のたびに既定フックが標準エラーへ出力するのを抑える。
-    ///
-    /// フックはプロセス全体で共有されるため、復元まで含めて呼び出し側が行う。
-    fn with_silent_panic_hook(f: impl FnOnce()) {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        std::panic::set_hook(previous);
-        assert!(result.is_ok(), "終了手順から panic が漏れました");
-    }
+    use crate::test_support::with_silent_panic_hook;
 
     #[test]
     fn shutdown_sequence_removes_descriptor_even_if_earlier_steps_panic() {
