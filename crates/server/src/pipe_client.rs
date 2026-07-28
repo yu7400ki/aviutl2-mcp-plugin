@@ -435,7 +435,7 @@ fn connect_pipe(pipe_name: &str, deadline: Instant) -> Result<HANDLE, PipeClient
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::{InstanceId, InstanceState};
+    use aviutl2_mcp_core::{InstanceId, InstanceState, ResponseKind};
     use std::time::Duration;
     use windows::Win32::Storage::FileSystem::{PIPE_ACCESS_DUPLEX, ReadFile, WriteFile};
     use windows::Win32::System::Pipes::{
@@ -678,6 +678,391 @@ mod tests {
             value >= before && value <= after,
             "過ぎた期限が現在時刻になっていません: value={value}, before={before}, after={after}"
         );
+    }
+
+    /// 対向端で 1 要求を受け取り、組み立てた応答本文を返すスレッドを起こす。
+    ///
+    /// join すると受信した要求が得られる。
+    fn respond_once(
+        peer: &MockPeer,
+        make_response: impl FnOnce(&RequestEnvelope) -> Vec<u8> + Send + 'static,
+    ) -> std::thread::JoinHandle<RequestEnvelope> {
+        let handle = SendHandle(peer.raw());
+        std::thread::spawn(move || {
+            let handle = handle;
+            let body = recv_frame(handle.0);
+            let request: RequestEnvelope = serde_json::from_slice(&body).unwrap();
+            let response = make_response(&request);
+            send_bytes(handle.0, &encode_frame(&response).unwrap());
+            request
+        })
+    }
+
+    /// 要求に対応する応答 Envelope を組み立てる。
+    fn response_for(
+        request: &RequestEnvelope,
+        instance_id: InstanceId,
+        result: ResponseResult,
+    ) -> ResponseEnvelope {
+        ResponseEnvelope {
+            kind: ResponseKind::Response,
+            protocol_version: request.protocol_version,
+            request_id: request.request_id,
+            instance_id,
+            result,
+        }
+    }
+
+    fn test_deadline() -> Instant {
+        Instant::now() + Duration::from_secs(5)
+    }
+
+    #[test]
+    fn request_sends_operation_and_returns_result() {
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+        let result = serde_json::json!({ "items": [1, 2, 3], "page": { "total_count": 3 } });
+
+        let payload = result.clone();
+        let responder = respond_once(&peer, move |request| {
+            let response =
+                response_for(request, instance_id, ResponseResult::Ok { result: payload });
+            serde_json::to_vec(&response).unwrap()
+        });
+
+        let params = serde_json::json!({ "expected_scene_id": 0, "offset": 0 });
+        let received = client
+            .request("list_layers", params.clone(), test_deadline())
+            .expect("要求が成功する");
+        assert_eq!(received, result, "result はそのまま返る");
+
+        let request = responder.join().unwrap();
+        assert_eq!(request.operation, "list_layers");
+        assert_eq!(request.params, params);
+        assert_eq!(request.instance_id, instance_id);
+        assert!(request.deadline_unix_ms.is_some(), "要求に期限が設定される");
+    }
+
+    #[test]
+    fn request_preserves_remote_error_object() {
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+        let error = ErrorObject::new(ErrorCode::PreconditionFailed, "scene が変化しました", true)
+            .with_details(serde_json::json!({ "current_project_revision": 12 }))
+            .with_correlation_id("0190abcd-1234-7def-1234-567890abcdef");
+
+        let payload = error.clone();
+        let responder = respond_once(&peer, move |request| {
+            let response =
+                response_for(request, instance_id, ResponseResult::Err { error: payload });
+            serde_json::to_vec(&response).unwrap()
+        });
+
+        let failure = client
+            .request("get_object", serde_json::json!({}), test_deadline())
+            .expect_err("エラー応答は失敗として返る");
+        responder.join().unwrap();
+
+        let PipeClientError::Remote(remote) = &failure else {
+            panic!("ErrorObject が失われています: {failure:?}");
+        };
+        assert_eq!(
+            **remote, error,
+            "code/message/retryable/details/correlation_id が保たれる"
+        );
+        assert_eq!(failure.error_code(), ErrorCode::PreconditionFailed);
+    }
+
+    #[test]
+    fn request_rejects_request_id_mismatch() {
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+
+        let responder = respond_once(&peer, move |request| {
+            let mut response = response_for(
+                request,
+                instance_id,
+                ResponseResult::Ok {
+                    result: serde_json::json!({}),
+                },
+            );
+            response.request_id = RequestId::new();
+            serde_json::to_vec(&response).unwrap()
+        });
+
+        let failure = client
+            .request("get_edit_info", serde_json::json!({}), test_deadline())
+            .expect_err("request_id 不一致は拒否される");
+        responder.join().unwrap();
+        assert!(
+            matches!(failure, PipeClientError::InvalidResponse),
+            "実際のエラー: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn request_rejects_instance_id_mismatch() {
+        let (peer, client) = MockPeer::connected();
+
+        let responder = respond_once(&peer, move |request| {
+            let response = response_for(
+                request,
+                InstanceId::new_v4(),
+                ResponseResult::Ok {
+                    result: serde_json::json!({}),
+                },
+            );
+            serde_json::to_vec(&response).unwrap()
+        });
+
+        let failure = client
+            .request("get_edit_info", serde_json::json!({}), test_deadline())
+            .expect_err("instance_id 不一致は拒否される");
+        responder.join().unwrap();
+        assert!(
+            matches!(failure, PipeClientError::InstanceStale),
+            "実際のエラー: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn request_rejects_protocol_major_mismatch() {
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+
+        let responder = respond_once(&peer, move |request| {
+            let mut response = response_for(
+                request,
+                instance_id,
+                ResponseResult::Ok {
+                    result: serde_json::json!({}),
+                },
+            );
+            response.protocol_version = ProtocolVersion {
+                major: ProtocolVersion::CURRENT.major + 1,
+                minor: 0,
+            };
+            serde_json::to_vec(&response).unwrap()
+        });
+
+        let failure = client
+            .request("get_edit_info", serde_json::json!({}), test_deadline())
+            .expect_err("プロトコル MAJOR 不一致は拒否される");
+        responder.join().unwrap();
+        assert!(
+            matches!(failure, PipeClientError::ProtocolMismatch),
+            "実際のエラー: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn request_rejects_response_with_duplicate_json_key() {
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+
+        let responder = respond_once(&peer, move |request| {
+            let response = response_for(
+                request,
+                instance_id,
+                ResponseResult::Ok {
+                    result: serde_json::json!({}),
+                },
+            );
+            // 末尾の `}` の直前に既出の key を足して重複させる。
+            let serialized = serde_json::to_string(&response).unwrap();
+            format!("{},\"ok\":true{}", &serialized[..serialized.len() - 1], "}").into_bytes()
+        });
+
+        let failure = client
+            .request("get_edit_info", serde_json::json!({}), test_deadline())
+            .expect_err("重複 JSON key を含む応答は拒否される");
+        responder.join().unwrap();
+        assert!(
+            matches!(failure, PipeClientError::Json),
+            "実際のエラー: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn request_times_out_without_response() {
+        let (_peer, client) = MockPeer::connected();
+
+        let started = Instant::now();
+        let failure = client
+            .request(
+                "get_edit_info",
+                serde_json::json!({}),
+                started + Duration::from_millis(200),
+            )
+            .expect_err("応答が無ければ期限を超過する");
+        assert!(
+            matches!(failure, PipeClientError::Timeout),
+            "実際のエラー: {failure:?}"
+        );
+        assert_eq!(failure.error_code(), ErrorCode::Timeout);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "期限を大きく超えて待っています: {}ms",
+            started.elapsed().as_millis()
+        );
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct SampleResult {
+        value: u32,
+    }
+
+    #[test]
+    fn request_typed_decodes_result() {
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+
+        let responder = respond_once(&peer, move |request| {
+            let response = response_for(
+                request,
+                instance_id,
+                ResponseResult::Ok {
+                    result: serde_json::json!({ "value": 5, "future": 1 }),
+                },
+            );
+            serde_json::to_vec(&response).unwrap()
+        });
+
+        let params = serde_json::json!({ "expected_scene_id": 0 });
+        let decoded: SampleResult = client
+            .request_typed("get_current_scene", &params, test_deadline())
+            .expect("型付きの result を読み取れる");
+        assert_eq!(decoded, SampleResult { value: 5 });
+
+        let request = responder.join().unwrap();
+        assert_eq!(request.params, params);
+    }
+
+    #[test]
+    fn request_typed_rejects_result_of_wrong_shape() {
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+
+        let responder = respond_once(&peer, move |request| {
+            let response = response_for(
+                request,
+                instance_id,
+                ResponseResult::Ok {
+                    result: serde_json::json!({ "value": "not a number" }),
+                },
+            );
+            serde_json::to_vec(&response).unwrap()
+        });
+
+        let failure = client
+            .request_typed::<_, SampleResult>(
+                "get_current_scene",
+                &serde_json::json!({}),
+                test_deadline(),
+            )
+            .expect_err("型が合わない result は拒否される");
+        responder.join().unwrap();
+        assert!(
+            matches!(failure, PipeClientError::InvalidResponse),
+            "実際のエラー: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn ping_hides_remote_error_detail() {
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+
+        let responder = respond_once(&peer, move |request| {
+            let response = response_for(
+                request,
+                instance_id,
+                ResponseResult::Err {
+                    error: ErrorObject::new(ErrorCode::HostBusy, "busy", true),
+                },
+            );
+            serde_json::to_vec(&response).unwrap()
+        });
+
+        let failure = client
+            .ping(test_deadline())
+            .expect_err("エラー応答の ping は失敗する");
+        responder.join().unwrap();
+        assert!(
+            matches!(failure, PipeClientError::InvalidResponse),
+            "ping は拒否理由の内訳を持ち出さない: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn ping_rejects_result_with_other_instance_id() {
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+
+        let responder = respond_once(&peer, move |request| {
+            let response = response_for(
+                request,
+                instance_id,
+                ResponseResult::Ok {
+                    result: serde_json::json!({
+                        "state": "ready",
+                        "instance_id": InstanceId::new_v4(),
+                    }),
+                },
+            );
+            serde_json::to_vec(&response).unwrap()
+        });
+
+        let failure = client
+            .ping(test_deadline())
+            .expect_err("result の instance_id 不一致は拒否される");
+        responder.join().unwrap();
+        assert!(
+            matches!(failure, PipeClientError::InstanceStale),
+            "実際のエラー: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn error_code_matches_failure_kind() {
+        let cases = [
+            (PipeClientError::ConnectFailed, ErrorCode::InstanceStale),
+            (
+                PipeClientError::Io(io::Error::from(io::ErrorKind::BrokenPipe)),
+                ErrorCode::InstanceStale,
+            ),
+            (PipeClientError::Framing, ErrorCode::InstanceStale),
+            (PipeClientError::Json, ErrorCode::InstanceStale),
+            (PipeClientError::InvalidResponse, ErrorCode::InstanceStale),
+            (PipeClientError::InstanceStale, ErrorCode::InstanceStale),
+            (PipeClientError::Timeout, ErrorCode::Timeout),
+            (
+                PipeClientError::AuthenticationFailed,
+                ErrorCode::AuthenticationFailed,
+            ),
+            (
+                PipeClientError::ProtocolMismatch,
+                ErrorCode::ProtocolMismatch,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.error_code(), expected, "{error:?} の対応が誤り");
+        }
+
+        // 接続先が返したコードはそのまま採用する。
+        for code in [
+            ErrorCode::EditBlocked,
+            ErrorCode::NotFound,
+            ErrorCode::UnsupportedOperation,
+            ErrorCode::Unknown("future_code".to_string()),
+        ] {
+            let error = PipeClientError::Remote(Box::new(ErrorObject::new(
+                code.clone(),
+                "message",
+                code.default_retryable(),
+            )));
+            assert_eq!(error.error_code(), code);
+        }
     }
 
     #[test]

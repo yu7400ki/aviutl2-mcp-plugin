@@ -803,6 +803,196 @@ mod tests {
     }
 
     #[test]
+    fn exclusion_reason_maps_to_error_code() {
+        let cases = [
+            (ExclusionReason::InvalidDescriptor, ErrorCode::InternalError),
+            (ExclusionReason::InternalError, ErrorCode::InternalError),
+            (
+                ExclusionReason::ProtocolMismatch,
+                ErrorCode::ProtocolMismatch,
+            ),
+            (
+                ExclusionReason::ProcessIdentityMismatch,
+                ErrorCode::InstanceStale,
+            ),
+            (ExclusionReason::PipeUnreachable, ErrorCode::InstanceStale),
+            (ExclusionReason::PingFailed, ErrorCode::InstanceStale),
+            (
+                ExclusionReason::AuthenticationFailed,
+                ErrorCode::AuthenticationFailed,
+            ),
+        ];
+        for (reason, expected) in cases {
+            assert_eq!(
+                reason.error_code(),
+                expected,
+                "{} の対応が誤り",
+                reason.as_code()
+            );
+            assert_eq!(
+                ResolveInstanceError::Excluded(reason).error_code(),
+                expected
+            );
+        }
+
+        // 候補が 1 件も見つからない場合だけが instance_not_found になる。
+        assert_eq!(
+            ResolveInstanceError::NotRegistered.error_code(),
+            ErrorCode::InstanceNotFound
+        );
+    }
+
+    #[test]
+    fn resolve_instance_reports_not_registered_for_missing_descriptor() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let error = resolve_instance(&dir, InstanceId::new_v4(), DiscoveryConfig::default())
+            .err()
+            .expect("登録の無い instance_id は解決できない");
+        assert!(
+            matches!(error, ResolveInstanceError::NotRegistered),
+            "実際のエラー: {error:?}"
+        );
+        assert_eq!(error.error_code(), ErrorCode::InstanceNotFound);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_instance_ignores_descriptors_of_other_instances() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = InstanceId::new_v4();
+        std::fs::write(
+            dir.join(format!("{}.json", other)),
+            serde_json::to_string(&sample_descriptor(other)).unwrap(),
+        )
+        .unwrap();
+
+        // 他 instance の descriptor があっても、要求された ID は未登録のままである。
+        let error = resolve_instance(&dir, InstanceId::new_v4(), DiscoveryConfig::default())
+            .err()
+            .expect("別 ID の descriptor では解決できない");
+        assert_eq!(error.error_code(), ErrorCode::InstanceNotFound);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_instance_reports_stale_for_dead_process() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = InstanceId::new_v4();
+        let mut descriptor = sample_descriptor(id);
+        descriptor.pid = 0xFFFF_FFFF; // 存在しない PID
+        std::fs::write(
+            dir.join(format!("{}.json", id)),
+            serde_json::to_string(&descriptor).unwrap(),
+        )
+        .unwrap();
+
+        let error = resolve_instance(&dir, id, DiscoveryConfig::default())
+            .err()
+            .expect("存在しない PID の descriptor では解決できない");
+        assert!(
+            matches!(
+                error,
+                ResolveInstanceError::Excluded(ExclusionReason::ProcessIdentityMismatch)
+            ),
+            "実際のエラー: {error:?}"
+        );
+        assert_eq!(error.error_code(), ErrorCode::InstanceStale);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_instance_reports_stale_for_unreachable_pipe() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = InstanceId::new_v4();
+        // 自 PID を指すため生存確認は通るが、pipe は待ち受けていない。
+        std::fs::write(
+            dir.join(format!("{}.json", id)),
+            serde_json::to_string(&sample_descriptor(id)).unwrap(),
+        )
+        .unwrap();
+
+        let error = resolve_instance(&dir, id, DiscoveryConfig::default())
+            .err()
+            .expect("接続できない pipe では解決できない");
+        assert!(
+            matches!(
+                error,
+                ResolveInstanceError::Excluded(ExclusionReason::PipeUnreachable)
+            ),
+            "実際のエラー: {error:?}"
+        );
+        assert_eq!(error.error_code(), ErrorCode::InstanceStale);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_instance_reports_protocol_mismatch() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = InstanceId::new_v4();
+        let mut descriptor = sample_descriptor(id);
+        descriptor.protocol_version = ProtocolVersion {
+            major: ProtocolVersion::CURRENT.major + 1,
+            minor: 0,
+        };
+        std::fs::write(
+            dir.join(format!("{}.json", id)),
+            serde_json::to_string(&descriptor).unwrap(),
+        )
+        .unwrap();
+
+        let error = resolve_instance(&dir, id, DiscoveryConfig::default())
+            .err()
+            .expect("MAJOR 不一致の descriptor では解決できない");
+        assert_eq!(error.error_code(), ErrorCode::ProtocolMismatch);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_instance_reports_excluded_for_broken_descriptor() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = InstanceId::new_v4();
+        std::fs::write(dir.join(format!("{}.json", id)), b"{ broken").unwrap();
+
+        let error = resolve_instance(&dir, id, DiscoveryConfig::default())
+            .err()
+            .expect("解釈できない descriptor では解決できない");
+        // ファイルは存在するため未登録とは区別する。
+        assert!(
+            matches!(
+                error,
+                ResolveInstanceError::Excluded(ExclusionReason::InvalidDescriptor)
+            ),
+            "実際のエラー: {error:?}"
+        );
+        assert_eq!(error.error_code(), ErrorCode::InternalError);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn descriptor_path_is_instance_id_json() {
+        let id = InstanceId::new_v4();
+        let dir = Path::new(r"C:\registry");
+        assert_eq!(
+            descriptor_path(dir, &id),
+            dir.join(format!("{id}.json")),
+            "descriptor は instance_id を名前とする JSON ファイル"
+        );
+    }
+
+    #[test]
     fn cleanup_eligibility_excludes_undecidable_reasons() {
         for reason in [
             ExclusionReason::InvalidDescriptor,

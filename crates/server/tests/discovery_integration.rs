@@ -1,13 +1,17 @@
 //! discovery pipeline と mock pipe server との統合テスト。
 
 use aviutl2_mcp_core::{
-    AuthSecret, ClientAuth, ClientHello, DescriptorProject, InstanceDescriptor, InstanceId,
-    InstanceState, Nonce, ProtocolVersion, RequestEnvelope, ResponseEnvelope, ServerAuth,
-    compute_client_mac, compute_server_mac, encode_frame, format_utc_timestamp, negotiate,
-    pipe_name_for, verify_mac,
+    AuthSecret, ClientAuth, ClientHello, DescriptorProject, ErrorCode, ErrorObject,
+    InstanceDescriptor, InstanceId, InstanceState, Nonce, ProtocolVersion, RequestEnvelope,
+    ResponseEnvelope, ResponseKind, ResponseResult, ServerAuth, compute_client_mac,
+    compute_server_mac, encode_frame, format_utc_timestamp, negotiate, pipe_name_for, verify_mac,
 };
-use aviutl2_mcp_server::discovery::{DiscoveryConfig, find_instances};
+use aviutl2_mcp_server::discovery::{
+    DiscoveryConfig, ResolveInstanceError, find_instances, resolve_instance,
+};
+use aviutl2_mcp_server::pipe_client::PipeClientError;
 use aviutl2_mcp_server::win_io::{self, EventHandle, IoIssue, OverlappedOp, WaitAnyOutcome};
+use std::collections::HashMap;
 use std::ffi::{OsStr, c_void};
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
@@ -30,6 +34,22 @@ fn io_deadline() -> Instant {
 struct SendHandle(HANDLE);
 unsafe impl Send for SendHandle {}
 
+/// operation 名から成功応答の `result` への対応表。
+///
+/// テストはここへ応答を注入し、mock server に read operation を演じさせる。
+/// 表に無い operation へは `unsupported_operation` のエラー応答を返す。
+type OperationResponses = HashMap<String, serde_json::Value>;
+
+/// mock server がクライアントへ提示する identity と応答。
+struct MockBehavior {
+    instance_id: InstanceId,
+    auth_secret: AuthSecret,
+    pid: u32,
+    process_created_at: String,
+    state: InstanceState,
+    responses: OperationResponses,
+}
+
 struct MockPipeServer {
     instance_id: InstanceId,
     auth_secret: AuthSecret,
@@ -48,6 +68,24 @@ impl MockPipeServer {
         pid: u32,
         process_created_at: String,
         state: InstanceState,
+    ) -> Self {
+        Self::start_with_operations(
+            instance_id,
+            auth_secret,
+            pid,
+            process_created_at,
+            state,
+            OperationResponses::new(),
+        )
+    }
+
+    fn start_with_operations(
+        instance_id: InstanceId,
+        auth_secret: AuthSecret,
+        pid: u32,
+        process_created_at: String,
+        state: InstanceState,
+        responses: OperationResponses,
     ) -> Self {
         let pipe_name = pipe_name_for(&instance_id);
         let wide: Vec<u16> = OsStr::new(&pipe_name)
@@ -75,18 +113,19 @@ impl MockPipeServer {
         let stop_event = EventHandle::new_manual_reset().unwrap();
         let handle_raw = handle.0 as usize;
         let stop_event_raw = stop_event.handle().0 as usize;
-        let auth_secret_clone = auth_secret.clone();
-        let process_created_at_clone = process_created_at.clone();
-        let state_clone = state.clone();
+        let behavior = MockBehavior {
+            instance_id,
+            auth_secret: auth_secret.clone(),
+            pid,
+            process_created_at: process_created_at.clone(),
+            state: state.clone(),
+            responses,
+        };
 
         let thread = std::thread::spawn(move || {
             server_loop(
                 HANDLE(handle_raw as *mut c_void),
-                instance_id,
-                auth_secret_clone,
-                pid,
-                process_created_at_clone,
-                state_clone,
+                behavior,
                 HANDLE(stop_event_raw as *mut c_void),
             );
         });
@@ -148,15 +187,7 @@ impl Drop for MockPipeServer {
     }
 }
 
-fn server_loop(
-    handle: HANDLE,
-    instance_id: InstanceId,
-    auth_secret: AuthSecret,
-    pid: u32,
-    process_created_at: String,
-    state: InstanceState,
-    stop_event: HANDLE,
-) {
+fn server_loop(handle: HANDLE, behavior: MockBehavior, stop_event: HANDLE) {
     if !accept_connection(handle, stop_event) {
         return;
     }
@@ -167,24 +198,24 @@ fn server_loop(
         None => return,
     };
     let m1: ClientHello = serde_json::from_slice(&m1_body).unwrap();
-    assert_eq!(m1.instance_id, instance_id);
+    assert_eq!(m1.instance_id, behavior.instance_id);
 
     let server_nonce = Nonce::generate();
     let negotiated = negotiate(ProtocolVersion::CURRENT, m1.protocol_version).unwrap();
     let server_mac = compute_server_mac(
-        auth_secret.as_bytes(),
+        behavior.auth_secret.as_bytes(),
         &m1.client_nonce,
         &server_nonce,
-        &instance_id,
+        &behavior.instance_id,
         &negotiated,
     );
 
     let m2 = ServerAuth {
         protocol_version: negotiated,
-        instance_id,
+        instance_id: behavior.instance_id,
         server_nonce,
-        pid,
-        process_created_at: process_created_at.clone(),
+        pid: behavior.pid,
+        process_created_at: behavior.process_created_at.clone(),
         server_mac,
     };
     let m2_body = serde_json::to_vec(&m2).unwrap();
@@ -198,21 +229,64 @@ fn server_loop(
         None => return,
     };
     let m3: ClientAuth = serde_json::from_slice(&m3_body).unwrap();
-    let expected_client_mac =
-        compute_client_mac(auth_secret.as_bytes(), &m2.server_nonce, &m1.client_nonce);
+    let expected_client_mac = compute_client_mac(
+        behavior.auth_secret.as_bytes(),
+        &m2.server_nonce,
+        &m1.client_nonce,
+    );
     assert!(verify_mac(&expected_client_mac, &m3.client_mac));
 
-    // ping 受信。
-    let ping_body = match read_frame(handle, io_deadline()) {
-        Some(body) => body,
-        None => return,
-    };
-    let request: RequestEnvelope = serde_json::from_slice(&ping_body).unwrap();
-    assert_eq!(request.operation, "ping");
+    // 要求ループ。切断・EOF・読み取り失敗のいずれでも抜ける。
+    loop {
+        let Some(body) = read_frame(handle, io_deadline()) else {
+            return;
+        };
+        let Ok(request) = serde_json::from_slice::<RequestEnvelope>(&body) else {
+            return;
+        };
+        let response = build_response(&request, &behavior, negotiated);
+        let response_body = serde_json::to_vec(&response).unwrap();
+        if write_frame(handle, &response_body, io_deadline()).is_err() {
+            return;
+        }
+    }
+}
 
-    let response = ResponseEnvelope::pong(negotiated, request.request_id, instance_id, state);
-    let response_body = serde_json::to_vec(&response).unwrap();
-    let _ = write_frame(handle, &response_body, io_deadline());
+/// 要求の operation に応じた応答を組み立てる。
+fn build_response(
+    request: &RequestEnvelope,
+    behavior: &MockBehavior,
+    negotiated: ProtocolVersion,
+) -> ResponseEnvelope {
+    if request.operation == "ping" {
+        return ResponseEnvelope::pong(
+            negotiated,
+            request.request_id,
+            behavior.instance_id,
+            behavior.state.clone(),
+        );
+    }
+
+    let result = match behavior.responses.get(&request.operation) {
+        Some(result) => ResponseResult::Ok {
+            result: result.clone(),
+        },
+        None => ResponseResult::Err {
+            error: ErrorObject::new(
+                ErrorCode::UnsupportedOperation,
+                "未対応の operation です",
+                false,
+            ),
+        },
+    };
+
+    ResponseEnvelope {
+        kind: ResponseKind::Response,
+        protocol_version: negotiated,
+        request_id: request.request_id,
+        instance_id: behavior.instance_id,
+        result,
+    }
 }
 
 /// クライアントの接続を待つ。停止要求で待機を打ち切った場合は `false` を返す。
@@ -281,6 +355,142 @@ fn current_process_created_at() -> String {
         ProcessLookup::Found(identity) => format_utc_timestamp(identity.created_at),
         other => panic!("自身の PID は照会できる: {other:?}"),
     }
+}
+
+/// mock server の準備が整うまで待つ余裕。
+const MOCK_STARTUP_GRACE: Duration = Duration::from_millis(100);
+
+fn request_deadline() -> Instant {
+    Instant::now() + Duration::from_secs(5)
+}
+
+#[test]
+fn resolved_client_serves_multiple_requests() {
+    let dir = temp_registry_dir();
+    let id = InstanceId::new_v4();
+    let created_at = current_process_created_at();
+
+    let edit_info = serde_json::json!({ "project_revision": 7 });
+    let layers = serde_json::json!({ "items": [], "page": { "total_count": 0 } });
+    let responses = OperationResponses::from([
+        ("get_edit_info".to_string(), edit_info.clone()),
+        ("list_layers".to_string(), layers.clone()),
+    ]);
+
+    let server = MockPipeServer::start_with_operations(
+        id,
+        AuthSecret::generate(),
+        std::process::id(),
+        created_at,
+        InstanceState::Ready,
+        responses,
+    );
+    server.write_descriptor(&dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let resolved = resolve_instance(&dir, id, DiscoveryConfig::default())
+        .expect("生存中のインスタンスは解決できる");
+    assert_eq!(resolved.info.instance_id, id);
+    assert_eq!(resolved.info.state, InstanceState::Ready);
+
+    // handshake と ping に続けて複数の要求を同じ接続で処理できる。
+    assert_eq!(
+        resolved
+            .client
+            .request("get_edit_info", serde_json::json!({}), request_deadline())
+            .expect("注入した応答を受け取れる"),
+        edit_info
+    );
+    assert_eq!(
+        resolved
+            .client
+            .request("list_layers", serde_json::json!({}), request_deadline())
+            .expect("2 件目の要求も処理される"),
+        layers
+    );
+
+    let error = resolved
+        .client
+        .request(
+            "no_such_operation",
+            serde_json::json!({}),
+            request_deadline(),
+        )
+        .expect_err("未知 operation は拒否される");
+    let PipeClientError::Remote(remote) = &error else {
+        panic!("エラー応答が保たれていません: {error:?}");
+    };
+    assert_eq!(remote.code, ErrorCode::UnsupportedOperation);
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+
+    // 未知 operation の拒否後も接続は継続する。
+    assert_eq!(
+        resolved
+            .client
+            .request("get_edit_info", serde_json::json!({}), request_deadline())
+            .expect("エラー応答の後も要求を処理できる"),
+        edit_info
+    );
+
+    drop(resolved);
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resolve_instance_reports_authentication_failed_for_wrong_secret() {
+    let dir = temp_registry_dir();
+    let id = InstanceId::new_v4();
+    let created_at = current_process_created_at();
+    let server = MockPipeServer::start(
+        id,
+        AuthSecret::generate(),
+        std::process::id(),
+        created_at,
+        InstanceState::Ready,
+    );
+
+    // descriptor には別の auth_secret を書き、handshake を失敗させる。
+    let mut descriptor = server.descriptor(dir.clone());
+    descriptor.auth_secret = AuthSecret::generate();
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{}.json", id));
+    std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let error = resolve_instance(&dir, id, DiscoveryConfig::default())
+        .err()
+        .expect("auth_secret 不一致は解決に失敗する");
+    assert!(
+        matches!(error, ResolveInstanceError::Excluded(_)),
+        "登録済みだが検証に落ちた扱いになる: {error:?}"
+    );
+    assert_eq!(error.error_code(), ErrorCode::AuthenticationFailed);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resolve_instance_excludes_draining_instance() {
+    let dir = temp_registry_dir();
+    let id = InstanceId::new_v4();
+    let created_at = current_process_created_at();
+    let server = MockPipeServer::start(
+        id,
+        AuthSecret::generate(),
+        std::process::id(),
+        created_at,
+        InstanceState::Draining,
+    );
+    server.write_descriptor(&dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let error = resolve_instance(&dir, id, DiscoveryConfig::default())
+        .err()
+        .expect("draining のインスタンスは解決できない");
+    assert_eq!(error.error_code(), ErrorCode::InstanceStale);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

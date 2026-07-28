@@ -190,6 +190,43 @@ mod tests {
     }
 
     #[test]
+    fn default_request_uses_default_limit() {
+        let request = ListInstancesRequest::default();
+        assert_eq!(request.offset, 0);
+        assert_eq!(request.limit, DEFAULT_PAGE_LIMIT);
+        assert_eq!(request.limit, 50);
+        assert_eq!(
+            request.page().validate(),
+            Ok(()),
+            "既定値はそのまま受理される"
+        );
+    }
+
+    #[test]
+    fn omitted_fields_match_default() {
+        let request: ListInstancesRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(request.offset, ListInstancesRequest::default().offset);
+        assert_eq!(request.limit, ListInstancesRequest::default().limit);
+    }
+
+    #[test]
+    fn wire_form_keeps_offset_and_limit_flat() {
+        let value = serde_json::to_value(ListInstancesRequest {
+            offset: 10,
+            limit: 25,
+        })
+        .unwrap();
+        assert_eq!(value, serde_json::json!({ "offset": 10, "limit": 25 }));
+    }
+
+    #[test]
+    fn unknown_field_rejected() {
+        assert!(
+            serde_json::from_str::<ListInstancesRequest>(r#"{"snapshot_revision":1}"#).is_err()
+        );
+    }
+
+    #[test]
     fn invalid_limit_rejected() {
         let dir = temp_registry_dir();
         std::fs::create_dir_all(&dir).unwrap();
