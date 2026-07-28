@@ -12,8 +12,9 @@ use aviutl2_mcp_core::{
 };
 use aviutl2_mcp_server::mcp::AviUtl2McpServer;
 use aviutl2_mcp_server::mcp::input::{
-    GetObjectInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput, ListLayersInput,
-    ListObjectsInput, ObjectFilterInput, ObjectSelectorInput, PageInput,
+    AvailableEffectsPageInput, GetObjectInput, InstanceInput, ListAvailableEffectsInput,
+    ListInstancesInput, ListLayersInput, ListObjectsInput, ObjectFilterInput, ObjectSelectorInput,
+    PageInput,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -166,6 +167,18 @@ fn selector_input() -> ObjectSelectorInput {
 
 fn page_input(offset: u32, limit: u32, snapshot_revision: Option<u64>) -> PageInput {
     PageInput {
+        offset,
+        limit,
+        snapshot_revision,
+    }
+}
+
+fn effects_page_input(
+    offset: u32,
+    limit: u32,
+    snapshot_revision: Option<u64>,
+) -> AvailableEffectsPageInput {
+    AvailableEffectsPageInput {
         offset,
         limit,
         snapshot_revision,
@@ -355,7 +368,7 @@ async fn list_available_effects_tool_sends_effect_type() {
         .aviutl2_list_available_effects(Parameters(ListAvailableEffectsInput {
             instance_id: harness.instance_id(),
             effect_type: Some(aviutl2_mcp_server::mcp::input::EffectTypeInput::Filter),
-            page: page_input(0, 50, None),
+            page: effects_page_input(0, 50, None),
         }))
         .await;
 

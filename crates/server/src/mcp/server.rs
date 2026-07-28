@@ -431,8 +431,9 @@ impl AviUtl2McpServer {
 
     /// インスタンスが利用できる effect の一覧と設定項目の定義を取得する。
     /// effect_type を指定すると種別で絞り込める。
-    /// offset と limit（1〜200、既定 50）でページを指定し、
-    /// 2 ページ目以降は先頭ページが返した snapshot_revision を添える。
+    /// offset と limit（1〜200、既定 50）でページを指定する。
+    /// snapshot_revision は受理するがページ間の照合には用いない。
+    /// effect カタログは登録済みプラグインの集合であり、プロジェクトの revision に連動しないためである。
     #[tool(
         name = "aviutl2_list_available_effects",
         annotations(

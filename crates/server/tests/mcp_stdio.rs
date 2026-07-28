@@ -267,6 +267,78 @@ fn tool_call_outcome_is_logged_without_rust_log() {
     let _ = std::fs::remove_dir_all(&registry_dir);
 }
 
+/// `tools/list` の応答から指定 tool の定義を取り出す。
+fn listed_tool(response: &Value, name: &str) -> Value {
+    response["result"]["tools"]
+        .as_array()
+        .expect("tools は配列")
+        .iter()
+        .find(|tool| tool["name"] == json!(name))
+        .unwrap_or_else(|| panic!("{name} が登録されていません"))
+        .clone()
+}
+
+#[test]
+fn effect_catalog_paging_is_not_declared_as_revision_checked() {
+    let registry_dir = temp_registry_dir();
+    std::fs::create_dir_all(&registry_dir).expect("registry を作れる");
+
+    let mut requests = initialize_requests();
+    requests.push(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+
+    let session = run_session(&registry_dir, &requests);
+    let listed = session.response(2);
+
+    // effect カタログはプロジェクトの revision に連動しないため照合されない。
+    // 照合されるかのように案内すると、返らない precondition_failed をもって
+    // 「ページ間の一貫性が検証された」と読まれてしまう。
+    let effects = listed_tool(&listed, "aviutl2_list_available_effects");
+    let description = effects["description"].as_str().expect("説明がある");
+    assert!(
+        !description.contains("先頭ページが返した snapshot_revision を添える"),
+        "照合されない値を添えるよう促しています: {description}"
+    );
+    assert!(
+        description.contains("照合には用いない"),
+        "照合しないことが説明されていません: {description}"
+    );
+
+    let field = &effects["inputSchema"]["properties"]["snapshot_revision"];
+    assert!(
+        field.is_object(),
+        "互換のため snapshot_revision は受理し続ける: {effects}"
+    );
+    let field_description = field["description"].as_str().expect("説明がある");
+    assert!(
+        !field_description.contains("precondition_failed"),
+        "返らない失敗を宣言しています: {field_description}"
+    );
+    assert!(
+        field_description.contains("照合に用いない"),
+        "照合しないことが説明されていません: {field_description}"
+    );
+
+    // 照合する列挙 tool の宣言はそのまま残す。
+    for name in ["aviutl2_list_layers", "aviutl2_list_objects"] {
+        let tool = listed_tool(&listed, name);
+        let description = tool["description"].as_str().expect("説明がある");
+        assert!(
+            description.contains("先頭ページが返した snapshot_revision"),
+            "{name}: {description}"
+        );
+        let field_description =
+            tool["inputSchema"]["properties"]["snapshot_revision"]["description"]
+                .as_str()
+                .expect("説明がある");
+        assert!(
+            field_description.contains("precondition_failed"),
+            "{name}: {field_description}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
 #[test]
 fn rejected_tool_calls_do_not_pollute_stdout() {
     let registry_dir = temp_registry_dir();

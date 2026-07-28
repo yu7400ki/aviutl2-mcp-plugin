@@ -74,18 +74,56 @@ pub struct PageInput {
 impl PageInput {
     /// 共通のページ要求へ変換する。
     fn to_page_request(self) -> Result<PageRequest, ErrorObject> {
-        let request = PageRequest {
-            offset: self.offset,
-            limit: self.limit,
-            snapshot_revision: self.snapshot_revision,
-        };
-        request.validate().map_err(|_| {
-            invalid_argument(format!(
-                "limit は 1 以上 {MAX_PAGE_LIMIT} 以下である必要があります"
-            ))
-        })?;
-        Ok(request)
+        build_page_request(self.offset, self.limit, self.snapshot_revision)
     }
+}
+
+/// effect カタログ列挙のページ指定。
+///
+/// 形は [`PageInput`] と同じだが、`snapshot_revision` の意味づけだけが異なる。
+/// effect カタログは登録済みプラグインの集合であり、プロジェクトの revision に
+/// 連動しない。照合すると、カタログと無関係な編集で revision が進んだだけで
+/// 2 ページ目以降が失敗する誤検知になる一方、カタログ自身の変化は revision に
+/// 現れないため取りこぼしも防げない。
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AvailableEffectsPageInput {
+    /// 取得を開始する 0 始まりの位置。
+    #[serde(default)]
+    pub offset: u32,
+    /// 取得件数。
+    #[serde(default = "default_limit")]
+    #[schemars(range(min = 1, max = 200))]
+    pub limit: u32,
+    /// 先頭ページが返した snapshot_revision。この tool では照合に用いない。effect カタログは登録済みプラグインの集合でありプロジェクトの revision に連動しないためである。
+    #[serde(default)]
+    pub snapshot_revision: Option<u64>,
+}
+
+impl AvailableEffectsPageInput {
+    /// 共通のページ要求へ変換する。
+    fn to_page_request(self) -> Result<PageRequest, ErrorObject> {
+        build_page_request(self.offset, self.limit, self.snapshot_revision)
+    }
+}
+
+/// ページ指定を検証してページ要求へ変換する。
+fn build_page_request(
+    offset: u32,
+    limit: u32,
+    snapshot_revision: Option<u64>,
+) -> Result<PageRequest, ErrorObject> {
+    let request = PageRequest {
+        offset,
+        limit,
+        snapshot_revision,
+    };
+    request.validate().map_err(|_| {
+        invalid_argument(format!(
+            "limit は 1 以上 {MAX_PAGE_LIMIT} 以下である必要があります"
+        ))
+    })?;
+    Ok(request)
 }
 
 /// `aviutl2_list_layers` の入力。
@@ -179,7 +217,7 @@ pub struct ListAvailableEffectsInput {
     pub effect_type: Option<EffectTypeInput>,
     /// ページ指定。
     #[serde(flatten)]
-    pub page: PageInput,
+    pub page: AvailableEffectsPageInput,
 }
 
 /// 絞り込みに指定できる effect の種別。
@@ -465,6 +503,33 @@ mod tests {
         .expect("種別名を受理する");
         let params = input.to_params().expect("params へ変換できる");
         assert_eq!(params.effect_type, Some(EffectType::Filter));
+    }
+
+    #[test]
+    fn available_effects_page_still_accepts_snapshot_revision() {
+        // 応答が返した値をそのまま送り返すクライアントを弾かない。
+        let input: ListAvailableEffectsInput = serde_json::from_value(serde_json::json!({
+            "instance_id": SAMPLE_ID,
+            "offset": 10,
+            "limit": 20,
+            "snapshot_revision": 5,
+        }))
+        .expect("snapshot_revision を受理する");
+        let params = input.to_params().expect("params へ変換できる");
+        assert_eq!(params.page.offset, 10);
+        assert_eq!(params.page.limit, 20);
+        assert_eq!(params.page.snapshot_revision, Some(5));
+    }
+
+    #[test]
+    fn available_effects_page_rejects_unknown_field() {
+        assert!(
+            serde_json::from_value::<ListAvailableEffectsInput>(serde_json::json!({
+                "instance_id": SAMPLE_ID,
+                "future": 1,
+            }))
+            .is_err()
+        );
     }
 
     #[test]

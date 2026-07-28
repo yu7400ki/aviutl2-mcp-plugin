@@ -176,7 +176,10 @@ pub fn object_detail(detail: &ObjectDetail) -> String {
 /// `aviutl2_list_available_effects` の text content。
 pub fn available_effects(result: &ListAvailableEffectsResult) -> String {
     let mut text = TextBuilder::new();
-    text.push_line(format!("利用可能 effect {}", page_line(&result.page)));
+    text.push_line(format!(
+        "利用可能 effect {}",
+        catalog_page_line(&result.page)
+    ));
     for effect in &result.items {
         text.push_line(format!(
             "- {} type={} items={}",
@@ -199,6 +202,21 @@ fn page_line(page: &PageMeta) -> String {
         page.count,
         page.offset,
         page.snapshot_revision,
+        next_offset_hint(page.has_more, page.next_offset),
+    )
+}
+
+/// effect カタログのページ情報の 1 行表現。
+///
+/// `snapshot_revision` を示さない。effect カタログは登録済みプラグインの集合で
+/// あり、プロジェクトの revision に連動しないためページ間の照合に使えない。
+/// 照合されない値を示すと、次のページ要求へ添えるよう促してしまう。
+fn catalog_page_line(page: &PageMeta) -> String {
+    format!(
+        "{} 件中 {} 件（offset={}{}）",
+        page.total_count,
+        page.count,
+        page.offset,
         next_offset_hint(page.has_more, page.next_offset),
     )
 }
@@ -494,6 +512,29 @@ mod tests {
         assert!(line.contains("offset=0"));
         assert!(line.contains("snapshot_revision=42"));
         assert!(line.contains("続きは offset=200"));
+    }
+
+    #[test]
+    fn effect_catalog_text_does_not_show_snapshot_revision() {
+        let text = available_effects(&ListAvailableEffectsResult {
+            items: Vec::new(),
+            page: page(1_000, 200),
+        });
+        assert!(
+            !text.contains("snapshot_revision"),
+            "照合に使えない値を次のページ要求へ促しています: {text}"
+        );
+        assert!(text.contains("続きは offset=200"), "{text}");
+
+        // 照合する列挙は従来どおり値を示す。
+        let layers_text = layers(&ListLayersResult {
+            items: Vec::new(),
+            page: page(1_000, 200),
+        });
+        assert!(
+            layers_text.contains("snapshot_revision=42"),
+            "{layers_text}"
+        );
     }
 
     #[test]
