@@ -1510,12 +1510,21 @@ mod tests {
                 "{operation:?} が起動処理中に受理されました"
             );
             assert!(error.retryable);
-            assert_eq!(error.details["retry_after_ms"], HOST_BUSY_RETRY_AFTER_MS);
+            assert_eq!(error.details["retry_after_ms"], 500);
             assert!(
                 adapter.calls().is_empty(),
                 "{operation:?} が起動処理中に読み取り口を呼びました"
             );
         }
+    }
+
+    #[test]
+    fn timeouts_match_the_intended_budget() {
+        // 期限と再試行案内の設計値。変えると要求元との取り決めが変わるため、
+        // 値そのものを主張する。
+        assert_eq!(READ_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(WRITE_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(HOST_BUSY_RETRY_AFTER_MS, 500);
     }
 
     #[test]
@@ -1533,7 +1542,7 @@ mod tests {
             let error = admit_read(&state).unwrap_err();
             assert_eq!(error.code, ErrorCode::HostBusy, "{state} が受理されました");
             assert!(error.retryable);
-            assert_eq!(error.details["retry_after_ms"], HOST_BUSY_RETRY_AFTER_MS);
+            assert_eq!(error.details["retry_after_ms"], 500);
         }
     }
 
