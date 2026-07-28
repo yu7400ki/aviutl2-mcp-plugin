@@ -57,13 +57,29 @@ impl Session {
 
 /// registry を指定してサーバーを起こし、要求を 1 件ずつ往復させて結果を得る。
 ///
+/// ログが stdout へ漏れないことを確かめるため、最も冗長な設定で走らせる。
+fn run_session(registry_dir: &Path, requests: &[Value]) -> Session {
+    run_session_with_log(registry_dir, requests, Some("trace"))
+}
+
+/// ログの絞り込みを指定してセッションを実行する。
+///
+/// `rust_log` が `None` のときは `RUST_LOG` を渡さず、既定のレベルを確かめる。
 /// 要求を一度に流し込むとサーバーが並行に処理し、インスタンスへの接続が重なる。
 /// 実際のクライアントと同じく、直前の応答を受け取ってから次を送る。
-fn run_session(registry_dir: &Path, requests: &[Value]) -> Session {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_aviutl2-mcp-server"))
-        .env("AVIUTL2_MCP_REGISTRY_DIR", registry_dir)
-        // ログが stdout へ漏れないことを確かめるため、最も冗長な設定で走らせる。
-        .env("RUST_LOG", "trace")
+fn run_session_with_log(
+    registry_dir: &Path,
+    requests: &[Value],
+    rust_log: Option<&str>,
+) -> Session {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aviutl2-mcp-server"));
+    command.env("AVIUTL2_MCP_REGISTRY_DIR", registry_dir);
+    match rust_log {
+        Some(filter) => command.env("RUST_LOG", filter),
+        None => command.env_remove("RUST_LOG"),
+    };
+
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -189,6 +205,40 @@ fn stdout_carries_only_mcp_messages() {
     assert!(tools["result"]["tools"].is_array());
     let call = session.response(3);
     assert_eq!(call["result"]["isError"], json!(false));
+
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+#[test]
+fn tool_call_outcome_is_logged_without_rust_log() {
+    let registry_dir = temp_registry_dir();
+    std::fs::create_dir_all(&registry_dir).expect("registry を作れる");
+
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": { "name": "aviutl2_list_instances", "arguments": {} },
+    }));
+
+    let session = run_session_with_log(&registry_dir, &requests, None);
+    assert_eq!(session.response(2)["result"]["isError"], json!(false));
+
+    // operation / correlation_id / 所要時間 / 結果コードは既定設定でも記録される。
+    let logged = session
+        .stderr
+        .lines()
+        .find(|line| line.contains("tool call succeeded"))
+        .unwrap_or_else(|| panic!("tool call の結果が記録されていません: {}", session.stderr));
+    for field in [
+        "aviutl2_list_instances",
+        "correlation_id",
+        "duration_ms",
+        "result",
+    ] {
+        assert!(logged.contains(field), "{field} がありません: {logged}");
+    }
 
     let _ = std::fs::remove_dir_all(&registry_dir);
 }
@@ -381,6 +431,58 @@ fn tool_call_over_stdio_reaches_the_instance() {
     assert!(
         correlated.contains("correlation_id"),
         "request_id が相関 ID と結び付いていません: {correlated}"
+    );
+
+    drop(mock);
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+#[test]
+fn logs_expose_neither_full_identifiers_nor_absolute_paths() {
+    let registry_dir = temp_registry_dir();
+    let edit_info = serde_json::to_value(sample_edit_info()).expect("直列化できる");
+    let mock = MockPipeServer::start_with_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        OperationResponses::from([("get_edit_info".to_string(), ok_result(edit_info))]),
+    );
+    mock.write_descriptor(&registry_dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let instance_id = mock.instance_id().to_string();
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_get_edit_info",
+            "arguments": { "instance_id": instance_id },
+        },
+    }));
+
+    // 自クレートのログだけを対象にする。SDK が受信メッセージを出す経路は別問題。
+    let session = run_session_with_log(&registry_dir, &requests, Some("aviutl2_mcp_server=trace"));
+
+    let anonymized: String = instance_id.chars().take(8).collect();
+    assert!(
+        session.stderr.contains(&anonymized),
+        "匿名化した instance_id が記録されていません: {}",
+        session.stderr
+    );
+    assert!(
+        !session.stderr.contains(&instance_id),
+        "完全な instance_id がログに出ています: {}",
+        session.stderr
+    );
+    let registry_path = registry_dir.to_string_lossy().to_string();
+    assert!(
+        !session.stderr.contains(&registry_path),
+        "registry の絶対パスがログに出ています: {}",
+        session.stderr
     );
 
     drop(mock);

@@ -5,6 +5,7 @@
 
 use crate::identity::{ProcessLookup, lookup_process};
 use crate::pipe_client::{PipeClient, PipeClientError};
+use crate::redact;
 use aviutl2_mcp_core::{
     ErrorCode, ErrorObject, InstanceDescriptor, InstanceId, InstanceInfo, InstanceProject,
     InstanceState, ProtocolVersion, deserialize_json, parse_utc_timestamp, pipe_name_for,
@@ -231,7 +232,7 @@ pub fn default_registry_dir() -> Option<PathBuf> {
 /// 1 候補の失敗は全体を失敗させず、他候補の検証を継続する。
 /// registry ディレクトリ自体を列挙できない場合のみ [`DiscoveryError`] を返す。
 /// `cleanup` が true の場合、安全条件を満たす stale descriptor を削除する。
-#[instrument(skip(config), fields(registry_dir = %registry_dir.display()))]
+#[instrument(skip_all)]
 pub fn find_instances(
     registry_dir: &Path,
     config: DiscoveryConfig,
@@ -249,27 +250,32 @@ pub fn find_instances(
         }));
 
         // 除外は panic 経路も含めて 1 箇所へ集約し、cleanup 判定を迂回させない。
-        let (instance_id, reason) = match result {
+        let (instance, reason) = match result {
             Ok(DiscoveryResult::Alive(info)) => {
-                debug!(instance_id = %info.instance_id, "instance is alive");
+                debug!(instance = %redact::instance_id(&info.instance_id), "instance is alive");
                 results.push(info);
                 continue;
             }
             Ok(DiscoveryResult::Excluded {
                 instance_id,
                 reason,
-            }) => (instance_id.map(|id| id.to_string()), reason),
+            }) => (
+                instance_id
+                    .as_ref()
+                    .map(redact::instance_id)
+                    .unwrap_or_else(|| redact::descriptor_file(&path)),
+                reason,
+            ),
             Err(_) => {
                 warn!("candidate discovery panicked; isolating");
-                let id_short = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_string());
-                (id_short, ExclusionReason::InternalError)
+                (
+                    redact::descriptor_file(&path),
+                    ExclusionReason::InternalError,
+                )
             }
         };
 
-        warn!(instance_id = ?instance_id, reason = reason.as_code(), "instance excluded");
+        warn!(instance = %instance, reason = reason.as_code(), "instance excluded");
         if cleanup
             && should_attempt_cleanup(reason)
             && let Err(e) = try_cleanup_stale_descriptor(&path)
@@ -309,7 +315,7 @@ impl ExcludedCandidate {
 ///
 /// レジストリ全体を列挙せず、`instance_id` に対応する descriptor だけを読む。
 /// 検証は一覧取得と同一の pipeline を通し、成功時は認証済み接続を返す。
-#[instrument(skip(config), fields(instance_id = %instance_id))]
+#[instrument(skip_all, fields(instance = %redact::instance_id(&instance_id)))]
 pub fn resolve_instance(
     registry_dir: &Path,
     instance_id: InstanceId,
@@ -361,7 +367,7 @@ fn descriptor_path(registry_dir: &Path, instance_id: &InstanceId) -> PathBuf {
 }
 
 /// 1 候補を discovery pipeline で検証する。
-#[instrument(skip(path, config), fields(path = %path.display()))]
+#[instrument(skip_all, fields(instance = %redact::descriptor_file(path)))]
 fn discover_candidate(path: &Path, config: DiscoveryConfig) -> DiscoveryResult {
     // 一覧取得では以降の要求を送らないため、接続はここで閉じる。
     match verify_candidate(path, config) {
@@ -556,12 +562,12 @@ fn should_attempt_cleanup(reason: ExclusionReason) -> bool {
 /// 削除直前に再読み込み・再検証し、対応するインスタンスの不在を確認できた場合のみ削除する。
 fn try_cleanup_stale_descriptor(path: &Path) -> std::io::Result<()> {
     if !instance_proven_absent(path) {
-        debug!(path = %path.display(), "descriptor revalidated; skipped cleanup");
+        debug!(instance = %redact::descriptor_file(path), "descriptor revalidated; skipped cleanup");
         return Ok(());
     }
 
     std::fs::remove_file(path)?;
-    debug!(path = %path.display(), "stale descriptor removed");
+    debug!(instance = %redact::descriptor_file(path), "stale descriptor removed");
     Ok(())
 }
 

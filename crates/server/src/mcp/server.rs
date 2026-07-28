@@ -11,8 +11,8 @@ use crate::mcp::input::{
     GetObjectInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput, ListLayersInput,
     ListObjectsInput, parse_instance_id,
 };
-use crate::mcp::summary::clamp_chars;
 use crate::mcp::{describe, failure};
+use crate::redact;
 use aviutl2_mcp_core::{
     EditInfo, ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult,
     GetEditInfoParams, InstanceId, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
@@ -43,9 +43,6 @@ pub const INSTANCES_RESOURCE_URI: &str = "aviutl2://instances";
 
 /// resource の内容に用いる MIME type。
 const RESOURCE_MIME_TYPE: &str = "application/json";
-
-/// 匿名化した instance_id に残す先頭文字数。
-const ANONYMIZED_ID_CHARS: usize = 8;
 
 /// tool call 1 回分の実行予算。
 ///
@@ -634,7 +631,7 @@ where
 
     let deadline = Instant::now() + limits.request;
     tracing::debug!(
-        instance = %anonymized_instance_id(&instance_id),
+        instance = %redact::instance_id(&instance_id),
         operation,
         "sending read request",
     );
@@ -647,11 +644,6 @@ where
 /// tool call ごとの相関 ID を発番する。
 fn new_correlation_id() -> String {
     uuid::Uuid::now_v7().as_hyphenated().to_string()
-}
-
-/// ログへ出す instance_id の匿名化表現。
-fn anonymized_instance_id(instance_id: &InstanceId) -> String {
-    clamp_chars(&instance_id.to_string(), ANONYMIZED_ID_CHARS)
 }
 
 /// DTO を `structuredContent` へ載せる値へ変換する。
@@ -916,14 +908,6 @@ mod tests {
         ] {
             assert_eq!(parse_resource_uri(uri), None, "{uri} を受理しています");
         }
-    }
-
-    #[test]
-    fn anonymized_instance_id_keeps_only_a_prefix() {
-        let id = InstanceId::new_v4();
-        let anonymized = anonymized_instance_id(&id);
-        assert!(anonymized.chars().count() <= ANONYMIZED_ID_CHARS);
-        assert!(!anonymized.contains(&id.to_string()));
     }
 
     #[test]

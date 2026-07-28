@@ -2,6 +2,7 @@
 //!
 //! Windows API（pipe 接続・読み書き）はこの層に閉じ、上位は frame 単位で扱う。
 
+use crate::redact;
 use crate::win_io::{self, WinIoError};
 use aviutl2_mcp_core::{
     AuthSecret, ClientAuth, ClientHello, ErrorCode, ErrorObject, FrameDecoder, InstanceId,
@@ -130,7 +131,7 @@ impl PipeClient {
     /// `pipe_name` へ指定した期限で接続し、handshake を完了する。
     ///
     /// 成功時は認証済みの `PipeClient` を返す。
-    #[instrument(skip(auth_secret), fields(instance_id = %descriptor_id))]
+    #[instrument(skip_all, fields(instance = %redact::instance_id(&descriptor_id), pid = descriptor_pid))]
     pub fn connect_and_handshake(
         descriptor_id: InstanceId,
         descriptor_pid: u32,
@@ -163,7 +164,7 @@ impl PipeClient {
     /// `request_id` の発番と期限の付与、応答の `request_id` / `instance_id` /
     /// プロトコル MAJOR の整合検証をまとめて行う。接続先がエラー応答を返した場合は
     /// [`PipeClientError::Remote`] として `ErrorObject` をそのまま返す。
-    #[instrument(skip(self, params), fields(instance_id = %self.instance_id, operation = operation))]
+    #[instrument(skip_all, fields(instance = %redact::instance_id(&self.instance_id), operation = operation))]
     pub fn request(
         &self,
         operation: &str,
@@ -202,7 +203,7 @@ impl PipeClient {
     ///
     /// 接続先が ping を拒否した場合は [`PipeClientError::Remote`] を返す。拒否理由は
     /// 「起動中で今は応じられない」と「生存確認に失敗した」を区別するために要る。
-    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    #[instrument(skip_all, fields(instance = %redact::instance_id(&self.instance_id)))]
     pub fn ping(&self, deadline: Instant) -> Result<InstanceState, PipeClientError> {
         let request =
             RequestEnvelope::ping(self.protocol_version, RequestId::new(), self.instance_id)
