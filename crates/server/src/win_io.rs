@@ -32,7 +32,7 @@ pub enum WinIoError {
 
 /// 単一オブジェクトの待機結果。
 #[derive(Debug)]
-pub enum WaitOutcome {
+enum WaitOutcome {
     /// シグナル状態になった。
     Signaled,
     /// 期限を超過した。
