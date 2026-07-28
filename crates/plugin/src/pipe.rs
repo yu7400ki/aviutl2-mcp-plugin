@@ -525,7 +525,7 @@ fn await_connection(pipe: &OwnedPipeHandle, stop: &StopSignal) -> Result<Connect
     // シグナルされることは二度とない。`OverlappedOp` は解放時に必ず保留 I/O を
     // 排出する（`GetOverlappedResult` を bWait = TRUE で待つ）ため、
     // このままでは接続受理スレッドが永久に戻らなくなる。
-    // カーネルがこの `OVERLAPPED` を保持していないことは同期失敗が保証するので、
+    // カーネルがこの `OVERLAPPED` と結びついていないことは同期失敗が保証するので、
     // 完了通知イベントを自分でシグナルして排出を終わらせる。
     if let Err(e) = &result
         && e.code() != ERROR_IO_PENDING.into()
@@ -672,6 +672,41 @@ mod tests {
         }
     }
 
+    /// 1 フレームを 4 回の書き込みに分割して送信する。
+    ///
+    /// 長さの前半・後半・本体の前半・後半に分けるため、受信側では長さと本体の
+    /// 双方が複数回の読み取りに跨る。
+    fn send_split(client: &PipeStream, body: &[u8], stage: &str) {
+        let frame = encode_frame(body).unwrap();
+        let body_middle = 4 + (frame.len() - 4) / 2;
+        let parts = [
+            &frame[..2],
+            &frame[2..4],
+            &frame[4..body_middle],
+            &frame[body_middle..],
+        ];
+        for part in parts {
+            let started = Instant::now();
+            if let Err(e) = client.write_all(part, started + CLIENT_IO_TIMEOUT, "分割送信") {
+                panic!("{stage}の分割送信に失敗しました: {e}");
+            }
+            // 受信側の 1 回の読み取りに複数の断片がまとまらないよう間隔を空ける。
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// 複数フレームを 1 回の書き込みでまとめて送信する。
+    fn send_batched(client: &PipeStream, bodies: &[&[u8]], stage: &str) {
+        let mut batched = Vec::new();
+        for body in bodies {
+            batched.extend_from_slice(&encode_frame(body).unwrap());
+        }
+        let started = Instant::now();
+        if let Err(e) = client.write_all(&batched, started + CLIENT_IO_TIMEOUT, "まとめ送信") {
+            panic!("{stage}のまとめ送信に失敗しました: {e}");
+        }
+    }
+
     /// 期限を切ってフレームを受信する。無期限には待たない。
     fn recv(client: &PipeStream, stage: &str) -> Option<Vec<u8>> {
         let started = Instant::now();
@@ -802,6 +837,119 @@ mod tests {
         drop(client);
         server.stop(Duration::from_secs(5));
         cleanup(dir);
+    }
+
+    #[test]
+    fn frame_split_across_writes_is_reassembled() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let client_nonce = aviutl2_mcp_core::Nonce::generate();
+        // 長さ・本体の双方が複数回の読み取りに跨っても 1 フレームへ復元される。
+        send_split(&client, &make_hello(id, &client_nonce), "ClientHello");
+
+        let server_auth_body = recv(&client, "ServerAuth").expect("ServerAuth が受信できません");
+        let server_auth: aviutl2_mcp_core::ServerAuth =
+            serde_json::from_slice(&server_auth_body).unwrap();
+        send_split(
+            &client,
+            &make_auth(&secret, &server_auth.server_nonce, &client_nonce),
+            "ClientAuth",
+        );
+        exchange_ping(&client, id, server_auth.protocol_version);
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    #[test]
+    fn frames_batched_in_single_write_are_processed_in_order() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let client_nonce = aviutl2_mcp_core::Nonce::generate();
+        send(&client, &make_hello(id, &client_nonce), "ClientHello");
+
+        let server_auth_body = recv(&client, "ServerAuth").expect("ServerAuth が受信できません");
+        let server_auth: aviutl2_mcp_core::ServerAuth =
+            serde_json::from_slice(&server_auth_body).unwrap();
+
+        // ClientAuth と ping 要求を 1 回の書き込みへ詰めて送る。受信側は
+        // フレーム境界を越えて読まないため、2 フレームが順に処理される。
+        let request_id = aviutl2_mcp_core::RequestId::new();
+        let client_auth = make_auth(&secret, &server_auth.server_nonce, &client_nonce);
+        let ping = make_ping(server_auth.protocol_version, request_id, id);
+        send_batched(&client, &[&client_auth, &ping], "ClientAuth と ping 要求");
+
+        let response_body = recv(&client, "ping 応答").expect("ping 応答が受信できません");
+        let response: aviutl2_mcp_core::ResponseEnvelope =
+            serde_json::from_slice(&response_body).unwrap();
+        assert_eq!(response.request_id, request_id);
+        assert_eq!(response.instance_id, id);
+        assert!(matches!(
+            response.result,
+            aviutl2_mcp_core::ResponseResult::Ok { .. }
+        ));
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    /// 契約を満たさないフレーム長は本体を待たずに拒否される。
+    ///
+    /// 過大な長さで本体の到着を待つと、その分だけ待受が占有された上で
+    /// 過大なバッファが確保される。長さの検証は本体を読む前に行われる。
+    fn assert_invalid_frame_length_disconnects(length: u32) {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        complete_handshake(&client, id, &secret);
+
+        // 本体を 1 バイトも送らずに長さだけを送る。
+        let started = Instant::now();
+        client
+            .write_all(
+                &length.to_le_bytes(),
+                started + CLIENT_IO_TIMEOUT,
+                "不正なフレーム長の送信",
+            )
+            .unwrap();
+
+        let body = recv_or_disconnected(&client, "不正なフレーム長の送信後");
+        assert!(
+            body.is_none(),
+            "フレーム長 {length} に応答が返されました: {body:?}（切断されるべきです）"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "フレーム長 {length} の拒否に {}ms かかりました",
+            started.elapsed().as_millis()
+        );
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    #[test]
+    fn zero_frame_length_disconnects() {
+        assert_invalid_frame_length_disconnects(0);
+    }
+
+    #[test]
+    fn oversized_frame_length_disconnects_without_reading_body() {
+        assert_invalid_frame_length_disconnects(aviutl2_mcp_core::MAX_FRAME_SIZE + 1);
     }
 
     #[test]
