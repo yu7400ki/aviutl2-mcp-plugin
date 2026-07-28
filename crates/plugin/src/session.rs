@@ -292,36 +292,38 @@ fn run_request_loop(
                     read_deadline,
                 );
 
-                match decide_send(
+                let read_response = resolve_read_response(
                     Instant::now(),
                     Utc::now().timestamp_millis(),
                     read_deadline,
                     request.deadline_unix_ms,
-                ) {
-                    SendDecision::Send(deadline) => {
-                        let response = response_envelope(
-                            negotiated_version,
-                            request.request_id,
-                            lifecycle.instance_id(),
-                            outcome,
-                        );
-                        send_response(stream, &response, deadline)?;
-                    }
-                    SendDecision::Discard => {
-                        tracing::warn!(
-                            request_id = ?request.request_id,
-                            operation = %request.operation,
-                            "deadline を超過したため読み取り結果を破棄しました"
-                        );
-                        send_error(
-                            stream,
-                            negotiated_version,
-                            request.request_id,
-                            lifecycle.instance_id(),
-                            timeout_after_execution(),
-                        )?;
-                    }
+                    outcome,
+                );
+
+                if read_response.discarded {
+                    tracing::warn!(
+                        request_id = ?request.request_id,
+                        operation = %request.operation,
+                        "deadline を超過したため読み取り結果を破棄しました"
+                    );
+                } else if let Err(error) = &read_response.outcome {
+                    // 失敗を返した事実だけをローカルへ残す。要求元の報告から
+                    // plugin 側の状況を辿る手掛かりになる。
+                    tracing::debug!(
+                        request_id = ?request.request_id,
+                        operation = %request.operation,
+                        code = %error.code,
+                        "読み取り要求を失敗として返します"
+                    );
                 }
+
+                let response = response_envelope(
+                    negotiated_version,
+                    request.request_id,
+                    lifecycle.instance_id(),
+                    read_response.outcome,
+                );
+                send_response(stream, &response, read_response.deadline)?;
             }
         }
     }
@@ -436,6 +438,53 @@ fn decide_send(
     match resolve_request_deadline(now, now_unix_ms, WRITE_TIMEOUT, deadline_unix_ms) {
         RequestDeadline::Within(deadline) => SendDecision::Send(deadline),
         RequestDeadline::Exceeded => SendDecision::Discard,
+    }
+}
+
+/// 読み取りを終えた時点で決まる応答の内容と送信期限。
+struct ReadResponse {
+    /// 応答へ載せる内容。
+    outcome: Result<Value, ErrorObject>,
+    /// 応答送信の期限。
+    deadline: Instant,
+    /// 期限超過により読み取り結果を捨てたか。監査ログを残す条件に使う。
+    discarded: bool,
+}
+
+/// 読み取りの結果を、期限の判定と突き合わせて応答の形にまとめる。
+///
+/// 期限内であれば結果をそのまま送る。期限を超過していた場合に捨てるのは、
+/// 成功した読み取り結果だけである。読み取りが失敗していた場合は捨てる結果が
+/// 無く、期限超過へ置き換えると失敗の理由も再試行の可否も書き換わってしまう
+/// ため、失敗をそのまま返す。
+///
+/// 期限を超過した後の送信は、要求の期限ではなくサーバー側の送信上限で区切る。
+/// 超過を伝える応答まで当の期限で打ち切ると、要求元は理由を得られない。
+fn resolve_read_response(
+    now: Instant,
+    now_unix_ms: i64,
+    read_deadline: RequestDeadline,
+    deadline_unix_ms: Option<u64>,
+    outcome: Result<Value, ErrorObject>,
+) -> ReadResponse {
+    match decide_send(now, now_unix_ms, read_deadline, deadline_unix_ms) {
+        SendDecision::Send(deadline) => ReadResponse {
+            outcome,
+            deadline,
+            discarded: false,
+        },
+        SendDecision::Discard => match outcome {
+            Ok(_) => ReadResponse {
+                outcome: Err(timeout_after_execution()),
+                deadline: now + WRITE_TIMEOUT,
+                discarded: true,
+            },
+            Err(error) => ReadResponse {
+                outcome: Err(error),
+                deadline: now + WRITE_TIMEOUT,
+                discarded: false,
+            },
+        },
     }
 }
 
@@ -1676,5 +1725,73 @@ mod tests {
             decide_send(now, NOW_UNIX_MS, RequestDeadline::Exceeded, Some(0)),
             SendDecision::Send(now + WRITE_TIMEOUT)
         );
+    }
+
+    /// 読み取りの期限を使い切った状態。結果は捨てる判定になる。
+    fn spent_read_deadline(now: Instant) -> RequestDeadline {
+        RequestDeadline::Within(now - Duration::from_millis(1))
+    }
+
+    #[test]
+    fn successful_result_is_replaced_by_timeout_when_discarded() {
+        let now = Instant::now();
+        let response = resolve_read_response(
+            now,
+            NOW_UNIX_MS,
+            spent_read_deadline(now),
+            None,
+            Ok(json!({ "scene": { "id": SCENE_ID } })),
+        );
+
+        let error = response.outcome.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert!(error.retryable);
+        assert!(response.discarded);
+        assert_eq!(response.deadline, now + WRITE_TIMEOUT);
+    }
+
+    #[test]
+    fn failure_keeps_its_reason_when_the_deadline_passed() {
+        // 読み取りが失敗していれば捨てる結果は無い。期限超過で上書きすると、
+        // 再試行しても解消しない理由が再試行可能な timeout に化ける。
+        let now = Instant::now();
+        for original in [
+            error_object(ErrorCode::InvalidArgument, "params の解釈に失敗しました"),
+            error_object(ErrorCode::HostBusy, "起動処理中です"),
+            error_object(ErrorCode::EditBlocked, "再生中です"),
+        ] {
+            let response = resolve_read_response(
+                now,
+                NOW_UNIX_MS,
+                spent_read_deadline(now),
+                None,
+                Err(original.clone()),
+            );
+
+            let error = response.outcome.unwrap_err();
+            assert_eq!(error, original, "失敗の理由が書き換わりました");
+            assert!(
+                !response.discarded,
+                "捨てる結果が無いのに破棄として扱われました"
+            );
+            assert_eq!(response.deadline, now + WRITE_TIMEOUT);
+        }
+    }
+
+    #[test]
+    fn outcome_is_kept_within_the_deadline() {
+        let now = Instant::now();
+        let result = json!({ "items": [] });
+        let response = resolve_read_response(
+            now,
+            NOW_UNIX_MS,
+            RequestDeadline::Within(now + Duration::from_secs(4)),
+            Some((NOW_UNIX_MS + 3_000) as u64),
+            Ok(result.clone()),
+        );
+
+        assert_eq!(response.outcome.unwrap(), result);
+        assert!(!response.discarded);
+        assert_eq!(response.deadline, now + Duration::from_secs(3));
     }
 }
