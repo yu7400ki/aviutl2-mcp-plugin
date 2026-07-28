@@ -2,6 +2,7 @@
 //!
 //! `starting` → `ready` → (`busy` ↔ `ready`) → `draining` → descriptor 削除
 //! の遷移を管理し、各遷移ごとに registry descriptor を原子的に更新する。
+//! `ready` を経ずに終了する場合に備え `starting` → `draining` も許可する。
 
 use crate::registry::RegistryWriter;
 use anyhow::{Context, Result};
@@ -83,9 +84,21 @@ impl Lifecycle {
     ///
     /// 許可される遷移:
     /// - `starting` → `ready`
+    /// - `starting` → `draining`
     /// - `ready` ↔ `busy`
     /// - `ready` → `draining`
     /// - `busy` → `draining`
+    ///
+    /// `starting` から直接 `draining` へ遷移できるのは、初回 project-load
+    /// （= `ready` への遷移契機）を迎える前にホストが終了する場合があるためである。
+    /// 終了処理は state を `draining` にして新規要求を拒否したうえで pipe を閉じ
+    /// descriptor を削除する手順に統一されており、この手順は起動直後の終了でも
+    /// 同じく成立しなければならない。
+    ///
+    /// `busy` は再生・保存・キュー飽和を表す state だが、現時点では遷移させる
+    /// 契機が存在しない。提供する operation は handshake と ping のみで SDK の
+    /// 長時間処理を伴わず、キュー飽和による backpressure は read/edit 導入時に
+    /// 併せて導入されるためである。遷移規則のみ先に定義しておく。
     pub fn transition_to(&self, new_state: InstanceState) -> Result<()> {
         if self.shutdown.load(Ordering::Acquire) {
             anyhow::bail!("shutdown 済みのため状態遷移できません");
@@ -98,7 +111,8 @@ impl Lifecycle {
             (InstanceState::Starting, InstanceState::Ready) => true,
             (InstanceState::Ready, InstanceState::Busy)
             | (InstanceState::Busy, InstanceState::Ready) => true,
-            (InstanceState::Ready, InstanceState::Draining)
+            (InstanceState::Starting, InstanceState::Draining)
+            | (InstanceState::Ready, InstanceState::Draining)
             | (InstanceState::Busy, InstanceState::Draining) => true,
             _ if old_state == new_state => return Ok(()),
             _ => false,
@@ -133,7 +147,8 @@ impl Lifecycle {
 
     /// 終了処理を開始する。
     ///
-    /// `ready`/`busy` → `draining` へ遷移し、新規要求を拒否する。
+    /// `starting`/`ready`/`busy` → `draining` へ遷移し、新規要求を拒否する。
+    /// 遷移後は `shutdown` フラグにより以降の状態遷移とプロジェクト情報更新を拒む。
     pub fn shutdown(&self) -> Result<()> {
         // draining 遷移を先に行い、以降の新規要求を拒否する。
         let result = self.transition_to(InstanceState::Draining);
@@ -253,6 +268,20 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_before_first_project_load_transitions_to_draining() {
+        let (writer, dir) = temp_writer();
+        let (id, secret, pid, created_at, hwnd, started_at) = sample_identity();
+        let lifecycle =
+            Lifecycle::new(id, secret, pid, created_at, hwnd, started_at, writer).unwrap();
+        assert_eq!(lifecycle.state(), InstanceState::Starting);
+
+        lifecycle.shutdown().unwrap();
+        assert_eq!(lifecycle.state(), InstanceState::Draining);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn mark_gone_removes_descriptor() {
         let (writer, dir) = temp_writer();
         let (id, secret, pid, created_at, hwnd, started_at) = sample_identity();
@@ -295,7 +324,7 @@ mod tests {
             Lifecycle::new(id, secret, pid, created_at, hwnd, started_at, writer).unwrap();
 
         assert!(lifecycle.transition_to(InstanceState::Busy).is_err());
-        assert!(lifecycle.transition_to(InstanceState::Draining).is_err());
+        assert!(lifecycle.transition_to(InstanceState::Gone).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
