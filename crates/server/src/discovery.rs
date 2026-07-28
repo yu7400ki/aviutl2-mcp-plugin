@@ -3,7 +3,7 @@
 //! registry ディレクトリを列挙し、descriptor 検証 → PID 作成時刻 → pipe 接続 →
 //! handshake → ping の順で生存確認を行う。
 
-use crate::identity::get_process_identity;
+use crate::identity::{ProcessLookup, lookup_process};
 use crate::pipe_client::{PipeClient, PipeClientError};
 use aviutl2_mcp_core::{
     InstanceDescriptor, InstanceId, InstanceInfo, InstanceProject, InstanceState, ProtocolVersion,
@@ -223,9 +223,11 @@ fn discover_candidate(path: &Path, config: DiscoveryConfig) -> DiscoveryResult {
     };
 
     // PID とプロセス作成時刻。
-    let process_identity = match get_process_identity(descriptor.pid) {
-        Some(id) => id,
-        None => {
+    let process_identity = match lookup_process(descriptor.pid) {
+        ProcessLookup::Found(identity) => identity,
+        // 生存を確認できなければ一覧には出さない。不在か判定不能かは
+        // descriptor を削除してよいかの判断にのみ影響する。
+        ProcessLookup::Absent | ProcessLookup::Undetermined => {
             return DiscoveryResult::Excluded {
                 instance_id: Some(descriptor.instance_id),
                 reason: ExclusionReason::ProcessIdentityMismatch,
@@ -387,10 +389,6 @@ fn should_attempt_cleanup(reason: ExclusionReason) -> bool {
 ///
 /// 削除直前に再読み込み・再検証し、対応するインスタンスの不在を確認できた場合のみ削除する。
 fn try_cleanup_stale_descriptor(path: &Path) -> std::io::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-
     if !instance_proven_absent(path) {
         debug!(path = %path.display(), "descriptor revalidated; skipped cleanup");
         return Ok(());
@@ -409,13 +407,23 @@ fn instance_proven_absent(path: &Path) -> bool {
     let Ok(descriptor) = validate_descriptor_file(path) else {
         return false;
     };
-    match get_process_identity(descriptor.pid) {
-        // PID に対応するプロセスが存在しない。
-        None => true,
+    absence_confirmed(
+        lookup_process(descriptor.pid),
+        &descriptor.process_created_at,
+    )
+}
+
+/// プロセス照会結果から、descriptor のインスタンスの不在を確定できるか判定する。
+fn absence_confirmed(lookup: ProcessLookup, descriptor_created_at: &str) -> bool {
+    match lookup {
+        // PID に対応するプロセスが存在しないことを確定できた。
+        ProcessLookup::Absent => true,
+        // 存在の有無を判定できていないため、不在の根拠にはならない。
+        ProcessLookup::Undetermined => false,
         // プロセスは存在するが、作成時刻が一致しなければ PID 再利用であり
         // descriptor のインスタンスではない。一致するなら稼働中の可能性がある。
-        Some(identity) => {
-            !process_created_at_matches(&descriptor.process_created_at, identity.created_at)
+        ProcessLookup::Found(identity) => {
+            !process_created_at_matches(descriptor_created_at, identity.created_at)
         }
     }
 }
@@ -434,8 +442,16 @@ mod tests {
         dir
     }
 
+    /// 自プロセスの識別情報。
+    fn self_identity() -> crate::identity::ProcessIdentity {
+        match lookup_process(std::process::id()) {
+            ProcessLookup::Found(identity) => identity,
+            other => panic!("自身の PID は照会できる: {other:?}"),
+        }
+    }
+
     fn sample_descriptor(id: InstanceId) -> InstanceDescriptor {
-        let identity = get_process_identity(std::process::id()).unwrap();
+        let identity = self_identity();
         InstanceDescriptor {
             schema_version: 1,
             protocol_version: ProtocolVersion::CURRENT,
@@ -456,7 +472,7 @@ mod tests {
 
     #[test]
     fn process_created_at_matches_self() {
-        let identity = get_process_identity(std::process::id()).unwrap();
+        let identity = self_identity();
         assert!(process_created_at_matches(
             &identity.created_at.to_rfc3339(),
             identity.created_at
@@ -465,7 +481,7 @@ mod tests {
 
     #[test]
     fn process_created_at_mismatch_outside_tolerance() {
-        let identity = get_process_identity(std::process::id()).unwrap();
+        let identity = self_identity();
         let different = identity.created_at + chrono::Duration::seconds(10);
         assert!(!process_created_at_matches(
             &identity.created_at.to_rfc3339(),
@@ -748,6 +764,30 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undetermined_process_lookup_is_not_absence() {
+        let identity = self_identity();
+        let created_at = identity.created_at.to_rfc3339();
+
+        assert!(
+            !absence_confirmed(ProcessLookup::Undetermined, &created_at),
+            "存在を判定できない場合は不在と扱わない"
+        );
+        assert!(absence_confirmed(ProcessLookup::Absent, &created_at));
+        assert!(
+            !absence_confirmed(ProcessLookup::Found(identity), &created_at),
+            "作成時刻が一致するプロセスは稼働中とみなす"
+        );
+
+        let reused = crate::identity::ProcessIdentity {
+            created_at: identity.created_at + chrono::Duration::seconds(10),
+        };
+        assert!(
+            absence_confirmed(ProcessLookup::Found(reused), &created_at),
+            "作成時刻が一致しないプロセスは PID 再利用であり不在を確定できる"
+        );
     }
 
     #[test]
