@@ -217,11 +217,17 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
 
 /// 対象の更新をプロジェクト状態へ反映する。
 ///
-/// イベントハンドラはホストのグローバル write lock を保持したまま呼ばれるため、
-/// 行えるのは atomic な状態更新と変更の記録だけである。SDK の read/edit section
-/// 呼び出しと descriptor の書き込みは、この制約に反するため行わない。
+/// `event_*` ハンドラはホストのイベント用スレッドから、plugin 本体の write lock を
+/// 保持したまま呼ばれる。イベント処理からは SDK の編集セクションを利用できず、
+/// ファイル I/O を挟めばホストの編集操作をその間だけ止めることになる。そのため
+/// ここで行えるのは atomic な状態更新と変更の記録だけであり、SDK の read/edit
+/// section 呼び出しと descriptor の書き込みは行わない。
 /// ハンドラ本体をプロジェクト状態だけを受け取る関数へ切り出し、ハンドラ側を
 /// 委譲だけにすることで、制約を満たすべき範囲をこの関数に閉じ込めている。
+///
+/// この制約が掛かるのは `event_*` ハンドラだけである。プロジェクトのロード・
+/// 保存ハンドラはイベント用スレッドから呼ばれず、境界ごとに一度しか発生しない
+/// ため、descriptor の更新は [`AviUtl2McpPlugin::sync_project`] で行う。
 #[cfg(windows)]
 fn apply_object_update(project_state: &project::ProjectState) {
     project_state.on_object_updated();
@@ -251,6 +257,9 @@ impl AviUtl2McpPlugin {
     ///
     /// ロード時と保存時で異なるのは epoch を再発行するかどうかだけであり、
     /// descriptor への反映内容は共通である。
+    ///
+    /// descriptor の書き込みを伴うため、呼び出せるのはプロジェクトのロード・
+    /// 保存ハンドラからだけである。`event_*` ハンドラから呼んではならない。
     fn sync_project(&self, path: Option<std::path::PathBuf>, boundary: ProjectBoundary) {
         if let Some(project_state) = &self.project_state {
             let path = path.as_ref().map(|path| path.to_string_lossy());
