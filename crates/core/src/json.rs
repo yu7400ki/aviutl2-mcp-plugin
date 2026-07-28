@@ -27,16 +27,6 @@ pub enum JsonStrictError {
     StructureError(String),
 }
 
-/// `serde_json` 由来のエラーは素の構文エラーとして扱う。
-///
-/// strict 規則（重複 key / 非有限数）による拒否の種別は検出時点で記録した
-/// [`StrictReject`] から決めるため、この変換はエラーメッセージを解析しない。
-impl From<serde_json::Error> for JsonStrictError {
-    fn from(e: serde_json::Error) -> Self {
-        JsonStrictError::ParseError(e.to_string())
-    }
-}
-
 impl From<JsonStrictError> for serde_json::Error {
     fn from(e: JsonStrictError) -> Self {
         serde::de::Error::custom(e.to_string())
@@ -150,7 +140,11 @@ impl<'de> Visitor<'de> for StrictVisitor<'_> {
     where
         E: de::Error,
     {
-        match serde_json::Number::from_f64(v).filter(|_| v.is_finite()) {
+        // JSON テキスト経由では、NaN / Infinity は字句解析で、表現範囲外の指数は
+        // 数値変換で拒否されるため、非有限値がここへ渡ることはない。
+        // JSON 以外の Deserializer から値を受ける場合に備えた防御的分岐である。
+        // `Number::from_f64` は NaN・無限大に対して `None` を返す。
+        match serde_json::Number::from_f64(v) {
             Some(number) => Ok(serde_json::Value::Number(number)),
             None => {
                 record_reject(self.reject, StrictReject::NonFiniteFloat);
@@ -251,6 +245,18 @@ mod tests {
     fn parse_json_rejects_nested_duplicate_key() {
         let result = parse_json(br#"{"outer":{"a":1,"a":2}}"#);
         assert!(matches!(result, Err(JsonStrictError::DuplicateKey(_))));
+    }
+
+    #[test]
+    fn parse_json_rejects_duplicate_key_inside_array() {
+        let result = parse_json(br#"[{"a":1,"a":2}]"#);
+        assert_eq!(result, Err(JsonStrictError::DuplicateKey("a".to_string())));
+    }
+
+    #[test]
+    fn parse_json_rejects_duplicate_key_nested_under_arrays() {
+        let result = parse_json(br#"{"x":[1,{"y":[{"z":1,"z":2}]}]}"#);
+        assert_eq!(result, Err(JsonStrictError::DuplicateKey("z".to_string())));
     }
 
     #[test]
