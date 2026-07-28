@@ -230,15 +230,18 @@ fn run_request_loop(
             continue;
         }
 
-        let Some(operation) = classify_operation(&request.operation) else {
-            send_error(
-                stream,
-                negotiated_version,
-                request.request_id,
-                request.instance_id,
-                error_object(ErrorCode::UnsupportedOperation, "未対応の operation です"),
-            )?;
-            continue;
+        let operation = match classify_operation(&request.operation) {
+            Ok(operation) => operation,
+            Err(error) => {
+                send_error(
+                    stream,
+                    negotiated_version,
+                    request.request_id,
+                    request.instance_id,
+                    error,
+                )?;
+                continue;
+            }
         };
 
         // 期限は operation の実行に対する制約であり、要求自体の妥当性検証
@@ -349,19 +352,24 @@ enum ReadOperation {
     ListAvailableEffects,
 }
 
-/// operation 名を処理経路へ対応付ける。未対応の名前は `None`。
-fn classify_operation(name: &str) -> Option<Operation> {
+/// operation 名を処理経路へ対応付ける。
+fn classify_operation(name: &str) -> Result<Operation, ErrorObject> {
     let operation = match name {
-        "ping" => return Some(Operation::Ping),
+        "ping" => return Ok(Operation::Ping),
         OPERATION_GET_EDIT_INFO => ReadOperation::GetEditInfo,
         OPERATION_GET_CURRENT_SCENE => ReadOperation::GetCurrentScene,
         OPERATION_LIST_LAYERS => ReadOperation::ListLayers,
         OPERATION_LIST_OBJECTS => ReadOperation::ListObjects,
         OPERATION_GET_OBJECT => ReadOperation::GetObject,
         OPERATION_LIST_AVAILABLE_EFFECTS => ReadOperation::ListAvailableEffects,
-        _ => return None,
+        _ => {
+            return Err(error_object(
+                ErrorCode::UnsupportedOperation,
+                "未対応の operation です",
+            ));
+        }
     };
-    Some(Operation::Read(operation))
+    Ok(Operation::Read(operation))
 }
 
 /// 受付判定と期限判定を通してから読み取りを実行する。
