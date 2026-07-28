@@ -118,15 +118,16 @@ impl ExclusionReason {
     /// 応答へ載せるエラーコードを返す。
     pub fn error_code(&self) -> ErrorCode {
         match self {
-            // descriptor を解釈できていないため、対象の状態を何も主張できない。
-            ExclusionReason::InvalidDescriptor | ExclusionReason::InternalError => {
-                ErrorCode::InternalError
-            }
-            ExclusionReason::ProtocolMismatch => ErrorCode::ProtocolMismatch,
-            // descriptor は解釈できたが、指す先が生きていない・届かない。
-            ExclusionReason::ProcessIdentityMismatch
+            // panic 捕捉のみが server 自身の不具合であり、呼び出し側に取れる手が無い。
+            ExclusionReason::InternalError => ErrorCode::InternalError,
+            // 残りは descriptor が指す対象の状態を表す。読み取れない descriptor には
+            // 書き換え途中の共有違反のような一過性の失敗も含まれるため、
+            // 一覧の取り直しで解消し得る stale として扱う。
+            ExclusionReason::InvalidDescriptor
+            | ExclusionReason::ProcessIdentityMismatch
             | ExclusionReason::PipeUnreachable
             | ExclusionReason::PingFailed => ErrorCode::InstanceStale,
+            ExclusionReason::ProtocolMismatch => ErrorCode::ProtocolMismatch,
             ExclusionReason::AuthenticationFailed => ErrorCode::AuthenticationFailed,
         }
     }
@@ -805,7 +806,7 @@ mod tests {
     #[test]
     fn exclusion_reason_maps_to_error_code() {
         let cases = [
-            (ExclusionReason::InvalidDescriptor, ErrorCode::InternalError),
+            (ExclusionReason::InvalidDescriptor, ErrorCode::InstanceStale),
             (ExclusionReason::InternalError, ErrorCode::InternalError),
             (
                 ExclusionReason::ProtocolMismatch,
@@ -976,7 +977,12 @@ mod tests {
             ),
             "実際のエラー: {error:?}"
         );
-        assert_eq!(error.error_code(), ErrorCode::InternalError);
+        // 読み取れない descriptor は一覧の取り直しで解消し得るため stale とする。
+        assert_eq!(error.error_code(), ErrorCode::InstanceStale);
+        assert!(
+            error.error_code().default_retryable(),
+            "取り直しを促せるようリトライ可能なコードにする"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
