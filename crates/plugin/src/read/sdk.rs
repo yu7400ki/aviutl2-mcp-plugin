@@ -230,13 +230,18 @@ impl SdkSceneReader<'_> {
 
     /// オブジェクトに付与された effect を所有型へ写す。
     ///
-    /// effect の列挙は 0 件でも失敗を返し、付与が無い状態と区別できない。
-    /// 失敗を読み取り全体の失敗にすると effect の無いオブジェクトを一切
-    /// 読めなくなるため、空の列として扱う。
+    /// 一覧の取得は effect が 0 件でも失敗を返すため、失敗した場合は先頭 effect を
+    /// 引いて 0 件と一覧取得の失敗を切り分ける。先頭が引けるなら effect は存在し、
+    /// 一覧の取得だけが失敗している。空の列を返すと「effect が付いていない」という
+    /// 誤った主張になるため、失敗として返す。
     fn effects_of(&self, object: ObjectHandle) -> Result<Vec<HostEffect>, ReadError> {
-        let Ok(handles) = self.section.get_effects(object) else {
-            tracing::debug!("effect の列挙結果が空か取得に失敗しました");
-            return Ok(Vec::new());
+        let handles = match self.section.get_effects(object) {
+            Ok(handles) => handles,
+            Err(_) if self.section.get_first_effect(object).is_ok() => {
+                tracing::warn!("effect の一覧を取得できませんでした");
+                return Err(sdk("get_effect_list"));
+            }
+            Err(_) => return Ok(Vec::new()),
         };
 
         let mut seen: HashMap<String, usize> = HashMap::new();
