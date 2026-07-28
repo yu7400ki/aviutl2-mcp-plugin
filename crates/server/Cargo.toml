@@ -14,6 +14,15 @@ path = "src/lib.rs"
 name = "aviutl2-mcp-server"
 path = "src/main.rs"
 
+# 実機（AviUtl2 起動）を要する受け入れ確認。
+# example ターゲットは `cargo test` でビルドのみ行われ実行されないため、
+# `cargo test --workspace --all-features` がホストを起動することはない。
+# 一方 `cargo clippy --workspace --all-targets --all-features` の検査対象には含まれる。
+# 実行は `cargo run -p aviutl2-mcp-server --example live_host_acceptance`。
+[[example]]
+name = "live_host_acceptance"
+path = "examples/live_host_acceptance.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 aviutl2-mcp-core = { workspace = true }
