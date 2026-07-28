@@ -542,6 +542,8 @@ fn await_connection(pipe: &OwnedPipeHandle, stop: &StopSignal) -> Result<Connect
                     op.cancel_and_drain();
                     Ok(Connection::Stopped)
                 }
+                // 無期限待機を指定しているため到達しない。待機結果の分類が
+                // 変わっても待受を落とさないための防御的な分岐。
                 WaitOutcome::TimedOut => Ok(Connection::Retry {
                     reason: "接続待ちが無期限待機で期限切れになりました".to_string(),
                 }),
@@ -588,9 +590,9 @@ mod tests {
             id,
             AuthSecret::generate(),
             std::process::id(),
-            "2026-01-01T00:00:00Z".to_string(),
+            "2026-01-01T00:00:00.0000000Z".to_string(),
             Some("0x0".to_string()),
-            "2026-01-01T00:00:00Z".to_string(),
+            "2026-01-01T00:00:00.0000000Z".to_string(),
             writer,
         )
         .unwrap();

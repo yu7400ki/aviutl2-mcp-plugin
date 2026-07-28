@@ -214,9 +214,9 @@ mod tests {
             InstanceId::new_v4(),
             AuthSecret::generate(),
             std::process::id(),
-            "2026-01-01T00:00:00Z".to_string(),
+            "2026-01-01T00:00:00.0000000Z".to_string(),
             Some("0x0".to_string()),
-            "2026-01-01T00:00:00Z".to_string(),
+            "2026-01-01T00:00:00.0000000Z".to_string(),
         )
     }
 
