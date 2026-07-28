@@ -134,6 +134,11 @@ impl ResolveInstanceError {
 ///
 /// `client` は handshake と ping を通過した認証済み接続であり、drop すると
 /// pipe が閉じる。以降の operation を送る呼び出し側が必要な間だけ保持する。
+///
+/// [`PipeClient`] は生の pipe ハンドルを持つため `!Send` かつ `!Sync` であり、
+/// 非同期タスクの await をまたいで持ち越せない。解決から要求送信、drop までを
+/// 単一のブロッキング実行へ閉じ込めるか、接続を所有する専任スレッドを立てて
+/// チャネル越しに要求を渡すこと。
 pub struct ResolvedInstance {
     /// 認証済みの pipe 接続。
     pub client: PipeClient,

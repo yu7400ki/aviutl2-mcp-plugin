@@ -17,7 +17,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, HANDLE};
-use windows::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX};
+use windows::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX, ReadFile};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
     PIPE_TYPE_BYTE,
@@ -247,9 +247,9 @@ fn server_loop(handle: HANDLE, behavior: MockBehavior, stop_event: HANDLE) {
     );
     assert!(verify_mac(&expected_client_mac, &m3.client_mac));
 
-    // 要求ループ。切断・EOF・読み取り失敗のいずれでも抜ける。
+    // 要求ループ。停止要求・切断・EOF・読み取り失敗のいずれでも抜ける。
     loop {
-        let Some(body) = read_frame(handle, io_deadline()) else {
+        let Some(body) = read_frame_until_stop(handle, stop_event) else {
             return;
         };
         let Ok(request) = serde_json::from_slice::<RequestEnvelope>(&body) else {
@@ -322,6 +322,67 @@ fn accept_connection(handle: HANDLE, stop_event: HANDLE) -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// 次の要求が届くまで待ち、1 フレームを読み取る。
+///
+/// 要求はいつ来るとも限らないため、待ちには期限を置かず停止要求で打ち切る。
+/// これにより、クライアントが接続したままでも server を即座に停止できる。
+/// フレームの先頭が届いた後は残りが続けて届くため、通常の期限で読み取る。
+fn read_frame_until_stop(handle: HANDLE, stop_event: HANDLE) -> Option<Vec<u8>> {
+    let mut length_buf = [0u8; 4];
+    if !read_exact_until_stop(handle, &mut length_buf, stop_event) {
+        return None;
+    }
+    let length = u32::from_le_bytes(length_buf) as usize;
+    if length == 0 || length > aviutl2_mcp_core::MAX_FRAME_SIZE as usize {
+        return None;
+    }
+    let mut body = vec![0u8; length];
+    win_io::read_exact(handle, &mut body, io_deadline()).ok()?;
+    Some(body)
+}
+
+/// 停止要求を監視しながら `buf` を満たすまで読み取る。
+///
+/// 停止要求・切断・読み取り失敗のいずれでも `false` を返す。
+fn read_exact_until_stop(handle: HANDLE, buf: &mut [u8], stop_event: HANDLE) -> bool {
+    let mut total = 0usize;
+    while total < buf.len() {
+        // SAFETY: `handle` は MockPipeServer が所有し、スレッドの join 後にのみ閉じられる。
+        // `op` はループ本体を出るときに drop されるため handle より長生きしない。
+        let Ok(mut op) = (unsafe { OverlappedOp::new(handle) }) else {
+            return false;
+        };
+        if op.begin().is_err() {
+            return false;
+        }
+        let slice = &mut buf[total..];
+        // SAFETY: `slice` は本関数のスコープで生存し、`op` の Drop が I/O 完了を
+        // 待ち合わせるため、カーネルの書き込み先は常に有効である。
+        let issued = unsafe { ReadFile(handle, Some(slice), None, Some(op.as_mut_ptr())) };
+        let issue = match op.classify(issued) {
+            Ok(issue) => issue,
+            Err(_) => return false,
+        };
+        if issue == IoIssue::Pending
+            && !matches!(
+                win_io::wait_any(&[op.event(), stop_event], None),
+                WaitAnyOutcome::Signaled(0)
+            )
+        {
+            // 停止要求または待機失敗。保留中の読み取りは op の Drop がキャンセルする。
+            return false;
+        }
+        let Ok(transferred) = op.await_completion(io_deadline()) else {
+            return false;
+        };
+        if transferred == 0 {
+            return false;
+        }
+        total += transferred as usize;
+    }
+    true
 }
 
 fn read_frame(handle: HANDLE, deadline: Instant) -> Option<Vec<u8>> {
@@ -472,6 +533,36 @@ fn resolve_instance_reports_authentication_failed_for_wrong_secret() {
         "登録済みだが検証に落ちた扱いになる: {error:?}"
     );
     assert_eq!(error.error_code(), ErrorCode::AuthenticationFailed);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mock_server_stops_while_client_is_connected() {
+    let dir = temp_registry_dir();
+    let id = InstanceId::new_v4();
+    let server = MockPipeServer::start(
+        id,
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+    );
+    server.write_descriptor(&dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    // 接続を保持したまま server を止める。要求待ちが停止要求で打ち切られなければ
+    // 読み取りの期限まで join がブロックする。
+    let _resolved = resolve_instance(&dir, id, DiscoveryConfig::default())
+        .expect("生存中のインスタンスは解決できる");
+
+    let started = Instant::now();
+    drop(server);
+    assert!(
+        started.elapsed() < IO_TIMEOUT / 2,
+        "停止に {}ms かかりました",
+        started.elapsed().as_millis()
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
