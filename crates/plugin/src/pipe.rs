@@ -1237,6 +1237,45 @@ mod tests {
         cleanup(dir);
     }
 
+    /// 起動処理中に拒否された読み取りが、初回のプロジェクトロード後に同じ
+    /// 読み取り口で成功することを確かめる。
+    #[test]
+    fn read_succeeds_after_the_first_project_load() {
+        let (lifecycle, dir) = temp_lifecycle_starting();
+        let project_state = ProjectState::new();
+        let server = start_server_with(&lifecycle, Arc::new(StubReadAdapter));
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+
+        let error = expect_error(
+            exchange_read(&client, id, version, "get_edit_info"),
+            "起動処理中の読み取り",
+        );
+        assert_eq!(error.code, aviutl2_mcp_core::ErrorCode::HostBusy);
+
+        crate::apply_project_load(
+            Some(&lifecycle),
+            Some(&project_state),
+            Some(std::path::Path::new(r"C:\projects\sample.aup2")),
+        );
+
+        match exchange_read(&client, id, version, "get_edit_info").result {
+            aviutl2_mcp_core::ResponseResult::Ok { result } => {
+                assert_eq!(result["scene"]["id"], STUB_SCENE_ID);
+            }
+            aviutl2_mcp_core::ResponseResult::Err { error } => {
+                panic!("プロジェクトロード後も読み取りが拒否されました: {error:?}")
+            }
+        }
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
     /// 終了処理中は要求を読む前に接続が閉じられることを確かめる。
     ///
     /// 要求元が観測するのはエラー応答ではなく切断であり、インスタンスを

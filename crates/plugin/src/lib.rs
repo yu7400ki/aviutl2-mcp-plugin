@@ -182,16 +182,19 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
     }
 
     fn on_project_load(&mut self, project: &mut aviutl2::generic::ProjectFile) {
-        if let Some(lifecycle) = &self.lifecycle {
-            let _ = lifecycle.transition_to(aviutl2_mcp_core::state::InstanceState::Ready);
-        }
-        // ロードはプロジェクトが切り替わる境界であり、新しい epoch を発行する。
-        self.sync_project(project.get_path(), ProjectBoundary::Renewed);
+        apply_project_load(
+            self.lifecycle.as_ref(),
+            self.project_state.as_deref(),
+            project.get_path().as_deref(),
+        );
     }
 
     fn on_project_save(&mut self, project: &mut aviutl2::generic::ProjectFile) {
-        // 保存は同一プロジェクトに対する操作であり、epoch を維持する。
-        self.sync_project(project.get_path(), ProjectBoundary::Retained);
+        apply_project_save(
+            self.lifecycle.as_ref(),
+            self.project_state.as_deref(),
+            project.get_path().as_deref(),
+        );
     }
 
     fn on_clear_cache(&mut self, _edit_section: &aviutl2::generic::EditSection) {
@@ -253,31 +256,67 @@ enum ProjectBoundary {
     Retained,
 }
 
+/// プロジェクトのロードを反映する。
+///
+/// 初回のロードが readiness の境界であり、ここでインスタンスは読み取りを
+/// 受け付けられる状態になる。ロードはプロジェクトが切り替わる境界でもあるため、
+/// 新しい epoch を発行する。
+///
+/// ハンドラ本体を、ハンドラが持つ状態だけを受け取る関数へ切り出し、ハンドラ側を
+/// 委譲だけにすることで、境界の扱いをこの関数に閉じ込めている。
 #[cfg(windows)]
-impl AviUtl2McpPlugin {
-    /// project handler が確定したパスを read 用の状態と descriptor へ反映する。
-    ///
-    /// ロード時と保存時で異なるのは epoch を再発行するかどうかだけであり、
-    /// descriptor への反映内容は共通である。
-    ///
-    /// descriptor の書き込みを伴うため、呼び出せるのはプロジェクトのロード・
-    /// 保存ハンドラからだけである。`event_*` ハンドラから呼んではならない。
-    fn sync_project(&self, path: Option<std::path::PathBuf>, boundary: ProjectBoundary) {
-        if let Some(project_state) = &self.project_state {
-            let path = path.as_ref().map(|path| path.to_string_lossy());
-            match boundary {
-                ProjectBoundary::Renewed => project_state.on_project_load(path.as_deref()),
-                ProjectBoundary::Retained => project_state.on_project_save(path.as_deref()),
-            }
-        }
+fn apply_project_load(
+    lifecycle: Option<&Arc<lifecycle::Lifecycle>>,
+    project_state: Option<&project::ProjectState>,
+    path: Option<&std::path::Path>,
+) {
+    if let Some(lifecycle) = lifecycle {
+        let _ = lifecycle.transition_to(aviutl2_mcp_core::state::InstanceState::Ready);
+    }
+    sync_project(lifecycle, project_state, path, ProjectBoundary::Renewed);
+}
 
-        let Some(lifecycle) = &self.lifecycle else {
-            return;
-        };
+/// プロジェクトの保存を反映する。
+///
+/// 保存は同一プロジェクトに対する操作であり、epoch を維持する。readiness の
+/// 境界でもないため、状態遷移は行わない。
+#[cfg(windows)]
+fn apply_project_save(
+    lifecycle: Option<&Arc<lifecycle::Lifecycle>>,
+    project_state: Option<&project::ProjectState>,
+    path: Option<&std::path::Path>,
+) {
+    sync_project(lifecycle, project_state, path, ProjectBoundary::Retained);
+}
 
-        if let Err(e) = lifecycle.update_project(path.as_deref().map(descriptor_project)) {
-            tracing::error!("プロジェクト情報の更新に失敗しました: {e:?}");
+/// project handler が確定したパスを read 用の状態と descriptor へ反映する。
+///
+/// ロード時と保存時で異なるのは epoch を再発行するかどうかだけであり、
+/// descriptor への反映内容は共通である。
+///
+/// descriptor の書き込みを伴うため、呼び出せるのはプロジェクトのロード・
+/// 保存ハンドラからだけである。`event_*` ハンドラから呼んではならない。
+#[cfg(windows)]
+fn sync_project(
+    lifecycle: Option<&Arc<lifecycle::Lifecycle>>,
+    project_state: Option<&project::ProjectState>,
+    path: Option<&std::path::Path>,
+    boundary: ProjectBoundary,
+) {
+    if let Some(project_state) = project_state {
+        let path = path.map(|path| path.to_string_lossy());
+        match boundary {
+            ProjectBoundary::Renewed => project_state.on_project_load(path.as_deref()),
+            ProjectBoundary::Retained => project_state.on_project_save(path.as_deref()),
         }
+    }
+
+    let Some(lifecycle) = lifecycle else {
+        return;
+    };
+
+    if let Err(e) = lifecycle.update_project(path.map(descriptor_project)) {
+        tracing::error!("プロジェクト情報の更新に失敗しました: {e:?}");
     }
 }
 
@@ -524,6 +563,82 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 初回のプロジェクトロードが readiness の境界であることを確かめる。
+    ///
+    /// 遷移と同時にプロジェクト境界も更新されるため、旧プロジェクトを指す
+    /// セレクターは epoch の照合で拒否されるようになる。
+    #[test]
+    fn project_load_makes_the_instance_ready_and_renews_the_boundary() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let project_state = project::ProjectState::new();
+        project_state.on_object_updated();
+        let epoch = project_state.epoch();
+        assert_eq!(
+            lifecycle.state(),
+            aviutl2_mcp_core::state::InstanceState::Starting
+        );
+
+        apply_project_load(
+            Some(&lifecycle),
+            Some(&project_state),
+            Some(std::path::Path::new(r"C:\projects\sample.aup2")),
+        );
+
+        assert_eq!(
+            lifecycle.state(),
+            aviutl2_mcp_core::state::InstanceState::Ready,
+            "初回のプロジェクトロードで ready になりませんでした"
+        );
+        assert_ne!(
+            project_state.epoch(),
+            epoch,
+            "プロジェクトロードで epoch が更新されませんでした"
+        );
+        assert_eq!(project_state.revision(), 0);
+        assert!(!project_state.modified());
+        assert_eq!(
+            project_state.identity_path().as_deref(),
+            Some(r"C:\projects\sample.aup2")
+        );
+        assert_eq!(
+            lifecycle.descriptor().project.map(|p| p.display_name),
+            Some("sample".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// プロジェクトの保存は readiness の境界ではないことを確かめる。
+    #[test]
+    fn project_save_neither_makes_the_instance_ready_nor_renews_the_boundary() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let project_state = project::ProjectState::new();
+        project_state.on_object_updated();
+        let epoch = project_state.epoch();
+        let revision = project_state.revision();
+
+        apply_project_save(
+            Some(&lifecycle),
+            Some(&project_state),
+            Some(std::path::Path::new(r"C:\projects\sample.aup2")),
+        );
+
+        assert_eq!(
+            lifecycle.state(),
+            aviutl2_mcp_core::state::InstanceState::Starting,
+            "保存で ready になりました"
+        );
+        assert_eq!(
+            project_state.epoch(),
+            epoch,
+            "保存で epoch が更新されました"
+        );
+        assert_eq!(project_state.revision(), revision);
+        assert!(!project_state.modified());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// tracing イベントの出力先として使う共有バッファ。
     #[derive(Clone, Default)]
     struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
@@ -618,9 +733,10 @@ mod tests {
             std::fs::create_dir_all(&root).unwrap();
             std::fs::write(root.join("instances"), b"").unwrap();
 
-            plugin.sync_project(
-                Some(std::path::PathBuf::from(r"C:\projects\sample.aup2")),
-                ProjectBoundary::Retained,
+            apply_project_save(
+                plugin.lifecycle.as_ref(),
+                plugin.project_state.as_deref(),
+                Some(std::path::Path::new(r"C:\projects\sample.aup2")),
             );
             drop(plugin);
         });
