@@ -585,6 +585,13 @@ mod tests {
     const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
     fn temp_lifecycle() -> (Arc<Lifecycle>, std::path::PathBuf) {
+        let (lifecycle, dir) = temp_lifecycle_starting();
+        lifecycle.transition_to(InstanceState::Ready).unwrap();
+        (lifecycle, dir)
+    }
+
+    /// 起動処理中のまま、`ready` へ遷移させないライフサイクルを作る。
+    fn temp_lifecycle_starting() -> (Arc<Lifecycle>, std::path::PathBuf) {
         let dir =
             std::env::temp_dir().join(format!("aviutl2-mcp-pipe-test-{}", InstanceId::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -601,7 +608,6 @@ mod tests {
             writer,
         )
         .unwrap();
-        lifecycle.transition_to(InstanceState::Ready).unwrap();
         (Arc::new(lifecycle), dir)
     }
 
@@ -712,6 +718,116 @@ mod tests {
             fps_scale: 1,
             sample_rate: 48000,
         }
+    }
+
+    /// 参照区間の内側で panic するホスト。
+    ///
+    /// panic を応答へ変換するのは読み取り口の責務であり、要求処理側には捕捉層が
+    /// 無い。層を繋いだ経路を確かめるため、実際の読み取り口を SDK の代わりに
+    /// このホストへ被せる。
+    struct PanickingReadHost;
+
+    impl crate::read::host::ReadHost for PanickingReadHost {
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        fn edit_state(&self) -> Result<crate::read::EditState, crate::read::ReadError> {
+            Ok(crate::read::EditState::Edit)
+        }
+
+        fn edit_info(&self) -> Result<crate::read::host::HostEditInfo, crate::read::ReadError> {
+            Ok(crate::read::host::HostEditInfo {
+                scene_id: STUB_SCENE_ID,
+                width: 1920,
+                height: 1080,
+                fps_rate: 60,
+                fps_scale: 1,
+                sample_rate: 48000,
+                cursor_frame: 0,
+                cursor_layer: 0,
+                frame_max: 100,
+                layer_max: 0,
+                display_frame_start: 0,
+                display_layer_start: 0,
+                display_frame_num: 100,
+                display_layer_num: 1,
+                select_range_start: None,
+                select_range_end: None,
+            })
+        }
+
+        fn effect_catalog(
+            &self,
+        ) -> Result<Vec<aviutl2_mcp_core::AvailableEffect>, crate::read::ReadError> {
+            Ok(Vec::new())
+        }
+
+        fn enter_read_section<T, F>(&self, f: F) -> Result<T, crate::read::ReadError>
+        where
+            T: Send + 'static,
+            F: FnOnce(&dyn crate::read::host::SceneReader) -> T + Send,
+        {
+            Ok(f(&PanickingScene))
+        }
+    }
+
+    /// 参照区間の内側で必ず panic するプロジェクトデータ。
+    struct PanickingScene;
+
+    impl crate::read::host::SceneReader for PanickingScene {
+        fn scene_name(&self) -> Option<String> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn grid_bpm(&self) -> Result<Vec<aviutl2_mcp_core::FiniteF64>, crate::read::ReadError> {
+            Ok(Vec::new())
+        }
+
+        fn layer(
+            &self,
+            _layer: usize,
+        ) -> Result<crate::read::host::HostLayer, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn object_count(&self, _layer: usize) -> Result<usize, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn objects_in_layer(
+            &self,
+            _layer: usize,
+        ) -> Result<Vec<crate::read::host::HostObject>, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn object_detail(
+            &self,
+            _layer: usize,
+            _frame_start: usize,
+        ) -> Result<crate::read::host::HostObjectDetail, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+    }
+
+    /// 参照区間で panic する読み取り口を作る。
+    fn panicking_read_adapter() -> Arc<dyn ReadAdapter> {
+        Arc::new(crate::read::HostReadAdapter::new(
+            PanickingReadHost,
+            Arc::new(ProjectState::new()),
+        ))
+    }
+
+    /// panic のたびに既定フックが標準エラーへ出力するのを抑える。
+    ///
+    /// フックはプロセス全体で共有されるため、復元まで含めて呼び出し側が行う。
+    fn with_silent_panic_hook<T>(f: impl FnOnce() -> T) -> T {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        std::panic::set_hook(previous);
+        result.expect("panic が呼び出し側へ漏れました")
     }
 
     fn cleanup(dir: std::path::PathBuf) {
@@ -872,19 +988,20 @@ mod tests {
         .unwrap()
     }
 
-    /// 期限を指定しない要求フレームを組み立てる。
+    /// 要求フレームを組み立てる。`deadline_unix_ms` は指定しなければ無期限。
     fn make_request(
         version: ProtocolVersion,
         request_id: aviutl2_mcp_core::RequestId,
         instance_id: InstanceId,
         operation: &str,
+        deadline_unix_ms: Option<u64>,
     ) -> Vec<u8> {
         serde_json::to_vec(&aviutl2_mcp_core::RequestEnvelope {
             kind: aviutl2_mcp_core::RequestKind::Request,
             protocol_version: version,
             request_id,
             instance_id,
-            deadline_unix_ms: None,
+            deadline_unix_ms,
             operation: operation.to_string(),
             params: serde_json::json!({}),
         })
@@ -960,17 +1077,28 @@ mod tests {
         cleanup(dir);
     }
 
-    /// 読み取り要求を 1 往復し、応答 Envelope を返す。
+    /// 期限を指定せずに読み取り要求を 1 往復する。
     fn exchange_read(
         client: &PipeStream,
         id: InstanceId,
         version: ProtocolVersion,
         operation: &str,
     ) -> aviutl2_mcp_core::ResponseEnvelope {
+        exchange_read_within(client, id, version, operation, None)
+    }
+
+    /// 期限つきで読み取り要求を 1 往復し、応答 Envelope を返す。
+    fn exchange_read_within(
+        client: &PipeStream,
+        id: InstanceId,
+        version: ProtocolVersion,
+        operation: &str,
+        deadline_unix_ms: Option<u64>,
+    ) -> aviutl2_mcp_core::ResponseEnvelope {
         let request_id = aviutl2_mcp_core::RequestId::new();
         send(
             client,
-            &make_request(version, request_id, id, operation),
+            &make_request(version, request_id, id, operation, deadline_unix_ms),
             operation,
         );
 
@@ -1034,6 +1162,133 @@ mod tests {
                 panic!("未対応の operation が受理されました: {result:?}")
             }
         }
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    /// 応答からエラーを取り出す。成功応答は誤りとして落とす。
+    fn expect_error(
+        response: aviutl2_mcp_core::ResponseEnvelope,
+        stage: &str,
+    ) -> aviutl2_mcp_core::ErrorObject {
+        match response.result {
+            aviutl2_mcp_core::ResponseResult::Err { error } => error,
+            aviutl2_mcp_core::ResponseResult::Ok { result } => {
+                panic!("{stage}が成功応答になりました: {result:?}")
+            }
+        }
+    }
+
+    /// 読み取りの panic が切断ではなくエラー応答として要求元へ届くことを確かめる。
+    ///
+    /// panic の変換は読み取り口の内側で完結し、要求処理側には捕捉層が無い。
+    /// 変換が失われると接続の境界まで巻き戻り、要求元は応答ではなく切断を
+    /// 観測する。両者は要求元にとって全く異なるため、層を繋いだ経路で確かめる。
+    #[test]
+    fn panicking_read_receives_an_internal_error_without_closing_the_connection() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = start_server_with(&lifecycle, panicking_read_adapter());
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+
+        let error = with_silent_panic_hook(|| {
+            expect_error(
+                exchange_read(&client, id, version, "get_edit_info"),
+                "panic した読み取り",
+            )
+        });
+        assert_eq!(error.code, aviutl2_mcp_core::ErrorCode::InternalError);
+        assert!(!error.retryable);
+
+        // 応答を返した後も接続は生きており、続く要求を処理できる。
+        exchange_ping(&client, id, version);
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    /// 起動処理中の読み取りが、再試行の案内つきで拒否されることを確かめる。
+    #[test]
+    fn read_while_starting_receives_host_busy_with_retry_advice() {
+        let (lifecycle, dir) = temp_lifecycle_starting();
+        let server = start_server_with(&lifecycle, Arc::new(StubReadAdapter));
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+
+        let error = expect_error(
+            exchange_read(&client, id, version, "get_edit_info"),
+            "起動処理中の読み取り",
+        );
+        assert_eq!(error.code, aviutl2_mcp_core::ErrorCode::HostBusy);
+        assert!(error.retryable);
+        assert_eq!(error.details["retry_after_ms"], 500);
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    /// 終了処理中は要求を読む前に接続が閉じられることを確かめる。
+    ///
+    /// 要求元が観測するのはエラー応答ではなく切断であり、インスタンスを
+    /// 探し直す契機になる。
+    #[test]
+    fn draining_closes_the_connection_without_reading_a_request() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = start_server_with(&lifecycle, Arc::new(StubReadAdapter));
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        lifecycle.transition_to(InstanceState::Draining).unwrap();
+
+        let client = connect_client(&pipe_name_for(&id));
+        complete_handshake(&client, id, &secret);
+
+        let body = recv_or_disconnected(&client, "終了処理中の接続");
+        assert!(
+            body.is_none(),
+            "終了処理中に応答が返されました: {body:?}（切断されるべきです）"
+        );
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    /// 既に過ぎた期限を指定した要求が、実行されずに期限超過として返ることを確かめる。
+    #[test]
+    fn read_with_a_passed_deadline_receives_timeout() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = start_server_with(&lifecycle, Arc::new(StubReadAdapter));
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+
+        // 過ぎた期限は待たずに判定できる。実時間の経過を待つ必要はない。
+        let passed = (chrono::Utc::now().timestamp_millis() - 1) as u64;
+        let error = expect_error(
+            exchange_read_within(&client, id, version, "get_edit_info", Some(passed)),
+            "期限を過ぎた読み取り",
+        );
+        assert_eq!(error.code, aviutl2_mcp_core::ErrorCode::Timeout);
+        assert!(error.retryable);
+
+        // 期限を指定しない要求は同じ接続でそのまま成功する。
+        assert!(matches!(
+            exchange_read(&client, id, version, "get_edit_info").result,
+            aviutl2_mcp_core::ResponseResult::Ok { .. }
+        ));
 
         drop(client);
         server.stop(Duration::from_secs(5));
