@@ -7,7 +7,7 @@ use crate::identity::get_process_identity;
 use crate::pipe_client::{PipeClient, PipeClientError};
 use aviutl2_mcp_core::{
     InstanceDescriptor, InstanceId, InstanceInfo, InstanceProject, InstanceState, ProtocolVersion,
-    pipe_name_for,
+    deserialize_json, pipe_name_for,
 };
 
 #[cfg(test)]
@@ -238,10 +238,12 @@ fn discover_candidate(path: &Path, config: DiscoveryConfig) -> DiscoveryResult {
 }
 
 /// descriptor ファイルを検証する。
+///
+/// JSON は strict 規則（不正 UTF-8・重複 key・非有限数を拒否）で解釈する。
 fn validate_descriptor_file(path: &Path) -> Result<InstanceDescriptor, ExclusionReason> {
-    let content = std::fs::read_to_string(path).map_err(|_| ExclusionReason::InvalidDescriptor)?;
+    let content = std::fs::read(path).map_err(|_| ExclusionReason::InvalidDescriptor)?;
     let descriptor: InstanceDescriptor =
-        serde_json::from_str(&content).map_err(|_| ExclusionReason::InvalidDescriptor)?;
+        deserialize_json(&content).map_err(|_| ExclusionReason::InvalidDescriptor)?;
 
     if descriptor.schema_version != 1 {
         return Err(ExclusionReason::InvalidDescriptor);
@@ -526,6 +528,64 @@ mod tests {
 
         find_instances(&dir, DiscoveryConfig::default(), true);
         assert!(!path.exists(), "stale descriptor should be cleaned up");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_utf8_descriptor_excluded_and_kept() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = InstanceId::new_v4();
+        let path = dir.join(format!("{}.json", id));
+        // JSON として妥当な形だが UTF-8 として不正なバイトを含む。
+        let mut bytes = br#"{"schema_version":1,"instance_id":""#.to_vec();
+        bytes.extend_from_slice(&[0x80, 0x81, 0x82]);
+        bytes.extend_from_slice(br#""}"#);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let result = discover_candidate(&path, DiscoveryConfig::default());
+        assert!(
+            matches!(
+                result,
+                DiscoveryResult::Excluded {
+                    reason: ExclusionReason::InvalidDescriptor,
+                    ..
+                }
+            ),
+            "不正 UTF-8 の descriptor は除外される"
+        );
+
+        find_instances(&dir, DiscoveryConfig::default(), true);
+        assert!(path.exists(), "不正 UTF-8 の descriptor は削除されない");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duplicate_json_key_descriptor_excluded() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = InstanceId::new_v4();
+        let descriptor = sample_descriptor(id);
+        let serialized = serde_json::to_string(&descriptor).unwrap();
+        // 末尾の `}` の直前に既出の key を追加して重複させる。
+        let duplicated = format!("{},\"pid\":1{}", &serialized[..serialized.len() - 1], "}");
+
+        let path = dir.join(format!("{}.json", id));
+        std::fs::write(&path, duplicated).unwrap();
+
+        let result = discover_candidate(&path, DiscoveryConfig::default());
+        assert!(
+            matches!(
+                result,
+                DiscoveryResult::Excluded {
+                    reason: ExclusionReason::InvalidDescriptor,
+                    ..
+                }
+            ),
+            "重複 JSON key を含む descriptor は除外される"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
