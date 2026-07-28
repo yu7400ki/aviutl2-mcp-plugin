@@ -71,6 +71,20 @@ impl FrameDecoder {
         self.state
     }
 
+    /// 現在の読み取り単位を満たすために必要な残りバイト数。
+    ///
+    /// `ReadingLength` では長さ 4 バイトの残り、`ReadingBody` では body の残りを返す。
+    /// 単位が満たされた時点で状態が遷移するため、戻り値は常に 1 以上である。
+    ///
+    /// 「必要な分だけ読んで投入する」pull 型の読み取りを駆動する際に用いる。
+    /// この値を上限とする限り、フレーム境界を越えて先読みすることはない。
+    pub fn bytes_needed(&self) -> usize {
+        match self.state {
+            DecoderState::ReadingLength => 4 - self.length_filled,
+            DecoderState::ReadingBody { length } => length as usize - self.body_filled,
+        }
+    }
+
     /// 入力バイト列を消費し、完成したフレームを内部キューに蓄積する。
     ///
     /// 完成したフレームは `take_frame()` で取り出す。
@@ -295,6 +309,27 @@ mod tests {
         assert_eq!(decoder.take_frame().unwrap(), b"second");
     }
 
+    #[test]
+    fn bytes_needed_tracks_current_unit() {
+        let frame = encode_frame(b"hello world").unwrap();
+        let mut decoder = FrameDecoder::new();
+        assert_eq!(decoder.bytes_needed(), 4);
+
+        decoder.feed(&frame[..2]).unwrap();
+        assert_eq!(decoder.bytes_needed(), 2);
+
+        decoder.feed(&frame[2..4]).unwrap();
+        assert_eq!(decoder.bytes_needed(), 11);
+
+        decoder.feed(&frame[4..7]).unwrap();
+        assert_eq!(decoder.bytes_needed(), 8);
+
+        decoder.feed(&frame[7..]).unwrap();
+        // フレーム完成後は次の長さ読み取りへ戻る。
+        assert_eq!(decoder.bytes_needed(), 4);
+        assert_eq!(decoder.take_frame().unwrap(), b"hello world");
+    }
+
     /// デコーダへ流す入力。妥当な frame 列（末尾が途中で切れる場合を含む）と、
     /// 任意バイト列の双方を生成する。
     fn feed_input_strategy() -> impl Strategy<Value = Vec<u8>> {
@@ -377,6 +412,39 @@ mod tests {
                     }
                 }
             }
+        }
+
+        /// pull 型の駆動が投入分割にかかわらず元のフレーム列を復元する。
+        ///
+        /// `bytes_needed()` を上限に読み取り単位を決める実装（1 回の読み取り量に
+        /// 上限 `chunk_cap` を設ける）が、フレーム境界を越えずに全フレームを
+        /// 取り出せることを確かめる。
+        #[test]
+        fn needed_driven_feed_recovers_all_frames(
+            bodies in prop::collection::vec(prop::collection::vec(any::<u8>(), 1..=64), 1..=6),
+            chunk_cap in 1..=16usize,
+        ) {
+            let mut stream = Vec::new();
+            for body in &bodies {
+                stream.extend_from_slice(&encode_frame(body).unwrap());
+            }
+
+            let mut decoder = FrameDecoder::new();
+            let mut cursor = 0;
+            let mut frames = Vec::new();
+            while cursor < stream.len() {
+                let needed = decoder.bytes_needed();
+                prop_assert!(needed >= 1);
+                let take = needed.min(chunk_cap);
+                decoder.feed(&stream[cursor..cursor + take]).unwrap();
+                cursor += take;
+                while let Some(frame) = decoder.take_frame() {
+                    frames.push(frame);
+                }
+            }
+            // 全フレームを読み切った時点で未完成のフレームは残らない。
+            prop_assert!(decoder.end().is_ok());
+            prop_assert_eq!(frames, bodies);
         }
 
         #[test]
