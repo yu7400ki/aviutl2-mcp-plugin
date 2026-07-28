@@ -243,43 +243,6 @@ impl ProjectState {
         }
     }
 
-    /// 現在の epoch。
-    ///
-    /// 更新されるのはプロジェクトのロードだけである。プロジェクトを開いたまま
-    /// 新規作成した場合はロードハンドラが呼ばれず、境界を検出できないため
-    /// epoch は据え置かれる。epoch の一致は対象が同一であることの十分条件では
-    /// ないので、同一性は scene_id と fingerprint の照合で確かめる。
-    pub fn epoch(&self) -> String {
-        self.lock_boundary().epoch.clone()
-    }
-
-    /// 現在の identity。
-    // 現時点の呼び出し元はテストのみ。
-    #[allow(dead_code)]
-    pub(crate) fn identity(&self) -> ProjectIdentity {
-        self.lock_boundary().identity.clone()
-    }
-
-    /// 保存済みプロジェクトのパス。未保存なら `None`。
-    // 現時点の呼び出し元はテストのみ。
-    #[allow(dead_code)]
-    pub(crate) fn identity_path(&self) -> Option<String> {
-        match &self.lock_boundary().identity {
-            ProjectIdentity::Path { path, .. } => Some(path.clone()),
-            ProjectIdentity::Unsaved { .. } => None,
-        }
-    }
-
-    /// 現在の revision。
-    pub fn revision(&self) -> u64 {
-        self.revision.load(Ordering::Relaxed)
-    }
-
-    /// 最後の load/save 以降に対象の更新イベントを受け取ったか。
-    pub fn modified(&self) -> bool {
-        self.modified.load(Ordering::Relaxed)
-    }
-
     /// プロジェクトのロードを反映する。
     ///
     /// プロジェクトが切り替わる境界であるため、新しい epoch を発行し
@@ -321,17 +284,6 @@ impl ProjectState {
         self.notifier.record(ChangeKind::CurrentScene);
     }
 
-    /// 未取り出しの変更を取り出してクリアする。
-    ///
-    /// 直近の取り出しから [`NOTIFY_MIN_INTERVAL`] が経過していない場合と、
-    /// 未取り出しの変更が無い場合は `None` を返す。抑止された変更は次の
-    /// 取り出しでまとめて観測できる。
-    // 現時点の呼び出し元はテストのみ。
-    #[allow(dead_code)]
-    pub(crate) fn take_pending_changes(&self, now: Instant) -> Option<PendingChanges> {
-        self.notifier.take(now)
-    }
-
     /// 境界を更新する。`renew_epoch` が真なら epoch も再発行する。
     fn update_boundary(&self, path: Option<&str>, renew_epoch: bool) {
         let mut boundary = self.lock_boundary();
@@ -345,6 +297,52 @@ impl ProjectState {
     /// 境界のガードを取得する。毒された場合も状態は一貫しているため継続する。
     fn lock_boundary(&self) -> std::sync::MutexGuard<'_, Boundary> {
         self.boundary.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// 状態の読み出しと変更の取り出し。現時点の呼び出し元はテストのみ。
+#[allow(dead_code)]
+impl ProjectState {
+    /// 現在の epoch。
+    ///
+    /// 更新されるのはプロジェクトのロードだけである。プロジェクトを開いたまま
+    /// 新規作成した場合はロードハンドラが呼ばれず、境界を検出できないため
+    /// epoch は据え置かれる。epoch の一致は対象が同一であることの十分条件では
+    /// ないので、同一性は scene_id と fingerprint の照合で確かめる。
+    pub(crate) fn epoch(&self) -> String {
+        self.lock_boundary().epoch.clone()
+    }
+
+    /// 現在の identity。
+    pub(crate) fn identity(&self) -> ProjectIdentity {
+        self.lock_boundary().identity.clone()
+    }
+
+    /// 保存済みプロジェクトのパス。未保存なら `None`。
+    pub(crate) fn identity_path(&self) -> Option<String> {
+        match &self.lock_boundary().identity {
+            ProjectIdentity::Path { path, .. } => Some(path.clone()),
+            ProjectIdentity::Unsaved { .. } => None,
+        }
+    }
+
+    /// 現在の revision。
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Relaxed)
+    }
+
+    /// 最後の load/save 以降に対象の更新イベントを受け取ったか。
+    pub(crate) fn modified(&self) -> bool {
+        self.modified.load(Ordering::Relaxed)
+    }
+
+    /// 未取り出しの変更を取り出してクリアする。
+    ///
+    /// 直近の取り出しから [`NOTIFY_MIN_INTERVAL`] が経過していない場合と、
+    /// 未取り出しの変更が無い場合は `None` を返す。抑止された変更は次の
+    /// 取り出しでまとめて観測できる。
+    pub(crate) fn take_pending_changes(&self, now: Instant) -> Option<PendingChanges> {
+        self.notifier.take(now)
     }
 }
 
