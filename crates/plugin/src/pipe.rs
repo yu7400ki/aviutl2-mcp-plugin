@@ -433,7 +433,7 @@ enum Connection {
     Established,
     /// 停止要求により待受を終了する。
     Stopped,
-    /// 一過性の失敗。待受を作り直して再試行する。
+    /// 待受の確立に失敗した。作り直して再試行する。
     Retry,
 }
 
@@ -534,6 +534,14 @@ mod tests {
     }
 
     fn connect_client(pipe_name: &str) -> PipeStream {
+        connect_client_within(pipe_name, Duration::from_secs(5))
+    }
+
+    /// 指定した猶予内で pipe への接続を繰り返し試みる。
+    ///
+    /// 待受インスタンスは 1 本のため、他の接続が処理中の間は
+    /// `ERROR_PIPE_BUSY` で失敗する。待受が再確立されるまで再試行する。
+    fn connect_client_within(pipe_name: &str, budget: Duration) -> PipeStream {
         use std::os::windows::ffi::OsStrExt;
         let wide: Vec<u16> = std::ffi::OsStr::new(pipe_name)
             .encode_wide()
@@ -558,8 +566,11 @@ mod tests {
             match result {
                 Ok(handle) => return unsafe { PipeStream::from_client_handle(handle) },
                 Err(e) => {
-                    if start.elapsed() > Duration::from_secs(5) {
-                        panic!("pipe への接続に失敗しました: {e}");
+                    if start.elapsed() > budget {
+                        panic!(
+                            "pipe への接続を {}ms 待って諦めました: {e}",
+                            start.elapsed().as_millis()
+                        );
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
@@ -641,25 +652,23 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn handshake_and_ping() {
-        let (lifecycle, dir) = temp_lifecycle();
-        let server = PipeServer::start(lifecycle.clone()).unwrap();
-        let id = lifecycle.instance_id();
-        let secret = *lifecycle.auth_secret().as_bytes();
-
-        let client = connect_client(&pipe_name_for(&id));
+    /// handshake を完走し、採用バージョンを返す。
+    fn complete_handshake(
+        client: &PipeStream,
+        id: InstanceId,
+        secret: &[u8; 32],
+    ) -> ProtocolVersion {
         let client_nonce = aviutl2_mcp_core::Nonce::generate();
-        send(&client, &make_hello(id, &client_nonce), "ClientHello");
+        send(client, &make_hello(id, &client_nonce), "ClientHello");
 
-        let server_auth_body = recv(&client, "ServerAuth").expect("ServerAuth が受信できません");
+        let server_auth_body = recv(client, "ServerAuth").expect("ServerAuth が受信できません");
         let server_auth: aviutl2_mcp_core::ServerAuth =
             serde_json::from_slice(&server_auth_body).unwrap();
         assert_eq!(server_auth.instance_id, id);
         assert_eq!(server_auth.protocol_version, ProtocolVersion::CURRENT);
 
         let server_mac = aviutl2_mcp_core::compute_server_mac(
-            &secret,
+            secret,
             &client_nonce,
             &server_auth.server_nonce,
             &id,
@@ -668,31 +677,44 @@ mod tests {
         assert_eq!(server_mac.as_bytes(), server_auth.server_mac.as_bytes());
 
         send(
-            &client,
-            &make_auth(&secret, &server_auth.server_nonce, &client_nonce),
+            client,
+            &make_auth(secret, &server_auth.server_nonce, &client_nonce),
             "ClientAuth",
         );
+        server_auth.protocol_version
+    }
 
+    /// ping を 1 往復し、応答内容を検証する。
+    fn exchange_ping(client: &PipeStream, id: InstanceId, version: ProtocolVersion) {
         let request_id = aviutl2_mcp_core::RequestId::new();
-        send(
-            &client,
-            &make_ping(server_auth.protocol_version, request_id, id),
-            "ping 要求",
-        );
+        send(client, &make_ping(version, request_id, id), "ping 要求");
 
-        let response_body = recv(&client, "ping 応答").expect("ping 応答が受信できません");
+        let response_body = recv(client, "ping 応答").expect("ping 応答が受信できません");
         let response: aviutl2_mcp_core::ResponseEnvelope =
             serde_json::from_slice(&response_body).unwrap();
         assert_eq!(response.request_id, request_id);
         assert_eq!(response.instance_id, id);
-        assert!(matches!(
-            response.result,
-            aviutl2_mcp_core::ResponseResult::Ok { .. }
-        ));
-        if let aviutl2_mcp_core::ResponseResult::Ok { result } = response.result {
-            assert_eq!(result["state"], "ready");
-            assert_eq!(result["instance_id"], serde_json::to_value(id).unwrap());
+        match response.result {
+            aviutl2_mcp_core::ResponseResult::Ok { result } => {
+                assert_eq!(result["state"], "ready");
+                assert_eq!(result["instance_id"], serde_json::to_value(id).unwrap());
+            }
+            aviutl2_mcp_core::ResponseResult::Err { error } => {
+                panic!("ping がエラー応答になりました: {error:?}")
+            }
         }
+    }
+
+    #[test]
+    fn handshake_and_ping() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+        exchange_ping(&client, id, version);
 
         drop(client);
         server.stop(Duration::from_secs(5));
@@ -736,20 +758,45 @@ mod tests {
     }
 
     #[test]
-    fn silent_client_does_not_block_accept_loop() {
+    fn silent_client_does_not_occupy_listener() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+        let name = pipe_name_for(&id);
+
+        // ClientHello を送らないクライアント。待受インスタンスは 1 本のため、
+        // handshake 期限が切れるまでこの接続が待受を占有する。
+        let silent = connect_client(&name);
+
+        // 期限超過で接続が破棄され待受が再確立されるので、黙ったクライアントを
+        // 保持したままでも 2 本目が handshake から ping まで完走できる。
+        let budget = crate::session::HANDSHAKE_TIMEOUT + Duration::from_secs(15);
+        let client = connect_client_within(&name, budget);
+        let version = complete_handshake(&client, id, &secret);
+        exchange_ping(&client, id, version);
+
+        drop(client);
+        drop(silent);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    #[test]
+    fn stop_returns_promptly_while_client_is_connected() {
         let (lifecycle, dir) = temp_lifecycle();
         let server = PipeServer::start(lifecycle.clone()).unwrap();
         let id = lifecycle.instance_id();
 
-        // 何も送らないクライアントを接続したまま放置しても、停止要求で
-        // 待受スレッドが終了できることを確認する。
+        // 何も送らないクライアントを接続したまま停止要求を出しても、
+        // 待受スレッドは handshake 期限を待たずに終了する。
         let silent = connect_client(&pipe_name_for(&id));
 
         let started = Instant::now();
         server.stop(Duration::from_secs(10));
         let elapsed = started.elapsed();
         assert!(
-            elapsed < Duration::from_secs(10),
+            elapsed < Duration::from_secs(2),
             "停止に {}ms かかりました",
             elapsed.as_millis()
         );

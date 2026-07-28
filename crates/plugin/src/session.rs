@@ -20,14 +20,16 @@ use std::time::{Duration, Instant};
 /// handshake は接続確立直後に 3 往復で完結する軽量な処理であり、
 /// クライアントの待ち時間は含まない。未応答のクライアントが待受を占有する
 /// 時間をこの値に抑える。
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 認証済み接続で次の要求フレームを待つ上限。
 ///
-/// discovery クライアントは接続を保ったまま間欠的に要求を送るため、
-/// handshake より長くとる。一方で切断を検知できないまま待受を占有し続けない
-/// よう有限にする。
-const REQUEST_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// 1 接続は handshake → 要求 → 応答の直列で完結し、クライアントは応答受信後に
+/// 切断する。したがってこの待機は実質「相手の切断（EOF）を受け取るまで」であり、
+/// 通常はミリ秒で終わる。待受インスタンスは 1 本だけで、1 接続の処理中は
+/// 新たな接続を受理できないため、黙り込んだクライアントが占有できる時間を
+/// この値に抑える。
+const REQUEST_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 1 フレームの送信に許す上限。
 ///
@@ -137,16 +139,32 @@ fn run_request_loop(
         let request: RequestEnvelope = deserialize_json(&body)
             .map_err(|e| anyhow::anyhow!("RequestEnvelope のデコードに失敗しました: {e}"))?;
 
-        if !is_compatible(negotiated_version, request.protocol_version) {
-            send_error_response(
-                stream,
-                negotiated_version,
-                request.request_id,
-                request.instance_id,
-                ErrorCode::ProtocolMismatch,
-                "要求のプロトコルバージョンが交渉結果と互換ではありません",
-            )?;
-            continue;
+        match classify_version(negotiated_version, request.protocol_version) {
+            VersionCheck::Compatible => {}
+            VersionCheck::MinorTooHigh => {
+                send_error_response(
+                    stream,
+                    negotiated_version,
+                    request.request_id,
+                    request.instance_id,
+                    ErrorCode::ProtocolMismatch,
+                    "要求の MINOR が交渉結果を超えています",
+                )?;
+                continue;
+            }
+            VersionCheck::MajorMismatch => {
+                // MAJOR 不一致は互換性が無く接続を継続できない。handshake は
+                // 完了しているため理由を 1 度返してから切断する。
+                send_error_response(
+                    stream,
+                    negotiated_version,
+                    request.request_id,
+                    request.instance_id,
+                    ErrorCode::ProtocolMismatch,
+                    "要求の MAJOR が交渉結果と一致しません",
+                )?;
+                break;
+            }
         }
 
         if request.instance_id != lifecycle.instance_id() {
@@ -185,11 +203,26 @@ fn run_request_loop(
     Ok(())
 }
 
+/// 要求の `protocol_version` を交渉結果と照合した結果。
+#[derive(Debug, PartialEq, Eq)]
+enum VersionCheck {
+    /// MAJOR 一致かつ MINOR が交渉結果以下。
+    Compatible,
+    /// MAJOR は一致するが MINOR が交渉結果を超えている。
+    MinorTooHigh,
+    /// MAJOR が一致しない。
+    MajorMismatch,
+}
+
 /// 要求の `protocol_version` が交渉結果と互換かを判定する。
-///
-/// MAJOR は完全一致、MINOR は交渉結果以下でなければならない。
-fn is_compatible(negotiated: ProtocolVersion, requested: ProtocolVersion) -> bool {
-    requested.major == negotiated.major && requested.minor <= negotiated.minor
+fn classify_version(negotiated: ProtocolVersion, requested: ProtocolVersion) -> VersionCheck {
+    if requested.major != negotiated.major {
+        VersionCheck::MajorMismatch
+    } else if requested.minor > negotiated.minor {
+        VersionCheck::MinorTooHigh
+    } else {
+        VersionCheck::Compatible
+    }
 }
 
 fn read_frame_as<T>(stream: &PipeStream, deadline: Instant) -> Result<T>
@@ -237,29 +270,35 @@ fn send_error_response(
 mod tests {
     use super::*;
 
+    const NEGOTIATED: ProtocolVersion = ProtocolVersion { major: 1, minor: 3 };
+
     #[test]
     fn compatible_when_same_major_and_minor_within_negotiated() {
-        let negotiated = ProtocolVersion { major: 1, minor: 3 };
-        assert!(is_compatible(
-            negotiated,
-            ProtocolVersion { major: 1, minor: 3 }
-        ));
-        assert!(is_compatible(
-            negotiated,
-            ProtocolVersion { major: 1, minor: 0 }
-        ));
+        for minor in 0..=3 {
+            assert_eq!(
+                classify_version(NEGOTIATED, ProtocolVersion { major: 1, minor }),
+                VersionCheck::Compatible
+            );
+        }
     }
 
     #[test]
-    fn incompatible_on_major_mismatch_or_higher_minor() {
-        let negotiated = ProtocolVersion { major: 1, minor: 3 };
-        assert!(!is_compatible(
-            negotiated,
-            ProtocolVersion { major: 2, minor: 3 }
-        ));
-        assert!(!is_compatible(
-            negotiated,
-            ProtocolVersion { major: 1, minor: 4 }
-        ));
+    fn minor_above_negotiated_is_rejected() {
+        assert_eq!(
+            classify_version(NEGOTIATED, ProtocolVersion { major: 1, minor: 4 }),
+            VersionCheck::MinorTooHigh
+        );
+    }
+
+    #[test]
+    fn major_mismatch_is_rejected() {
+        assert_eq!(
+            classify_version(NEGOTIATED, ProtocolVersion { major: 2, minor: 3 }),
+            VersionCheck::MajorMismatch
+        );
+        assert_eq!(
+            classify_version(NEGOTIATED, ProtocolVersion { major: 0, minor: 0 }),
+            VersionCheck::MajorMismatch
+        );
     }
 }
