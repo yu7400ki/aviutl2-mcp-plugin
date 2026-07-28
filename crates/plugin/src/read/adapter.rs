@@ -449,6 +449,7 @@ mod tests {
     /// SDK の代わりに定型データを返すホスト。
     ///
     /// 呼び出された経路を記録するため、受付前に SDK を呼ばないことを検証できる。
+    /// 準備前の呼び出しは、実際の SDK と同じく panic で落とす。
     struct FakeHost {
         ready: bool,
         state: EditState,
@@ -491,6 +492,11 @@ mod tests {
             }
         }
 
+        /// 準備前の呼び出しを、実際の SDK と同じ失敗モードで再現する。
+        fn assert_ready(&self, api: &str) {
+            assert!(self.ready, "準備前に {api} が呼ばれました");
+        }
+
         fn record(&self, call: &'static str) {
             self.calls.lock().unwrap().push(call);
         }
@@ -506,6 +512,7 @@ mod tests {
         }
 
         fn edit_state(&self) -> Result<EditState, ReadError> {
+            self.assert_ready("get_edit_state");
             self.record("edit_state");
             let calls = self.edit_state_calls.fetch_add(1, Ordering::Relaxed);
             Ok(if calls == 0 {
@@ -516,6 +523,7 @@ mod tests {
         }
 
         fn edit_info(&self) -> Result<HostEditInfo, ReadError> {
+            self.assert_ready("get_edit_info");
             self.record("edit_info");
             assert_ne!(
                 self.panic_at,
@@ -526,6 +534,7 @@ mod tests {
         }
 
         fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError> {
+            self.assert_ready("get_effects");
             self.record("effect_catalog");
             Ok(self.catalog.clone())
         }
@@ -535,6 +544,7 @@ mod tests {
             T: Send + 'static,
             F: FnOnce(&dyn SceneReader) -> T + Send,
         {
+            self.assert_ready("call_read_section");
             self.record("enter_read_section");
             if self.section_fails {
                 return Err(ReadError::Sdk {
