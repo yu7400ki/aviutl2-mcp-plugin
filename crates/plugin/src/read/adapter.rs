@@ -214,9 +214,6 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
         filter: Option<&ObjectFilter>,
     ) -> Result<Snapshot<ObjectSummary>, ReadError> {
         self.ensure_readable()?;
-        if let Some(filter) = filter {
-            filter.validate()?;
-        }
         let info = self.edit_info()?;
         ensure_scene(&info, expected_scene_id)?;
         let layers = layer_range(filter, info.layer_max);
@@ -1195,14 +1192,19 @@ mod tests {
     }
 
     #[test]
-    fn list_objects_rejects_inverted_filter() {
+    fn list_objects_treats_the_filter_as_already_validated() {
+        // 絞り込み条件の妥当性は要求の復号と同じ場所で判定するため、逆転した
+        // 範囲はここへ届かない。届いた場合も空の範囲として扱われるだけで、
+        // 矛盾した指定がホストへ渡ることはない。
         let adapter = adapter();
         let filter = ObjectFilter {
             layer_min: Some(2),
             layer_max: Some(1),
         };
-        let error = adapter.list_objects(0, Some(&filter)).unwrap_err();
-        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+        let snapshot = adapter
+            .list_objects(0, Some(&filter))
+            .expect("検証は呼び出し側の責務であり、ここでは失敗させない");
+        assert!(snapshot.items.is_empty());
     }
 
     #[test]

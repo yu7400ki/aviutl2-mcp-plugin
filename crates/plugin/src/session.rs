@@ -1829,7 +1829,6 @@ mod tests {
             || ReadError::FingerprintMismatch,
             || ReadError::ObjectNotFound,
             || ReadError::AmbiguousObject { candidate_count: 2 },
-            || ReadError::InvalidFilter(ObjectFilterError::InvertedLayerRange { min: 8, max: 1 }),
             || ReadError::Sdk {
                 operation: "call_read_section",
             },

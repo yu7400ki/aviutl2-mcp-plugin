@@ -71,6 +71,10 @@ pub trait ReadAdapter: Send + Sync {
     fn list_layers(&self, expected_scene_id: i32) -> Result<Snapshot<LayerInfo>, ReadError>;
 
     /// 現在シーンのオブジェクトを全件列挙する。
+    ///
+    /// `filter` は検証済みのものだけを受け取る。絞り込み条件の妥当性は要求内容
+    /// だけで決まり、読み取りを受け付けられるかにも期限にも依存しないため、
+    /// 要求の復号と同じ場所で判定して不正な条件はここへ届かせない。
     fn list_objects(
         &self,
         expected_scene_id: i32,

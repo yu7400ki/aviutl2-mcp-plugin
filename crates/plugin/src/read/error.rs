@@ -1,7 +1,7 @@
 //! 読み取りの失敗を表す型と、応答へ載せる安全な補助情報。
 
 use crate::read::host::EditState;
-use aviutl2_mcp_core::{ErrorCode, ObjectFilterError};
+use aviutl2_mcp_core::ErrorCode;
 use serde_json::{Value, json};
 
 /// 編集ハンドルが読み取りを受け付けられない場合に案内する再試行間隔（ミリ秒）。
@@ -60,9 +60,6 @@ pub enum ReadError {
         /// 一致した候補の件数。
         candidate_count: usize,
     },
-    /// 絞り込み条件が不正。
-    #[error("絞り込み条件が不正です: {0}")]
-    InvalidFilter(#[from] ObjectFilterError),
     /// SDK の呼び出しが失敗した。
     #[error("SDK の呼び出しに失敗しました: {operation}")]
     Sdk {
@@ -86,7 +83,6 @@ impl ReadError {
             | ReadError::FingerprintMismatch => ErrorCode::PreconditionFailed,
             ReadError::ObjectNotFound => ErrorCode::NotFound,
             ReadError::AmbiguousObject { .. } => ErrorCode::AmbiguousSelector,
-            ReadError::InvalidFilter(_) => ErrorCode::InvalidArgument,
             ReadError::Sdk { .. } => ErrorCode::SdkError,
             ReadError::Panicked => ErrorCode::InternalError,
         }
@@ -134,7 +130,6 @@ impl ReadError {
             ReadError::AmbiguousObject { candidate_count } => {
                 json!({ "candidate_count": candidate_count })
             }
-            ReadError::InvalidFilter(_) => json!({}),
             ReadError::Sdk { operation } => json!({ "sdk_operation": operation }),
             ReadError::Panicked => json!({}),
         }
@@ -167,7 +162,6 @@ mod tests {
             ReadError::FingerprintMismatch,
             ReadError::ObjectNotFound,
             ReadError::AmbiguousObject { candidate_count: 2 },
-            ReadError::InvalidFilter(ObjectFilterError::InvertedLayerRange { min: 8, max: 1 }),
             ReadError::Sdk {
                 operation: "get_object_alias",
             },
@@ -190,7 +184,6 @@ mod tests {
                 ErrorCode::PreconditionFailed,
                 ErrorCode::NotFound,
                 ErrorCode::AmbiguousSelector,
-                ErrorCode::InvalidArgument,
                 ErrorCode::SdkError,
                 ErrorCode::InternalError,
             ]
