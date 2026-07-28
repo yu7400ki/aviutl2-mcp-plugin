@@ -20,9 +20,9 @@ use aviutl2_mcp_core::{
     ListObjectsResult, Nonce, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
     OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
     OPERATION_LIST_OBJECTS, ObjectFilterError, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT,
-    PLUGIN_WRITE_TIMEOUT, PageError, PageRequest, ProtocolVersion, RequestEnvelope, RequestId,
-    ResponseEnvelope, ResponseKind, ResponseResult, compute_client_mac, compute_server_mac,
-    deserialize_json, negotiate, take_page, verify_mac,
+    PLUGIN_WRITE_TIMEOUT, PageError, PageRequest, PongProject, PongResult, ProtocolVersion,
+    RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult, compute_client_mac,
+    compute_server_mac, deserialize_json, negotiate, take_page, verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -284,8 +284,7 @@ fn run_request_loop(
                 let response = ResponseEnvelope::pong(
                     negotiated_version,
                     request.request_id,
-                    lifecycle.instance_id(),
-                    lifecycle.state(),
+                    &pong_result(lifecycle.instance_id(), lifecycle.state(), read_adapter),
                 );
                 send_response(stream, &response, deadline)?;
             }
@@ -341,6 +340,27 @@ fn run_request_loop(
     }
 
     Ok(())
+}
+
+/// 生存確認の応答内容を組み立てる。
+///
+/// プロジェクトの状態はライフサイクル状態に関わらず載せる。読み取り口が返すのは
+/// SDK に触れずに読める値だけであり、起動処理中でも参照できる。要求元はこの値で
+/// インスタンス一覧の project を埋めるため、載せられるものを落とさない。
+///
+/// 現在シーンは載せない。シーン ID もシーン名も編集ハンドルを介してしか読めず、
+/// 生存確認を受け付けるすべての状態でそれを呼べるとは限らない。
+fn pong_result(
+    instance_id: InstanceId,
+    state: InstanceState,
+    read_adapter: &dyn ReadAdapter,
+) -> PongResult {
+    let status = read_adapter.project_status();
+    PongResult::new(instance_id, state).with_project(PongProject {
+        epoch: status.epoch,
+        revision: status.revision,
+        modified: status.modified,
+    })
 }
 
 /// 受理できる operation。
@@ -1040,6 +1060,15 @@ mod tests {
     }
 
     impl ReadAdapter for FakeAdapter {
+        fn project_status(&self) -> crate::read::ProjectStatus {
+            self.calls.lock().unwrap().push("project_status");
+            crate::read::ProjectStatus {
+                epoch: EPOCH.to_string(),
+                revision: REVISION,
+                modified: true,
+            }
+        }
+
         fn get_edit_info(&self) -> Result<EditInfo, ReadError> {
             self.enter("get_edit_info")?;
             Ok(fake_edit_info())
@@ -1682,6 +1711,46 @@ mod tests {
             );
             assert!(adapter.calls().is_empty(), "{operation:?}");
         }
+    }
+
+    #[test]
+    fn pong_carries_the_project_state_in_every_state() {
+        // 生存確認は状態を問わず受け付ける。プロジェクトの状態は SDK に触れずに
+        // 読めるため、受付できない状態でも載せられる。
+        let instance_id = InstanceId::new_v4();
+        for state in [
+            InstanceState::Starting,
+            InstanceState::Ready,
+            InstanceState::Busy,
+            InstanceState::Draining,
+        ] {
+            let adapter = FakeAdapter::new();
+            let result = pong_result(instance_id, state.clone(), &adapter);
+
+            assert_eq!(result.instance_id, instance_id);
+            assert_eq!(result.state, state);
+            let project = result.project.expect("project が載っていません");
+            assert_eq!(project.epoch, EPOCH);
+            assert_eq!(project.revision, REVISION);
+            assert!(project.modified);
+            assert_eq!(adapter.calls(), vec!["project_status"]);
+        }
+    }
+
+    #[test]
+    fn pong_does_not_report_a_scene() {
+        // シーンは編集ハンドルを介してしか読めず、生存確認を受け付ける全ての
+        // 状態でそれを呼べるとは限らない。読み取り口へも問い合わせない。
+        let adapter = FakeAdapter::new();
+        let result = pong_result(InstanceId::new_v4(), InstanceState::Ready, &adapter);
+
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value.get("scene"), None);
+        assert_eq!(
+            adapter.calls(),
+            vec!["project_status"],
+            "生存確認が読み取りを行いました"
+        );
     }
 
     #[test]

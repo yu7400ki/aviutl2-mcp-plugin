@@ -35,11 +35,30 @@ pub struct Snapshot<T> {
     pub snapshot_revision: u64,
 }
 
+/// プロジェクトの状態。
+///
+/// SDK に触れずに読み取れる値だけで構成する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectStatus {
+    /// プロジェクトの epoch。
+    pub epoch: String,
+    /// プロジェクトの revision。
+    pub revision: u64,
+    /// 最後の保存以降に変更があるか。
+    pub modified: bool,
+}
+
 /// 読み取り operation の実行口。
 ///
 /// 各メソッドは 1 度の呼び出しで完結し、SDK の参照区間を跨いで状態を保持しない。
 /// 戻り値は所有型のみで、opaque handle を公開しない。
 pub trait ReadAdapter: Send + Sync {
+    /// プロジェクトの状態を取得する。
+    ///
+    /// 編集ハンドルにも参照区間にも触れないため、読み取りを受け付けられない
+    /// 状態でも呼び出せる。生存確認の応答へ載せるために用いる。
+    fn project_status(&self) -> ProjectStatus;
+
     /// 現在の編集情報を取得する。
     fn get_edit_info(&self) -> Result<EditInfo, ReadError>;
 

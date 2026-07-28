@@ -51,7 +51,10 @@ pub use effect::{
     AvailableEffect, AvailableEffectItem, EffectFlags, EffectInfo, EffectItem, EffectItemType,
     EffectType, TrackInfo,
 };
-pub use envelope::{RequestEnvelope, RequestKind, ResponseEnvelope, ResponseKind, ResponseResult};
+pub use envelope::{
+    PongProject, PongResult, RequestEnvelope, RequestKind, ResponseEnvelope, ResponseKind,
+    ResponseResult,
+};
 pub use error::{ErrorCode, ErrorObject};
 pub use fingerprint::{
     EffectFingerprintInput, Fingerprint, FingerprintAlgorithm, FingerprintFormatError,

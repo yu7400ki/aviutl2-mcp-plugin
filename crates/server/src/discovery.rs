@@ -8,8 +8,8 @@ use crate::pipe_client::{PipeClient, PipeClientError};
 use crate::redact;
 use aviutl2_mcp_core::{
     ErrorCode, ErrorObject, InstanceDescriptor, InstanceId, InstanceInfo, InstanceProject,
-    InstanceState, ProtocolVersion, SERVER_RESOLVE_BUDGET, deserialize_json, parse_utc_timestamp,
-    pipe_name_for,
+    InstanceState, PongResult, ProtocolVersion, SERVER_RESOLVE_BUDGET, deserialize_json,
+    parse_utc_timestamp, pipe_name_for,
 };
 
 #[cfg(test)]
@@ -447,7 +447,7 @@ fn verify_candidate(
     }
 
     // pipe 接続、handshake、ping。
-    let (client, state) =
+    let (client, pong) =
         run_pipe_handshake_and_ping(&descriptor, deadline).map_err(|err| ExcludedCandidate {
             instance_id: Some(descriptor.instance_id),
             reason: map_pipe_error(&err),
@@ -458,12 +458,12 @@ fn verify_candidate(
             },
         })?;
 
-    if matches!(state, InstanceState::Draining | InstanceState::Gone) {
+    if matches!(pong.state, InstanceState::Draining | InstanceState::Gone) {
         return Err(excluded(ExclusionReason::PingFailed));
     }
 
     Ok(VerifiedCandidate {
-        info: build_instance_info(descriptor, state),
+        info: build_instance_info(descriptor, pong),
         client,
     })
 }
@@ -501,11 +501,11 @@ fn validate_descriptor_file(path: &Path) -> Result<InstanceDescriptor, Exclusion
     Ok(descriptor)
 }
 
-/// pipe 接続、handshake、ping を実行し、認証済み接続と状態を返す。
+/// pipe 接続、handshake、ping を実行し、認証済み接続と ping 応答を返す。
 fn run_pipe_handshake_and_ping(
     descriptor: &InstanceDescriptor,
     deadline: Instant,
-) -> Result<(PipeClient, InstanceState), PipeClientError> {
+) -> Result<(PipeClient, PongResult), PipeClientError> {
     let client = PipeClient::connect_and_handshake(
         descriptor.instance_id,
         descriptor.pid,
@@ -514,8 +514,8 @@ fn run_pipe_handshake_and_ping(
         deadline,
     )?;
 
-    let state = client.ping(deadline)?;
-    Ok((client, state))
+    let pong = client.ping(deadline)?;
+    Ok((client, pong))
 }
 
 /// `PipeClientError` を `ExclusionReason` へ対応付ける。
@@ -546,21 +546,29 @@ fn process_created_at_matches(descriptor_value: &str, actual: DateTime<Utc>) -> 
 }
 
 /// `InstanceDescriptor` と ping 応答から `InstanceInfo` を生成する。
-fn build_instance_info(descriptor: InstanceDescriptor, state: InstanceState) -> InstanceInfo {
+///
+/// registry の descriptor は表示名とパスしか持たない。epoch / revision / modified は
+/// ping 応答が運んだ場合にのみ入り、運ばれなければ欠落のままとする。既定値で埋めると
+/// 「未取得」と実測値が区別できなくなる。
+///
+/// 現在シーンは ping 応答に含まれない。シーンは編集ハンドルを介してしか読めず、
+/// 生存確認だけでは取得できないため `None` とする。
+fn build_instance_info(descriptor: InstanceDescriptor, pong: PongResult) -> InstanceInfo {
+    let project = pong.project;
     InstanceInfo {
         instance_id: descriptor.instance_id,
-        state,
+        state: pong.state,
         pid: descriptor.pid,
         started_at: descriptor.started_at,
-        // registry の descriptor は epoch / revision / modified / scene を持たない。
-        // 既定値で埋めると「未取得」と実測値が区別できなくなるため欠落のままとする。
-        project: descriptor.project.map(|p| InstanceProject {
-            display_name: p.display_name,
-            path: Some(p.path),
-            epoch: None,
-            revision: None,
-            modified: None,
-        }),
+        project: descriptor
+            .project
+            .map(|descriptor_project| InstanceProject {
+                display_name: descriptor_project.display_name,
+                path: Some(descriptor_project.path),
+                epoch: project.as_ref().map(|p| p.epoch.clone()),
+                revision: project.as_ref().map(|p| p.revision),
+                modified: project.as_ref().map(|p| p.modified),
+            }),
         scene: None,
     }
 }
@@ -682,6 +690,47 @@ mod tests {
                 path: r"C:\test.aup".to_string(),
             }),
         }
+    }
+
+    #[test]
+    fn instance_info_takes_the_project_state_from_the_ping_result() {
+        let id = InstanceId::new_v4();
+        let pong =
+            PongResult::new(id, InstanceState::Ready).with_project(aviutl2_mcp_core::PongProject {
+                epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+                revision: 42,
+                modified: true,
+            });
+
+        let info = build_instance_info(sample_descriptor(id), pong);
+        let project = info.project.expect("project が失われています");
+        assert_eq!(project.display_name, "Test");
+        assert_eq!(project.path.as_deref(), Some(r"C:\test.aup"));
+        assert_eq!(
+            project.epoch.as_deref(),
+            Some("78be92d1-c8c9-44c6-ae52-387548971468")
+        );
+        assert_eq!(project.revision, Some(42));
+        assert_eq!(project.modified, Some(true));
+        assert_eq!(info.state, InstanceState::Ready);
+        // シーンは生存確認からは取得できない。
+        assert_eq!(info.scene, None);
+    }
+
+    #[test]
+    fn instance_info_keeps_the_project_state_absent_when_the_ping_omits_it() {
+        // 既定値で埋めると「未取得」と実測値が区別できなくなる。特に modified は
+        // 「未保存の変更が無い」と読めてしまい、保存確認の要否を誤らせる。
+        let id = InstanceId::new_v4();
+        let info = build_instance_info(
+            sample_descriptor(id),
+            PongResult::new(id, InstanceState::Busy),
+        );
+
+        let project = info.project.expect("project が失われています");
+        assert_eq!(project.epoch, None);
+        assert_eq!(project.revision, None);
+        assert_eq!(project.modified, None);
     }
 
     #[test]

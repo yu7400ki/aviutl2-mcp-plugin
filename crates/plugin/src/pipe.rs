@@ -630,8 +630,17 @@ mod tests {
     /// 実在の値と取り違えないよう、応答に現れる値へ目印を付ける。
     const STUB_SCENE_ID: i32 = 3;
     const STUB_REVISION: u64 = 11;
+    const STUB_EPOCH: &str = "0c9b1f2e-6d3a-4c85-9f10-2b7c4d5e6f70";
 
     impl ReadAdapter for StubReadAdapter {
+        fn project_status(&self) -> crate::read::ProjectStatus {
+            crate::read::ProjectStatus {
+                epoch: STUB_EPOCH.to_string(),
+                revision: STUB_REVISION,
+                modified: false,
+            }
+        }
+
         fn get_edit_info(&self) -> Result<aviutl2_mcp_core::EditInfo, crate::read::ReadError> {
             Ok(aviutl2_mcp_core::EditInfo {
                 scene: stub_scene(),
@@ -648,7 +657,7 @@ mod tests {
                 },
                 selected_range: None,
                 grid_bpm: Vec::new(),
-                project_epoch: "0c9b1f2e-6d3a-4c85-9f10-2b7c4d5e6f70".to_string(),
+                project_epoch: STUB_EPOCH.to_string(),
                 project_revision: STUB_REVISION,
             })
         }

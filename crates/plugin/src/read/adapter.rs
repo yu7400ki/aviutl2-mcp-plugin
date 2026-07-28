@@ -8,7 +8,7 @@ use crate::read::error::ReadError;
 use crate::read::host::{
     EditState, HostEditInfo, HostEffect, HostObject, HostObjectDetail, ReadHost, SceneReader,
 };
-use crate::read::{ReadAdapter, Snapshot};
+use crate::read::{ProjectStatus, ReadAdapter, Snapshot};
 use aviutl2_mcp_core::FingerprintAlgorithm;
 use aviutl2_mcp_core::{
     AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFingerprintInput, EffectInfo,
@@ -119,6 +119,16 @@ fn guard<T>(f: impl FnOnce() -> Result<T, ReadError>) -> Result<T, ReadError> {
 }
 
 impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
+    fn project_status(&self) -> ProjectStatus {
+        // epoch・revision・modified はいずれもプロジェクト状態が保持しており、
+        // SDK を呼ばずに読める。受付判定を通さないのはそのためである。
+        ProjectStatus {
+            epoch: self.project.epoch(),
+            revision: self.project.revision(),
+            modified: self.project.modified(),
+        }
+    }
+
     fn get_edit_info(&self) -> Result<EditInfo, ReadError> {
         self.ensure_readable()?;
         let info = self.edit_info()?;

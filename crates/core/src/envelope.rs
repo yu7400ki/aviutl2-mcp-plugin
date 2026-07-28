@@ -2,6 +2,7 @@
 
 use crate::error::ErrorObject;
 use crate::identifier::{InstanceId, ProtocolVersion, RequestId};
+use crate::state::InstanceState;
 use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -213,26 +214,67 @@ pub struct ResponseEnvelope {
     pub result: ResponseResult,
 }
 
+/// ping 応答が運ぶプロジェクトの状態。
+///
+/// 応答型の内側であるため未知フィールドを拒否しない。将来の MINOR で追加された
+/// フィールドを含む応答を、旧版の受信側が受理できるようにする。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PongProject {
+    /// プロジェクトの epoch。
+    pub epoch: String,
+    /// プロジェクトの revision。
+    pub revision: u64,
+    /// 最後の保存以降に変更があるか。
+    pub modified: bool,
+}
+
+/// ping 応答の `result`。
+///
+/// `project` は接続先が載せなかった場合に `None` となる。既定値で埋めると
+/// 「未取得」と実測値が区別できなくなるため、欠落のまま扱う。
+///
+/// 未知フィールドを拒否せず、`project` を持たない縮約形も受理する。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PongResult {
+    /// 接続先のライフサイクル状態。
+    pub state: InstanceState,
+    /// 接続先のインスタンス ID。
+    pub instance_id: InstanceId,
+    /// プロジェクトの状態。取得できない場合は None。
+    #[serde(default)]
+    pub project: Option<PongProject>,
+}
+
+impl PongResult {
+    /// プロジェクトの状態を伴わない ping 応答を作る。
+    pub fn new(instance_id: InstanceId, state: InstanceState) -> Self {
+        Self {
+            state,
+            instance_id,
+            project: None,
+        }
+    }
+
+    /// プロジェクトの状態を添える。
+    pub fn with_project(mut self, project: PongProject) -> Self {
+        self.project = Some(project);
+        self
+    }
+}
+
 impl ResponseEnvelope {
     pub fn pong(
         protocol_version: ProtocolVersion,
         request_id: RequestId,
-        instance_id: InstanceId,
-        state: crate::state::InstanceState,
+        result: &PongResult,
     ) -> Self {
-        let mut result = serde_json::Map::new();
-        result.insert("state".to_string(), serde_json::to_value(state).unwrap());
-        result.insert(
-            "instance_id".to_string(),
-            serde_json::to_value(instance_id).unwrap(),
-        );
         Self {
             kind: ResponseKind::Response,
             protocol_version,
             request_id,
-            instance_id,
+            instance_id: result.instance_id,
             result: ResponseResult::Ok {
-                result: serde_json::Value::Object(result),
+                result: serde_json::to_value(result).unwrap_or(serde_json::Value::Null),
             },
         }
     }
@@ -480,11 +522,86 @@ mod tests {
         let response = ResponseEnvelope::pong(
             ProtocolVersion::CURRENT,
             request_id,
-            instance_id,
-            InstanceState::Ready,
+            &PongResult::new(instance_id, InstanceState::Ready),
         );
         let s = serde_json::to_string(&response).unwrap();
         let response2: ResponseEnvelope = serde_json::from_str(&s).unwrap();
         assert_eq!(response, response2);
+    }
+
+    #[test]
+    fn pong_carries_the_project_state() {
+        let instance_id = InstanceId::new_v4();
+        let project = PongProject {
+            epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            revision: 42,
+            modified: true,
+        };
+        let result =
+            PongResult::new(instance_id, InstanceState::Ready).with_project(project.clone());
+        let response = ResponseEnvelope::pong(ProtocolVersion::CURRENT, RequestId::new(), &result);
+
+        let ResponseResult::Ok { result: value } = &response.result else {
+            panic!("pong が成功応答ではありません");
+        };
+        let restored: PongResult = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(restored, result);
+        assert_eq!(restored.project, Some(project));
+        assert_eq!(response.instance_id, instance_id);
+    }
+
+    #[test]
+    fn pong_result_accepts_the_reduced_form() {
+        // project を持たない応答は「未取得」として受理する。既定値で埋めると
+        // 実測値と区別が付かなくなる。
+        let instance_id = InstanceId::new_v4();
+        let value = serde_json::json!({
+            "state": "ready",
+            "instance_id": instance_id,
+        });
+        let result: PongResult = serde_json::from_value(value).unwrap();
+        assert_eq!(result.state, InstanceState::Ready);
+        assert_eq!(result.instance_id, instance_id);
+        assert_eq!(result.project, None);
+    }
+
+    #[test]
+    fn pong_result_ignores_unknown_fields() {
+        let instance_id = InstanceId::new_v4();
+        let value = serde_json::json!({
+            "state": "ready",
+            "instance_id": instance_id,
+            "project": {
+                "epoch": "e",
+                "revision": 1,
+                "modified": false,
+                "future": 1,
+            },
+            "future": 1,
+        });
+        let result: PongResult = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            result.project,
+            Some(PongProject {
+                epoch: "e".to_string(),
+                revision: 1,
+                modified: false,
+            })
+        );
+    }
+
+    #[test]
+    fn pong_result_requires_state_and_instance_id() {
+        let instance_id = InstanceId::new_v4();
+        for value in [
+            serde_json::json!({ "state": "ready" }),
+            serde_json::json!({ "instance_id": instance_id }),
+            serde_json::json!({}),
+        ] {
+            assert!(
+                serde_json::from_value::<PongResult>(value.clone()).is_err(),
+                "{value} が受理されました"
+            );
+        }
     }
 }

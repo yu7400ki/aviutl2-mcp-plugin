@@ -343,8 +343,6 @@ impl ProjectState {
     }
 
     /// 最後の load/save 以降に対象の更新イベントを受け取ったか。
-    // 現時点の呼び出し元はテストのみ。
-    #[allow(dead_code)]
     pub(crate) fn modified(&self) -> bool {
         self.modified.load(Ordering::Relaxed)
     }

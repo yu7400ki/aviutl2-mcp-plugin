@@ -5,14 +5,14 @@
 use crate::redact;
 use crate::win_io::{self, WinIoError};
 use aviutl2_mcp_core::{
-    AuthSecret, ClientAuth, ClientHello, ErrorCode, ErrorObject, FrameDecoder, InstanceId,
-    InstanceState, Nonce, ProtocolVersion, RequestEnvelope, RequestId, RequestKind,
-    ResponseEnvelope, ResponseResult, SERVER_CONNECT_WAIT_CAP, ServerAuth, compute_client_mac,
-    compute_server_mac, deserialize_json, encode_frame, pipe_name_for, verify_mac,
+    AuthSecret, ClientAuth, ClientHello, ErrorCode, ErrorObject, FrameDecoder, InstanceId, Nonce,
+    PongResult, ProtocolVersion, RequestEnvelope, RequestId, RequestKind, ResponseEnvelope,
+    ResponseResult, SERVER_CONNECT_WAIT_CAP, ServerAuth, compute_client_mac, compute_server_mac,
+    deserialize_json, encode_frame, pipe_name_for, verify_mac,
 };
 use chrono::Utc;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::ffi::OsStr;
 use std::io;
@@ -206,8 +206,11 @@ impl PipeClient {
     ///
     /// 接続先が ping を拒否した場合は [`PipeClientError::Remote`] を返す。拒否理由は
     /// 「起動中で今は応じられない」と「生存確認に失敗した」を区別するために要る。
+    ///
+    /// 応答が運ぶ内容は既定値で埋めずにそのまま返す。接続先が載せなかった値を
+    /// 埋めると、未取得と実測値が区別できなくなる。
     #[instrument(skip_all, fields(instance = %redact::instance_id(&self.instance_id)))]
-    pub fn ping(&self, deadline: Instant) -> Result<InstanceState, PipeClientError> {
+    pub fn ping(&self, deadline: Instant) -> Result<PongResult, PipeClientError> {
         let request =
             RequestEnvelope::ping(self.protocol_version, RequestId::new(), self.instance_id)
                 .with_deadline(deadline_to_unix_ms(deadline));
@@ -219,7 +222,7 @@ impl PipeClient {
             return Err(PipeClientError::InstanceStale);
         }
         debug!(state = %pong.state, "ping succeeded");
-        Ok(pong.state)
+        Ok(pong)
     }
 
     /// 要求を 1 往復させ、応答の整合を検証して結果を取り出す。
@@ -409,15 +412,6 @@ impl PipeClient {
     }
 }
 
-/// ping 応答の `result`。
-///
-/// 将来の MINOR で追加されるフィールドを受け取れるよう未知フィールドは許容する。
-#[derive(Debug, Deserialize)]
-struct PongResult {
-    state: InstanceState,
-    instance_id: InstanceId,
-}
-
 /// 成功応答の `result` を型付きで読み取る。
 ///
 /// いったんバイト列へ戻して [`deserialize_json`] を通し、応答の読み取りを
@@ -502,6 +496,7 @@ fn connect_pipe(pipe_name: &str, deadline: Instant) -> Result<HANDLE, PipeClient
 mod tests {
     use super::*;
     use aviutl2_mcp_core::{InstanceId, InstanceState, ResponseKind};
+    use serde::Deserialize;
     use std::time::Duration;
     use windows::Win32::Storage::FileSystem::{PIPE_ACCESS_DUPLEX, ReadFile, WriteFile};
     use windows::Win32::System::Pipes::{
@@ -1292,8 +1287,7 @@ mod tests {
             let response = ResponseEnvelope::pong(
                 request.protocol_version,
                 request.request_id,
-                instance_id,
-                InstanceState::Ready,
+                &PongResult::new(instance_id, InstanceState::Ready),
             );
             send_bytes(
                 handle.0,
@@ -1303,10 +1297,12 @@ mod tests {
         });
 
         let before = Utc::now().timestamp_millis() as u64;
-        let state = client
+        let pong = client
             .ping(Instant::now() + Duration::from_secs(5))
             .expect("ping に失敗しました");
-        assert_eq!(state, InstanceState::Ready);
+        assert_eq!(pong.state, InstanceState::Ready);
+        // 接続先が載せなかった値は欠落のままにする。
+        assert_eq!(pong.project, None);
 
         let request = responder.join().unwrap();
         let deadline_unix_ms = request

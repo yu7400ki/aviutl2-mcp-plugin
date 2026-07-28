@@ -294,7 +294,17 @@ fn discovery_finds_live_mock_instance() {
     assert_eq!(instances[0].instance_id, id);
     assert_eq!(instances[0].state, InstanceState::Ready);
     assert_eq!(instances[0].pid, std::process::id());
-    assert!(instances[0].project.is_some());
+
+    // project の epoch / revision / modified は descriptor に無く、ping 応答から
+    // 得る。descriptor 由来の表示名とパスは維持される。
+    let project = instances[0]
+        .project
+        .as_ref()
+        .expect("project が失われています");
+    assert!(project.path.is_some());
+    assert_eq!(project.epoch.as_deref(), Some(support::MOCK_PROJECT_EPOCH));
+    assert_eq!(project.revision, Some(support::MOCK_PROJECT_REVISION));
+    assert_eq!(project.modified, Some(support::MOCK_PROJECT_MODIFIED));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

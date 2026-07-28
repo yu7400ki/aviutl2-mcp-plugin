@@ -5,9 +5,10 @@
 
 use aviutl2_mcp_core::{
     AuthSecret, ClientAuth, ClientHello, DescriptorProject, ErrorCode, ErrorObject,
-    InstanceDescriptor, InstanceId, InstanceState, Nonce, ProtocolVersion, RequestEnvelope,
-    ResponseEnvelope, ResponseKind, ResponseResult, ServerAuth, compute_client_mac,
-    compute_server_mac, encode_frame, format_utc_timestamp, negotiate, pipe_name_for, verify_mac,
+    InstanceDescriptor, InstanceId, InstanceState, Nonce, PongProject, PongResult, ProtocolVersion,
+    RequestEnvelope, ResponseEnvelope, ResponseKind, ResponseResult, ServerAuth,
+    compute_client_mac, compute_server_mac, encode_frame, format_utc_timestamp, negotiate,
+    pipe_name_for, verify_mac,
 };
 use aviutl2_mcp_server::win_io::{self, EventHandle, IoIssue, OverlappedOp, WaitAnyOutcome};
 use std::collections::HashMap;
@@ -40,6 +41,20 @@ unsafe impl Send for SendHandle {}
 /// `ping` を含む任意の operation を差し替えられる。表に無い operation は、
 /// `ping` なら生存応答、それ以外は `unsupported_operation` のエラー応答になる。
 pub type OperationResponses = HashMap<String, ResponseResult>;
+
+/// mock server の ping 応答が運ぶプロジェクトの状態。
+pub const MOCK_PROJECT_EPOCH: &str = "78be92d1-c8c9-44c6-ae52-387548971468";
+pub const MOCK_PROJECT_REVISION: u64 = 42;
+pub const MOCK_PROJECT_MODIFIED: bool = true;
+
+/// mock server が ping 応答へ載せるプロジェクトの状態。
+pub fn mock_project() -> PongProject {
+    PongProject {
+        epoch: MOCK_PROJECT_EPOCH.to_string(),
+        revision: MOCK_PROJECT_REVISION,
+        modified: MOCK_PROJECT_MODIFIED,
+    }
+}
 
 /// 成功応答を組み立てる。
 pub fn ok_result(value: serde_json::Value) -> ResponseResult {
@@ -388,8 +403,8 @@ pub fn build_response(
             return ResponseEnvelope::pong(
                 negotiated,
                 request.request_id,
-                behavior.instance_id,
-                behavior.state.clone(),
+                &PongResult::new(behavior.instance_id, behavior.state.clone())
+                    .with_project(mock_project()),
             );
         }
         None => err_result(ErrorObject::new(
