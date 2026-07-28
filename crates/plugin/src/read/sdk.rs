@@ -306,7 +306,9 @@ impl SdkSceneReader<'_> {
 /// `next` は「指定フレーム以降で最初に見つかる対象」の終了フレームと値を返し、
 /// 対象が無ければ `None` を返す。次の探索は終了フレームの次から始める。
 ///
-/// 探索位置が前進しない場合は同じ対象を返し続けるため打ち切る。
+/// 探索位置が前進しない場合は同じ対象を返し続けるため、失敗として返す。途中
+/// までの一覧を全件として返すと、列挙の母集合から対象が欠けたまま正当な
+/// スナップショットとして扱われてしまう。
 fn scan_layer<T>(
     mut next: impl FnMut(usize) -> Result<Option<(usize, T)>, ReadError>,
 ) -> Result<Vec<T>, ReadError> {
@@ -317,8 +319,8 @@ fn scan_layer<T>(
             return Ok(items);
         };
         let advanced = frame_end.saturating_add(1);
-        if !items.is_empty() && advanced <= next_frame {
-            return Ok(items);
+        if advanced <= next_frame {
+            return Err(sdk("find_object"));
         }
         next_frame = advanced;
         items.push(item);
@@ -430,6 +432,7 @@ fn parse_check(raw: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aviutl2_mcp_core::ErrorCode;
 
     fn object(frame_start: usize, frame_end: usize) -> HostObject {
         HostObject {
@@ -484,6 +487,29 @@ mod tests {
     fn scan_layer_propagates_failures() {
         let error = scan_layer::<()>(|_| Err(sdk("get_object_layer_frame"))).unwrap_err();
         assert_eq!(error.details()["sdk_operation"], "get_object_layer_frame");
+    }
+
+    #[test]
+    fn scan_layer_fails_when_the_search_does_not_advance() {
+        // 同じ対象を返し続ける探索を、途中までの一覧の成功として返さない。
+        let error = scan_layer(|_| Ok(Some((0usize, ())))).unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::SdkError);
+        assert_eq!(error.details()["sdk_operation"], "find_object");
+    }
+
+    #[test]
+    fn scan_layer_fails_when_the_search_moves_backwards() {
+        let mut calls = 0;
+        let error = scan_layer(|_| {
+            calls += 1;
+            Ok(Some((if calls == 1 { 100 } else { 50 }, ())))
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::SdkError,
+            "後退する探索が成功として返りました"
+        );
     }
 
     #[test]
