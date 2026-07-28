@@ -177,7 +177,7 @@ impl OverlappedOp {
     ///
     /// `wait` が true のときは完了するまでブロックする。完了が確定した時点で
     /// 保留状態を落とす。
-    pub(crate) fn result(&mut self, wait: bool) -> io::Result<u32> {
+    pub(crate) fn result(&mut self, wait: bool) -> windows::core::Result<u32> {
         let mut transferred = 0u32;
         let handle = self.handle;
         let overlapped = self.as_mut_ptr();
@@ -195,7 +195,7 @@ impl OverlappedOp {
                 if e.code() != ERROR_IO_INCOMPLETE.into() {
                     self.pending = false;
                 }
-                Err(to_io_error(e))
+                Err(e)
             }
         }
     }
@@ -274,25 +274,34 @@ impl std::fmt::Display for IoError {
 impl std::error::Error for IoError {}
 
 /// `windows` crate のエラーを `std::io::Error` へ変換する。
+///
+/// `windows::core::Error` は Win32 エラーを `HRESULT`（`0x8007_XXXX`）として
+/// 保持するため、そのまま `from_raw_os_error` へ渡すと `raw_os_error` が
+/// 生の Win32 コードと一致しなくなる。FACILITY_WIN32 の場合は元のコードへ戻す。
 fn to_io_error(e: windows::core::Error) -> io::Error {
-    io::Error::from_raw_os_error(e.code().0)
+    let hresult = e.code().0 as u32;
+    if hresult & 0xFFFF_0000 == 0x8007_0000 {
+        io::Error::from_raw_os_error((hresult & 0xFFFF) as i32)
+    } else {
+        io::Error::other(e)
+    }
 }
 
 /// `ERROR_OPERATION_ABORTED` はキャンセルの正常完了として扱う。
-fn is_operation_aborted(err: &io::Error) -> bool {
-    err.raw_os_error() == Some(ERROR_OPERATION_ABORTED.0 as i32)
+fn is_operation_aborted(e: &windows::core::Error) -> bool {
+    e.code() == ERROR_OPERATION_ABORTED.into()
 }
 
 /// 相手側が接続を閉じたことを示すエラーかどうか。
-fn is_disconnect(err: &io::Error) -> bool {
-    matches!(
-        err.raw_os_error(),
-        Some(code)
-            if code == ERROR_BROKEN_PIPE.0 as i32
-                || code == ERROR_PIPE_NOT_CONNECTED.0 as i32
-                || code == ERROR_NO_DATA.0 as i32
-                || code == ERROR_HANDLE_EOF.0 as i32
-    )
+///
+/// 比較は `HRESULT` 同士で行う。`windows::core::Error` が保持するのは
+/// `HRESULT` であり、生の Win32 値と直接比較すると常に不一致になる。
+fn is_disconnect(e: &windows::core::Error) -> bool {
+    let code = e.code();
+    code == ERROR_BROKEN_PIPE.into()
+        || code == ERROR_PIPE_NOT_CONNECTED.into()
+        || code == ERROR_NO_DATA.into()
+        || code == ERROR_HANDLE_EOF.into()
 }
 
 /// 期限までの残り時間をミリ秒へ変換する。期限に達していれば `None`。
@@ -334,7 +343,7 @@ fn transfer_once(
         Ok(()) => match op.result(true) {
             Ok(n) => n,
             Err(e) if is_disconnect(&e) => return Ok(Transfer::Eof),
-            Err(e) => return Err(IoError::Os(e)),
+            Err(e) => return Err(IoError::Os(to_io_error(e))),
         },
         Err(e) if e.code() == ERROR_IO_PENDING.into() => {
             let Some(timeout_ms) = remaining_ms(deadline) else {
@@ -349,7 +358,7 @@ fn transfer_once(
                 WaitOutcome::Signaled(0) => match op.result(false) {
                     Ok(n) => n,
                     Err(e) if is_disconnect(&e) => return Ok(Transfer::Eof),
-                    Err(e) => return Err(IoError::Os(e)),
+                    Err(e) => return Err(IoError::Os(to_io_error(e))),
                 },
                 WaitOutcome::Signaled(_) => {
                     op.cancel_and_drain();
@@ -366,11 +375,10 @@ fn transfer_once(
             }
         }
         Err(e) => {
-            let err = to_io_error(e);
-            if is_disconnect(&err) {
+            if is_disconnect(&e) {
                 return Ok(Transfer::Eof);
             }
-            return Err(IoError::Os(err));
+            return Err(IoError::Os(to_io_error(e)));
         }
     };
 

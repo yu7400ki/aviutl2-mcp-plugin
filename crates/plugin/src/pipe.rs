@@ -594,14 +594,17 @@ mod tests {
     }
 
     /// 期限を切って受信を試み、切断された場合を許容する。
+    ///
+    /// 切断は `Ok(None)`（フレーム先頭での EOF）か `UnexpectedEof`
+    /// （フレーム途中での EOF）としてのみ許容する。ここで `PipeError::Io` を
+    /// 許容すると、EOF 判定の取り違えが切断として通ってしまう。
     fn recv_or_disconnected(client: &PipeStream, stage: &str) -> Option<Vec<u8>> {
-        let started = Instant::now();
-        match client.read_frame(started + CLIENT_IO_TIMEOUT) {
+        match client.read_frame(Instant::now() + CLIENT_IO_TIMEOUT) {
             Ok(body) => body,
             Err(PipeError::TimedOut { waited_ms, .. }) => {
                 panic!("{stage}を {waited_ms}ms 待って諦めました")
             }
-            Err(PipeError::UnexpectedEof { .. }) | Err(PipeError::Io { .. }) => None,
+            Err(PipeError::UnexpectedEof { .. }) => None,
             Err(e) => panic!("{stage}で想定外のエラーが発生しました: {e}"),
         }
     }
