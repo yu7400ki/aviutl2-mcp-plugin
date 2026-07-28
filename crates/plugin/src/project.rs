@@ -25,11 +25,11 @@ const NEVER_ADMITTED: u64 = u64::MAX;
 /// プロジェクトの同一性。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectIdentity {
-    /// 保存済みプロジェクト。ファイルパスとロード世代で識別する。
+    /// 保存済みプロジェクト。ファイルパスと境界の世代で識別する。
     Path {
         /// プロジェクトファイルのパス。
         path: String,
-        /// 同じパスの再ロードを区別するための世代番号。
+        /// 境界の更新（ロード・保存）ごとに進む世代番号。
         generation: u64,
     },
     /// 未保存プロジェクト。plugin 内で生成したランダム ID で識別する。
@@ -182,7 +182,7 @@ impl ChangeNotifier {
 struct Boundary {
     epoch: String,
     identity: ProjectIdentity,
-    /// identity を更新した回数。保存済み identity の世代番号に用いる。
+    /// 境界を更新した回数。保存済み identity の世代番号に用いる。
     generation: u64,
 }
 
@@ -226,11 +226,6 @@ fn next_identity(
 /// ロックを取らないか、境界更新時の短い Mutex 保持だけで完結する。
 pub struct ProjectState {
     boundary: Mutex<Boundary>,
-    /// identity をライフサイクルフックで確定できているか。
-    ///
-    /// 確定していない間は、シーン変更がプロジェクト切り替えを伴う可能性を
-    /// 否定できないため、epoch を保守的に更新する判断材料にする。
-    identity_confirmed: AtomicBool,
     revision: AtomicU64,
     modified: AtomicBool,
     notifier: ChangeNotifier,
@@ -245,7 +240,7 @@ impl Default for ProjectState {
 impl ProjectState {
     /// plugin 登録時の初期状態を作る。
     ///
-    /// epoch を新規に発行し、identity は未確定の未保存プロジェクトとする。
+    /// epoch を新規に発行し、identity は未保存プロジェクトとして始める。
     pub fn new() -> Self {
         Self {
             boundary: Mutex::new(Boundary {
@@ -255,7 +250,6 @@ impl ProjectState {
                 },
                 generation: 0,
             }),
-            identity_confirmed: AtomicBool::new(false),
             revision: AtomicU64::new(0),
             modified: AtomicBool::new(false),
             notifier: ChangeNotifier::new(),
@@ -263,6 +257,11 @@ impl ProjectState {
     }
 
     /// 現在の epoch。
+    ///
+    /// 更新されるのはプロジェクトのロードだけである。プロジェクトを開いたまま
+    /// 新規作成した場合はロードハンドラが呼ばれず、境界を検出できないため
+    /// epoch は据え置かれる。epoch の一致は対象が同一であることの十分条件では
+    /// ないので、同一性は scene_id と fingerprint の照合で確かめる。
     pub fn epoch(&self) -> String {
         self.lock_boundary().epoch.clone()
     }
@@ -321,17 +320,17 @@ impl ProjectState {
 
     /// シーン変更イベントを反映する。
     ///
-    /// identity を確定できていない間はプロジェクトの切り替えと区別できないため、
-    /// epoch を保守的に更新して既存の参照を無効化する。
+    /// このイベントはシーンの切り替えとシーン情報の更新の双方で発生し、
+    /// イベントスレッドからは両者を区別できない。プロジェクトの差し替えとも
+    /// 区別できないが、切り替えのたびに epoch を更新すると参照の無効化が
+    /// 頻発するため、epoch は据え置いて revision の増加と変更の記録だけを行う。
+    ///
+    /// シーンの切り替えは編集対象を変えるだけで未保存の変更を生まないため、
+    /// `modified` も据え置く。
     pub fn on_scene_changed(&self) {
-        let now = Instant::now();
         self.revision.fetch_add(1, Ordering::AcqRel);
-        self.notifier.record(ChangeKind::CurrentScene, now);
-
-        if !self.identity_confirmed.load(Ordering::Acquire) {
-            self.lock_boundary().epoch = new_epoch();
-            self.notifier.record(ChangeKind::ProjectEpoch, now);
-        }
+        self.notifier
+            .record(ChangeKind::CurrentScene, Instant::now());
     }
 
     /// 未取り出しの変更種別を取り出してクリアする。
@@ -341,15 +340,12 @@ impl ProjectState {
 
     /// 境界を更新する。`renew_epoch` が真なら epoch も再発行する。
     fn update_boundary(&self, path: Option<&str>, renew_epoch: bool) {
-        {
-            let mut boundary = self.lock_boundary();
-            boundary.generation += 1;
-            boundary.identity = next_identity(&boundary.identity, path, boundary.generation);
-            if renew_epoch {
-                boundary.epoch = new_epoch();
-            }
+        let mut boundary = self.lock_boundary();
+        boundary.generation += 1;
+        boundary.identity = next_identity(&boundary.identity, path, boundary.generation);
+        if renew_epoch {
+            boundary.epoch = new_epoch();
         }
-        self.identity_confirmed.store(true, Ordering::Release);
     }
 
     /// 境界のガードを取得する。毒された場合も状態は一貫しているため継続する。
@@ -433,21 +429,19 @@ mod tests {
     }
 
     #[test]
-    fn scene_change_renews_epoch_while_identity_is_unconfirmed() {
+    fn scene_change_keeps_epoch() {
         let state = ProjectState::new();
         let before = state.epoch();
 
         state.on_scene_changed();
+        state.on_scene_changed();
 
-        assert_ne!(
-            state.epoch(),
-            before,
-            "identity 未確定のシーン変更で epoch が維持されました"
-        );
+        assert_eq!(state.epoch(), before, "シーン変更で epoch が更新されました");
+        assert_eq!(state.revision(), 2);
     }
 
     #[test]
-    fn scene_change_keeps_epoch_after_identity_is_confirmed() {
+    fn scene_change_keeps_epoch_after_project_load() {
         let state = ProjectState::new();
         state.on_project_load(None);
         let epoch = state.epoch();
@@ -480,32 +474,33 @@ mod tests {
     }
 
     #[test]
-    fn saving_unsaved_project_advances_generation() {
+    fn boundary_updates_advance_path_generation() {
         let state = ProjectState::new();
         state.on_project_load(None);
         assert!(matches!(state.identity(), ProjectIdentity::Unsaved { .. }));
 
         state.on_project_save(Some(r"C:\projects\sample.aup2"));
         let ProjectIdentity::Path {
-            path: first_path,
-            generation: first,
+            path: saved_path,
+            generation: saved,
         } = state.identity()
         else {
             panic!("保存後も未保存の identity のままです");
         };
-        assert_eq!(first_path, r"C:\projects\sample.aup2");
+        assert_eq!(saved_path, r"C:\projects\sample.aup2");
 
         state.on_project_load(Some(r"C:\projects\sample.aup2"));
         let ProjectIdentity::Path {
-            generation: second, ..
+            generation: reloaded,
+            ..
         } = state.identity()
         else {
             panic!("ロード後の identity が保存済みではありません");
         };
 
         assert!(
-            second > first,
-            "再ロードで世代が進みませんでした: {first} → {second}"
+            reloaded > saved,
+            "再ロードで世代が進みませんでした: {saved} → {reloaded}"
         );
     }
 

@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(
             project_state.epoch(),
             epoch,
-            "identity 確定後のシーン変更で epoch が変わりました"
+            "シーンの変更で epoch が更新されました"
         );
 
         let pending = project_state.take_pending_changes();
