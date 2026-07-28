@@ -72,63 +72,136 @@ fn run_session_with_log(
     requests: &[Value],
     rust_log: Option<&str>,
 ) -> Session {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_aviutl2-mcp-server"));
-    command.env("AVIUTL2_MCP_REGISTRY_DIR", registry_dir);
-    match rust_log {
-        Some(filter) => command.env("RUST_LOG", filter),
-        None => command.env_remove("RUST_LOG"),
-    };
-
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("MCP サーバーを起動できる");
-
-    let mut stdin = child.stdin.take().expect("stdin を得られる");
-    let mut reader = BufReader::new(child.stdout.take().expect("stdout を得られる"));
-    // stderr を読み続けないとログでパイプが詰まる。
-    let mut stderr_pipe = child.stderr.take().expect("stderr を得られる");
-    let stderr_reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr_pipe.read_to_string(&mut text);
-        text
-    });
-
-    let mut stdout = String::new();
+    let mut server = ServerProcess::start(registry_dir, rust_log);
     for request in requests {
-        let line = serde_json::to_string(request).expect("直列化できる");
-        writeln!(stdin, "{line}").expect("要求を書き込める");
-        stdin.flush().expect("要求を送出できる");
+        server.send(request);
+        if let Some(id) = request.get("id") {
+            server.read_until(std::slice::from_ref(id));
+        }
+    }
+    server.finish()
+}
 
-        let Some(id) = request.get("id") else {
-            continue;
+/// `first` の実行中に `second` を送り込むセッション。
+///
+/// サーバーは要求ごとに処理を起こすため、応答を待たずに送れば実行が重なる。
+/// `gap` は `first` がインスタンスへ接続し終えるまでの待ちで、これにより
+/// `second` は必ず接続済みの pipe に出会う。plugin の pipe は同時 1 接続しか
+/// 受け付けないため、実クライアントでも起こり得る競合をそのまま再現する。
+fn run_overlapping_session(
+    registry_dir: &Path,
+    first: &Value,
+    gap: std::time::Duration,
+    second: &Value,
+) -> Session {
+    let mut server = ServerProcess::start(registry_dir, Some("trace"));
+    for request in initialize_requests() {
+        server.send(&request);
+        if let Some(id) = request.get("id") {
+            server.read_until(std::slice::from_ref(id));
+        }
+    }
+
+    server.send(first);
+    std::thread::sleep(gap);
+    server.send(second);
+
+    let ids: Vec<Value> = [first, second]
+        .iter()
+        .filter_map(|request| request.get("id").cloned())
+        .collect();
+    server.read_until(&ids);
+    server.finish()
+}
+
+/// 起動したサーバープロセスと、その stdio。
+struct ServerProcess {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    reader: BufReader<std::process::ChildStdout>,
+    stderr_reader: std::thread::JoinHandle<String>,
+    stdout: String,
+}
+
+impl ServerProcess {
+    /// registry と `RUST_LOG` を指定してサーバーを起こす。
+    fn start(registry_dir: &Path, rust_log: Option<&str>) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_aviutl2-mcp-server"));
+        command.env("AVIUTL2_MCP_REGISTRY_DIR", registry_dir);
+        match rust_log {
+            Some(filter) => command.env("RUST_LOG", filter),
+            None => command.env_remove("RUST_LOG"),
         };
-        loop {
+
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("MCP サーバーを起動できる");
+
+        let stdin = child.stdin.take().expect("stdin を得られる");
+        let reader = BufReader::new(child.stdout.take().expect("stdout を得られる"));
+        // stderr を読み続けないとログでパイプが詰まる。
+        let mut stderr_pipe = child.stderr.take().expect("stderr を得られる");
+        let stderr_reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr_pipe.read_to_string(&mut text);
+            text
+        });
+
+        Self {
+            child,
+            stdin,
+            reader,
+            stderr_reader,
+            stdout: String::new(),
+        }
+    }
+
+    /// 要求を 1 件送る。応答は待たない。
+    fn send(&mut self, request: &Value) {
+        let line = serde_json::to_string(request).expect("直列化できる");
+        writeln!(self.stdin, "{line}").expect("要求を書き込める");
+        self.stdin.flush().expect("要求を送出できる");
+    }
+
+    /// 指定した id の応答が揃うまで stdout を読む。
+    fn read_until(&mut self, ids: &[Value]) {
+        let mut pending: Vec<Value> = ids.to_vec();
+        while !pending.is_empty() {
             let mut line = String::new();
-            if reader.read_line(&mut line).expect("stdout を読める") == 0 {
+            if self.reader.read_line(&mut line).expect("stdout を読める") == 0 {
                 break;
             }
-            stdout.push_str(&line);
-            let responded = serde_json::from_str::<Value>(line.trim_end())
-                .is_ok_and(|message| message.get("id") == Some(id));
-            if responded {
-                break;
+            self.stdout.push_str(&line);
+            if let Ok(message) = serde_json::from_str::<Value>(line.trim_end())
+                && let Some(id) = message.get("id")
+            {
+                pending.retain(|awaited| awaited != id);
             }
         }
     }
 
-    // stdin を閉じてサーバーの終了を促す。
-    drop(stdin);
-    reader
-        .read_to_string(&mut stdout)
-        .expect("残りの stdout を読める");
-    child.wait().expect("サーバーの終了を待てる");
+    /// stdin を閉じてサーバーの終了を待ち、記録を返す。
+    fn finish(self) -> Session {
+        let Self {
+            mut child,
+            stdin,
+            mut reader,
+            stderr_reader,
+            mut stdout,
+        } = self;
+        drop(stdin);
+        reader
+            .read_to_string(&mut stdout)
+            .expect("残りの stdout を読める");
+        child.wait().expect("サーバーの終了を待てる");
 
-    Session {
-        stdout,
-        stderr: stderr_reader.join().expect("stderr の読み取りが完了する"),
+        Session {
+            stdout,
+            stderr: stderr_reader.join().expect("stderr の読み取りが完了する"),
+        }
     }
 }
 
@@ -603,6 +676,138 @@ fn unreachable_instance_resource_reports_not_found_with_details() {
     assert_eq!(error["data"]["retryable"], json!(true));
     assert!(error["data"]["correlation_id"].is_string());
 
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+/// インスタンスが read operation を処理している時間。
+///
+/// この間その pipe は塞がるため、後続の接続は待たされる。1 往復に要する時間より
+/// 十分長く、要求の期限（5 秒）より十分短い値を選ぶ。
+const BUSY_WHILE_READING: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// 先の要求がインスタンスへ接続し終えるまでの待ち。
+///
+/// 接続・handshake・ping はミリ秒で終わるため、この待ちの後は必ず pipe が
+/// 塞がっている。[`BUSY_WHILE_READING`] より十分短くし、read の実行中に
+/// 次の要求が届くようにする。
+const CONNECT_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// `resources/read` の内容を JSON として取り出す。
+fn read_resource_contents(response: &Value) -> Value {
+    let text = response["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("resource の内容がありません: {response}"));
+    serde_json::from_str(text).expect("JSON として読める")
+}
+
+#[test]
+fn instance_listing_and_tool_call_survive_overlapping() {
+    let registry_dir = temp_registry_dir();
+    let edit_info = serde_json::to_value(sample_edit_info()).expect("直列化できる");
+    // 読み取りに時間の掛かるインスタンスを演じさせ、その最中に一覧を要求する。
+    let mock = MockPipeServer::start_with_delayed_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        OperationResponses::from([("get_edit_info".to_string(), ok_result(edit_info.clone()))]),
+        BUSY_WHILE_READING,
+    );
+    mock.write_descriptor(&registry_dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    // 一覧は候補へ接続して生存確認するため、実行中の read 要求と pipe を奪い合う。
+    let session = run_overlapping_session(
+        &registry_dir,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "aviutl2_get_edit_info",
+                "arguments": { "instance_id": mock.instance_id().to_string() },
+            },
+        }),
+        CONNECT_GRACE,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "resources/read",
+            "params": { "uri": "aviutl2://instances" },
+        }),
+    );
+
+    // 一覧が届いた時点で pipe は read 要求に占有されている。
+    let operations: Vec<String> = mock
+        .received_requests()
+        .iter()
+        .map(|request| request.operation.clone())
+        .collect();
+    assert_eq!(
+        operations.first().map(String::as_str),
+        Some("ping"),
+        "{operations:?}"
+    );
+    assert_eq!(
+        operations.get(1).map(String::as_str),
+        Some("get_edit_info"),
+        "read 要求が先に pipe を占有していません: {operations:?}"
+    );
+
+    // 実行中の read 要求は割り込まれても壊れない。
+    let call = session.response(2);
+    assert_eq!(call["result"]["isError"], json!(false), "{call}");
+    assert_eq!(call["result"]["structuredContent"], edit_info);
+
+    // 一覧側も応答を返す。pipe が空くのを待って生存確認できることもあれば、
+    // 待ちきれず候補から外れることもあるが、後者でも取り直しへ誘導する
+    // retryable な失敗にとどまり、内部エラーにはしない。
+    let listed = session.response(3);
+    if listed["error"].is_object() {
+        assert_eq!(listed["error"]["data"]["code"], json!("instance_stale"));
+        assert_eq!(
+            listed["error"]["data"]["retryable"],
+            json!(true),
+            "{listed}"
+        );
+    } else {
+        let contents = read_resource_contents(&listed);
+        assert_eq!(contents["total_count"], json!(1), "{contents}");
+    }
+
+    // 競合はその 1 回に留まり、登録は失われない。取り直せば一覧にも read にも応じる。
+    let mut retry = initialize_requests();
+    retry.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/read",
+        "params": { "uri": "aviutl2://instances" },
+    }));
+    retry.push(json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_get_edit_info",
+            "arguments": { "instance_id": mock.instance_id().to_string() },
+        },
+    }));
+    let after = run_session(&registry_dir, &retry);
+    let contents = read_resource_contents(&after.response(2));
+    assert_eq!(
+        contents["total_count"],
+        json!(1),
+        "競合の後にインスタンスが失われています: {contents}"
+    );
+    assert_eq!(
+        after.response(3)["result"]["isError"],
+        json!(false),
+        "競合の後に read が通りません: {}",
+        after.response(3)
+    );
+
+    drop(mock);
     let _ = std::fs::remove_dir_all(&registry_dir);
 }
 

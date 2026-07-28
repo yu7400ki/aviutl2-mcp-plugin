@@ -62,6 +62,7 @@ pub struct MockBehavior {
     process_created_at: String,
     state: InstanceState,
     responses: OperationResponses,
+    response_delay: Duration,
     received: ReceivedRequests,
 }
 
@@ -103,6 +104,32 @@ impl MockPipeServer {
         state: InstanceState,
         responses: OperationResponses,
     ) -> Self {
+        Self::start_with_delayed_operations(
+            instance_id,
+            auth_secret,
+            pid,
+            process_created_at,
+            state,
+            responses,
+            Duration::ZERO,
+        )
+    }
+
+    /// read operation の応答を `response_delay` だけ遅らせて起動する。
+    ///
+    /// pipe は同時 1 接続しか受け付けないため、この遅延の間は接続が塞がる。
+    /// 実行中の要求と後続の接続が重なる状況を作るために使う。生存確認の `ping`
+    /// には適用せず、接続の確立そのものは遅らせない。
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_delayed_operations(
+        instance_id: InstanceId,
+        auth_secret: AuthSecret,
+        pid: u32,
+        process_created_at: String,
+        state: InstanceState,
+        responses: OperationResponses,
+        response_delay: Duration,
+    ) -> Self {
         let pipe_name = pipe_name_for(&instance_id);
         let wide: Vec<u16> = OsStr::new(&pipe_name)
             .encode_wide()
@@ -137,6 +164,7 @@ impl MockPipeServer {
             process_created_at: process_created_at.clone(),
             state: state.clone(),
             responses,
+            response_delay,
             received: Arc::clone(&received),
         };
 
@@ -337,6 +365,9 @@ fn serve_connection(handle: HANDLE, behavior: &MockBehavior, stop_event: HANDLE)
             .lock()
             .expect("received のロックは毒化しない")
             .push(request.clone());
+        if request.operation != "ping" {
+            std::thread::sleep(behavior.response_delay);
+        }
         let response = build_response(&request, behavior, negotiated);
         let response_body = serde_json::to_vec(&response).unwrap();
         if write_frame(handle, &response_body, io_deadline()).is_err() {

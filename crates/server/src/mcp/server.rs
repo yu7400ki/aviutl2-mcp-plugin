@@ -208,6 +208,9 @@ impl AviUtl2McpServer {
     /// 返る instance_id は他のすべての tool で必須の引数となる。
     /// 本サーバーが扱う frame 番号と layer 番号はいずれも 0 始まりである。
     /// offset と limit（1〜200、既定 50）でページを指定する。
+    /// 生存確認は実行中の要求と競合し得るため、稼働中のインスタンスが
+    /// その回の一覧から一時的に外れることがある。期待した instance_id が
+    /// 見つからない場合は取り直す。
     #[tool(
         name = "aviutl2_list_instances",
         annotations(
