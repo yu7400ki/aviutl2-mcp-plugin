@@ -295,6 +295,24 @@ mod tests {
         assert_eq!(decoder.take_frame().unwrap(), b"second");
     }
 
+    /// デコーダへ流す入力。妥当な frame 列（末尾が途中で切れる場合を含む）と、
+    /// 任意バイト列の双方を生成する。
+    fn feed_input_strategy() -> impl Strategy<Value = Vec<u8>> {
+        let frame_stream = (
+            prop::collection::vec(prop::collection::vec(any::<u8>(), 1..=64), 0..=6),
+            1..=100usize,
+        )
+            .prop_map(|(bodies, keep_percent)| {
+                let mut buf = Vec::new();
+                for body in &bodies {
+                    buf.extend_from_slice(&encode_frame(body).unwrap());
+                }
+                buf.truncate(buf.len() * keep_percent / 100);
+                buf
+            });
+        prop_oneof![frame_stream, prop::collection::vec(any::<u8>(), 0..=1024)]
+    }
+
     proptest! {
         #[test]
         fn feed_arbitrary_bytes_never_panics(
@@ -309,25 +327,54 @@ mod tests {
             let _ = decoder.end();
         }
 
+        /// 分割耐性: 投入の分割位置は結果に影響しない。
         #[test]
-        fn feed_result_is_typed_or_waiting(bytes in prop::collection::vec(any::<u8>(), 0..=1024)) {
-            let mut decoder = FrameDecoder::new();
-            match decoder.feed(&bytes) {
-                Ok(()) => {
-                    // 完成したフレームはキューへ積まれるため、feed 後の状態は常に読み取り待ちのいずれか。
-                    let waiting = matches!(
-                        decoder.state(),
-                        DecoderState::ReadingLength | DecoderState::ReadingBody { .. }
-                    );
-                    prop_assert!(waiting);
+        fn chunked_feed_matches_single_feed(bytes in feed_input_strategy()) {
+            let mut whole = FrameDecoder::new();
+            let whole_result = whole.feed(&bytes);
+            let mut whole_frames = Vec::new();
+            while let Some(frame) = whole.take_frame() {
+                whole_frames.push(frame);
+            }
+
+            let mut split = FrameDecoder::new();
+            let mut split_result = Ok(());
+            for byte in &bytes {
+                split_result = split.feed(std::slice::from_ref(byte));
+                if split_result.is_err() {
+                    break;
                 }
-                Err(e) => {
-                    prop_assert!(matches!(
-                        e,
-                        FrameError::PayloadTooLarge(_)
-                            | FrameError::EmptyPayload
-                            | FrameError::IncompleteFrame
-                    ));
+            }
+            let mut split_frames = Vec::new();
+            while let Some(frame) = split.take_frame() {
+                split_frames.push(frame);
+            }
+
+            prop_assert_eq!(whole_result, split_result);
+            prop_assert_eq!(whole_frames, split_frames);
+        }
+
+        /// 公開状態と内部カウンタの整合。
+        #[test]
+        fn state_matches_internal_counters(
+            bytes in feed_input_strategy(),
+            chunk_size in 1..=32usize,
+        ) {
+            let mut decoder = FrameDecoder::new();
+            for chunk in bytes.chunks(chunk_size) {
+                if decoder.feed(chunk).is_err() {
+                    // エラー時はリセットされ、長さ読み取りの初期状態へ戻る。
+                    prop_assert_eq!(decoder.state(), DecoderState::ReadingLength);
+                    prop_assert_eq!(decoder.length_filled, 0);
+                }
+                match decoder.state() {
+                    // 4 バイト到達で必ず ReadingBody へ移るため、途中受信のみが残る。
+                    DecoderState::ReadingLength => prop_assert!(decoder.length_filled < 4),
+                    // length バイト到達で必ずキューへ積まれるため、途中受信のみが残る。
+                    DecoderState::ReadingBody { length } => {
+                        prop_assert_eq!(decoder.body.len(), length as usize);
+                        prop_assert!(decoder.body_filled < length as usize);
+                    }
                 }
             }
         }
