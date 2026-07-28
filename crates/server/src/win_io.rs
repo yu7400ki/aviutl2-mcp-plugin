@@ -68,10 +68,6 @@ pub struct EventHandle {
     handle: HANDLE,
 }
 
-// イベントハンドルはカーネルオブジェクトへの参照であり、スレッド親和性を持たない。
-// 所有権が移るだけで同時アクセスは生じないため、スレッド間の移動は安全である。
-unsafe impl Send for EventHandle {}
-
 impl EventHandle {
     /// 非シグナル状態の手動リセットイベントを作成する。
     pub fn new_manual_reset() -> io::Result<Self> {
@@ -92,13 +88,13 @@ impl EventHandle {
     }
 
     /// 非シグナル状態に戻す。
-    pub fn reset(&self) -> io::Result<()> {
+    fn reset(&self) -> io::Result<()> {
         // SAFETY: `self.handle` は本型が生存する限り有効なイベントハンドルである。
         unsafe { ResetEvent(self.handle) }.map_err(to_io_error)
     }
 
     /// `deadline` までシグナル状態を待つ。
-    pub fn wait(&self, deadline: Instant) -> WaitOutcome {
+    fn wait(&self, deadline: Instant) -> WaitOutcome {
         wait_one(self.handle, deadline)
     }
 }
@@ -227,7 +223,7 @@ impl OverlappedOp {
     /// I/O を保留したまま失敗することはない。すなわち失敗は不変条件の違反であり、
     /// 保留 I/O を残したまま転送バッファが解放される直前の状態を意味する。
     /// 復帰手段が無いため、その場合はログを残してプロセスを異常終了させる。
-    pub fn cancel_and_drain(&mut self) {
+    fn cancel_and_drain(&mut self) {
         if !self.pending {
             return;
         }
@@ -312,21 +308,17 @@ pub fn read_exact(handle: HANDLE, buf: &mut [u8], deadline: Instant) -> Result<(
     let mut op = unsafe { OverlappedOp::new(handle) }?;
     let mut total = 0usize;
     while total < buf.len() {
+        if remaining_until(deadline).is_zero() {
+            return Err(WinIoError::TimedOut);
+        }
         op.begin()?;
-        let mut immediate = 0u32;
         let slice = &mut buf[total..];
         // SAFETY: `slice` は本関数のスコープで生存し、`op` の `Drop` が I/O 完了を
         // 待ち合わせるため、カーネルの書き込み先は常に有効である。
-        let result = unsafe {
-            ReadFile(
-                handle,
-                Some(slice),
-                Some(&mut immediate),
-                Some(op.as_mut_ptr()),
-            )
-        };
+        // 転送バイト数は同期完了時も `OVERLAPPED` から取得するため NULL を渡す。
+        let result = unsafe { ReadFile(handle, Some(slice), None, Some(op.as_mut_ptr())) };
         let transferred = match op.classify(result)? {
-            IoIssue::Completed => immediate,
+            IoIssue::Completed => op.overlapped_result(false)?,
             IoIssue::Pending => op.await_completion(deadline)?,
         };
         if transferred == 0 {
@@ -352,21 +344,17 @@ pub fn write_all(handle: HANDLE, buf: &[u8], deadline: Instant) -> Result<(), Wi
     let mut op = unsafe { OverlappedOp::new(handle) }?;
     let mut total = 0usize;
     while total < buf.len() {
+        if remaining_until(deadline).is_zero() {
+            return Err(WinIoError::TimedOut);
+        }
         op.begin()?;
-        let mut immediate = 0u32;
         let slice = &buf[total..];
         // SAFETY: `slice` は本関数のスコープで生存し、`op` の `Drop` が I/O 完了を
         // 待ち合わせるため、カーネルの読み出し元は常に有効である。
-        let result = unsafe {
-            WriteFile(
-                handle,
-                Some(slice),
-                Some(&mut immediate),
-                Some(op.as_mut_ptr()),
-            )
-        };
+        // 転送バイト数は同期完了時も `OVERLAPPED` から取得するため NULL を渡す。
+        let result = unsafe { WriteFile(handle, Some(slice), None, Some(op.as_mut_ptr())) };
         let transferred = match op.classify(result)? {
-            IoIssue::Completed => immediate,
+            IoIssue::Completed => op.overlapped_result(false)?,
             IoIssue::Pending => op.await_completion(deadline)?,
         };
         if transferred == 0 {
@@ -383,7 +371,7 @@ pub fn write_all(handle: HANDLE, buf: &[u8], deadline: Instant) -> Result<(), Wi
 /// 単一のカーネルオブジェクトを `deadline` まで待つ。
 ///
 /// 残り時間が 0 の場合は待機せず [`WaitOutcome::TimedOut`] を返す。
-pub fn wait_one(handle: HANDLE, deadline: Instant) -> WaitOutcome {
+fn wait_one(handle: HANDLE, deadline: Instant) -> WaitOutcome {
     let remaining = remaining_until(deadline);
     if remaining.is_zero() {
         return WaitOutcome::TimedOut;
@@ -450,7 +438,7 @@ pub fn remaining_until(deadline: Instant) -> Duration {
 }
 
 /// `windows::core::Error` を `io::Error` へ変換する。
-pub fn to_io_error(err: windows::core::Error) -> io::Error {
+fn to_io_error(err: windows::core::Error) -> io::Error {
     io::Error::from_raw_os_error(err.code().0)
 }
 

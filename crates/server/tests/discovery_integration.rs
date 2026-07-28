@@ -247,7 +247,7 @@ fn read_frame(handle: HANDLE, deadline: Instant) -> Option<Vec<u8>> {
     let mut length_buf = [0u8; 4];
     win_io::read_exact(handle, &mut length_buf, deadline).ok()?;
     let length = u32::from_le_bytes(length_buf) as usize;
-    if length == 0 || length > 8 * 1024 * 1024 {
+    if length == 0 || length > aviutl2_mcp_core::MAX_FRAME_SIZE as usize {
         return None;
     }
     let mut body = vec![0u8; length];
