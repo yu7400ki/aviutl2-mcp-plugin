@@ -169,41 +169,12 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
     fn on_project_load(&mut self, project: &mut aviutl2::generic::ProjectFile) {
         if let Some(lifecycle) = &self.lifecycle {
             let _ = lifecycle.transition_to(aviutl2_mcp_core::state::InstanceState::Ready);
-
-            let project_info = project.get_path().map(|path| {
-                let display_name = path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "未命名プロジェクト".to_string());
-                DescriptorProject {
-                    display_name,
-                    path: path.to_string_lossy().into_owned(),
-                }
-            });
-
-            if let Err(e) = lifecycle.update_project(project_info) {
-                tracing::error!("プロジェクト情報の更新に失敗しました: {e:?}");
-            }
         }
+        self.sync_project(project.get_path());
     }
 
     fn on_project_save(&mut self, project: &mut aviutl2::generic::ProjectFile) {
-        if let Some(lifecycle) = &self.lifecycle {
-            let project_info = project.get_path().map(|path| {
-                let display_name = path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "未命名プロジェクト".to_string());
-                DescriptorProject {
-                    display_name,
-                    path: path.to_string_lossy().into_owned(),
-                }
-            });
-
-            if let Err(e) = lifecycle.update_project(project_info) {
-                tracing::error!("プロジェクト情報の更新に失敗しました: {e:?}");
-            }
-        }
+        self.sync_project(project.get_path());
     }
 
     fn on_clear_cache(&mut self, _edit_section: &aviutl2::generic::EditSection) {
@@ -214,6 +185,38 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
     fn event_change_edit_frame(&mut self) {}
     fn event_change_scene_info(&mut self) {}
     fn event_change_focus_object(&mut self) {}
+}
+
+#[cfg(windows)]
+impl AviUtl2McpPlugin {
+    /// project handler が確定したパスを descriptor へ反映する。
+    ///
+    /// ロード時と保存時で反映する内容は同じであり、確定したパスの有無だけが
+    /// 入力となる。
+    fn sync_project(&self, path: Option<std::path::PathBuf>) {
+        let Some(lifecycle) = &self.lifecycle else {
+            return;
+        };
+
+        if let Err(e) = lifecycle.update_project(path.as_deref().map(descriptor_project)) {
+            tracing::error!("プロジェクト情報の更新に失敗しました: {e:?}");
+        }
+    }
+}
+
+/// descriptor に載せるプロジェクト情報を組み立てる。
+///
+/// 表示名は拡張子を除いたファイル名とし、取得できない場合は未命名として扱う。
+#[cfg(windows)]
+fn descriptor_project(path: &std::path::Path) -> DescriptorProject {
+    let display_name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "未命名プロジェクト".to_string());
+    DescriptorProject {
+        display_name,
+        path: path.to_string_lossy().into_owned(),
+    }
 }
 
 /// 終了手順を段ごとに panic から隔離して順に実行する。
