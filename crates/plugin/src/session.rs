@@ -12,6 +12,7 @@ use aviutl2_mcp_core::{
     RequestEnvelope, ResponseEnvelope, ResponseResult, compute_client_mac, compute_server_mac,
     deserialize_json, negotiate, verify_mac,
 };
+use chrono::Utc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,7 @@ const REQUEST_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 /// 1 フレームの送信に許す上限。
 ///
 /// 受信側がバッファを読み出さない場合でも送信側が滞留しないようにする。
+/// 要求が deadline を指定した場合は、この上限と deadline の短い方を採用する。
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 1 接続の処理を panic boundary で包んで実行する。
@@ -149,6 +151,7 @@ fn run_request_loop(
                     request.instance_id,
                     ErrorCode::ProtocolMismatch,
                     "要求の MINOR が交渉結果を超えています",
+                    false,
                 )?;
                 continue;
             }
@@ -163,6 +166,7 @@ fn run_request_loop(
                     request.instance_id,
                     ErrorCode::ProtocolMismatch,
                     "要求の MAJOR が交渉結果と一致しません",
+                    false,
                 )?;
                 await_peer_close(stream);
                 break;
@@ -177,6 +181,7 @@ fn run_request_loop(
                 request.instance_id,
                 ErrorCode::InstanceNotFound,
                 "インスタンス ID が一致しません",
+                false,
             )?;
             continue;
         }
@@ -189,9 +194,35 @@ fn run_request_loop(
                 request.instance_id,
                 ErrorCode::UnsupportedOperation,
                 "未対応の operation です",
+                false,
             )?;
             continue;
         }
+
+        // 期限は operation の実行に対する制約であり、要求自体の妥当性検証
+        // （version・instance・operation）を通した後に評価する。妥当性の誤りは
+        // 再試行しても解消しないため、再試行可能な `timeout` より先に返す。
+        let response_deadline = match resolve_request_deadline(
+            Instant::now(),
+            Utc::now().timestamp_millis(),
+            WRITE_TIMEOUT,
+            request.deadline_unix_ms,
+        ) {
+            RequestDeadline::Within(deadline) => deadline,
+            RequestDeadline::Exceeded => {
+                // 未開始の要求は中止する。副作用が無いため再試行可能として返す。
+                send_error_response(
+                    stream,
+                    negotiated_version,
+                    request.request_id,
+                    request.instance_id,
+                    ErrorCode::Timeout,
+                    "要求の deadline を超過したため処理しません",
+                    true,
+                )?;
+                continue;
+            }
+        };
 
         let response = ResponseEnvelope::pong(
             negotiated_version,
@@ -199,7 +230,7 @@ fn run_request_loop(
             lifecycle.instance_id(),
             lifecycle.state(),
         );
-        send_response(stream, &response)?;
+        send_response(stream, &response, response_deadline)?;
     }
 
     Ok(())
@@ -226,6 +257,49 @@ fn await_peer_close(stream: &PipeStream) {
             }
         }
     }
+}
+
+/// 要求 1 件に対して採用する期限。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestDeadline {
+    /// 期限内。値は応答送信に使う単調時計上の期限。
+    Within(Instant),
+    /// 要求を受け取った時点で既に期限を超過している。
+    Exceeded,
+}
+
+/// 要求の `deadline_unix_ms` とサーバー側上限から、実際に採用する期限を決める。
+///
+/// 採用するのは両者の短い方であり、`deadline_unix_ms` が未指定の要求には
+/// サーバー側上限だけを適用する。
+///
+/// `deadline_unix_ms` は壁時計（Unix epoch ミリ秒）基準で、`now` の単調時計とは
+/// 基準が異なる。そのため `now_unix_ms` との差から残り時間を求め、それを `now` へ
+/// 加算して単調時計上の期限に直す。
+///
+/// 壁時計は時刻調整で前後し得るため、極端な値は次のように扱う。
+/// - 遠い未来: サーバー側上限との短い方を採るため、上限を超えて待つことはない。
+/// - 過去: 期限超過として扱う。要求元と本プロセスは同一ホストの同一壁時計を参照する
+///   ので、往復のミリ秒の間に過去へ回るのは時刻調整に限られる。その場合も要求は
+///   未実行のまま中止され副作用が残らず、再試行可能なエラーとして通知できる。
+fn resolve_request_deadline(
+    now: Instant,
+    now_unix_ms: i64,
+    server_limit: Duration,
+    deadline_unix_ms: Option<u64>,
+) -> RequestDeadline {
+    let Some(deadline_unix_ms) = deadline_unix_ms else {
+        return RequestDeadline::Within(now + server_limit);
+    };
+
+    let remaining_ms = i128::from(deadline_unix_ms) - i128::from(now_unix_ms);
+    if remaining_ms <= 0 {
+        return RequestDeadline::Exceeded;
+    }
+
+    // 上限との短い方を採るため、表現できない大きさは上限へ丸めて差し支えない。
+    let remaining = Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(u64::MAX));
+    RequestDeadline::Within(now + remaining.min(server_limit))
 }
 
 /// 要求の `protocol_version` を交渉結果と照合した結果。
@@ -263,14 +337,24 @@ where
     Ok(value)
 }
 
-fn send_response(stream: &PipeStream, response: &ResponseEnvelope) -> Result<()> {
+/// 応答を `deadline` までに送信する。
+fn send_response(
+    stream: &PipeStream,
+    response: &ResponseEnvelope,
+    deadline: Instant,
+) -> Result<()> {
     let body = serde_json::to_vec(response).context("応答の JSON 直列化に失敗しました")?;
     stream
-        .write_frame(&body, Instant::now() + WRITE_TIMEOUT)
+        .write_frame(&body, deadline)
         .context("応答の送信に失敗しました")?;
     Ok(())
 }
 
+/// エラー応答を送信する。
+///
+/// 送信の期限には要求の deadline ではなくサーバー側上限を使う。期限超過を伝える
+/// 応答まで当の期限で打ち切ると、クライアントは理由を得られないまま切断だけを
+/// 観測することになる。
 fn send_error_response(
     stream: &PipeStream,
     protocol_version: ProtocolVersion,
@@ -278,6 +362,7 @@ fn send_error_response(
     instance_id: InstanceId,
     code: ErrorCode,
     message: &str,
+    retryable: bool,
 ) -> Result<()> {
     let response = ResponseEnvelope {
         kind: aviutl2_mcp_core::ResponseKind::Response,
@@ -285,10 +370,10 @@ fn send_error_response(
         request_id,
         instance_id,
         result: ResponseResult::Err {
-            error: ErrorObject::new(code, message, false),
+            error: ErrorObject::new(code, message, retryable),
         },
     };
-    send_response(stream, &response)
+    send_response(stream, &response, Instant::now() + WRITE_TIMEOUT)
 }
 
 #[cfg(test)]
@@ -324,6 +409,82 @@ mod tests {
         assert_eq!(
             classify_version(NEGOTIATED, ProtocolVersion { major: 0, minor: 0 }),
             VersionCheck::MajorMismatch
+        );
+    }
+
+    /// 期限判定の基準時刻。壁時計・単調時計いずれの絶対値にも依存しない。
+    const NOW_UNIX_MS: i64 = 1_785_144_000_000;
+    const SERVER_LIMIT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn deadline_shorter_than_server_limit_is_adopted() {
+        let now = Instant::now();
+        assert_eq!(
+            resolve_request_deadline(
+                now,
+                NOW_UNIX_MS,
+                SERVER_LIMIT,
+                Some((NOW_UNIX_MS + 500) as u64),
+            ),
+            RequestDeadline::Within(now + Duration::from_millis(500))
+        );
+    }
+
+    #[test]
+    fn server_limit_is_adopted_when_deadline_is_longer() {
+        let now = Instant::now();
+        assert_eq!(
+            resolve_request_deadline(
+                now,
+                NOW_UNIX_MS,
+                SERVER_LIMIT,
+                Some((NOW_UNIX_MS + 60_000) as u64),
+            ),
+            RequestDeadline::Within(now + SERVER_LIMIT)
+        );
+    }
+
+    #[test]
+    fn absent_deadline_uses_server_limit() {
+        let now = Instant::now();
+        assert_eq!(
+            resolve_request_deadline(now, NOW_UNIX_MS, SERVER_LIMIT, None),
+            RequestDeadline::Within(now + SERVER_LIMIT)
+        );
+    }
+
+    #[test]
+    fn passed_deadline_is_exceeded() {
+        let now = Instant::now();
+        for deadline_unix_ms in [NOW_UNIX_MS - 1, NOW_UNIX_MS] {
+            assert_eq!(
+                resolve_request_deadline(
+                    now,
+                    NOW_UNIX_MS,
+                    SERVER_LIMIT,
+                    Some(deadline_unix_ms as u64),
+                ),
+                RequestDeadline::Exceeded,
+                "deadline {deadline_unix_ms} が期限超過として扱われていません"
+            );
+        }
+    }
+
+    #[test]
+    fn far_past_deadline_is_exceeded() {
+        let now = Instant::now();
+        assert_eq!(
+            resolve_request_deadline(now, NOW_UNIX_MS, SERVER_LIMIT, Some(0)),
+            RequestDeadline::Exceeded
+        );
+    }
+
+    #[test]
+    fn far_future_deadline_is_capped_by_server_limit() {
+        let now = Instant::now();
+        assert_eq!(
+            resolve_request_deadline(now, NOW_UNIX_MS, SERVER_LIMIT, Some(u64::MAX)),
+            RequestDeadline::Within(now + SERVER_LIMIT)
         );
     }
 }
