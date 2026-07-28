@@ -235,6 +235,9 @@ impl Drop for AviUtl2McpPlugin {
     }
 }
 
+// SDK が要求する C エクスポートを生成する。展開結果は Windows 限定の
+// `AviUtl2McpPlugin` を参照するため、モジュール群と同じ条件で展開する。
+#[cfg(windows)]
 aviutl2::register_generic_plugin!(AviUtl2McpPlugin);
 
 #[cfg(not(windows))]
