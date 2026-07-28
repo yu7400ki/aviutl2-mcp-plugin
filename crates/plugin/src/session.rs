@@ -766,6 +766,14 @@ fn error_object(code: ErrorCode, message: impl Into<String>) -> ErrorObject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::read::Snapshot;
+    use aviutl2_mcp_core::{
+        AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
+        EffectItemType, EffectType, Extent, FiniteF64, FrameRange, LayerInfo, ObjectDetail,
+        ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary, SceneInfo,
+        SectionRange,
+    };
+    use std::sync::Mutex;
 
     const NEGOTIATED: ProtocolVersion = ProtocolVersion { major: 1, minor: 3 };
 
@@ -872,6 +880,801 @@ mod tests {
         assert_eq!(
             resolve_request_deadline(now, NOW_UNIX_MS, SERVER_LIMIT, Some(u64::MAX)),
             RequestDeadline::Within(now + SERVER_LIMIT)
+        );
+    }
+
+    /// テストで用いるプロジェクトの epoch。
+    const EPOCH: &str = "9d0a5f4e-2f47-4a13-9a5e-1e2f3a4b5c6d";
+
+    /// テストで用いる現在シーンの ID。
+    const SCENE_ID: i32 = 0;
+
+    /// 読み取り口が返す列挙時点の revision。
+    const REVISION: u64 = 7;
+
+    /// 読み取り口の代わりに定型データを返す実装。
+    ///
+    /// 呼ばれた operation を記録するため、受付判定や params の検証で弾かれた
+    /// 要求が読み取りへ進んでいないことを確かめられる。
+    struct FakeAdapter {
+        calls: Mutex<Vec<&'static str>>,
+        /// 最初の呼び出しで返す失敗。
+        failure: Mutex<Option<ReadError>>,
+    }
+
+    impl FakeAdapter {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                failure: Mutex::new(None),
+            }
+        }
+
+        /// 最初の読み取りが指定の失敗を返す読み取り口を作る。
+        fn failing(error: ReadError) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                failure: Mutex::new(Some(error)),
+            }
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        /// 呼び出しを記録し、設定された失敗があればそれを返す。
+        fn enter(&self, call: &'static str) -> Result<(), ReadError> {
+            self.calls.lock().unwrap().push(call);
+            match self.failure.lock().unwrap().take() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        }
+    }
+
+    impl ReadAdapter for FakeAdapter {
+        fn get_edit_info(&self) -> Result<EditInfo, ReadError> {
+            self.enter("get_edit_info")?;
+            Ok(fake_edit_info())
+        }
+
+        fn get_current_scene(&self) -> Result<(SceneInfo, u64), ReadError> {
+            self.enter("get_current_scene")?;
+            Ok((fake_scene(), REVISION))
+        }
+
+        fn list_layers(&self, expected_scene_id: i32) -> Result<Snapshot<LayerInfo>, ReadError> {
+            self.enter("list_layers")?;
+            ensure_scene(expected_scene_id)?;
+            Ok(Snapshot {
+                items: fake_layers(),
+                snapshot_revision: REVISION,
+            })
+        }
+
+        fn list_objects(
+            &self,
+            expected_scene_id: i32,
+            filter: Option<&ObjectFilter>,
+        ) -> Result<Snapshot<ObjectSummary>, ReadError> {
+            self.enter("list_objects")?;
+            ensure_scene(expected_scene_id)?;
+            let layer_min = filter.and_then(|filter| filter.layer_min).unwrap_or(0);
+            let items = fake_objects()
+                .into_iter()
+                .filter(|object| object.layer >= layer_min)
+                .collect();
+            Ok(Snapshot {
+                items,
+                snapshot_revision: REVISION,
+            })
+        }
+
+        fn get_object(&self, selector: &ObjectSelector) -> Result<ObjectDetail, ReadError> {
+            self.enter("get_object")?;
+            let summary = fake_object();
+            if *selector != summary.selector {
+                return Err(ReadError::ObjectNotFound);
+            }
+            Ok(ObjectDetail {
+                alias: "[1:100]".to_string(),
+                sections: vec![SectionRange {
+                    start: 100,
+                    end: 200,
+                }],
+                effects: Vec::new(),
+                project_revision: REVISION,
+                summary,
+            })
+        }
+
+        fn list_available_effects(
+            &self,
+            effect_type: Option<&EffectType>,
+        ) -> Result<Snapshot<AvailableEffect>, ReadError> {
+            self.enter("list_available_effects")?;
+            let mut items = fake_effects();
+            if let Some(effect_type) = effect_type {
+                items.retain(|effect| effect.effect_type == *effect_type);
+            }
+            Ok(Snapshot {
+                items,
+                snapshot_revision: REVISION,
+            })
+        }
+    }
+
+    fn ensure_scene(expected_scene_id: i32) -> Result<(), ReadError> {
+        if expected_scene_id == SCENE_ID {
+            Ok(())
+        } else {
+            Err(ReadError::SceneMismatch {
+                expected: expected_scene_id,
+                current: SCENE_ID,
+            })
+        }
+    }
+
+    fn fake_scene() -> SceneInfo {
+        SceneInfo {
+            id: SCENE_ID,
+            name: Some("Scene 1".to_string()),
+            width: 1920,
+            height: 1080,
+            fps: FiniteF64::try_new(60.0),
+            fps_rate: 60,
+            fps_scale: 1,
+            sample_rate: 48000,
+        }
+    }
+
+    fn fake_edit_info() -> EditInfo {
+        EditInfo {
+            scene: fake_scene(),
+            cursor: Cursor {
+                frame: 12,
+                layer: 1,
+            },
+            extent: Extent {
+                frame_max: 3600,
+                layer_max: 2,
+            },
+            display: DisplayRange {
+                frame_start: 0,
+                layer_start: 0,
+                frame_num: 600,
+                layer_num: 10,
+            },
+            selected_range: Some(FrameRange { start: 10, end: 20 }),
+            grid_bpm: Vec::new(),
+            project_epoch: EPOCH.to_string(),
+            project_revision: REVISION,
+        }
+    }
+
+    fn fake_layers() -> Vec<LayerInfo> {
+        (0..3)
+            .map(|index| LayerInfo {
+                index,
+                name: Some(format!("レイヤー {index}")),
+                enabled: true,
+                locked: false,
+                object_count: 1,
+            })
+            .collect()
+    }
+
+    /// レイヤー 1・フレーム 100 のオブジェクト。
+    fn fake_object() -> ObjectSummary {
+        ObjectSummary::new(
+            EPOCH,
+            ObjectFingerprintInput {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame_start: 100,
+                frame_end: 200,
+                name: Some("立ち絵"),
+                alias: "[1:100]",
+            },
+        )
+    }
+
+    fn fake_objects() -> Vec<ObjectSummary> {
+        vec![
+            ObjectSummary::new(
+                EPOCH,
+                ObjectFingerprintInput {
+                    scene_id: SCENE_ID,
+                    layer: 0,
+                    frame_start: 0,
+                    frame_end: 99,
+                    name: None,
+                    alias: "[0:0]",
+                },
+            ),
+            fake_object(),
+        ]
+    }
+
+    fn fake_effects() -> Vec<AvailableEffect> {
+        vec![
+            AvailableEffect {
+                name: "ぼかし".to_string(),
+                effect_type: EffectType::Filter,
+                flags: EffectFlags::from_raw(1),
+                items: vec![AvailableEffectItem {
+                    name: "範囲".to_string(),
+                    item_type: EffectItemType::Integer,
+                }],
+            },
+            AvailableEffect {
+                name: "動画ファイル".to_string(),
+                effect_type: EffectType::Input,
+                flags: EffectFlags::from_raw(3),
+                items: Vec::new(),
+            },
+        ]
+    }
+
+    /// 受付可能な状態・期限内で読み取りを実行する。
+    fn read(
+        adapter: &FakeAdapter,
+        operation: ReadOperation,
+        params: Value,
+    ) -> Result<Value, ErrorObject> {
+        execute_read(
+            adapter,
+            &InstanceState::Ready,
+            operation,
+            &params,
+            RequestDeadline::Within(Instant::now() + READ_TIMEOUT),
+        )
+    }
+
+    /// 全 operation と、その operation が受け付ける最小の params。
+    fn all_operations() -> Vec<(ReadOperation, Value)> {
+        vec![
+            (ReadOperation::GetEditInfo, json!({})),
+            (ReadOperation::GetCurrentScene, json!({})),
+            (
+                ReadOperation::ListLayers,
+                json!({ "expected_scene_id": SCENE_ID }),
+            ),
+            (
+                ReadOperation::ListObjects,
+                json!({ "expected_scene_id": SCENE_ID }),
+            ),
+            (
+                ReadOperation::GetObject,
+                json!({ "selector": fake_object().selector }),
+            ),
+            (ReadOperation::ListAvailableEffects, json!({})),
+        ]
+    }
+
+    #[test]
+    fn known_operations_are_routed() {
+        assert_eq!(classify_operation("ping").unwrap(), Operation::Ping);
+        for (name, operation) in [
+            ("get_edit_info", ReadOperation::GetEditInfo),
+            ("get_current_scene", ReadOperation::GetCurrentScene),
+            ("list_layers", ReadOperation::ListLayers),
+            ("list_objects", ReadOperation::ListObjects),
+            ("get_object", ReadOperation::GetObject),
+            (
+                "list_available_effects",
+                ReadOperation::ListAvailableEffects,
+            ),
+        ] {
+            assert_eq!(
+                classify_operation(name).unwrap(),
+                Operation::Read(operation),
+                "{name} が読み取りへ振り分けられていません"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_operation_is_unsupported() {
+        for name in ["", "Ping", "create_object", "list_layer"] {
+            let error = classify_operation(name).unwrap_err();
+            assert_eq!(
+                error.code,
+                ErrorCode::UnsupportedOperation,
+                "{name} が受理されました"
+            );
+            assert!(!error.retryable);
+        }
+    }
+
+    #[test]
+    fn get_edit_info_returns_edit_info() {
+        let adapter = FakeAdapter::new();
+        let result = read(&adapter, ReadOperation::GetEditInfo, json!({})).unwrap();
+
+        assert_eq!(result["scene"]["id"], SCENE_ID);
+        assert_eq!(result["scene"]["name"], "Scene 1");
+        assert_eq!(result["project_epoch"], EPOCH);
+        assert_eq!(result["project_revision"], REVISION);
+        assert_eq!(adapter.calls(), vec!["get_edit_info"]);
+    }
+
+    #[test]
+    fn get_current_scene_returns_scene_and_revision() {
+        let adapter = FakeAdapter::new();
+        let result = read(&adapter, ReadOperation::GetCurrentScene, json!({})).unwrap();
+
+        assert_eq!(result["scene"]["id"], SCENE_ID);
+        assert_eq!(result["project_revision"], REVISION);
+        assert_eq!(adapter.calls(), vec!["get_current_scene"]);
+    }
+
+    #[test]
+    fn list_layers_returns_requested_page() {
+        let adapter = FakeAdapter::new();
+        let result = read(
+            &adapter,
+            ReadOperation::ListLayers,
+            json!({ "expected_scene_id": SCENE_ID, "offset": 1, "limit": 1 }),
+        )
+        .unwrap();
+
+        assert_eq!(result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(result["items"][0]["index"], 1);
+        assert_eq!(result["page"]["total_count"], 3);
+        assert_eq!(result["page"]["count"], 1);
+        assert_eq!(result["page"]["offset"], 1);
+        assert_eq!(result["page"]["has_more"], true);
+        assert_eq!(result["page"]["next_offset"], 2);
+        assert_eq!(result["page"]["snapshot_revision"], REVISION);
+    }
+
+    #[test]
+    fn list_objects_passes_filter_to_the_adapter() {
+        let adapter = FakeAdapter::new();
+        let result = read(
+            &adapter,
+            ReadOperation::ListObjects,
+            json!({ "expected_scene_id": SCENE_ID, "filter": { "layer_min": 1 } }),
+        )
+        .unwrap();
+
+        assert_eq!(result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(result["items"][0]["layer"], 1);
+        assert_eq!(result["page"]["total_count"], 1);
+        assert_eq!(result["page"]["snapshot_revision"], REVISION);
+    }
+
+    #[test]
+    fn get_object_passes_selector_to_the_adapter() {
+        let adapter = FakeAdapter::new();
+        let selector = fake_object().selector;
+        let result = read(
+            &adapter,
+            ReadOperation::GetObject,
+            json!({ "selector": selector }),
+        )
+        .unwrap();
+
+        assert_eq!(result["summary"]["layer"], 1);
+        assert_eq!(result["summary"]["frame_start"], 100);
+        assert_eq!(result["summary"]["selector"], json!(selector));
+        assert_eq!(result["project_revision"], REVISION);
+    }
+
+    #[test]
+    fn list_available_effects_filters_by_type() {
+        let adapter = FakeAdapter::new();
+        let result = read(
+            &adapter,
+            ReadOperation::ListAvailableEffects,
+            json!({ "effect_type": "input" }),
+        )
+        .unwrap();
+
+        assert_eq!(result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(result["items"][0]["name"], "動画ファイル");
+        assert_eq!(result["page"]["total_count"], 1);
+    }
+
+    #[test]
+    fn unknown_params_field_is_invalid_argument() {
+        for (operation, params) in all_operations() {
+            let mut params = params;
+            params
+                .as_object_mut()
+                .unwrap()
+                .insert("future".to_string(), json!(1));
+            let adapter = FakeAdapter::new();
+
+            let error = read(&adapter, operation, params).unwrap_err();
+            assert_eq!(
+                error.code,
+                ErrorCode::InvalidArgument,
+                "{operation:?} が未知フィールドを受理しました"
+            );
+            assert!(
+                adapter.calls().is_empty(),
+                "{operation:?} が未知フィールドのまま読み取りへ進みました"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_params_are_invalid_argument() {
+        let cases = [
+            (ReadOperation::ListLayers, json!({})),
+            (
+                ReadOperation::ListLayers,
+                json!({ "expected_scene_id": "0" }),
+            ),
+            (
+                ReadOperation::ListObjects,
+                json!({ "expected_scene_id": SCENE_ID, "filter": { "layer_min": -1 } }),
+            ),
+            (ReadOperation::GetObject, json!({})),
+            (
+                ReadOperation::ListAvailableEffects,
+                json!({ "effect_type": 1 }),
+            ),
+        ];
+
+        for (operation, params) in cases {
+            let adapter = FakeAdapter::new();
+            let error = read(&adapter, operation, params.clone()).unwrap_err();
+            assert_eq!(
+                error.code,
+                ErrorCode::InvalidArgument,
+                "{operation:?} が {params} を受理しました"
+            );
+            assert!(adapter.calls().is_empty(), "{operation:?}: {params}");
+        }
+    }
+
+    #[test]
+    fn limit_out_of_range_is_invalid_argument_without_reading() {
+        let paged = [
+            (
+                ReadOperation::ListLayers,
+                json!({ "expected_scene_id": SCENE_ID }),
+            ),
+            (
+                ReadOperation::ListObjects,
+                json!({ "expected_scene_id": SCENE_ID }),
+            ),
+            (ReadOperation::ListAvailableEffects, json!({})),
+        ];
+
+        for (operation, params) in paged {
+            for limit in [0, 201] {
+                let mut params = params.clone();
+                params
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("limit".to_string(), json!(limit));
+                let adapter = FakeAdapter::new();
+
+                let error = read(&adapter, operation, params).unwrap_err();
+                assert_eq!(
+                    error.code,
+                    ErrorCode::InvalidArgument,
+                    "{operation:?} が limit {limit} を受理しました"
+                );
+                assert!(
+                    adapter.calls().is_empty(),
+                    "{operation:?} が limit {limit} のまま読み取りへ進みました"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inverted_layer_filter_is_invalid_argument_without_reading() {
+        let adapter = FakeAdapter::new();
+        let error = read(
+            &adapter,
+            ReadOperation::ListObjects,
+            json!({
+                "expected_scene_id": SCENE_ID,
+                "filter": { "layer_min": 2, "layer_max": 1 },
+            }),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(
+            adapter.calls().is_empty(),
+            "逆転した絞り込み条件のまま読み取りへ進みました"
+        );
+    }
+
+    #[test]
+    fn snapshot_revision_mismatch_is_precondition_failed() {
+        let paged = [
+            (
+                ReadOperation::ListLayers,
+                json!({ "expected_scene_id": SCENE_ID, "snapshot_revision": REVISION - 1 }),
+            ),
+            (
+                ReadOperation::ListObjects,
+                json!({ "expected_scene_id": SCENE_ID, "snapshot_revision": REVISION - 1 }),
+            ),
+        ];
+
+        for (operation, params) in paged {
+            let adapter = FakeAdapter::new();
+            let error = read(&adapter, operation, params).unwrap_err();
+
+            assert_eq!(
+                error.code,
+                ErrorCode::PreconditionFailed,
+                "{operation:?} が古い snapshot_revision を受理しました"
+            );
+            assert!(error.retryable);
+            assert_eq!(error.details["requested_snapshot_revision"], REVISION - 1);
+            assert_eq!(error.details["current_snapshot_revision"], REVISION);
+        }
+    }
+
+    #[test]
+    fn effect_catalog_page_ignores_snapshot_revision() {
+        // 登録済み effect の一覧はプロジェクトの編集内容から独立しており、
+        // revision の照合対象にしない。無関係な編集で revision が進んでも
+        // 後続ページは拒否されない。
+        let adapter = FakeAdapter::new();
+        let result = read(
+            &adapter,
+            ReadOperation::ListAvailableEffects,
+            json!({ "snapshot_revision": REVISION - 1 }),
+        )
+        .unwrap();
+
+        assert_eq!(result["items"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            result["page"]["snapshot_revision"],
+            EFFECT_CATALOG_SNAPSHOT_REVISION
+        );
+    }
+
+    #[test]
+    fn starting_rejects_read_without_touching_the_adapter() {
+        for (operation, params) in all_operations() {
+            let adapter = FakeAdapter::new();
+            let error = execute_read(
+                &adapter,
+                &InstanceState::Starting,
+                operation,
+                &params,
+                RequestDeadline::Within(Instant::now() + READ_TIMEOUT),
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error.code,
+                ErrorCode::HostBusy,
+                "{operation:?} が起動処理中に受理されました"
+            );
+            assert!(error.retryable);
+            assert_eq!(error.details["retry_after_ms"], HOST_BUSY_RETRY_AFTER_MS);
+            assert!(
+                adapter.calls().is_empty(),
+                "{operation:?} が起動処理中に読み取り口を呼びました"
+            );
+        }
+    }
+
+    #[test]
+    fn admit_read_accepts_only_serviceable_states() {
+        for state in [InstanceState::Ready, InstanceState::Busy] {
+            assert_eq!(admit_read(&state), Ok(()), "{state} が拒否されました");
+        }
+
+        for state in [
+            InstanceState::Starting,
+            InstanceState::Draining,
+            InstanceState::Gone,
+            InstanceState::Unknown("future".to_string()),
+        ] {
+            let error = admit_read(&state).unwrap_err();
+            assert_eq!(error.code, ErrorCode::HostBusy, "{state} が受理されました");
+            assert!(error.retryable);
+            assert_eq!(error.details["retry_after_ms"], HOST_BUSY_RETRY_AFTER_MS);
+        }
+    }
+
+    /// 読み取りの失敗の全 variant。新しい variant を足したらここへも足す。
+    fn read_error_variants() -> Vec<fn() -> ReadError> {
+        vec![
+            || ReadError::NotReady,
+            || ReadError::EditBlocked {
+                state: crate::read::EditState::Preview,
+            },
+            || ReadError::EditBlocked {
+                state: crate::read::EditState::Save,
+            },
+            || ReadError::SceneMismatch {
+                expected: 3,
+                current: SCENE_ID,
+            },
+            || ReadError::EpochMismatch,
+            || ReadError::FingerprintAlgorithmMismatch {
+                requested: "sha256-future-v9".to_string(),
+                supported: "sha256-alias-v1".to_string(),
+            },
+            || ReadError::FingerprintMismatch,
+            || ReadError::ObjectNotFound,
+            || ReadError::AmbiguousObject { candidate_count: 2 },
+            || ReadError::InvalidFilter(ObjectFilterError::InvertedLayerRange { min: 8, max: 1 }),
+            || ReadError::Sdk {
+                operation: "call_read_section",
+            },
+            || ReadError::Panicked,
+        ]
+    }
+
+    #[test]
+    fn read_failures_keep_their_code_and_details() {
+        for make in read_error_variants() {
+            let expected = make();
+            let adapter = FakeAdapter::failing(make());
+
+            let error = read(&adapter, ReadOperation::GetEditInfo, json!({})).unwrap_err();
+
+            assert_eq!(error.code, expected.error_code(), "{expected}");
+            assert_eq!(error.retryable, expected.retryable(), "{expected}");
+            assert_eq!(error.message, expected.to_string());
+            // 再試行間隔は補助情報の中だけに現れ、重ねて載せない。
+            assert_eq!(error.details, expected.details(), "{expected}");
+            assert_eq!(
+                error.details.get("retry_after_ms").and_then(Value::as_u64),
+                expected.retry_after_ms(),
+                "{expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn scene_mismatch_from_the_adapter_is_precondition_failed() {
+        let adapter = FakeAdapter::new();
+        let error = read(
+            &adapter,
+            ReadOperation::ListLayers,
+            json!({ "expected_scene_id": SCENE_ID + 1 }),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::PreconditionFailed);
+        assert_eq!(error.details["expected_scene_id"], SCENE_ID + 1);
+        assert_eq!(error.details["current_scene_id"], SCENE_ID);
+    }
+
+    #[test]
+    fn responses_do_not_expose_handles() {
+        let mut documents = Vec::new();
+        for (operation, params) in all_operations() {
+            let adapter = FakeAdapter::new();
+            let result = read(&adapter, operation, params).unwrap();
+            documents.push(serde_json::to_string(&result).unwrap());
+        }
+        for make in read_error_variants() {
+            let adapter = FakeAdapter::failing(make());
+            let error = read(&adapter, ReadOperation::GetEditInfo, json!({})).unwrap_err();
+            documents.push(serde_json::to_string(&error).unwrap());
+        }
+
+        for document in documents {
+            let lowered = document.to_lowercase();
+            for forbidden in ["handle", "pointer", "0x", "secret", "nonce"] {
+                assert!(
+                    !lowered.contains(forbidden),
+                    "{forbidden} が応答に含まれます: {document}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exceeded_deadline_skips_the_read() {
+        for (operation, params) in all_operations() {
+            let adapter = FakeAdapter::new();
+            let error = execute_read(
+                &adapter,
+                &InstanceState::Ready,
+                operation,
+                &params,
+                RequestDeadline::Exceeded,
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error.code,
+                ErrorCode::Timeout,
+                "{operation:?} が期限超過後に実行されました"
+            );
+            assert!(error.retryable);
+            assert!(
+                adapter.calls().is_empty(),
+                "{operation:?} が期限超過後に読み取り口を呼びました"
+            );
+        }
+    }
+
+    #[test]
+    fn send_uses_the_remaining_budget_after_the_read() {
+        let now = Instant::now();
+        // 読み取りに 1 秒使い、要求の残りは 3 秒。送信上限より短いので残りを採る。
+        assert_eq!(
+            decide_send(
+                now,
+                NOW_UNIX_MS,
+                RequestDeadline::Within(now + Duration::from_secs(4)),
+                Some((NOW_UNIX_MS + 3_000) as u64),
+            ),
+            SendDecision::Send(now + Duration::from_secs(3))
+        );
+    }
+
+    #[test]
+    fn send_is_capped_by_the_write_limit() {
+        let now = Instant::now();
+        assert_eq!(
+            decide_send(
+                now,
+                NOW_UNIX_MS,
+                RequestDeadline::Within(now + Duration::from_secs(4)),
+                None,
+            ),
+            SendDecision::Send(now + WRITE_TIMEOUT)
+        );
+        assert_eq!(
+            decide_send(
+                now,
+                NOW_UNIX_MS,
+                RequestDeadline::Within(now + Duration::from_secs(4)),
+                Some((NOW_UNIX_MS + 60_000) as u64),
+            ),
+            SendDecision::Send(now + WRITE_TIMEOUT)
+        );
+    }
+
+    #[test]
+    fn result_is_discarded_when_the_read_used_up_its_deadline() {
+        let now = Instant::now();
+        for read_deadline in [now, now - Duration::from_millis(1)] {
+            assert_eq!(
+                decide_send(
+                    now,
+                    NOW_UNIX_MS,
+                    RequestDeadline::Within(read_deadline),
+                    None,
+                ),
+                SendDecision::Discard
+            );
+        }
+    }
+
+    #[test]
+    fn result_is_discarded_when_the_request_deadline_passed_during_the_read() {
+        let now = Instant::now();
+        assert_eq!(
+            decide_send(
+                now,
+                NOW_UNIX_MS,
+                RequestDeadline::Within(now + Duration::from_secs(4)),
+                Some(NOW_UNIX_MS as u64),
+            ),
+            SendDecision::Discard
+        );
+    }
+
+    #[test]
+    fn unstarted_read_still_gets_a_send_budget() {
+        // 実行前に期限を超過していた要求は捨てる結果を持たない。理由を返せるよう
+        // 送信上限だけで送る。
+        let now = Instant::now();
+        assert_eq!(
+            decide_send(now, NOW_UNIX_MS, RequestDeadline::Exceeded, Some(0)),
+            SendDecision::Send(now + WRITE_TIMEOUT)
         );
     }
 }
