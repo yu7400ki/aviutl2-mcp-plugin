@@ -740,3 +740,51 @@ async fn precondition_failed_reaches_the_tool_result_with_current_revision() {
     assert_eq!(structured["details"]["expected_project_revision"], json!(7));
     assert!(text_of(&result).contains("precondition_failed"));
 }
+
+#[tokio::test]
+async fn secrets_in_remote_details_never_reach_the_tool_result() {
+    // 接続先が秘匿すべき値を details に載せてきても、tool result へは出さない。
+    let result = get_object_failure(
+        ErrorObject::new(
+            ErrorCode::EditBlocked,
+            "プレビュー中のため読み取れません",
+            true,
+        )
+        .with_details(json!({
+            "auth_secret": "s3cr3t-value",
+            "raw_pointer": "0xdeadbeef",
+            "pipe_name": r"\\.\pipe\aviutl2-mcp-leaked",
+            "object_alias": "[vo]\n_name=leaked-alias",
+            "project_path": r"C:\Users\tester\leaked-project.aup2",
+            "edit_state": "preview",
+            "retry_after_ms": 250,
+            "candidate_count": 2,
+        })),
+    )
+    .await;
+
+    let structured = structured(&result);
+    let text = text_of(&result);
+    let serialized = serde_json::to_string(&result).expect("直列化できる");
+    for forbidden in [
+        "s3cr3t-value",
+        "0xdeadbeef",
+        "aviutl2-mcp-leaked",
+        "leaked-alias",
+        "leaked-project",
+        "tester",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "{forbidden} が tool result に含まれています: {serialized}"
+        );
+        assert!(!text.contains(forbidden), "{forbidden} が text にあります");
+    }
+
+    // 秘匿が効きすぎて、待ち直しと再解決に要る内訳まで落ちてはならない。
+    assert_eq!(structured["code"], json!("edit_blocked"));
+    assert_eq!(structured["retryable"], json!(true));
+    assert_eq!(structured["details"]["edit_state"], json!("preview"));
+    assert_eq!(structured["details"]["retry_after_ms"], json!(250));
+    assert_eq!(structured["details"]["candidate_count"], json!(2));
+}
