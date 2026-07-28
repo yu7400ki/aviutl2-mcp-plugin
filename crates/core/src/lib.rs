@@ -16,6 +16,7 @@ pub mod item_value;
 pub mod json;
 pub mod number;
 pub mod object;
+pub mod operation;
 pub mod page;
 pub mod selector;
 pub mod state;
@@ -51,6 +52,13 @@ pub use item_value::ItemValue;
 pub use json::{JsonStrictError, deserialize_json, parse_json};
 pub use number::FiniteF64;
 pub use object::{LayerInfo, ObjectDetail, ObjectSummary, SectionRange};
+pub use operation::{
+    GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GetObjectParams,
+    ListAvailableEffectsParams, ListAvailableEffectsResult, ListLayersParams, ListLayersResult,
+    ListObjectsParams, ListObjectsResult, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
+    OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
+    OPERATION_LIST_OBJECTS, ObjectFilter,
+};
 pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
 pub use selector::{EffectSelector, ObjectSelector};
 pub use state::InstanceState;
