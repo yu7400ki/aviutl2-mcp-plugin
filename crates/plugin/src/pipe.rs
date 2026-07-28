@@ -26,12 +26,15 @@ use windows::core::PCWSTR;
 /// pipe の入出力バッファサイズ。
 const PIPE_BUFFER_SIZE: u32 = 64 * 1024;
 
-/// 待受の再確立に失敗した際の再試行間隔。
+/// 待受の再確立に失敗した際の初回再試行間隔。
 ///
 /// 一過性の失敗で待受を諦めないために再試行するが、間隔を空けずに回すと
-/// 恒久的な失敗時に CPU を占有する。停止イベントを待つ形で間隔を空けることで、
-/// 停止要求には即応しつつ再試行の頻度を抑える。
-const ACCEPT_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+/// 恒久的な失敗時に CPU とログを占有する。停止イベントを待つ形で間隔を空ける
+/// ことで、停止要求には即応しつつ再試行の頻度を抑える。
+const ACCEPT_RETRY_MIN_INTERVAL: Duration = Duration::from_millis(200);
+
+/// 失敗が続いた場合の再試行間隔の上限。
+const ACCEPT_RETRY_MAX_INTERVAL: Duration = Duration::from_secs(10);
 
 /// pipe I/O のエラー。
 #[derive(Debug, thiserror::Error)]
@@ -255,11 +258,17 @@ impl StopSignal {
     }
 }
 
+/// 起動済み accept スレッドの終了検知に必要な組。
+struct ServerThread {
+    join_handle: JoinHandle<()>,
+    /// スレッド終了時に送信端が drop され `Disconnected` になる受信端。
+    finished: Receiver<()>,
+}
+
 /// named pipe server の制御ハンドル。
 pub struct PipeServer {
     stop_signal: Arc<StopSignal>,
-    join_handle: Mutex<Option<JoinHandle<()>>>,
-    finished: Mutex<Option<Receiver<()>>>,
+    thread: Mutex<Option<ServerThread>>,
     stopped: AtomicBool,
 }
 
@@ -286,8 +295,10 @@ impl PipeServer {
 
         Ok(Arc::new(Self {
             stop_signal,
-            join_handle: Mutex::new(Some(join_handle)),
-            finished: Mutex::new(Some(rx)),
+            thread: Mutex::new(Some(ServerThread {
+                join_handle,
+                finished: rx,
+            })),
             stopped: AtomicBool::new(false),
         }))
     }
@@ -304,29 +315,17 @@ impl PipeServer {
             tracing::error!("停止イベントのシグナルに失敗しました: {e}");
         }
 
-        let finished = self
-            .finished
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        let join_handle = self
-            .join_handle
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        let Some(join_handle) = join_handle else {
+        let thread = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let Some(thread) = thread else {
             return;
         };
 
-        let ended = match finished {
-            Some(rx) => matches!(
-                rx.recv_timeout(timeout),
-                Err(RecvTimeoutError::Disconnected)
-            ),
-            None => false,
-        };
+        let ended = matches!(
+            thread.finished.recv_timeout(timeout),
+            Err(RecvTimeoutError::Disconnected)
+        );
         if ended {
-            if join_handle.join().is_err() {
+            if thread.join_handle.join().is_err() {
                 tracing::error!("named pipe server スレッドが panic で終了しました");
             }
         } else {
@@ -379,6 +378,7 @@ fn accept_loop(lifecycle: Arc<Lifecycle>, stop: Arc<StopSignal>) -> Result<()> {
     let pipe_name = pipe_name_for(&lifecycle.instance_id());
     let sa = ProtectedSecurityAttributes::new().context("pipe 用 DACL の作成に失敗しました")?;
     let name_wide = to_wide(&pipe_name);
+    let mut backoff = RetryBackoff::default();
 
     loop {
         if stop.is_signaled() || lifecycle.state() == aviutl2_mcp_core::state::InstanceState::Gone {
@@ -400,24 +400,31 @@ fn accept_loop(lifecycle: Arc<Lifecycle>, stop: Arc<StopSignal>) -> Result<()> {
             )
         };
         if pipe_handle.is_invalid() {
-            return Err(anyhow::anyhow!("named pipe の作成に失敗しました"));
+            // 直前の API 呼び出しは `CreateNamedPipeW` のみであり、
+            // last error は当該失敗のもの。
+            let reason = windows::core::Error::from_thread();
+            return Err(anyhow::anyhow!(
+                "named pipe {pipe_name} の作成に失敗しました: {reason}"
+            ));
         }
         let pipe = OwnedPipeHandle(pipe_handle);
 
         match await_connection(&pipe, &stop)? {
             Connection::Established => {
+                backoff.reset();
                 // SAFETY: `pipe` から所有権を移譲した接続確立済みハンドル。
                 let stream =
                     unsafe { PipeStream::from_server_handle(pipe.into_raw(), Some(stop.clone())) };
                 if stop.is_signaled() {
                     break;
                 }
-                serve_connection(stream, lifecycle.clone());
+                session::handle_connection(stream, lifecycle.clone());
             }
             Connection::Stopped => break,
-            Connection::Retry => {
+            Connection::Retry { reason } => {
                 drop(pipe);
-                if stop.wait_for(ACCEPT_RETRY_INTERVAL) {
+                backoff.report(&reason);
+                if stop.wait_for(backoff.next_interval()) {
                     break;
                 }
             }
@@ -427,6 +434,50 @@ fn accept_loop(lifecycle: Arc<Lifecycle>, stop: Arc<StopSignal>) -> Result<()> {
     Ok(())
 }
 
+/// 待受再確立の失敗が続いた場合の間隔とログ量を抑える。
+///
+/// 恒久的な失敗でも `Connection::Retry` を返し続けるため、間隔を空けずに
+/// 回すとログを埋め尽くす。初回のみ warn で通知し、以降は debug へ落として
+/// 間隔を指数的に伸ばす。
+struct RetryBackoff {
+    failures: u32,
+    interval: Duration,
+}
+
+impl Default for RetryBackoff {
+    fn default() -> Self {
+        Self {
+            failures: 0,
+            interval: ACCEPT_RETRY_MIN_INTERVAL,
+        }
+    }
+}
+
+impl RetryBackoff {
+    fn reset(&mut self) {
+        self.failures = 0;
+        self.interval = ACCEPT_RETRY_MIN_INTERVAL;
+    }
+
+    fn report(&mut self, reason: &str) {
+        self.failures += 1;
+        if self.failures == 1 {
+            tracing::warn!("待受の再確立に失敗しました: {reason}");
+        } else {
+            tracing::debug!(
+                "待受の再確立に失敗しました（連続 {} 回目）: {reason}",
+                self.failures
+            );
+        }
+    }
+
+    fn next_interval(&mut self) -> Duration {
+        let current = self.interval;
+        self.interval = (self.interval * 2).min(ACCEPT_RETRY_MAX_INTERVAL);
+        current
+    }
+}
+
 /// 接続待ちの結果。
 enum Connection {
     /// クライアントとの接続が確立した。
@@ -434,7 +485,10 @@ enum Connection {
     /// 停止要求により待受を終了する。
     Stopped,
     /// 待受の確立に失敗した。作り直して再試行する。
-    Retry,
+    Retry {
+        /// ログに残す失敗理由。
+        reason: String,
+    },
 }
 
 /// クライアントの接続を待つ。停止イベントがシグナルされたら待機を打ち切る。
@@ -460,32 +514,27 @@ fn await_connection(pipe: &OwnedPipeHandle, stop: &StopSignal) -> Result<Connect
             match win_io::wait_any(&[op.event_handle(), stop.raw()], win_io::WAIT_INFINITE) {
                 WaitOutcome::Signaled(0) => match op.result(false) {
                     Ok(_) => Ok(Connection::Established),
-                    Err(e) => {
-                        tracing::warn!("接続完了の確認に失敗しました: {e}");
-                        Ok(Connection::Retry)
-                    }
+                    Err(e) => Ok(Connection::Retry {
+                        reason: format!("接続完了の確認に失敗しました: {e}"),
+                    }),
                 },
                 WaitOutcome::Signaled(_) => {
                     op.cancel_and_drain();
                     Ok(Connection::Stopped)
                 }
-                WaitOutcome::TimedOut => Ok(Connection::Retry),
+                WaitOutcome::TimedOut => Ok(Connection::Retry {
+                    reason: "接続待ちが無期限待機で期限切れになりました".to_string(),
+                }),
                 WaitOutcome::Failed(e) => Err(anyhow::anyhow!("接続待ちの待機に失敗しました: {e}")),
             }
         }
-        Err(e) => {
-            // 待受インスタンスは毎回作り直すため、失敗が一過性であれば
-            // 再試行で回復する。恒久的な失敗でも間隔を空けて再試行するため
-            // ループが CPU を占有することはない。
-            tracing::warn!("接続受理に失敗しました: {e}");
-            Ok(Connection::Retry)
-        }
+        // 待受インスタンスは毎回作り直すため、失敗が一過性であれば再試行で
+        // 回復する。恒久的な失敗でも間隔を空けて再試行するため CPU を
+        // 占有しない。
+        Err(e) => Ok(Connection::Retry {
+            reason: format!("接続受理に失敗しました: {e}"),
+        }),
     }
-}
-
-/// 接続が確立したらセッション処理に委譲する。
-fn serve_connection(stream: PipeStream, lifecycle: Arc<Lifecycle>) {
-    session::handle_connection(stream, lifecycle);
 }
 
 /// UTF-16 文字列（NUL 終端）を作成する。
