@@ -104,35 +104,39 @@ impl Lifecycle {
             anyhow::bail!("shutdown 済みのため状態遷移できません");
         }
 
-        let mut descriptor = self.lock_descriptor();
-        let old_state = descriptor.state.clone();
+        // descriptor のガードはログ出力より前に手放す。ログ出力はホストの
+        // コールバックまで入るため、ガードを保持したまま入ると descriptor の
+        // 参照者がホストの処理時間だけ待たされ、ロック順の循環も生まれる。
+        let old_state = {
+            let mut descriptor = self.lock_descriptor();
+            let old_state = descriptor.state.clone();
 
-        let allowed = match (&old_state, &new_state) {
-            (InstanceState::Starting, InstanceState::Ready) => true,
-            (InstanceState::Ready, InstanceState::Busy)
-            | (InstanceState::Busy, InstanceState::Ready) => true,
-            (InstanceState::Starting, InstanceState::Draining)
-            | (InstanceState::Ready, InstanceState::Draining)
-            | (InstanceState::Busy, InstanceState::Draining) => true,
-            _ if old_state == new_state => return Ok(()),
-            _ => false,
+            let allowed = match (&old_state, &new_state) {
+                (InstanceState::Starting, InstanceState::Ready) => true,
+                (InstanceState::Ready, InstanceState::Busy)
+                | (InstanceState::Busy, InstanceState::Ready) => true,
+                (InstanceState::Starting, InstanceState::Draining)
+                | (InstanceState::Ready, InstanceState::Draining)
+                | (InstanceState::Busy, InstanceState::Draining) => true,
+                _ if old_state == new_state => return Ok(()),
+                _ => false,
+            };
+
+            if !allowed {
+                anyhow::bail!("無効な状態遷移です: {old_state} → {new_state}");
+            }
+
+            descriptor.state = new_state.clone();
+            self.writer.write(&descriptor).with_context(|| {
+                format!("descriptor の状態更新に失敗しました: {old_state} → {new_state}")
+            })?;
+            old_state
         };
 
-        if !allowed {
-            anyhow::bail!("無効な状態遷移です: {old_state} → {new_state}");
-        }
-
-        descriptor.state = new_state;
-        self.writer.write(&descriptor).with_context(|| {
-            format!(
-                "descriptor の状態更新に失敗しました: {old_state} → {descriptor_state}",
-                descriptor_state = descriptor.state
-            )
-        })?;
         tracing::info!(
             instance_id = %self.instance_id,
             from = %old_state,
-            to = %descriptor.state,
+            to = %new_state,
             "lifecycle state を遷移しました"
         );
         Ok(())
