@@ -451,6 +451,31 @@ fn rejected_tool_calls_do_not_pollute_stdout() {
             },
         },
     }));
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_list_layers",
+            "arguments": {
+                "instance_id": instance_id,
+                "expected_scene_id": "文字列",
+            },
+        },
+    }));
+    // 拒否の説明にはクライアントが送ったキー名がそのまま現れるため、巨大な
+    // キーを送れば text content の上限を破れてしまわないかを確かめる。
+    let mut huge_arguments = serde_json::Map::new();
+    huge_arguments.insert("k".repeat(HUGE_ARGUMENT_KEY_CHARS), json!(1));
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_list_instances",
+            "arguments": Value::Object(huge_arguments),
+        },
+    }));
 
     let session = run_session(&registry_dir, &requests);
     // 未知 tool は経路が存在しないため protocol error になる。
@@ -468,16 +493,71 @@ fn rejected_tool_calls_do_not_pollute_stdout() {
         message.contains("future"),
         "未知フィールドの拒否理由: {message}"
     );
+    assert_structured_invalid_argument(&unknown_field);
 
     // schema の範囲は server 側でも検証し、構造化したエラーを返す。
     let out_of_range = session.response(4);
     assert_eq!(out_of_range["result"]["isError"], json!(true));
-    assert_eq!(
-        out_of_range["result"]["structuredContent"]["code"],
-        json!("invalid_argument")
+    assert_structured_invalid_argument(&out_of_range);
+
+    // 型不一致も引数の復元に失敗する経路であり、同じ形の失敗として返る。
+    let type_mismatch = session.response(5);
+    assert_eq!(type_mismatch["result"]["isError"], json!(true));
+    assert_structured_invalid_argument(&type_mismatch);
+
+    let huge_key = session.response(6);
+    assert_eq!(huge_key["result"]["isError"], json!(true));
+    assert_structured_invalid_argument(&huge_key);
+    let text = huge_key["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text がある");
+    assert!(
+        text.chars().count() <= MAX_TOOL_TEXT_CHARS,
+        "text content が上限を超えています: {}",
+        text.chars().count()
     );
 
+    // この経路を通ったことは stderr の構造化ログから追える。
+    let logged: Vec<&str> = session
+        .stderr
+        .lines()
+        .filter(|line| line.contains("tool call rejected before dispatch"))
+        .collect();
+    for tool in ["aviutl2_list_layers", "aviutl2_list_instances"] {
+        let line = logged
+            .iter()
+            .find(|line| line.contains(tool))
+            .unwrap_or_else(|| panic!("{tool} の拒否が記録されていません: {logged:?}"));
+        assert!(line.contains("correlation_id"), "{line}");
+    }
+    // クライアント由来の文字列全文はログへ出さない。
+    for line in &logged {
+        assert!(
+            !line.contains(&"k".repeat(1_000)),
+            "クライアントが送った文字列がログに出ています"
+        );
+    }
+
     let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+/// 引数を解釈できなかった tool call へ送るキー名の長さ。
+const HUGE_ARGUMENT_KEY_CHARS: usize = 100_000;
+
+/// 1 応答の text content に許す最大文字数。
+const MAX_TOOL_TEXT_CHARS: usize = 25_000;
+
+/// tool result が構造化した `invalid_argument` を運ぶことを確かめる。
+fn assert_structured_invalid_argument(response: &Value) {
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["code"], json!("invalid_argument"), "{response}");
+    assert_eq!(structured["retryable"], json!(false), "{response}");
+    assert!(
+        structured["correlation_id"]
+            .as_str()
+            .is_some_and(|id| id.len() == 36),
+        "correlation_id がありません: {structured}"
+    );
 }
 
 #[test]
