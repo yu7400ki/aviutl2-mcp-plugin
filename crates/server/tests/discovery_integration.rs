@@ -6,21 +6,25 @@ use aviutl2_mcp_core::{
     compute_client_mac, compute_server_mac, encode_frame, negotiate, pipe_name_for, verify_mac,
 };
 use aviutl2_mcp_server::discovery::{DiscoveryConfig, find_instances};
+use aviutl2_mcp_server::win_io::{self, EventHandle, IoIssue, OverlappedOp, WaitAnyOutcome};
 use std::ffi::{OsStr, c_void};
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::time::Duration;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
-use windows::Win32::Storage::FileSystem::{PIPE_ACCESS_DUPLEX, ReadFile, WriteFile};
-use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+use std::time::{Duration, Instant};
+use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, HANDLE};
+use windows::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
     PIPE_TYPE_BYTE,
 };
-use windows::Win32::System::Threading::{
-    CreateEventW, INFINITE, ResetEvent, WaitForMultipleObjects, WaitForSingleObject,
-};
 use windows::core::PCWSTR;
+
+/// mock server が 1 回の read/write に許す時間。
+const IO_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn io_deadline() -> Instant {
+    Instant::now() + IO_TIMEOUT
+}
 
 struct SendHandle(HANDLE);
 unsafe impl Send for SendHandle {}
@@ -32,7 +36,7 @@ struct MockPipeServer {
     process_created_at: String,
     state: InstanceState,
     handle: SendHandle,
-    stop_event: HANDLE,
+    stop_event: EventHandle,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -53,7 +57,8 @@ impl MockPipeServer {
         let handle = unsafe {
             CreateNamedPipeW(
                 PCWSTR(wide.as_ptr()),
-                PIPE_ACCESS_DUPLEX,
+                // 期限付き I/O と停止イベントによる待機打ち切りには overlapped が必須。
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
                 4096,
@@ -66,9 +71,9 @@ impl MockPipeServer {
             panic!("mock pipe を作成できませんでした");
         }
 
-        let stop_event = unsafe { CreateEventW(None, true, false, None).unwrap() };
+        let stop_event = EventHandle::new_manual_reset().unwrap();
         let handle_raw = handle.0 as usize;
-        let stop_event_raw = stop_event.0 as usize;
+        let stop_event_raw = stop_event.handle().0 as usize;
         let auth_secret_clone = auth_secret.clone();
         let process_created_at_clone = process_created_at.clone();
         let state_clone = state.clone();
@@ -129,17 +134,15 @@ impl MockPipeServer {
 
 impl Drop for MockPipeServer {
     fn drop(&mut self) {
-        unsafe {
-            let _ = windows::Win32::System::Threading::SetEvent(self.stop_event);
-            // 接続待機中の pending IO をキャンセルし、スレッドを速やかに終了させる。
-            let _ = CancelIoEx(self.handle.0, None);
-            let _ = CloseHandle(self.handle.0);
-        }
+        // 停止を通知してスレッドの終了を待ってから pipe を閉じる。
+        // スレッドが保留中の I/O をキャンセルし終えるまでハンドルを有効に保つ。
+        let _ = self.stop_event.set();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        // SAFETY: スレッド終了後はこのハンドルを参照するものが無く、ここでのみ閉じる。
         unsafe {
-            let _ = CloseHandle(self.stop_event);
+            let _ = CloseHandle(self.handle.0);
         }
     }
 }
@@ -153,36 +156,12 @@ fn server_loop(
     state: InstanceState,
     stop_event: HANDLE,
 ) {
-    let connect_event = unsafe { CreateEventW(None, true, false, None).unwrap() };
-    let mut connect_overlapped = OVERLAPPED {
-        hEvent: connect_event,
-        ..Default::default()
-    };
-
-    let connect_result = unsafe { ConnectNamedPipe(handle, Some(&mut connect_overlapped)) };
-    let pending = match connect_result {
-        Ok(()) => false,
-        Err(err) => {
-            if err.code() == windows::Win32::Foundation::ERROR_IO_PENDING.into() {
-                true
-            } else if err.code() == windows::Win32::Foundation::ERROR_PIPE_CONNECTED.into() {
-                false
-            } else {
-                return;
-            }
-        }
-    };
-
-    if pending {
-        let events = [connect_event, stop_event];
-        let result = unsafe { WaitForMultipleObjects(&events, false, INFINITE) };
-        if result.0 == WAIT_OBJECT_0.0 + 1 {
-            return;
-        }
+    if !accept_connection(handle, stop_event) {
+        return;
     }
 
     // M1 受信。
-    let m1_body = match read_frame(handle, Duration::from_secs(2)) {
+    let m1_body = match read_frame(handle, io_deadline()) {
         Some(body) => body,
         None => return,
     };
@@ -208,12 +187,12 @@ fn server_loop(
         server_mac,
     };
     let m2_body = serde_json::to_vec(&m2).unwrap();
-    if write_frame(handle, &m2_body, Duration::from_secs(2)).is_err() {
+    if write_frame(handle, &m2_body, io_deadline()).is_err() {
         return;
     }
 
     // M3 受信。
-    let m3_body = match read_frame(handle, Duration::from_secs(2)) {
+    let m3_body = match read_frame(handle, io_deadline()) {
         Some(body) => body,
         None => return,
     };
@@ -223,7 +202,7 @@ fn server_loop(
     assert!(verify_mac(&expected_client_mac, &m3.client_mac));
 
     // ping 受信。
-    let ping_body = match read_frame(handle, Duration::from_secs(2)) {
+    let ping_body = match read_frame(handle, io_deadline()) {
         Some(body) => body,
         None => return,
     };
@@ -232,118 +211,56 @@ fn server_loop(
 
     let response = ResponseEnvelope::pong(negotiated, request.request_id, instance_id, state);
     let response_body = serde_json::to_vec(&response).unwrap();
-    let _ = write_frame(handle, &response_body, Duration::from_secs(2));
+    let _ = write_frame(handle, &response_body, io_deadline());
 }
 
-fn read_frame(handle: HANDLE, timeout: Duration) -> Option<Vec<u8>> {
+/// クライアントの接続を待つ。停止要求で待機を打ち切った場合は `false` を返す。
+fn accept_connection(handle: HANDLE, stop_event: HANDLE) -> bool {
+    let mut op = OverlappedOp::new(handle).unwrap();
+    if op.begin().is_err() {
+        return false;
+    }
+    // SAFETY: `handle` は overlapped 用に作成した有効な pipe であり、`op` は
+    // 接続完了まで生存して保留 I/O の後始末を行う。
+    let result = unsafe { ConnectNamedPipe(handle, Some(op.as_mut_ptr())) };
+    // ConnectNamedPipe 発行前にクライアントが接続していた場合は接続済みとして扱う。
+    let result = match result {
+        Err(err) if err.code() == ERROR_PIPE_CONNECTED.into() => Ok(()),
+        other => other,
+    };
+    match op.classify(result) {
+        Ok(IoIssue::Completed) => true,
+        Ok(IoIssue::Pending) => {
+            match win_io::wait_any(&[op.event(), stop_event], None) {
+                WaitAnyOutcome::Signaled(0) => op.await_completion(io_deadline()).is_ok(),
+                // 停止要求または待機失敗。保留中の接続待ちは op の Drop がキャンセルする。
+                _ => false,
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn read_frame(handle: HANDLE, deadline: Instant) -> Option<Vec<u8>> {
     let mut length_buf = [0u8; 4];
-    read_exact(handle, &mut length_buf, timeout).ok()?;
+    win_io::read_exact(handle, &mut length_buf, deadline).ok()?;
     let length = u32::from_le_bytes(length_buf) as usize;
     if length == 0 || length > 8 * 1024 * 1024 {
         return None;
     }
     let mut body = vec![0u8; length];
-    read_exact(handle, &mut body, timeout).ok()?;
+    win_io::read_exact(handle, &mut body, deadline).ok()?;
     Some(body)
 }
 
-fn write_frame(handle: HANDLE, body: &[u8], timeout: Duration) -> std::io::Result<()> {
-    let frame = encode_frame(body)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "frame"))?;
-    write_all(handle, &frame, timeout)
-}
-
-fn read_exact(handle: HANDLE, buf: &mut [u8], timeout: Duration) -> std::io::Result<()> {
-    let mut overlapped = new_overlapped()?;
-    let mut total = 0;
-    while total < buf.len() {
-        unsafe {
-            ResetEvent(overlapped.hEvent)
-                .map_err(|e| std::io::Error::from_raw_os_error(e.code().0))?;
-        }
-        let mut read = 0u32;
-        let slice = &mut buf[total..];
-        let result =
-            unsafe { ReadFile(handle, Some(slice), Some(&mut read), Some(&mut overlapped)) };
-        if result.is_ok() {
-            total += read as usize;
-            continue;
-        }
-        let err = result.unwrap_err();
-        if err.code() != windows::Win32::Foundation::ERROR_IO_PENDING.into() {
-            return Err(std::io::Error::from_raw_os_error(err.code().0));
-        }
-        wait_io(overlapped.hEvent, timeout)?;
-        let transferred = unsafe { get_overlapped_result(handle, &overlapped)? };
-        if transferred == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "closed",
-            ));
-        }
-        total += transferred as usize;
-    }
-    Ok(())
-}
-
-fn write_all(handle: HANDLE, buf: &[u8], timeout: Duration) -> std::io::Result<()> {
-    let mut overlapped = new_overlapped()?;
-    let mut total = 0;
-    while total < buf.len() {
-        unsafe {
-            ResetEvent(overlapped.hEvent)
-                .map_err(|e| std::io::Error::from_raw_os_error(e.code().0))?;
-        }
-        let mut written = 0u32;
-        let result = unsafe {
-            WriteFile(
-                handle,
-                Some(&buf[total..]),
-                Some(&mut written),
-                Some(&mut overlapped),
-            )
-        };
-        if result.is_ok() {
-            total += written as usize;
-            continue;
-        }
-        let err = result.unwrap_err();
-        if err.code() != windows::Win32::Foundation::ERROR_IO_PENDING.into() {
-            return Err(std::io::Error::from_raw_os_error(err.code().0));
-        }
-        wait_io(overlapped.hEvent, timeout)?;
-        let transferred = unsafe { get_overlapped_result(handle, &overlapped)? };
-        total += transferred as usize;
-    }
-    Ok(())
-}
-
-fn new_overlapped() -> std::io::Result<OVERLAPPED> {
-    unsafe {
-        let event = CreateEventW(None, true, false, None)?;
-        let mut overlapped = std::mem::zeroed::<OVERLAPPED>();
-        overlapped.hEvent = event;
-        Ok(overlapped)
-    }
-}
-
-fn wait_io(event: HANDLE, timeout: Duration) -> std::io::Result<()> {
-    let ms = timeout.as_millis().min(u32::MAX as u128) as u32;
-    let result = unsafe { WaitForSingleObject(event, ms) };
-    if result.0 == windows::Win32::Foundation::WAIT_OBJECT_0.0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))
-    }
-}
-
-unsafe fn get_overlapped_result(handle: HANDLE, overlapped: &OVERLAPPED) -> std::io::Result<u32> {
-    let mut transferred = 0u32;
-    unsafe {
-        GetOverlappedResult(handle, overlapped, &mut transferred, false)
-            .map_err(|e| std::io::Error::from_raw_os_error(e.code().0))?;
-    }
-    Ok(transferred)
+fn write_frame(handle: HANDLE, body: &[u8], deadline: Instant) -> Result<(), win_io::WinIoError> {
+    let frame = encode_frame(body).map_err(|_| {
+        win_io::WinIoError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frame をエンコードできませんでした",
+        ))
+    })?;
+    win_io::write_all(handle, &frame, deadline)
 }
 
 fn temp_registry_dir() -> PathBuf {
