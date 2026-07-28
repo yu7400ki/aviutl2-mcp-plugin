@@ -4,8 +4,8 @@
 
 use crate::win_io::{self, WinIoError};
 use aviutl2_mcp_core::{
-    AuthSecret, ClientAuth, ClientHello, InstanceId, Nonce, ProtocolVersion, RequestEnvelope,
-    RequestId, ResponseEnvelope, ResponseResult, ServerAuth, compute_client_mac,
+    AuthSecret, ClientAuth, ClientHello, FrameDecoder, InstanceId, Nonce, ProtocolVersion,
+    RequestEnvelope, RequestId, ResponseEnvelope, ResponseResult, ServerAuth, compute_client_mac,
     compute_server_mac, deserialize_json, encode_frame, pipe_name_for, verify_mac,
 };
 use std::ffi::OsStr;
@@ -26,6 +26,12 @@ use windows::core::PCWSTR;
 ///
 /// discovery の期限が長い場合でも 1 候補の接続待ちに引きずられないよう頭打ちにする。
 const CONNECT_WAIT_CAP_MS: u128 = 5_000;
+
+/// 1 回の読み取りで受け取る最大バイト数。
+///
+/// フレーム本体が大きい場合は複数回に分けて読み取り、デコーダへ逐次投入する。
+/// これにより本体長にかかわらず読み取りバッファのサイズが一定に保たれる。
+const READ_CHUNK_SIZE: usize = 8 * 1024;
 
 /// pipe client のエラー。
 #[derive(Debug, Error)]
@@ -233,16 +239,27 @@ impl PipeClient {
         Ok(())
     }
 
+    /// 期限内に 1 フレームを読み取る。
+    ///
+    /// フレーム長の検証と本体の組み立ては [`FrameDecoder`] に委譲する。
+    /// 1 回の読み取り量はデコーダが要求する残りバイト数を上限とするため、
+    /// フレーム境界を越えて先読みすることはなく、次のフレームのバイトを
+    /// 抱え込む必要もない。
+    ///
+    /// 過大なフレーム長・長さ 0 はデコーダが本体を確保する前に拒否する。
     fn read_frame(&self, deadline: Instant) -> Result<Vec<u8>, PipeClientError> {
-        let mut length_buf = [0u8; 4];
-        win_io::read_exact(self.handle, &mut length_buf, deadline)?;
-        let length = u32::from_le_bytes(length_buf) as usize;
-        if length == 0 || length > aviutl2_mcp_core::MAX_FRAME_SIZE as usize {
-            return Err(PipeClientError::Framing);
+        let mut decoder = FrameDecoder::new();
+        let mut chunk = [0u8; READ_CHUNK_SIZE];
+        loop {
+            if let Some(frame) = decoder.take_frame() {
+                return Ok(frame);
+            }
+            let take = decoder.bytes_needed().min(chunk.len());
+            win_io::read_exact(self.handle, &mut chunk[..take], deadline)?;
+            decoder
+                .feed(&chunk[..take])
+                .map_err(|_| PipeClientError::Framing)?;
         }
-        let mut body = vec![0u8; length];
-        win_io::read_exact(self.handle, &mut body, deadline)?;
-        Ok(body)
     }
 }
 

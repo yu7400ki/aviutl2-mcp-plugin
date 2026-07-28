@@ -9,6 +9,7 @@ use crate::security::ProtectedSecurityAttributes;
 use crate::session;
 use crate::win_io::{self, EventHandle, IoError, OverlappedOp, WaitOutcome};
 use anyhow::{Context, Result};
+use aviutl2_mcp_core::framing::{DecoderState, FrameDecoder, encode_frame};
 use aviutl2_mcp_core::identifier::pipe_name_for;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
@@ -25,6 +26,12 @@ use windows::core::PCWSTR;
 
 /// pipe の入出力バッファサイズ。
 const PIPE_BUFFER_SIZE: u32 = 64 * 1024;
+
+/// 1 回の読み取りで受け取る最大バイト数。
+///
+/// フレーム本体が大きい場合は複数回に分けて読み取り、デコーダへ逐次投入する。
+/// これにより本体長にかかわらず読み取りバッファのサイズが一定に保たれる。
+const READ_CHUNK_SIZE: usize = 8 * 1024;
 
 /// 待受の再確立に失敗した際の初回再試行間隔。
 ///
@@ -67,11 +74,8 @@ pub enum PipeError {
         /// 中断された操作の名前。
         operation: &'static str,
     },
-    /// フレーム長が契約を満たさない。
-    #[error("無効なフレーム長です: {0}")]
-    InvalidFrameLength(usize),
-    /// フレームのエンコードに失敗した。
-    #[error("フレームのエンコードに失敗しました: {0}")]
+    /// フレームの符号化・復号が契約を満たさない。
+    #[error("フレームの処理に失敗しました: {0}")]
     Framing(#[from] aviutl2_mcp_core::framing::FrameError),
 }
 
@@ -181,27 +185,39 @@ impl PipeStream {
     }
 
     /// 期限内に 1 フレームを読み取る。相手が切断していれば `Ok(None)`。
+    ///
+    /// フレーム長の検証と本体の組み立ては [`FrameDecoder`] に委譲する。
+    /// 1 回の読み取り量はデコーダが要求する残りバイト数を上限とするため、
+    /// フレーム境界を越えて先読みすることはなく、次のフレームのバイトを
+    /// 抱え込む必要もない。
+    ///
+    /// 過大なフレーム長・長さ 0 はデコーダが本体を確保する前に拒否する。
     pub fn read_frame(&self, deadline: Instant) -> Result<Option<Vec<u8>>, PipeError> {
-        let mut len_bytes = [0u8; 4];
-        if !self.read_exact(&mut len_bytes, deadline, "フレーム長の受信")? {
-            return Ok(None);
+        let mut decoder = FrameDecoder::new();
+        let mut chunk = [0u8; READ_CHUNK_SIZE];
+        loop {
+            if let Some(frame) = decoder.take_frame() {
+                return Ok(Some(frame));
+            }
+            let operation = match decoder.state() {
+                DecoderState::ReadingLength => "フレーム長の受信",
+                DecoderState::ReadingBody { .. } => "フレーム本体の受信",
+            };
+            let take = decoder.bytes_needed().min(chunk.len());
+            if !self.read_exact(&mut chunk[..take], deadline, operation)? {
+                // フレーム境界での切断は接続終了、フレーム途中の切断はエラー。
+                return match decoder.end() {
+                    Ok(()) => Ok(None),
+                    Err(_) => Err(PipeError::UnexpectedEof { operation }),
+                };
+            }
+            decoder.feed(&chunk[..take])?;
         }
-        let len = u32::from_le_bytes(len_bytes) as usize;
-        if len == 0 || len > aviutl2_mcp_core::framing::MAX_FRAME_SIZE as usize {
-            return Err(PipeError::InvalidFrameLength(len));
-        }
-        let mut body = vec![0u8; len];
-        if !self.read_exact(&mut body, deadline, "フレーム本体の受信")? {
-            return Err(PipeError::UnexpectedEof {
-                operation: "フレーム本体の受信",
-            });
-        }
-        Ok(Some(body))
     }
 
     /// 期限内に 1 フレームを書き込む。
     pub fn write_frame(&self, body: &[u8], deadline: Instant) -> Result<(), PipeError> {
-        let frame = aviutl2_mcp_core::framing::encode_frame(body)?;
+        let frame = encode_frame(body)?;
         self.write_all(&frame, deadline, "フレームの送信")
     }
 }
