@@ -13,6 +13,9 @@ use windows::core::HRESULT;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessIdentity {
     /// プロセス作成時刻（UTC）。
+    ///
+    /// `FILETIME` 由来のため 100 ナノ秒粒度であり、descriptor が記録する
+    /// 正準書式（[`aviutl2_mcp_core::format_utc_timestamp`]）と厳密に一致する。
     pub created_at: DateTime<Utc>,
 }
 

@@ -105,14 +105,14 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
         let auth_secret = aviutl2_mcp_core::AuthSecret::generate();
         let pid = identity::current_pid();
         let process_created_at = match identity::current_process_created_at() {
-            Ok(dt) => dt.to_rfc3339(),
+            Ok(dt) => aviutl2_mcp_core::format_utc_timestamp(dt),
             Err(e) => {
                 tracing::error!("プロセス作成時刻の取得に失敗しました: {e:?}");
-                chrono::Utc::now().to_rfc3339()
+                aviutl2_mcp_core::format_utc_timestamp(chrono::Utc::now())
             }
         };
         let hwnd = identity::current_hwnd();
-        let started_at = chrono::Utc::now().to_rfc3339();
+        let started_at = aviutl2_mcp_core::format_utc_timestamp(chrono::Utc::now());
 
         let writer = match registry::RegistryWriter::new() {
             Ok(w) => w,

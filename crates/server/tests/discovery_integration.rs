@@ -3,7 +3,8 @@
 use aviutl2_mcp_core::{
     AuthSecret, ClientAuth, ClientHello, DescriptorProject, InstanceDescriptor, InstanceId,
     InstanceState, Nonce, ProtocolVersion, RequestEnvelope, ResponseEnvelope, ServerAuth,
-    compute_client_mac, compute_server_mac, encode_frame, negotiate, pipe_name_for, verify_mac,
+    compute_client_mac, compute_server_mac, encode_frame, format_utc_timestamp, negotiate,
+    pipe_name_for, verify_mac,
 };
 use aviutl2_mcp_server::discovery::{DiscoveryConfig, find_instances};
 use aviutl2_mcp_server::win_io::{self, EventHandle, IoIssue, OverlappedOp, WaitAnyOutcome};
@@ -277,7 +278,7 @@ fn temp_registry_dir() -> PathBuf {
 fn current_process_created_at() -> String {
     use aviutl2_mcp_server::identity::{ProcessLookup, lookup_process};
     match lookup_process(std::process::id()) {
-        ProcessLookup::Found(identity) => identity.created_at.to_rfc3339(),
+        ProcessLookup::Found(identity) => format_utc_timestamp(identity.created_at),
         other => panic!("自身の PID は照会できる: {other:?}"),
     }
 }

@@ -25,7 +25,7 @@
 //!
 //! 本ターゲットは MCP server ではないため、対話用の出力は stdout へ書く。
 
-use aviutl2_mcp_core::InstanceInfo;
+use aviutl2_mcp_core::{InstanceInfo, format_utc_timestamp, parse_utc_timestamp};
 use aviutl2_mcp_server::api::{
     ListInstancesRequest, ListInstancesResponse, aviutl2_list_instances,
 };
@@ -271,15 +271,21 @@ fn verify_written_by_other_processes(instances: &[InstanceInfo]) -> Result<(), S
     Ok(())
 }
 
-/// `started_at` が RFC3339 として解釈できることを確認する。
+/// `started_at` が正準書式で表現されていることを確認する。
 fn verify_started_at_parsable(instances: &[InstanceInfo]) -> Result<(), String> {
     for info in instances {
-        chrono::DateTime::parse_from_rfc3339(&info.started_at).map_err(|e| {
+        let parsed = parse_utc_timestamp(&info.started_at).map_err(|e| {
             format!(
                 "instance {} の started_at を解釈できません: {e}",
                 info.instance_id
             )
         })?;
+        if format_utc_timestamp(parsed) != info.started_at {
+            return Err(format!(
+                "instance {} の started_at が正準書式ではありません",
+                info.instance_id
+            ));
+        }
     }
     Ok(())
 }
