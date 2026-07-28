@@ -9,12 +9,12 @@ use crate::read::host::{
     EditState, HostEditInfo, HostEffect, HostObject, HostObjectDetail, ReadHost, SceneReader,
 };
 use crate::read::{ReadAdapter, Snapshot};
+use aviutl2_mcp_core::FingerprintAlgorithm;
 use aviutl2_mcp_core::{
     AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFingerprintInput, EffectInfo,
     EffectType, Extent, FiniteF64, FrameRange, LayerInfo, ObjectDetail, ObjectFilter,
     ObjectFingerprintInput, ObjectSelector, ObjectSummary, SceneInfo,
 };
-use aviutl2_mcp_core::{FingerprintAlgorithm, object_fingerprint};
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -250,12 +250,15 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
             let revision = project.revision();
             let candidate =
                 resolve_candidate(scene.objects_in_layer(layer)?, frame, required_name)?;
-            if object_fingerprint(fingerprint_input(scene_id, &candidate)) != *expected_fingerprint
-            {
+            // 詳細を先に読み、その内容から fingerprint を組み立てて照合する。
+            // 照合した対象と応答へ載せる対象が同じ読み取りに由来することが、
+            // これで構造として保証される。
+            let detail = scene.object_detail(layer, candidate.frame_start)?;
+            let summary = object_summary(epoch, scene_id, &detail.object);
+            if summary.fingerprint != *expected_fingerprint {
                 return Err(ReadError::FingerprintMismatch);
             }
-            let detail = scene.object_detail(layer, candidate.frame_start)?;
-            Ok(object_detail(epoch, scene_id, revision, detail))
+            Ok(object_detail(summary, revision, detail))
         })
     }
 
@@ -349,15 +352,9 @@ fn object_summary(epoch: &str, scene_id: i32, object: &HostObject) -> ObjectSumm
     ObjectSummary::new(epoch, fingerprint_input(scene_id, object))
 }
 
-/// オブジェクトの詳細を組み立てる。
-fn object_detail(
-    epoch: &str,
-    scene_id: i32,
-    revision: u64,
-    detail: HostObjectDetail,
-) -> ObjectDetail {
-    let alias = detail.object.alias.clone();
-    let summary = object_summary(epoch, scene_id, &detail.object);
+/// オブジェクトの詳細を、算出済みの概要と組み合わせて組み立てる。
+fn object_detail(summary: ObjectSummary, revision: u64, detail: HostObjectDetail) -> ObjectDetail {
+    let alias = detail.object.alias;
     let effects = detail
         .effects
         .iter()
@@ -1387,12 +1384,12 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_of_unknown_object_differs() {
+    fn fingerprint_of_a_moved_object_differs() {
         let base = object(1, 100, 200, Some("立ち絵"));
         let moved = object(1, 101, 200, Some("立ち絵"));
         assert_ne!(
-            object_fingerprint(fingerprint_input(0, &base)),
-            object_fingerprint(fingerprint_input(0, &moved))
+            object_summary("epoch", 0, &base).fingerprint,
+            object_summary("epoch", 0, &moved).fingerprint
         );
     }
 
