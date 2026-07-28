@@ -48,6 +48,18 @@ pub enum ExclusionReason {
     InternalError,
 }
 
+/// 除外した候補の descriptor ファイルをどう扱うか。
+///
+/// 除外は「一覧に出さない」だけの可逆な措置であるのに対し、削除は不可逆であり、
+/// 他プロセスが所有するファイルを消す。両者を型で分離し、既定を除外側に置く。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupEligibility {
+    /// 一覧から除外するのみで、descriptor ファイルは残す。
+    ExcludeOnly,
+    /// descriptor が指すインスタンスの不在を示せるため、再検証のうえ削除してよい。
+    RemovalAllowed,
+}
+
 impl ExclusionReason {
     /// 安全な理由コード文字列を返す。
     pub fn as_code(&self) -> &'static str {
@@ -59,6 +71,31 @@ impl ExclusionReason {
             ExclusionReason::AuthenticationFailed => "authentication_failed",
             ExclusionReason::PingFailed => "ping_failed",
             ExclusionReason::InternalError => "internal_error",
+        }
+    }
+
+    /// この除外理由が descriptor ファイルの削除まで許すかを返す。
+    ///
+    /// 削除を許すのは「descriptor が指すインスタンスがもう存在しない」ことを
+    /// 積極的に示せる理由に限る。判断できない理由は除外にとどめる。
+    pub fn cleanup_eligibility(&self) -> CleanupEligibility {
+        match self {
+            // descriptor を解釈できていないため PID すら取り出せず、対応する
+            // インスタンスの不在を示せない。将来 schema の descriptor（稼働中の
+            // 新版インスタンスが書いたもの）や、一時的な read 失敗もここに落ちる。
+            ExclusionReason::InvalidDescriptor => CleanupEligibility::ExcludeOnly,
+            // 互換しないプロトコルで稼働中のインスタンスがあり得る。
+            ExclusionReason::ProtocolMismatch => CleanupEligibility::ExcludeOnly,
+            // panic により何も判定できていない。
+            ExclusionReason::InternalError => CleanupEligibility::ExcludeOnly,
+            // descriptor の PID にプロセスが無いか、PID が再利用されており
+            // descriptor のインスタンスではないことを確認済み。
+            ExclusionReason::ProcessIdentityMismatch => CleanupEligibility::RemovalAllowed,
+            // descriptor は解釈できており、削除直前の再検証でプロセス生存を
+            // 確認できる。稼働中であればそこで削除を取りやめる。
+            ExclusionReason::PipeUnreachable
+            | ExclusionReason::AuthenticationFailed
+            | ExclusionReason::PingFailed => CleanupEligibility::RemovalAllowed,
         }
     }
 }
@@ -112,35 +149,33 @@ pub fn find_instances(
             discover_candidate(&path, config)
         }));
 
-        match result {
+        // 除外は panic 経路も含めて 1 箇所へ集約し、cleanup 判定を迂回させない。
+        let (instance_id, reason) = match result {
             Ok(DiscoveryResult::Alive(info)) => {
                 debug!(instance_id = %info.instance_id, "instance is alive");
                 results.push(info);
+                continue;
             }
             Ok(DiscoveryResult::Excluded {
                 instance_id,
                 reason,
-            }) => {
-                let id_short = instance_id.map(|id| id.to_string());
-                warn!(instance_id = ?id_short, reason = reason.as_code(), "instance excluded");
-                if cleanup
-                    && should_attempt_cleanup(reason)
-                    && let Err(e) = try_cleanup_stale_descriptor(&path)
-                {
-                    warn!(error = %e, "stale descriptor cleanup failed");
-                }
-            }
+            }) => (instance_id.map(|id| id.to_string()), reason),
             Err(_) => {
                 warn!("candidate discovery panicked; isolating");
                 let id_short = path
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .map(|s| s.to_string());
-                warn!(instance_id = ?id_short, reason = ExclusionReason::InternalError.as_code(), "instance excluded");
-                if cleanup {
-                    let _ = try_cleanup_stale_descriptor(&path);
-                }
+                (id_short, ExclusionReason::InternalError)
             }
+        };
+
+        warn!(instance_id = ?instance_id, reason = reason.as_code(), "instance excluded");
+        if cleanup
+            && should_attempt_cleanup(reason)
+            && let Err(e) = try_cleanup_stale_descriptor(&path)
+        {
+            warn!(error = %e, "stale descriptor cleanup failed");
         }
     }
 
@@ -308,45 +343,46 @@ fn list_descriptor_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 /// この除外理由に対して cleanup を試みるべきか。
 fn should_attempt_cleanup(reason: ExclusionReason) -> bool {
     matches!(
-        reason,
-        ExclusionReason::InvalidDescriptor
-            | ExclusionReason::ProcessIdentityMismatch
-            | ExclusionReason::PipeUnreachable
-            | ExclusionReason::AuthenticationFailed
-            | ExclusionReason::PingFailed
+        reason.cleanup_eligibility(),
+        CleanupEligibility::RemovalAllowed
     )
 }
 
-/// stale descriptor を安全に削除する。
+/// stale descriptor を安全に削除する（best-effort）。
 ///
-/// 削除直前に再読み込み・再検証し、依然として stale であれば削除する。
-/// 削除失敗や判断に迷う場合は無視する。
+/// 削除直前に再読み込み・再検証し、対応するインスタンスの不在を確認できた場合のみ削除する。
 fn try_cleanup_stale_descriptor(path: &Path) -> std::io::Result<()> {
     if !path.exists() {
         return Ok(());
     }
 
-    // 削除直前の再検証。
-    let should_delete = match validate_descriptor_file(path) {
-        Ok(descriptor) => {
-            // プロセスが存在し、作成時刻も一致すれば稼働中の可能性がある。削除しない。
-            if let Some(identity) = get_process_identity(descriptor.pid) {
-                !process_created_at_matches(&descriptor.process_created_at, identity.created_at)
-            } else {
-                true
-            }
-        }
-        Err(_) => true,
-    };
-
-    if should_delete {
-        std::fs::remove_file(path)?;
-        debug!(path = %path.display(), "stale descriptor removed");
-    } else {
-        debug!(path = %path.display(), "descriptor revalidated as alive; skipped cleanup");
+    if !instance_proven_absent(path) {
+        debug!(path = %path.display(), "descriptor revalidated; skipped cleanup");
+        return Ok(());
     }
 
+    std::fs::remove_file(path)?;
+    debug!(path = %path.display(), "stale descriptor removed");
     Ok(())
+}
+
+/// descriptor が指すインスタンスがもう存在しないことを積極的に示せるか。
+///
+/// 再読み込みや再検証に失敗した場合は判断できないものとして `false` を返し、
+/// 削除ではなく除外にとどめる。
+fn instance_proven_absent(path: &Path) -> bool {
+    let Ok(descriptor) = validate_descriptor_file(path) else {
+        return false;
+    };
+    match get_process_identity(descriptor.pid) {
+        // PID に対応するプロセスが存在しない。
+        None => true,
+        // プロセスは存在するが、作成時刻が一致しなければ PID 再利用であり
+        // descriptor のインスタンスではない。一致するなら稼働中の可能性がある。
+        Some(identity) => {
+            !process_created_at_matches(&descriptor.process_created_at, identity.created_at)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -490,6 +526,117 @@ mod tests {
 
         find_instances(&dir, DiscoveryConfig::default(), true);
         assert!(!path.exists(), "stale descriptor should be cleaned up");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_eligibility_excludes_undecidable_reasons() {
+        for reason in [
+            ExclusionReason::InvalidDescriptor,
+            ExclusionReason::ProtocolMismatch,
+            ExclusionReason::InternalError,
+        ] {
+            assert_eq!(
+                reason.cleanup_eligibility(),
+                CleanupEligibility::ExcludeOnly,
+                "生存を判断できない理由では削除しない: {}",
+                reason.as_code()
+            );
+            assert!(!should_attempt_cleanup(reason));
+        }
+
+        for reason in [
+            ExclusionReason::ProcessIdentityMismatch,
+            ExclusionReason::PipeUnreachable,
+            ExclusionReason::AuthenticationFailed,
+            ExclusionReason::PingFailed,
+        ] {
+            assert_eq!(
+                reason.cleanup_eligibility(),
+                CleanupEligibility::RemovalAllowed,
+                "不在を示せる理由では削除を許す: {}",
+                reason.as_code()
+            );
+            assert!(should_attempt_cleanup(reason));
+        }
+    }
+
+    #[test]
+    fn unparsable_descriptor_is_not_removed() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = InstanceId::new_v4();
+        let path = dir.join(format!("{}.json", id));
+        std::fs::write(&path, b"{ broken").unwrap();
+
+        find_instances(&dir, DiscoveryConfig::default(), true);
+        assert!(
+            path.exists(),
+            "パース不能な descriptor は削除せず除外にとどめる"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn future_schema_version_descriptor_is_not_removed() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = InstanceId::new_v4();
+        let mut descriptor = sample_descriptor(id);
+        descriptor.schema_version = 2;
+
+        let path = dir.join(format!("{}.json", id));
+        std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
+
+        let instances = find_instances(&dir, DiscoveryConfig::default(), true);
+        assert!(
+            instances.is_empty(),
+            "未知 schema の descriptor は除外される"
+        );
+        assert!(
+            path.exists(),
+            "未知 schema の descriptor は稼働中インスタンスのものであり得るため削除しない"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn protocol_mismatch_descriptor_is_not_removed() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = InstanceId::new_v4();
+        let mut descriptor = sample_descriptor(id);
+        descriptor.protocol_version = ProtocolVersion {
+            major: ProtocolVersion::CURRENT.major + 1,
+            minor: 0,
+        };
+
+        let path = dir.join(format!("{}.json", id));
+        std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
+
+        let instances = find_instances(&dir, DiscoveryConfig::default(), true);
+        assert!(instances.is_empty(), "MAJOR 不一致の候補は除外される");
+        assert!(
+            path.exists(),
+            "MAJOR 不一致は別版で稼働中のインスタンスであり得るため削除しない"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_skips_descriptor_that_cannot_be_revalidated() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{}.json", InstanceId::new_v4()));
+        std::fs::write(&path, b"{ broken").unwrap();
+
+        assert!(!instance_proven_absent(&path));
+        try_cleanup_stale_descriptor(&path).unwrap();
+        assert!(path.exists(), "再検証できない descriptor は削除されない");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
