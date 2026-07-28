@@ -7,4 +7,7 @@ pub mod describe;
 pub mod failure;
 pub mod input;
 pub mod output_schema;
+pub mod server;
 pub mod summary;
+
+pub use server::{AviUtl2McpServer, CallLimits, INSTANCES_RESOURCE_URI, REGISTRY_DIR_ENV};
