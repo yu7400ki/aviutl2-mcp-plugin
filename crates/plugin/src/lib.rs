@@ -192,31 +192,43 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
         tracing::debug!("キャッシュ破棄イベントを受信しました");
     }
 
-    /// 対象の更新を revision へ反映する。
-    ///
-    /// イベントハンドラはホストのグローバル write lock を保持したまま呼ばれる。
-    /// 行うのは atomic な状態更新と通知の投入だけで、SDK の read/edit section
-    /// 呼び出しや descriptor の書き込みは行わない。
     fn event_update_object_info(&mut self) {
         if let Some(project_state) = &self.project_state {
-            project_state.on_object_updated();
+            apply_object_update(project_state);
         }
     }
 
     /// 編集フレームの移動は対象の構造を変えないため revision を更新しない。
     fn event_change_edit_frame(&mut self) {}
 
-    /// シーンの変更を revision へ反映する。
-    ///
-    /// `event_update_object_info` と同じく、SDK 呼び出しを伴わない更新に限る。
     fn event_change_scene_info(&mut self) {
         if let Some(project_state) = &self.project_state {
-            project_state.on_scene_changed();
+            apply_scene_change(project_state);
         }
     }
 
     /// フォーカスの変更は対象の構造を変えないため revision を更新しない。
     fn event_change_focus_object(&mut self) {}
+}
+
+/// 対象の更新をプロジェクト状態へ反映する。
+///
+/// イベントハンドラはホストのグローバル write lock を保持したまま呼ばれるため、
+/// 行えるのは atomic な状態更新と変更の記録だけである。SDK の read/edit section
+/// 呼び出しと descriptor の書き込みは、この制約に反するため行わない。
+/// ハンドラ本体をプロジェクト状態だけを受け取る関数へ切り出し、ハンドラ側を
+/// 委譲だけにすることで、制約を満たすべき範囲をこの関数に閉じ込めている。
+#[cfg(windows)]
+fn apply_object_update(project_state: &project::ProjectState) {
+    project_state.on_object_updated();
+}
+
+/// シーンの変更をプロジェクト状態へ反映する。
+///
+/// 制約は [`apply_object_update`] と同じ。
+#[cfg(windows)]
+fn apply_scene_change(project_state: &project::ProjectState) {
+    project_state.on_scene_changed();
 }
 
 /// project handler が表すプロジェクト境界の扱い。
@@ -418,21 +430,51 @@ mod tests {
         root.join("instances").join(format!("{id}.json"))
     }
 
-    /// イベントハンドラがプロジェクト状態だけを更新することを確かめる。
+    /// イベントハンドラ本体がプロジェクト状態だけを更新することを確かめる。
     ///
-    /// このテストでは `EDIT_HANDLE` を初期化していない。ハンドラが read/edit
-    /// section へ入ろうとすれば未初期化の編集ハンドルを参照して panic するため、
-    /// 完走できること自体が SDK を呼んでいないことの担保になる。descriptor が
-    /// イベントの前後で一致することは、ハンドラがファイル I/O を伴わないことを示す。
+    /// 本体は編集ハンドルを引数に取らない自由関数であり、受け取るのは
+    /// プロジェクト状態のみである。ここではその関数を直接呼び、状態の更新が
+    /// 期待どおりであることと、変更が記録されることを確かめる。
     #[test]
-    fn event_handlers_update_project_state_only() {
+    fn event_handler_bodies_update_project_state() {
+        let project_state = project::ProjectState::new();
+        project_state.on_project_load(Some(r"C:\projects\sample.aup2"));
+        let epoch = project_state.epoch();
+        let now = std::time::Instant::now();
+        project_state.take_pending_changes(now);
+
+        apply_object_update(&project_state);
+        assert_eq!(project_state.revision(), 1);
+        assert!(project_state.modified());
+
+        apply_scene_change(&project_state);
+        assert_eq!(project_state.revision(), 2);
+        assert_eq!(
+            project_state.epoch(),
+            epoch,
+            "シーンの変更で epoch が更新されました"
+        );
+
+        let taken = project_state
+            .take_pending_changes(now + std::time::Duration::from_millis(100))
+            .expect("イベントの変更が記録されていません");
+        assert!(taken.contains(project::ChangeKind::ProjectRevision));
+        assert!(taken.contains(project::ChangeKind::CurrentScene));
+    }
+
+    /// イベントハンドラが本体へ委譲し、descriptor の内容を変えないことを確かめる。
+    ///
+    /// 対象の更新とシーンの変更はプロジェクト状態へ反映され、編集フレームと
+    /// フォーカスの変更は何も更新しない。あわせて descriptor ファイルの内容が
+    /// イベントの前後で一致することを確かめる。ここで確かめられるのは内容の
+    /// 同一性だけであり、書き込みが行われなかったことまでは確かめていない。
+    #[test]
+    fn event_handlers_delegate_to_project_state() {
         use aviutl2::generic::GenericPlugin;
 
         let (lifecycle, dir) = temp_lifecycle();
         let descriptor_file = descriptor_path(&dir, lifecycle.instance_id());
         let project_state = Arc::new(project::ProjectState::new());
-        project_state.on_project_load(Some(r"C:\projects\sample.aup2"));
-        let epoch = project_state.epoch();
         let descriptor_before = std::fs::read_to_string(&descriptor_file).unwrap();
 
         let mut plugin = AviUtl2McpPlugin {
@@ -456,22 +498,11 @@ mod tests {
 
         plugin.event_change_scene_info();
         assert_eq!(project_state.revision(), 2);
-        assert_eq!(
-            project_state.epoch(),
-            epoch,
-            "シーンの変更で epoch が更新されました"
-        );
-
-        let taken = project_state
-            .take_pending_changes(std::time::Instant::now())
-            .expect("イベントの変更が記録されていません");
-        assert!(taken.contains(project::ChangeKind::ProjectRevision));
-        assert!(taken.contains(project::ChangeKind::CurrentScene));
 
         assert_eq!(
             descriptor_before,
             std::fs::read_to_string(&descriptor_file).unwrap(),
-            "イベントハンドラが descriptor を書き換えました"
+            "イベントの前後で descriptor の内容が変わりました"
         );
 
         drop(plugin);
