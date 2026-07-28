@@ -39,9 +39,10 @@ pub struct SceneInfo {
     pub height: u32,
     /// フレームレート。`fps_scale` が 0 のときは算出できないため null。
     pub fps: Option<FiniteF64>,
-    /// フレームレートの分子。診断と再計算のために生値を保持する。
+    /// フレームレートの分子。約分された値であり、編集情報が持つ元の分子とは
+    /// 限らない（60000/1000 は 60/1 として現れる）。
     pub fps_rate: i32,
-    /// フレームレートの分母。
+    /// フレームレートの分母。`fps_rate` と同じく約分された値。
     pub fps_scale: i32,
     /// 音声のサンプリングレート。
     pub sample_rate: u32,

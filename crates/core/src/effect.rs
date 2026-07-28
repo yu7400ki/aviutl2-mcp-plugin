@@ -125,10 +125,10 @@ pub struct AvailableEffectItem {
 
 /// effect が対応する内容を表すフラグ。
 ///
-/// 既知ビットを bool で展開しつつ、未知ビットを失わないよう `raw` を併記する。
+/// 既知ビットを bool で展開しつつ、ビット列そのものを `raw` に併記する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectFlags {
-    /// 生のビット列。
+    /// ビット列。生成元が既知ビットしか復元できない場合は未知ビットを含まない。
     pub raw: u32,
     /// 画像をサポートする。
     pub video: bool,
