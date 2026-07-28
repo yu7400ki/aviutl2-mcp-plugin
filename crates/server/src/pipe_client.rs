@@ -6,7 +6,7 @@ use crate::win_io::{self, WinIoError};
 use aviutl2_mcp_core::{
     AuthSecret, ClientAuth, ClientHello, InstanceId, Nonce, ProtocolVersion, RequestEnvelope,
     RequestId, ResponseEnvelope, ResponseResult, ServerAuth, compute_client_mac,
-    compute_server_mac, encode_frame, negotiate, pipe_name_for, verify_mac,
+    compute_server_mac, encode_frame, pipe_name_for, verify_mac,
 };
 use std::ffi::OsStr;
 use std::io;
@@ -179,9 +179,15 @@ impl PipeClient {
 
         trace!("received server auth");
 
-        // version negotiation: M2 の採用版を検証。
-        let negotiated = negotiate(client_max_version, m2.protocol_version)
-            .map_err(|_| PipeClientError::ProtocolMismatch)?;
+        // 採用版は M2 の protocol_version そのものであり、client は妥当性のみを検証する。
+        // MAJOR 不一致、または client の対応最大 MINOR を超える MINOR は互換性がない。
+        let negotiated = m2.protocol_version;
+        if negotiated.major != client_max_version.major
+            || negotiated.minor > client_max_version.minor
+        {
+            warn!("negotiated protocol version is not acceptable");
+            return Err(PipeClientError::ProtocolMismatch);
+        }
 
         // identity 検証。
         if m2.instance_id != descriptor_id {
