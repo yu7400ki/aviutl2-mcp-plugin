@@ -8,6 +8,7 @@ use aviutl2_mcp_core::{
     RequestEnvelope, RequestId, ResponseEnvelope, ResponseResult, ServerAuth, compute_client_mac,
     compute_server_mac, deserialize_json, encode_frame, pipe_name_for, verify_mac,
 };
+use chrono::Utc;
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -119,7 +120,8 @@ impl PipeClient {
         deadline: Instant,
     ) -> Result<aviutl2_mcp_core::InstanceState, PipeClientError> {
         let request_id = RequestId::new();
-        let request = RequestEnvelope::ping(self.protocol_version, request_id, self.instance_id);
+        let request = RequestEnvelope::ping(self.protocol_version, request_id, self.instance_id)
+            .with_deadline(deadline_to_unix_ms(deadline));
         let request_body = serde_json::to_vec(&request).map_err(|_| PipeClientError::Json)?;
         self.write_frame(&request_body, deadline)?;
 
@@ -274,6 +276,21 @@ impl Drop for PipeClient {
     }
 }
 
+/// 単調時計上の期限を、Envelope が運ぶ壁時計基準の Unix ミリ秒へ変換する。
+///
+/// [`Instant`] は epoch を持たない単調時計であり、壁時計時刻へ直接変換できない。
+/// そこで「今から期限までの残り時間」を求め、それを現在の壁時計時刻へ加算する。
+/// 2 つの時計を読む間に生じる誤差はミリ秒未満で、秒単位の期限には影響しない。
+/// 期限を過ぎている場合は残り時間 0、すなわち現在時刻がそのまま期限になる。
+///
+/// 壁時計が Unix epoch より前を指す場合や加算が溢れる場合は期限を表現できないため、
+/// 期限未指定（`None`）として送る。受信側は自身の上限だけを適用する。
+fn deadline_to_unix_ms(deadline: Instant) -> Option<u64> {
+    let remaining_ms = u64::try_from(win_io::remaining_until(deadline).as_millis()).ok()?;
+    let now_unix_ms = u64::try_from(Utc::now().timestamp_millis()).ok()?;
+    now_unix_ms.checked_add(remaining_ms)
+}
+
 /// 指定 pipe 名に `deadline` までの範囲で接続する。
 fn connect_pipe(pipe_name: &str, deadline: Instant) -> Result<HANDLE, PipeClientError> {
     let wide: Vec<u16> = OsStr::new(pipe_name)
@@ -318,9 +335,9 @@ fn connect_pipe(pipe_name: &str, deadline: Instant) -> Result<HANDLE, PipeClient
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::InstanceId;
+    use aviutl2_mcp_core::{InstanceId, InstanceState};
     use std::time::Duration;
-    use windows::Win32::Storage::FileSystem::{PIPE_ACCESS_DUPLEX, WriteFile};
+    use windows::Win32::Storage::FileSystem::{PIPE_ACCESS_DUPLEX, ReadFile, WriteFile};
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
         PIPE_TYPE_BYTE,
@@ -407,6 +424,27 @@ mod tests {
         fn send(&self, bytes: &[u8]) {
             send_bytes(self.handle, bytes);
         }
+    }
+
+    /// 対向端から同期的に指定バイト数を読み取る。
+    fn recv_bytes(handle: HANDLE, len: usize) -> Vec<u8> {
+        let mut buffer = vec![0u8; len];
+        let mut filled = 0usize;
+        while filled < len {
+            let mut read = 0u32;
+            // SAFETY: `handle` は生存中の pipe ハンドル、書き込み先は本呼び出し中に生存する。
+            unsafe { ReadFile(handle, Some(&mut buffer[filled..]), Some(&mut read), None) }
+                .expect("テスト用 pipe からの読み取りに失敗しました");
+            assert_ne!(read, 0, "テスト用 pipe が切断されました");
+            filled += read as usize;
+        }
+        buffer
+    }
+
+    /// 対向端から 1 フレームを読み取り、本体を返す。
+    fn recv_frame(handle: HANDLE) -> Vec<u8> {
+        let length = u32::from_le_bytes(recv_bytes(handle, 4).try_into().unwrap()) as usize;
+        recv_bytes(handle, length)
     }
 
     impl Drop for MockPeer {
@@ -512,5 +550,73 @@ mod tests {
                 started.elapsed().as_millis()
             );
         }
+    }
+
+    #[test]
+    fn deadline_to_unix_ms_reflects_remaining_time() {
+        let before = Utc::now().timestamp_millis() as u64;
+        let value = deadline_to_unix_ms(Instant::now() + Duration::from_secs(5))
+            .expect("期限を Unix ミリ秒へ変換できません");
+        let after = Utc::now().timestamp_millis() as u64;
+
+        // 残り時間はミリ秒未満を切り捨てるため、下限は 1 ミリ秒緩める。
+        assert!(
+            value >= before + 4_999 && value <= after + 5_000,
+            "残り時間が反映されていません: value={value}, before={before}, after={after}"
+        );
+    }
+
+    #[test]
+    fn deadline_to_unix_ms_for_passed_deadline_is_now() {
+        let before = Utc::now().timestamp_millis() as u64;
+        let value = deadline_to_unix_ms(Instant::now() - Duration::from_secs(60))
+            .expect("期限を Unix ミリ秒へ変換できません");
+        let after = Utc::now().timestamp_millis() as u64;
+
+        // 残り時間は 0 に丸められ、過去へは戻らない。
+        assert!(
+            value >= before && value <= after,
+            "過ぎた期限が現在時刻になっていません: value={value}, before={before}, after={after}"
+        );
+    }
+
+    #[test]
+    fn ping_request_carries_deadline() {
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+
+        // ping は要求送信後に応答を待って戻るため、対向端は別スレッドで応対する。
+        let handle = SendHandle(peer.raw());
+        let responder = std::thread::spawn(move || {
+            let handle = handle;
+            let body = recv_frame(handle.0);
+            let request: RequestEnvelope = serde_json::from_slice(&body).unwrap();
+            let response = ResponseEnvelope::pong(
+                request.protocol_version,
+                request.request_id,
+                instance_id,
+                InstanceState::Ready,
+            );
+            send_bytes(
+                handle.0,
+                &encode_frame(&serde_json::to_vec(&response).unwrap()).unwrap(),
+            );
+            request
+        });
+
+        let before = Utc::now().timestamp_millis() as u64;
+        let state = client
+            .ping(Instant::now() + Duration::from_secs(5))
+            .expect("ping に失敗しました");
+        assert_eq!(state, InstanceState::Ready);
+
+        let request = responder.join().unwrap();
+        let deadline_unix_ms = request
+            .deadline_unix_ms
+            .expect("要求に deadline_unix_ms が設定されていません");
+        assert!(
+            deadline_unix_ms >= before + 4_000 && deadline_unix_ms <= before + 6_000,
+            "deadline_unix_ms が期限を反映していません: {deadline_unix_ms}, before={before}"
+        );
     }
 }

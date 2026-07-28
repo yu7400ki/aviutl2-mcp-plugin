@@ -94,6 +94,10 @@ pub struct RequestEnvelope {
 }
 
 impl RequestEnvelope {
+    /// ping 要求を組み立てる。
+    ///
+    /// deadline は未指定で作られる。期限を付ける場合は
+    /// [`RequestEnvelope::with_deadline`] を続けて呼ぶ。
     pub fn ping(
         protocol_version: ProtocolVersion,
         request_id: RequestId,
@@ -108,6 +112,14 @@ impl RequestEnvelope {
             operation: "ping".to_string(),
             params: serde_json::Value::Object(serde_json::Map::new()),
         }
+    }
+
+    /// deadline（Unix 時刻ミリ秒）を設定する。
+    ///
+    /// `None` は期限未指定を表し、受信側は自身の上限だけを適用する。
+    pub fn with_deadline(mut self, deadline_unix_ms: Option<u64>) -> Self {
+        self.deadline_unix_ms = deadline_unix_ms;
+        self
     }
 }
 
@@ -426,6 +438,34 @@ mod tests {
         let s = serde_json::to_string(&err).unwrap();
         assert!(s.contains("\"ok\":false"));
         assert!(s.contains("\"error\""));
+    }
+
+    #[test]
+    fn ping_has_no_deadline_by_default() {
+        let request = RequestEnvelope::ping(
+            ProtocolVersion::CURRENT,
+            RequestId::new(),
+            InstanceId::new_v4(),
+        );
+        assert_eq!(request.deadline_unix_ms, None);
+    }
+
+    #[test]
+    fn with_deadline_sets_and_clears_deadline() {
+        let request = RequestEnvelope::ping(
+            ProtocolVersion::CURRENT,
+            RequestId::new(),
+            InstanceId::new_v4(),
+        );
+
+        let with_deadline = request.clone().with_deadline(Some(1_785_144_000_000));
+        assert_eq!(with_deadline.deadline_unix_ms, Some(1_785_144_000_000));
+
+        let s = serde_json::to_string(&with_deadline).unwrap();
+        let decoded: RequestEnvelope = serde_json::from_str(&s).unwrap();
+        assert_eq!(decoded, with_deadline);
+
+        assert_eq!(with_deadline.with_deadline(None).deadline_unix_ms, None);
     }
 
     #[test]
