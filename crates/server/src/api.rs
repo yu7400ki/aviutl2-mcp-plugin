@@ -2,7 +2,7 @@
 //!
 //! MCP SDK 未使用。内部関数または CLI 経由で呼び出す。
 
-use crate::discovery::{DiscoveryConfig, try_find_instances};
+use crate::discovery::{DiscoveryConfig, find_instances};
 use aviutl2_mcp_core::{ErrorCode, InstanceInfo};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -82,7 +82,7 @@ pub fn aviutl2_list_instances(
         return Err(ListInstancesError::InvalidArgument);
     }
 
-    let all = try_find_instances(registry_dir, DiscoveryConfig::default(), true)
+    let all = find_instances(registry_dir, DiscoveryConfig::default(), true)
         .map_err(|e| ListInstancesError::RegistryUnreadable(e.io_error_kind()))?;
     let total_count = all.len() as u32;
     let offset = request.offset as usize;

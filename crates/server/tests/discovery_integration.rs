@@ -298,7 +298,8 @@ fn discovery_finds_live_mock_instance() {
     // pipe server の準備を待つ。
     std::thread::sleep(Duration::from_millis(100));
 
-    let instances = find_instances(&dir, DiscoveryConfig::default(), true);
+    let instances = find_instances(&dir, DiscoveryConfig::default(), true)
+        .expect("registry ディレクトリを列挙できる");
     assert_eq!(instances.len(), 1);
     assert_eq!(instances[0].instance_id, id);
     assert_eq!(instances[0].state, InstanceState::Ready);
@@ -325,7 +326,8 @@ fn discovery_excludes_draining_instance() {
 
     std::thread::sleep(Duration::from_millis(100));
 
-    let instances = find_instances(&dir, DiscoveryConfig::default(), true);
+    let instances = find_instances(&dir, DiscoveryConfig::default(), true)
+        .expect("registry ディレクトリを列挙できる");
     assert!(instances.is_empty(), "draining instance は一覧に含まれない");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -354,7 +356,8 @@ fn discovery_excludes_authentication_failed_instance() {
 
     std::thread::sleep(Duration::from_millis(100));
 
-    let instances = find_instances(&dir, DiscoveryConfig::default(), true);
+    let instances = find_instances(&dir, DiscoveryConfig::default(), true)
+        .expect("registry ディレクトリを列挙できる");
     assert!(instances.is_empty(), "auth_secret 不一致は除外される");
     assert!(path.exists(), "生存中の descriptor は削除されない");
 
@@ -383,7 +386,8 @@ fn cleanup_preserves_live_but_unreachable_instance() {
     let path = dir.join(format!("{}.json", id));
     std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
 
-    let instances = find_instances(&dir, DiscoveryConfig::default(), true);
+    let instances = find_instances(&dir, DiscoveryConfig::default(), true)
+        .expect("registry ディレクトリを列挙できる");
     assert!(
         instances.is_empty(),
         "pipe に接続できない instance は除外される"
@@ -430,7 +434,8 @@ fn discovery_isolates_broken_candidate() {
 
     std::thread::sleep(Duration::from_millis(100));
 
-    let instances = find_instances(&dir, DiscoveryConfig::default(), true);
+    let instances = find_instances(&dir, DiscoveryConfig::default(), true)
+        .expect("registry ディレクトリを列挙できる");
     assert_eq!(instances.len(), 1);
     assert_eq!(instances[0].instance_id, id1);
     assert!(path2.exists(), "生存中の descriptor は削除されない");
@@ -471,7 +476,8 @@ fn discovery_lists_three_distinct_instances() {
 
     std::thread::sleep(Duration::from_millis(200));
 
-    let instances = find_instances(&dir, DiscoveryConfig::default(), true);
+    let instances = find_instances(&dir, DiscoveryConfig::default(), true)
+        .expect("registry ディレクトリを列挙できる");
     assert_eq!(instances.len(), 3, "3 件の生存インスタンスが列挙される");
 
     let ids: std::collections::HashSet<_> = instances.iter().map(|info| info.instance_id).collect();
@@ -511,7 +517,8 @@ fn discovery_excludes_stopped_instance_even_if_descriptor_remains() {
     // 最初に server1 のみ終了し、descriptor は意図的に残す（crash 模擬）。
     drop(server1);
 
-    let instances = find_instances(&dir, DiscoveryConfig::default(), true);
+    let instances = find_instances(&dir, DiscoveryConfig::default(), true)
+        .expect("registry ディレクトリを列挙できる");
     assert_eq!(instances.len(), 1, "終了したインスタンスは一覧に含まれない");
     assert_eq!(instances[0].instance_id, id2);
     assert!(

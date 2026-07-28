@@ -145,26 +145,11 @@ pub fn default_registry_dir() -> Option<PathBuf> {
 
 /// registry ディレクトリ内の生存インスタンスを発見する。
 ///
-/// registry ディレクトリを読み取れなかった場合も 0 件として畳み込むため、
-/// 「読み取れなかった」と「本当に 0 件」を区別できない。
-///
-/// 既存の呼び出し元との互換のために残している暫定 API であり、新しい呼び出し元を
-/// 作ってはならない。[`try_find_instances`] を使うこと。
-pub fn find_instances(
-    registry_dir: &Path,
-    config: DiscoveryConfig,
-    cleanup: bool,
-) -> Vec<InstanceInfo> {
-    try_find_instances(registry_dir, config, cleanup).unwrap_or_default()
-}
-
-/// registry ディレクトリ内の生存インスタンスを発見する。
-///
 /// 1 候補の失敗は全体を失敗させず、他候補の検証を継続する。
 /// registry ディレクトリ自体を列挙できない場合のみ [`DiscoveryError`] を返す。
 /// `cleanup` が true の場合、安全条件を満たす stale descriptor を削除する。
 #[instrument(skip(config), fields(registry_dir = %registry_dir.display()))]
-pub fn try_find_instances(
+pub fn find_instances(
     registry_dir: &Path,
     config: DiscoveryConfig,
     cleanup: bool,
@@ -583,7 +568,7 @@ mod tests {
             "存在しない PID は除外される"
         );
 
-        try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
+        find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
         assert!(!path.exists(), "stale descriptor should be cleaned up");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -594,7 +579,7 @@ mod tests {
         let dir = temp_registry_dir();
         assert!(!dir.exists());
 
-        let instances = try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
+        let instances = find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
         assert!(
             instances.is_empty(),
             "ディレクトリ不在はインスタンス 0 件として扱う"
@@ -610,7 +595,7 @@ mod tests {
         ));
         std::fs::write(&path, b"not a directory").unwrap();
 
-        let result = try_find_instances(&path, DiscoveryConfig::default(), true);
+        let result = find_instances(&path, DiscoveryConfig::default(), true);
         assert!(
             matches!(result, Err(DiscoveryError::RegistryUnreadable(_))),
             "ディレクトリを列挙できない場合は全体エラーになる"
@@ -643,7 +628,7 @@ mod tests {
             "不正 UTF-8 の descriptor は除外される"
         );
 
-        try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
+        find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
         assert!(path.exists(), "不正 UTF-8 の descriptor は削除されない");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -717,7 +702,7 @@ mod tests {
         let path = dir.join(format!("{}.json", id));
         std::fs::write(&path, b"{ broken").unwrap();
 
-        try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
+        find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
         assert!(
             path.exists(),
             "パース不能な descriptor は削除せず除外にとどめる"
@@ -737,7 +722,7 @@ mod tests {
         let path = dir.join(format!("{}.json", id));
         std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
 
-        let instances = try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
+        let instances = find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
         assert!(
             instances.is_empty(),
             "未知 schema の descriptor は除外される"
@@ -764,7 +749,7 @@ mod tests {
         let path = dir.join(format!("{}.json", id));
         std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
 
-        let instances = try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
+        let instances = find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
         assert!(instances.is_empty(), "MAJOR 不一致の候補は除外される");
         assert!(
             path.exists(),
@@ -784,7 +769,7 @@ mod tests {
         let path = dir.join(format!("{}.json", id));
         std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
 
-        let instances = try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
+        let instances = find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
         assert!(
             instances.is_empty(),
             "pipe に接続できない候補は一覧に含まれない"
