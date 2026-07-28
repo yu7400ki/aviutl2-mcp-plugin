@@ -2,8 +2,8 @@
 //!
 //! MCP SDK 未使用。内部関数または CLI 経由で呼び出す。
 
-use crate::discovery::{DiscoveryConfig, find_instances};
-use aviutl2_mcp_core::InstanceInfo;
+use crate::discovery::{DiscoveryConfig, try_find_instances};
+use aviutl2_mcp_core::{ErrorCode, InstanceInfo};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -45,17 +45,34 @@ pub struct ListInstancesResponse {
     pub next_offset: Option<u32>,
 }
 
-/// 引数検証エラー。
+/// `aviutl2_list_instances` の失敗。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ListInstancesError {
     /// offset/limit が範囲外。
     #[error("offset または limit が範囲外です")]
     InvalidArgument,
+    /// registry ディレクトリ自体を読み取れなかった。
+    ///
+    /// インスタンスが 0 件である場合と区別するため、正常な空結果にはしない。
+    #[error("インスタンス登録情報を読み取れませんでした")]
+    RegistryUnreadable,
+}
+
+impl ListInstancesError {
+    /// 応答へ載せるエラーコードを返す。
+    pub fn error_code(&self) -> ErrorCode {
+        match self {
+            ListInstancesError::InvalidArgument => ErrorCode::InvalidArgument,
+            // 呼び出し側の入力に起因しない、server 環境側の想定外失敗。
+            ListInstancesError::RegistryUnreadable => ErrorCode::InternalError,
+        }
+    }
 }
 
 /// `aviutl2_list_instances` を実行する。
 ///
-/// `registry_dir` が存在しない場合は空の結果を返す。
+/// `registry_dir` が存在しない場合はインスタンス 0 件として空の結果を返す。
+/// ディレクトリを列挙できない場合は 0 件と区別するためエラーを返す。
 pub fn aviutl2_list_instances(
     registry_dir: &Path,
     request: ListInstancesRequest,
@@ -67,7 +84,8 @@ pub fn aviutl2_list_instances(
         return Err(ListInstancesError::InvalidArgument);
     }
 
-    let all = find_instances(registry_dir, DiscoveryConfig::default(), true);
+    let all = try_find_instances(registry_dir, DiscoveryConfig::default(), true)
+        .map_err(|_| ListInstancesError::RegistryUnreadable)?;
     let total_count = all.len() as u32;
     let offset = request.offset as usize;
     let limit = request.limit as usize;
@@ -174,6 +192,46 @@ mod tests {
             .is_err()
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_registry_dir_returns_zero_instances() {
+        let dir = temp_registry_dir();
+        assert!(!dir.exists());
+
+        let response = aviutl2_list_instances(
+            &dir,
+            ListInstancesRequest {
+                offset: 0,
+                limit: 50,
+            },
+        )
+        .expect("ディレクトリ不在は 0 件の正常応答");
+        assert_eq!(response.total_count, 0);
+        assert_eq!(response.count, 0);
+    }
+
+    #[test]
+    fn unreadable_registry_dir_returns_error() {
+        // ディレクトリとして開けない対象を registry として渡す。
+        let path = std::env::temp_dir().join(format!(
+            "aviutl2-mcp-api-not-a-dir-{}",
+            InstanceId::new_v4()
+        ));
+        std::fs::write(&path, b"not a directory").unwrap();
+
+        let error = aviutl2_list_instances(
+            &path,
+            ListInstancesRequest {
+                offset: 0,
+                limit: 50,
+            },
+        )
+        .expect_err("読み取り失敗は 0 件と区別してエラーにする");
+        assert_eq!(error, ListInstancesError::RegistryUnreadable);
+        assert_eq!(error.error_code(), ErrorCode::InternalError);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

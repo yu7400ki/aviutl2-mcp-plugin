@@ -29,6 +29,17 @@ pub enum DiscoveryResult {
     },
 }
 
+/// discovery 全体を失敗させるエラー。
+///
+/// 個々の候補の失敗は [`DiscoveryResult::Excluded`] として一覧から除外するにとどめ、
+/// ここには含めない。
+#[derive(Debug, thiserror::Error)]
+pub enum DiscoveryError {
+    /// registry ディレクトリ自体を列挙できなかった。
+    #[error("registry ディレクトリを列挙できませんでした: {0}")]
+    RegistryUnreadable(#[source] std::io::Error),
+}
+
 /// 除外理由。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExclusionReason {
@@ -127,21 +138,32 @@ pub fn default_registry_dir() -> Option<PathBuf> {
 
 /// registry ディレクトリ内の生存インスタンスを発見する。
 ///
-/// 1 候補の失敗は全体を失敗させず、他候補の検証を継続する。
-/// `cleanup` が true の場合、安全条件を満たす stale descriptor を削除する。
-#[instrument(skip(config), fields(registry_dir = %registry_dir.display()))]
+/// registry ディレクトリを読み取れなかった場合も 0 件として畳み込む。
+/// 「読み取れなかった」と「本当に 0 件」を区別する必要がある場合は
+/// [`try_find_instances`] を使う。
 pub fn find_instances(
     registry_dir: &Path,
     config: DiscoveryConfig,
     cleanup: bool,
 ) -> Vec<InstanceInfo> {
-    let files = match list_descriptor_files(registry_dir) {
-        Ok(files) => files,
-        Err(e) => {
-            warn!(error = %e, "registry ディレクトリの列挙に失敗しました");
-            return Vec::new();
-        }
-    };
+    try_find_instances(registry_dir, config, cleanup).unwrap_or_default()
+}
+
+/// registry ディレクトリ内の生存インスタンスを発見する。
+///
+/// 1 候補の失敗は全体を失敗させず、他候補の検証を継続する。
+/// registry ディレクトリ自体を列挙できない場合のみ [`DiscoveryError`] を返す。
+/// `cleanup` が true の場合、安全条件を満たす stale descriptor を削除する。
+#[instrument(skip(config), fields(registry_dir = %registry_dir.display()))]
+pub fn try_find_instances(
+    registry_dir: &Path,
+    config: DiscoveryConfig,
+    cleanup: bool,
+) -> Result<Vec<InstanceInfo>, DiscoveryError> {
+    let files = list_descriptor_files(registry_dir).map_err(|e| {
+        warn!(error = %e, "registry ディレクトリの列挙に失敗しました");
+        DiscoveryError::RegistryUnreadable(e)
+    })?;
 
     let mut results = Vec::new();
     for path in files {
@@ -179,7 +201,7 @@ pub fn find_instances(
         }
     }
 
-    results
+    Ok(results)
 }
 
 /// 1 候補を discovery pipeline で検証する。
@@ -326,12 +348,21 @@ fn build_instance_info(descriptor: InstanceDescriptor, state: InstanceState) -> 
 }
 
 /// descriptor ファイル一覧を取得する（ファイル名順）。
+///
+/// ディレクトリが存在しないことは「インスタンスが 1 件も登録されていない」を意味するため
+/// エラーではなく空の一覧を返す。権限拒否や I/O エラーのように、読めるはずのものを
+/// 読めなかった場合のみエラーとする。
 fn list_descriptor_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+
     let mut files = Vec::new();
-    if !dir.exists() {
-        return Ok(files);
-    }
-    for entry in std::fs::read_dir(dir)? {
+    for entry in entries {
+        // 列挙途中の失敗はディレクトリ自体を読み切れていないことを意味するため、
+        // 候補単位の除外ではなく全体エラーとして伝播させる。
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("json") {
@@ -530,6 +561,36 @@ mod tests {
         assert!(!path.exists(), "stale descriptor should be cleaned up");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_registry_dir_is_zero_instances() {
+        let dir = temp_registry_dir();
+        assert!(!dir.exists());
+
+        let instances = try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
+        assert!(
+            instances.is_empty(),
+            "ディレクトリ不在はインスタンス 0 件として扱う"
+        );
+    }
+
+    #[test]
+    fn unreadable_registry_dir_is_whole_error() {
+        // ディレクトリとして開けない対象を registry として渡し、列挙自体の失敗を再現する。
+        let path = std::env::temp_dir().join(format!(
+            "aviutl2-mcp-discovery-not-a-dir-{}",
+            InstanceId::new_v4()
+        ));
+        std::fs::write(&path, b"not a directory").unwrap();
+
+        let result = try_find_instances(&path, DiscoveryConfig::default(), true);
+        assert!(
+            matches!(result, Err(DiscoveryError::RegistryUnreadable(_))),
+            "ディレクトリを列挙できない場合は全体エラーになる"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
