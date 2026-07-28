@@ -3,12 +3,17 @@
 //! MCP SDK 未使用。内部関数または CLI 経由で呼び出す。
 
 use crate::discovery::{DiscoveryConfig, find_instances};
-use aviutl2_mcp_core::{DEFAULT_PAGE_LIMIT, ErrorCode, InstanceInfo, MAX_PAGE_LIMIT};
+use aviutl2_mcp_core::{DEFAULT_PAGE_LIMIT, ErrorCode, InstanceInfo, PageRequest, take_page};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// 一覧はスナップショット revision を持たないため、ページ切り出しへ渡す固定値。
+///
+/// 要求側も revision を指定できないため、この値が応答へ現れることはない。
+const NO_SNAPSHOT_REVISION: u64 = 0;
+
 /// `aviutl2_list_instances` 要求。
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListInstancesRequest {
     /// 開始位置。
@@ -21,6 +26,29 @@ pub struct ListInstancesRequest {
 
 fn default_limit() -> u32 {
     DEFAULT_PAGE_LIMIT
+}
+
+/// 既定値は省略時の JSON 逆直列化結果と一致する。
+///
+/// `limit` は 0 が常に範囲外であるため、derive による 0 埋めの既定値を持たせない。
+impl Default for ListInstancesRequest {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            limit: default_limit(),
+        }
+    }
+}
+
+impl ListInstancesRequest {
+    /// 共通のページ要求へ変換する。
+    fn page(&self) -> PageRequest {
+        PageRequest {
+            offset: self.offset,
+            limit: self.limit,
+            snapshot_revision: None,
+        }
+    }
 }
 
 /// `aviutl2_list_instances` 応答。
@@ -73,39 +101,25 @@ pub fn aviutl2_list_instances(
     registry_dir: &Path,
     request: ListInstancesRequest,
 ) -> Result<ListInstancesResponse, ListInstancesError> {
-    if request.limit == 0 || request.limit > MAX_PAGE_LIMIT {
-        return Err(ListInstancesError::InvalidArgument);
-    }
+    // 範囲外の要求で registry を走査しないよう、生存確認の前に検証する。
+    let page_request = request.page();
+    page_request
+        .validate()
+        .map_err(|_| ListInstancesError::InvalidArgument)?;
 
     let all = find_instances(registry_dir, DiscoveryConfig::default(), true)
         .map_err(|e| ListInstancesError::RegistryUnreadable(e.io_error_kind()))?;
-    let total_count = all.len() as u32;
-    let offset = request.offset as usize;
-    let limit = request.limit as usize;
 
-    // offset は u32 なので下限側の検証は不要。上限は総件数で頭打ちにし、
-    // 総件数を超える offset は空ページとして返す。
-    let page_end = offset.saturating_add(limit);
-    let page = if offset >= all.len() {
-        Vec::new()
-    } else {
-        all[offset..page_end.min(all.len())].to_vec()
-    };
-
-    let count = page.len() as u32;
-    let next_offset = if page_end < all.len() {
-        Some(page_end as u32)
-    } else {
-        None
-    };
+    let (instances, page) = take_page(&all, &page_request, NO_SNAPSHOT_REVISION)
+        .map_err(|_| ListInstancesError::InvalidArgument)?;
 
     Ok(ListInstancesResponse {
-        instances: page,
-        total_count,
-        count,
-        offset: request.offset,
-        has_more: next_offset.is_some(),
-        next_offset,
+        instances,
+        total_count: page.total_count,
+        count: page.count,
+        offset: page.offset,
+        has_more: page.has_more,
+        next_offset: page.next_offset,
     })
 }
 
@@ -114,7 +128,7 @@ mod tests {
     use super::*;
     use aviutl2_mcp_core::{
         AuthSecret, DescriptorProject, InstanceDescriptor, InstanceId, InstanceState,
-        ProtocolVersion, format_utc_timestamp, pipe_name_for,
+        MAX_PAGE_LIMIT, ProtocolVersion, format_utc_timestamp, pipe_name_for,
     };
     use chrono::{TimeZone, Utc};
 

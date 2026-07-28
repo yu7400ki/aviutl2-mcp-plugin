@@ -4,11 +4,14 @@
 
 use crate::win_io::{self, WinIoError};
 use aviutl2_mcp_core::{
-    AuthSecret, ClientAuth, ClientHello, FrameDecoder, InstanceId, Nonce, ProtocolVersion,
-    RequestEnvelope, RequestId, ResponseEnvelope, ResponseResult, ServerAuth, compute_client_mac,
-    compute_server_mac, deserialize_json, encode_frame, pipe_name_for, verify_mac,
+    AuthSecret, ClientAuth, ClientHello, ErrorCode, ErrorObject, FrameDecoder, InstanceId,
+    InstanceState, Nonce, ProtocolVersion, RequestEnvelope, RequestId, RequestKind,
+    ResponseEnvelope, ResponseResult, ServerAuth, compute_client_mac, compute_server_mac,
+    deserialize_json, encode_frame, pipe_name_for, verify_mac,
 };
 use chrono::Utc;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -64,6 +67,34 @@ pub enum PipeClientError {
     /// 無効な応答。
     #[error("無効な応答を受信しました")]
     InvalidResponse,
+    /// 接続先が返したエラー応答。
+    ///
+    /// 呼び出し側がそのまま外部へ渡せるよう、受け取った [`ErrorObject`] を
+    /// 潰さずに運ぶ。
+    #[error("接続先がエラーを返しました: {}", .0.code)]
+    Remote(Box<ErrorObject>),
+}
+
+impl PipeClientError {
+    /// 応答へ載せるエラーコードを返す。
+    ///
+    /// 接続先が返したエラーはそのコードをそのまま採用する。frame やスキーマの
+    /// 破れは相手が契約どおりに応答していない状態であり、接続を張り直す以外に
+    /// 回復手段が無いため、接続不能と同じく stale として扱う。
+    pub fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::ConnectFailed
+            | Self::Io(_)
+            | Self::Framing
+            | Self::Json
+            | Self::InvalidResponse
+            | Self::InstanceStale => ErrorCode::InstanceStale,
+            Self::Timeout => ErrorCode::Timeout,
+            Self::AuthenticationFailed => ErrorCode::AuthenticationFailed,
+            Self::ProtocolMismatch => ErrorCode::ProtocolMismatch,
+            Self::Remote(error) => error.code.clone(),
+        }
+    }
 }
 
 impl From<WinIoError> for PipeClientError {
@@ -113,15 +144,78 @@ impl PipeClient {
         Ok(client)
     }
 
+    /// 任意の operation を送信し、成功応答の `result` を返す。
+    ///
+    /// `request_id` の発番と期限の付与、応答の `request_id` / `instance_id` /
+    /// プロトコル MAJOR の整合検証をまとめて行う。接続先がエラー応答を返した場合は
+    /// [`PipeClientError::Remote`] として `ErrorObject` をそのまま返す。
+    #[instrument(skip(self, params), fields(instance_id = %self.instance_id, operation = operation))]
+    pub fn request(
+        &self,
+        operation: &str,
+        params: serde_json::Value,
+        deadline: Instant,
+    ) -> Result<serde_json::Value, PipeClientError> {
+        let request = RequestEnvelope {
+            kind: RequestKind::Request,
+            protocol_version: self.protocol_version,
+            request_id: RequestId::new(),
+            instance_id: self.instance_id,
+            deadline_unix_ms: deadline_to_unix_ms(deadline),
+            operation: operation.to_string(),
+            params,
+        };
+        self.exchange(request, deadline)
+    }
+
+    /// 型付きの params を送り、成功応答の `result` を型付きで受け取る。
+    pub fn request_typed<P, R>(
+        &self,
+        operation: &str,
+        params: &P,
+        deadline: Instant,
+    ) -> Result<R, PipeClientError>
+    where
+        P: Serialize,
+        R: DeserializeOwned,
+    {
+        let params = serde_json::to_value(params).map_err(|_| PipeClientError::Json)?;
+        let result = self.request(operation, params, deadline)?;
+        decode_result(&result)
+    }
+
     /// ping を送信し、応答を検証する。
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
-    pub fn ping(
+    pub fn ping(&self, deadline: Instant) -> Result<InstanceState, PipeClientError> {
+        let request =
+            RequestEnvelope::ping(self.protocol_version, RequestId::new(), self.instance_id)
+                .with_deadline(deadline_to_unix_ms(deadline));
+
+        let result = self.exchange(request, deadline).map_err(|err| match err {
+            // ping は生存確認であり、拒否理由の内訳を呼び出し側へ渡さない。
+            PipeClientError::Remote(error) => {
+                warn!(code = %error.code, "ping returned error");
+                PipeClientError::InvalidResponse
+            }
+            other => other,
+        })?;
+
+        let pong: PongResult = decode_result(&result)?;
+        if pong.instance_id != self.instance_id {
+            warn!("instance_id in ping result mismatch");
+            return Err(PipeClientError::InstanceStale);
+        }
+        debug!(state = %pong.state, "ping succeeded");
+        Ok(pong.state)
+    }
+
+    /// 要求を 1 往復させ、応答の整合を検証して結果を取り出す。
+    fn exchange(
         &self,
+        request: RequestEnvelope,
         deadline: Instant,
-    ) -> Result<aviutl2_mcp_core::InstanceState, PipeClientError> {
-        let request_id = RequestId::new();
-        let request = RequestEnvelope::ping(self.protocol_version, request_id, self.instance_id)
-            .with_deadline(deadline_to_unix_ms(deadline));
+    ) -> Result<serde_json::Value, PipeClientError> {
+        let request_id = request.request_id;
         let request_body = serde_json::to_vec(&request).map_err(|_| PipeClientError::Json)?;
         self.write_frame(&request_body, deadline)?;
 
@@ -134,31 +228,19 @@ impl PipeClient {
             return Err(PipeClientError::InvalidResponse);
         }
         if response.instance_id != self.instance_id {
-            warn!("instance_id mismatch in ping response");
+            warn!("instance_id mismatch in response");
             return Err(PipeClientError::InstanceStale);
         }
         if response.protocol_version.major != self.protocol_version.major {
-            warn!("protocol major mismatch in ping response");
+            warn!("protocol major mismatch in response");
             return Err(PipeClientError::ProtocolMismatch);
         }
 
         match response.result {
-            ResponseResult::Ok { result } => {
-                let state: aviutl2_mcp_core::InstanceState =
-                    serde_json::from_value(result["state"].clone())
-                        .map_err(|_| PipeClientError::InvalidResponse)?;
-                let pong_id: InstanceId = serde_json::from_value(result["instance_id"].clone())
-                    .map_err(|_| PipeClientError::InvalidResponse)?;
-                if pong_id != self.instance_id {
-                    warn!("instance_id in ping result mismatch");
-                    return Err(PipeClientError::InstanceStale);
-                }
-                debug!(state = %state, "ping succeeded");
-                Ok(state)
-            }
+            ResponseResult::Ok { result } => Ok(result),
             ResponseResult::Err { error } => {
-                warn!(code = %error.code, "ping returned error");
-                Err(PipeClientError::InvalidResponse)
+                warn!(code = %error.code, "request returned error");
+                Err(PipeClientError::Remote(Box::new(error)))
             }
         }
     }
@@ -263,6 +345,24 @@ impl PipeClient {
                 .map_err(|_| PipeClientError::Framing)?;
         }
     }
+}
+
+/// ping 応答の `result`。
+///
+/// 将来の MINOR で追加されるフィールドを受け取れるよう未知フィールドは許容する。
+#[derive(Debug, Deserialize)]
+struct PongResult {
+    state: InstanceState,
+    instance_id: InstanceId,
+}
+
+/// 成功応答の `result` を型付きで読み取る。
+///
+/// いったんバイト列へ戻して [`deserialize_json`] を通し、応答の読み取りを
+/// 重複 key と非有限数を拒否する経路へ統一する。
+fn decode_result<R: DeserializeOwned>(result: &serde_json::Value) -> Result<R, PipeClientError> {
+    let bytes = serde_json::to_vec(result).map_err(|_| PipeClientError::Json)?;
+    deserialize_json(&bytes).map_err(|_| PipeClientError::InvalidResponse)
 }
 
 impl Drop for PipeClient {

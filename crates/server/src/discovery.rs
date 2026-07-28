@@ -6,8 +6,8 @@
 use crate::identity::{ProcessLookup, lookup_process};
 use crate::pipe_client::{PipeClient, PipeClientError};
 use aviutl2_mcp_core::{
-    InstanceDescriptor, InstanceId, InstanceInfo, InstanceProject, InstanceState, ProtocolVersion,
-    deserialize_json, parse_utc_timestamp, pipe_name_for,
+    ErrorCode, InstanceDescriptor, InstanceId, InstanceInfo, InstanceProject, InstanceState,
+    ProtocolVersion, deserialize_json, parse_utc_timestamp, pipe_name_for,
 };
 
 #[cfg(test)]
@@ -80,7 +80,57 @@ pub(crate) enum CleanupEligibility {
     RemovalAllowed,
 }
 
+/// `instance_id` 単体でのインスタンス解決の失敗。
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveInstanceError {
+    /// 指定された `instance_id` の descriptor が登録されていない。
+    #[error("指定された instance_id は登録されていません")]
+    NotRegistered,
+    /// descriptor は見つかったが、生存確認に失敗した。
+    #[error("インスタンスの生存確認に失敗しました: {}", .0.as_code())]
+    Excluded(ExclusionReason),
+}
+
+impl ResolveInstanceError {
+    /// 応答へ載せるエラーコードを返す。
+    pub fn error_code(&self) -> ErrorCode {
+        match self {
+            // 候補が 1 件も見つからない場合と、見つかったが検証に落ちた場合を
+            // 区別する。前者は指定 ID の instance が存在しないことを意味する。
+            ResolveInstanceError::NotRegistered => ErrorCode::InstanceNotFound,
+            ResolveInstanceError::Excluded(reason) => reason.error_code(),
+        }
+    }
+}
+
+/// 生存確認を通過し、接続を保持したインスタンス。
+///
+/// `client` は handshake と ping を通過した認証済み接続であり、drop すると
+/// pipe が閉じる。以降の operation を送る呼び出し側が必要な間だけ保持する。
+pub struct ResolvedInstance {
+    /// 認証済みの pipe 接続。
+    pub client: PipeClient,
+    /// 生存確認済みのインスタンス情報。
+    pub info: InstanceInfo,
+}
+
 impl ExclusionReason {
+    /// 応答へ載せるエラーコードを返す。
+    pub fn error_code(&self) -> ErrorCode {
+        match self {
+            // descriptor を解釈できていないため、対象の状態を何も主張できない。
+            ExclusionReason::InvalidDescriptor | ExclusionReason::InternalError => {
+                ErrorCode::InternalError
+            }
+            ExclusionReason::ProtocolMismatch => ErrorCode::ProtocolMismatch,
+            // descriptor は解釈できたが、指す先が生きていない・届かない。
+            ExclusionReason::ProcessIdentityMismatch
+            | ExclusionReason::PipeUnreachable
+            | ExclusionReason::PingFailed => ErrorCode::InstanceStale,
+            ExclusionReason::AuthenticationFailed => ErrorCode::AuthenticationFailed,
+        }
+    }
+
     /// 安全な理由コード文字列を返す。
     pub fn as_code(&self) -> &'static str {
         match self {
@@ -198,20 +248,101 @@ pub fn find_instances(
     Ok(results)
 }
 
+/// 検証を通過した候補と、確立済みの接続。
+struct VerifiedCandidate {
+    info: InstanceInfo,
+    client: PipeClient,
+}
+
+/// 検証に落ちた候補。
+struct ExcludedCandidate {
+    instance_id: Option<InstanceId>,
+    reason: ExclusionReason,
+}
+
+/// `instance_id` を指定して 1 件のインスタンスを解決する。
+///
+/// レジストリ全体を列挙せず、`instance_id` に対応する descriptor だけを読む。
+/// 検証は一覧取得と同一の pipeline を通し、成功時は認証済み接続を返す。
+#[instrument(skip(config), fields(instance_id = %instance_id))]
+pub fn resolve_instance(
+    registry_dir: &Path,
+    instance_id: InstanceId,
+    config: DiscoveryConfig,
+) -> Result<ResolvedInstance, ResolveInstanceError> {
+    let path = descriptor_path(registry_dir, &instance_id);
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {}
+        // 通常ファイルでない、または存在しない場合はこの ID の登録が無い。
+        Ok(_) => return Err(ResolveInstanceError::NotRegistered),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ResolveInstanceError::NotRegistered);
+        }
+        // 存在の有無を判定できないため、登録が無いとは断定しない。
+        Err(_) => {
+            return Err(ResolveInstanceError::Excluded(
+                ExclusionReason::InvalidDescriptor,
+            ));
+        }
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        verify_candidate(&path, config)
+    }));
+    match result {
+        Ok(Ok(candidate)) => Ok(ResolvedInstance {
+            client: candidate.client,
+            info: candidate.info,
+        }),
+        Ok(Err(excluded)) => {
+            warn!(reason = excluded.reason.as_code(), "instance excluded");
+            Err(ResolveInstanceError::Excluded(excluded.reason))
+        }
+        Err(_) => {
+            warn!("instance resolution panicked; isolating");
+            Err(ResolveInstanceError::Excluded(
+                ExclusionReason::InternalError,
+            ))
+        }
+    }
+}
+
+/// registry ディレクトリ内で `instance_id` に対応する descriptor のパス。
+///
+/// descriptor は `{instance_id}.json` として登録されるため、ファイル名は
+/// UUID の正準書式のみで構成される。
+fn descriptor_path(registry_dir: &Path, instance_id: &InstanceId) -> PathBuf {
+    registry_dir.join(format!("{instance_id}.json"))
+}
+
 /// 1 候補を discovery pipeline で検証する。
 #[instrument(skip(path, config), fields(path = %path.display()))]
 fn discover_candidate(path: &Path, config: DiscoveryConfig) -> DiscoveryResult {
+    // 一覧取得では以降の要求を送らないため、接続はここで閉じる。
+    match verify_candidate(path, config) {
+        Ok(candidate) => DiscoveryResult::Alive(candidate.info),
+        Err(excluded) => DiscoveryResult::Excluded {
+            instance_id: excluded.instance_id,
+            reason: excluded.reason,
+        },
+    }
+}
+
+/// descriptor 検証 → プロセス同一性 → pipe 接続 → handshake → ping を順に実行する。
+fn verify_candidate(
+    path: &Path,
+    config: DiscoveryConfig,
+) -> Result<VerifiedCandidate, ExcludedCandidate> {
     let deadline = Instant::now() + config.per_candidate_deadline;
 
     // descriptor 検証。
-    let descriptor = match validate_descriptor_file(path) {
-        Ok(d) => d,
-        Err(reason) => {
-            return DiscoveryResult::Excluded {
-                instance_id: None,
-                reason,
-            };
-        }
+    let descriptor = validate_descriptor_file(path).map_err(|reason| ExcludedCandidate {
+        instance_id: None,
+        reason,
+    })?;
+    let excluded = |reason| ExcludedCandidate {
+        instance_id: Some(descriptor.instance_id),
+        reason,
     };
 
     // PID とプロセス作成時刻。
@@ -220,39 +351,24 @@ fn discover_candidate(path: &Path, config: DiscoveryConfig) -> DiscoveryResult {
         // 生存を確認できなければ一覧には出さない。不在か判定不能かは
         // descriptor を削除してよいかの判断にのみ影響する。
         ProcessLookup::Absent | ProcessLookup::Undetermined => {
-            return DiscoveryResult::Excluded {
-                instance_id: Some(descriptor.instance_id),
-                reason: ExclusionReason::ProcessIdentityMismatch,
-            };
+            return Err(excluded(ExclusionReason::ProcessIdentityMismatch));
         }
     };
     if !process_created_at_matches(&descriptor.process_created_at, process_identity.created_at) {
-        return DiscoveryResult::Excluded {
-            instance_id: Some(descriptor.instance_id),
-            reason: ExclusionReason::ProcessIdentityMismatch,
-        };
+        return Err(excluded(ExclusionReason::ProcessIdentityMismatch));
     }
 
     // pipe 接続、handshake、ping。
-    let state = match run_pipe_handshake_and_ping(&descriptor, deadline) {
-        Ok(state) => state,
-        Err(reason) => {
-            return DiscoveryResult::Excluded {
-                instance_id: Some(descriptor.instance_id),
-                reason,
-            };
-        }
-    };
+    let (client, state) = run_pipe_handshake_and_ping(&descriptor, deadline).map_err(excluded)?;
 
     if matches!(state, InstanceState::Draining | InstanceState::Gone) {
-        return DiscoveryResult::Excluded {
-            instance_id: Some(descriptor.instance_id),
-            reason: ExclusionReason::PingFailed,
-        };
+        return Err(excluded(ExclusionReason::PingFailed));
     }
 
-    // InstanceInfo 生成。
-    DiscoveryResult::Alive(build_instance_info(descriptor, state))
+    Ok(VerifiedCandidate {
+        info: build_instance_info(descriptor, state),
+        client,
+    })
 }
 
 /// descriptor ファイルを検証する。
@@ -288,11 +404,11 @@ fn validate_descriptor_file(path: &Path) -> Result<InstanceDescriptor, Exclusion
     Ok(descriptor)
 }
 
-/// pipe 接続、handshake、ping を実行する。
+/// pipe 接続、handshake、ping を実行し、認証済み接続と状態を返す。
 fn run_pipe_handshake_and_ping(
     descriptor: &InstanceDescriptor,
     deadline: Instant,
-) -> Result<InstanceState, ExclusionReason> {
+) -> Result<(PipeClient, InstanceState), ExclusionReason> {
     let client = PipeClient::connect_and_handshake(
         descriptor.instance_id,
         descriptor.pid,
@@ -302,7 +418,8 @@ fn run_pipe_handshake_and_ping(
     )
     .map_err(map_pipe_error)?;
 
-    client.ping(deadline).map_err(map_pipe_error)
+    let state = client.ping(deadline).map_err(map_pipe_error)?;
+    Ok((client, state))
 }
 
 /// `PipeClientError` を `ExclusionReason` へ対応付ける。
@@ -311,9 +428,11 @@ fn map_pipe_error(err: PipeClientError) -> ExclusionReason {
         PipeClientError::ConnectFailed | PipeClientError::Timeout | PipeClientError::Io(_) => {
             ExclusionReason::PipeUnreachable
         }
-        PipeClientError::Framing | PipeClientError::Json | PipeClientError::InvalidResponse => {
-            ExclusionReason::PingFailed
-        }
+        // 接続先は応答したが契約どおりの内容ではなく、生存を確認できていない。
+        PipeClientError::Framing
+        | PipeClientError::Json
+        | PipeClientError::InvalidResponse
+        | PipeClientError::Remote(_) => ExclusionReason::PingFailed,
         PipeClientError::AuthenticationFailed => ExclusionReason::AuthenticationFailed,
         PipeClientError::ProtocolMismatch => ExclusionReason::ProtocolMismatch,
         PipeClientError::InstanceStale => ExclusionReason::ProcessIdentityMismatch,
