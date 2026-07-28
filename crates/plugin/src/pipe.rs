@@ -15,9 +15,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::{JoinHandle, spawn};
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{
-    CloseHandle, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
-};
+use windows::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, HANDLE};
 use windows::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
@@ -218,7 +216,7 @@ fn map_io_error(error: IoError, operation: &'static str, started: Instant) -> Pi
 ///
 /// 生ハンドル値を共有せず、Windows イベントオブジェクトのシグナルのみで
 /// 停止を伝える。待機中の overlapped I/O もこのイベントで中断できる。
-pub struct StopSignal {
+pub(crate) struct StopSignal {
     event: EventHandle,
 }
 
@@ -395,7 +393,7 @@ fn accept_loop(lifecycle: Arc<Lifecycle>, stop: Arc<StopSignal>) -> Result<()> {
                 Some(sa.as_ptr()),
             )
         };
-        if pipe_handle.is_invalid() || pipe_handle == INVALID_HANDLE_VALUE {
+        if pipe_handle.is_invalid() {
             return Err(anyhow::anyhow!("named pipe の作成に失敗しました"));
         }
         let pipe = OwnedPipeHandle(pipe_handle);
