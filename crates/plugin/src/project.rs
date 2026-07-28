@@ -298,11 +298,7 @@ impl ProjectState {
     fn lock_boundary(&self) -> std::sync::MutexGuard<'_, Boundary> {
         self.boundary.lock().unwrap_or_else(|e| e.into_inner())
     }
-}
 
-/// 状態の読み出しと変更の取り出し。現時点の呼び出し元はテストのみ。
-#[allow(dead_code)]
-impl ProjectState {
     /// 現在の epoch。
     ///
     /// 更新されるのはプロジェクトのロードだけである。プロジェクトを開いたまま
@@ -314,11 +310,15 @@ impl ProjectState {
     }
 
     /// 現在の identity。
+    // 現時点の呼び出し元はテストのみ。
+    #[allow(dead_code)]
     pub(crate) fn identity(&self) -> ProjectIdentity {
         self.lock_boundary().identity.clone()
     }
 
     /// 保存済みプロジェクトのパス。未保存なら `None`。
+    // 現時点の呼び出し元はテストのみ。
+    #[allow(dead_code)]
     pub(crate) fn identity_path(&self) -> Option<String> {
         match &self.lock_boundary().identity {
             ProjectIdentity::Path { path, .. } => Some(path.clone()),
@@ -332,6 +332,8 @@ impl ProjectState {
     }
 
     /// 最後の load/save 以降に対象の更新イベントを受け取ったか。
+    // 現時点の呼び出し元はテストのみ。
+    #[allow(dead_code)]
     pub(crate) fn modified(&self) -> bool {
         self.modified.load(Ordering::Relaxed)
     }
@@ -341,6 +343,8 @@ impl ProjectState {
     /// 直近の取り出しから [`NOTIFY_MIN_INTERVAL`] が経過していない場合と、
     /// 未取り出しの変更が無い場合は `None` を返す。抑止された変更は次の
     /// 取り出しでまとめて観測できる。
+    // 現時点の呼び出し元はテストのみ。
+    #[allow(dead_code)]
     pub(crate) fn take_pending_changes(&self, now: Instant) -> Option<PendingChanges> {
         self.notifier.take(now)
     }
