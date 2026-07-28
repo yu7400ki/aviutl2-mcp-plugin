@@ -150,15 +150,14 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
             }
         };
 
-        let read_adapter = read::sdk_read_adapter(project_state.clone());
-        let pipe_server =
-            match pipe::PipeServer::start(lifecycle.clone(), project_state, read_adapter) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("named pipe server の起動に失敗しました: {e:?}");
-                    return;
-                }
-            };
+        let read_adapter = read::sdk_read_adapter(project_state);
+        let pipe_server = match pipe::PipeServer::start(lifecycle.clone(), read_adapter) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("named pipe server の起動に失敗しました: {e:?}");
+                return;
+            }
+        };
 
         tracing::info!(
             instance_id = %instance_id,

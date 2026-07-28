@@ -5,7 +5,6 @@
 //! pipe は overlapped で作成し、読み書きには必ず期限を与える。
 
 use crate::lifecycle::Lifecycle;
-use crate::project::ProjectState;
 use crate::read::ReadAdapter;
 use crate::security::ProtectedSecurityAttributes;
 use crate::session;
@@ -294,13 +293,9 @@ impl PipeServer {
     /// 指定したライフサイクルに紐づく named pipe server を起動する。
     ///
     /// 戻り値は制御ハンドルであり、accept スレッドとは共有しない。スレッドへ
-    /// 渡すのは停止イベントとライフサイクル・プロジェクト状態・読み取り口のみで、
-    /// スレッドから制御ハンドルを触る経路は存在しない。
-    pub fn start(
-        lifecycle: Arc<Lifecycle>,
-        project_state: Arc<ProjectState>,
-        read_adapter: Arc<dyn ReadAdapter>,
-    ) -> Result<Self> {
+    /// 渡すのは停止イベントとライフサイクル・読み取り口のみで、スレッドから
+    /// 制御ハンドルを触る経路は存在しない。
+    pub fn start(lifecycle: Arc<Lifecycle>, read_adapter: Arc<dyn ReadAdapter>) -> Result<Self> {
         let stop_signal = Arc::new(StopSignal::new()?);
         // 送信は行わない。スレッド終了時に `tx` が drop され、受信側が
         // `Disconnected` を得ることでスレッド終了を検知する。
@@ -314,7 +309,7 @@ impl PipeServer {
             // その Drop がこのスレッドを join する。ここで同じ write lock を
             // 要求すると確実にデッドロックする。
             let _finished = tx;
-            if let Err(e) = accept_loop(lifecycle, project_state, read_adapter, stop_for_thread) {
+            if let Err(e) = accept_loop(lifecycle, read_adapter, stop_for_thread) {
                 tracing::error!("named pipe server ループが異常終了しました: {e:?}");
             }
         });
@@ -402,7 +397,6 @@ impl Drop for OwnedPipeHandle {
 /// クローズ済みハンドルの使用が構造的に発生しない。
 fn accept_loop(
     lifecycle: Arc<Lifecycle>,
-    project_state: Arc<ProjectState>,
     read_adapter: Arc<dyn ReadAdapter>,
     stop: Arc<StopSignal>,
 ) -> Result<()> {
@@ -449,12 +443,7 @@ fn accept_loop(
                 if stop.is_signaled() {
                     break;
                 }
-                session::handle_connection(
-                    stream,
-                    lifecycle.clone(),
-                    project_state.clone(),
-                    read_adapter.clone(),
-                );
+                session::handle_connection(stream, lifecycle.clone(), read_adapter.clone());
             }
             Connection::Stopped => break,
             Connection::Retry { reason } => {
@@ -587,6 +576,7 @@ fn to_wide(s: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::ProjectState;
     use aviutl2_mcp_core::{AuthSecret, InstanceId, InstanceState, ProtocolVersion};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING,
@@ -616,13 +606,12 @@ mod tests {
         (Arc::new(lifecycle), dir)
     }
 
-    /// テスト用のプロジェクト状態と読み取り口を添えて server を起動する。
+    /// テスト用の読み取り口を添えて server を起動する。
     ///
     /// 編集ハンドルは初期化されないため、読み取り口は SDK を呼ばない。
     fn start_server(lifecycle: &Arc<Lifecycle>) -> PipeServer {
-        let project_state = Arc::new(ProjectState::new());
-        let read_adapter = crate::read::sdk_read_adapter(project_state.clone());
-        PipeServer::start(lifecycle.clone(), project_state, read_adapter).unwrap()
+        let read_adapter = crate::read::sdk_read_adapter(Arc::new(ProjectState::new()));
+        PipeServer::start(lifecycle.clone(), read_adapter).unwrap()
     }
 
     /// 指定した読み取り口を添えて server を起動する。
@@ -630,12 +619,7 @@ mod tests {
         lifecycle: &Arc<Lifecycle>,
         read_adapter: Arc<dyn ReadAdapter>,
     ) -> PipeServer {
-        PipeServer::start(
-            lifecycle.clone(),
-            Arc::new(ProjectState::new()),
-            read_adapter,
-        )
-        .unwrap()
+        PipeServer::start(lifecycle.clone(), read_adapter).unwrap()
     }
 
     /// 応答が要求へ届くことだけを確かめるための読み取り口。
