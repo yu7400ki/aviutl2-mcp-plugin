@@ -438,9 +438,25 @@ pub fn remaining_until(deadline: Instant) -> Duration {
 }
 
 /// `windows::core::Error` を `io::Error` へ変換する。
+///
+/// `windows::core::Error` は Win32 エラーを `HRESULT`（`0x8007_XXXX`）として
+/// 保持するため、そのまま `from_raw_os_error` へ渡すと `io::Error::raw_os_error`
+/// が生の Win32 コードと一致せず、`io::Error::kind` も常に分類不能になる。
+/// FACILITY_WIN32 の場合は元の Win32 コードへ戻し、それ以外の HRESULT は
+/// 生の OS エラーではないため `io::Error::other` として包む。
 fn to_io_error(err: windows::core::Error) -> io::Error {
-    io::Error::from_raw_os_error(err.code().0)
+    let hresult = err.code().0 as u32;
+    if hresult & 0xFFFF_0000 == FACILITY_WIN32_MASK {
+        io::Error::from_raw_os_error((hresult & 0xFFFF) as i32)
+    } else {
+        io::Error::other(err)
+    }
 }
+
+/// `HRESULT` の上位 16bit が示す「Win32 エラーを包んだ HRESULT」の印。
+///
+/// 失敗ビットと FACILITY_WIN32 の組で、`HRESULT_FROM_WIN32` が生成する値に対応する。
+const FACILITY_WIN32_MASK: u32 = 0x8007_0000;
 
 /// 待機 API へ渡すミリ秒値へ変換する。
 ///
@@ -454,6 +470,7 @@ fn to_wait_millis(remaining: Duration) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND};
 
     #[test]
     fn manual_reset_event_signals_and_resets() {
@@ -504,6 +521,79 @@ mod tests {
         assert_eq!(to_wait_millis(Duration::from_micros(1500)), 2);
         assert_eq!(to_wait_millis(Duration::from_millis(3)), 3);
         assert_eq!(to_wait_millis(Duration::from_secs(u64::MAX)), INFINITE - 1);
+    }
+
+    #[test]
+    fn win32_error_keeps_raw_os_error() {
+        for code in [
+            ERROR_FILE_NOT_FOUND,
+            ERROR_BROKEN_PIPE,
+            ERROR_INVALID_HANDLE,
+            ERROR_OPERATION_ABORTED,
+        ] {
+            let converted = to_io_error(windows::core::Error::from_hresult(code.to_hresult()));
+            assert_eq!(
+                converted.raw_os_error(),
+                Some(code.0 as i32),
+                "HRESULT ではなく生の Win32 コードを保持する"
+            );
+        }
+
+        let broken_pipe = to_io_error(windows::core::Error::from_hresult(
+            ERROR_BROKEN_PIPE.to_hresult(),
+        ));
+        assert_eq!(
+            broken_pipe.kind(),
+            io::ErrorKind::BrokenPipe,
+            "生の Win32 コードから種別が分類できる"
+        );
+    }
+
+    #[test]
+    fn non_win32_hresult_has_no_raw_os_error() {
+        // E_NOTIMPL。FACILITY_WIN32 ではないため Win32 コードへは還元できない。
+        let converted = to_io_error(windows::core::Error::from_hresult(windows::core::HRESULT(
+            0x8000_4001_u32 as i32,
+        )));
+        assert_eq!(
+            converted.raw_os_error(),
+            None,
+            "Win32 由来でない HRESULT を生の OS エラーとして扱わない"
+        );
+    }
+
+    #[test]
+    fn failed_io_reports_raw_win32_error() {
+        let mut buf = [0u8; 1];
+        let deadline = Instant::now() + Duration::from_millis(200);
+        // 無効なハンドルへの読み取りは同期的に失敗し、保留 I/O を残さない。
+        let error = read_exact(HANDLE::default(), &mut buf, deadline)
+            .expect_err("無効なハンドルへの読み取りは失敗する");
+        let WinIoError::Io(error) = error else {
+            panic!("期限超過ではなく I/O エラーになる: {error:?}");
+        };
+        assert_eq!(error.raw_os_error(), Some(ERROR_INVALID_HANDLE.0 as i32));
+    }
+
+    #[test]
+    fn leaves_io_pending_matches_hresult_form() {
+        for code in [
+            ERROR_INVALID_HANDLE,
+            ERROR_INVALID_PARAMETER,
+            ERROR_IO_INCOMPLETE,
+        ] {
+            assert!(
+                leaves_io_pending(&windows::core::Error::from_hresult(code.to_hresult())),
+                "完了状態を取得できない失敗は I/O が保留されたままであり得る"
+            );
+        }
+
+        for code in [ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED] {
+            assert!(
+                !leaves_io_pending(&windows::core::Error::from_hresult(code.to_hresult())),
+                "I/O 自体の完了状態を示す失敗ではカーネルは既に手放している"
+            );
+        }
     }
 
     #[test]
