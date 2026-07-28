@@ -287,6 +287,52 @@ pub fn find_instances(
     Ok(results)
 }
 
+/// registry に登録されている `instance_id` を列挙する（生存確認なし）。
+///
+/// descriptor の検証とプロセス同一性の確認までを行い、pipe 接続・handshake・
+/// ping は行わない。plugin の pipe は同時 1 接続しか受け付けないため、一覧の
+/// たびに接続すると実行中の要求と競合し、双方を失敗させてしまう。
+/// したがって返る ID のインスタンスが要求に応じられるとは限らず、生存確認は
+/// 実際に要求を送る [`resolve_instance`] が行う。
+///
+/// 並びは descriptor のファイル名順で安定しており、ページ分割の基準にできる。
+#[instrument(skip_all)]
+pub fn list_registered_instances(registry_dir: &Path) -> Result<Vec<InstanceId>, DiscoveryError> {
+    let files = list_descriptor_files(registry_dir).map_err(|e| {
+        warn!(error = %e, "registry ディレクトリの列挙に失敗しました");
+        DiscoveryError::RegistryUnreadable(e)
+    })?;
+
+    let mut instances = Vec::new();
+    for path in files {
+        let Ok(descriptor) = validate_descriptor_file(&path) else {
+            debug!(instance = %redact::descriptor_file(&path), "descriptor を解釈できません");
+            continue;
+        };
+        if !process_identity_matches(&descriptor) {
+            debug!(
+                instance = %redact::instance_id(&descriptor.instance_id),
+                "descriptor のプロセスが存在しません",
+            );
+            continue;
+        }
+        instances.push(descriptor.instance_id);
+    }
+    Ok(instances)
+}
+
+/// descriptor が指すプロセスが今も同一であるかを、pipe に触れずに判定する。
+fn process_identity_matches(descriptor: &InstanceDescriptor) -> bool {
+    match lookup_process(descriptor.pid) {
+        ProcessLookup::Found(identity) => {
+            process_created_at_matches(&descriptor.process_created_at, identity.created_at)
+        }
+        // 生存を確認できなければ同一とは扱わない。不在か判定不能かは
+        // descriptor を削除してよいかの判断にのみ影響する。
+        ProcessLookup::Absent | ProcessLookup::Undetermined => false,
+    }
+}
+
 /// 検証を通過した候補と、確立済みの接続。
 struct VerifiedCandidate {
     info: InstanceInfo,
@@ -392,15 +438,7 @@ fn verify_candidate(
     let excluded = |reason| ExcludedCandidate::new(Some(descriptor.instance_id), reason);
 
     // PID とプロセス作成時刻。
-    let process_identity = match lookup_process(descriptor.pid) {
-        ProcessLookup::Found(identity) => identity,
-        // 生存を確認できなければ一覧には出さない。不在か判定不能かは
-        // descriptor を削除してよいかの判断にのみ影響する。
-        ProcessLookup::Absent | ProcessLookup::Undetermined => {
-            return Err(excluded(ExclusionReason::ProcessIdentityMismatch));
-        }
-    };
-    if !process_created_at_matches(&descriptor.process_created_at, process_identity.created_at) {
+    if !process_identity_matches(&descriptor) {
         return Err(excluded(ExclusionReason::ProcessIdentityMismatch));
     }
 

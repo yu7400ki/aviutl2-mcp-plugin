@@ -204,6 +204,35 @@ impl MockPipeServer {
     }
 }
 
+/// pipe server を伴わない descriptor を registry へ書き、その `instance_id` を返す。
+///
+/// PID は自プロセスを指すためプロセス同一性の確認は通るが、pipe は待ち受けていない。
+/// 生存確認を伴わない経路と、伴う経路の違いを分けて確かめるために使う。
+pub fn write_bare_descriptor(registry_dir: &std::path::Path) -> InstanceId {
+    let instance_id = InstanceId::new_v4();
+    let created_at = current_process_created_at();
+    let descriptor = InstanceDescriptor {
+        schema_version: 1,
+        protocol_version: ProtocolVersion::CURRENT,
+        instance_id,
+        pipe_name: pipe_name_for(&instance_id),
+        auth_secret: AuthSecret::generate(),
+        pid: std::process::id(),
+        process_created_at: created_at.clone(),
+        hwnd: None,
+        started_at: created_at,
+        state: InstanceState::Ready,
+        project: None,
+    };
+    std::fs::create_dir_all(registry_dir).unwrap();
+    std::fs::write(
+        registry_dir.join(format!("{instance_id}.json")),
+        serde_json::to_string(&descriptor).unwrap(),
+    )
+    .unwrap();
+    instance_id
+}
+
 impl Drop for MockPipeServer {
     fn drop(&mut self) {
         // 停止を通知してスレッドの終了を待ってから pipe を閉じる。

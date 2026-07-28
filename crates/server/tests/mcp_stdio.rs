@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use support::{
     MOCK_STARTUP_GRACE, MockPipeServer, OperationResponses, current_process_created_at, ok_result,
-    temp_registry_dir,
+    temp_registry_dir, write_bare_descriptor,
 };
 
 /// stdio セッションの結果。
@@ -382,6 +382,131 @@ fn resources_round_trip_over_stdio() {
     );
 
     drop(mock);
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+/// `resources/list` の応答から resource の URI を取り出す。
+fn listed_uris(response: &Value) -> Vec<String> {
+    response["result"]["resources"]
+        .as_array()
+        .expect("resources は配列")
+        .iter()
+        .map(|resource| resource["uri"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+#[test]
+fn resources_list_does_not_probe_instances() {
+    let registry_dir = temp_registry_dir();
+    // pipe を待ち受けないインスタンスを登録する。生存確認へ出れば 1 件も並ばない。
+    let registered: Vec<String> = (0..3)
+        .map(|_| write_bare_descriptor(&registry_dir).to_string())
+        .collect();
+
+    let mut requests = initialize_requests();
+    requests.push(json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }));
+
+    let session = run_session(&registry_dir, &requests);
+    let uris = listed_uris(&session.response(2));
+    for instance_id in &registered {
+        assert!(
+            uris.iter().any(|uri| uri.contains(instance_id)),
+            "{instance_id} が列挙されていません: {uris:?}"
+        );
+    }
+    assert!(session.response(2)["result"]["nextCursor"].is_null());
+
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+#[test]
+fn resources_list_pages_with_a_cursor() {
+    let registry_dir = temp_registry_dir();
+    // 1 ページの上限を超える件数を登録し、続きが黙って落ちないことを確かめる。
+    let total = 150;
+    for _ in 0..total {
+        write_bare_descriptor(&registry_dir);
+    }
+
+    let mut requests = initialize_requests();
+    requests.push(json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }));
+
+    let first_session = run_session(&registry_dir, &requests);
+    let first = first_session.response(2);
+    let cursor = first["result"]["nextCursor"]
+        .as_str()
+        .expect("続きがある場合は nextCursor を返す")
+        .to_string();
+    let first_uris = listed_uris(&first);
+    // 先頭ページはインスタンス一覧 1 件と edit-info 100 件。
+    assert_eq!(first_uris.len(), 101, "{}", first_uris.len());
+    assert!(first_uris.contains(&"aviutl2://instances".to_string()));
+
+    let mut next_requests = initialize_requests();
+    next_requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/list",
+        "params": { "cursor": cursor },
+    }));
+    let second_session = run_session(&registry_dir, &next_requests);
+    let second = second_session.response(2);
+    let second_uris = listed_uris(&second);
+    assert_eq!(second_uris.len(), total - 100, "{}", second_uris.len());
+    assert!(
+        second["result"]["nextCursor"].is_null(),
+        "最終ページに cursor は付かない"
+    );
+
+    // 2 ページで全件を重複なく覆う。
+    let mut all: Vec<&String> = first_uris.iter().chain(second_uris.iter()).collect();
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), total + 1);
+
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+#[test]
+fn invalid_resources_list_cursor_is_rejected() {
+    let registry_dir = temp_registry_dir();
+    std::fs::create_dir_all(&registry_dir).expect("registry を作れる");
+
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/list",
+        "params": { "cursor": "not-a-cursor" },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+    assert!(session.response(2)["error"].is_object());
+
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+#[test]
+fn unreachable_instance_resource_reports_not_found_with_details() {
+    let registry_dir = temp_registry_dir();
+    // 登録はあるが pipe を待ち受けないため、読み取り時に生存確認で落ちる。
+    let instance_id = write_bare_descriptor(&registry_dir);
+
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/read",
+        "params": { "uri": format!("aviutl2://instances/{instance_id}/edit-info") },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+    let error = &session.response(2)["error"];
+    assert!(error.is_object(), "{}", session.response(2));
+    assert_eq!(error["data"]["code"], json!("instance_stale"));
+    assert_eq!(error["data"]["retryable"], json!(true));
+    assert!(error["data"]["correlation_id"].is_string());
+
     let _ = std::fs::remove_dir_all(&registry_dir);
 }
 

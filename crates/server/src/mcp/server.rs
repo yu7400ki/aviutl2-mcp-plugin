@@ -6,7 +6,7 @@
 //! 非同期タスク間で接続が移動しないようにする。
 
 use crate::api::{ListInstancesResponse, aviutl2_list_instances};
-use crate::discovery::{DiscoveryConfig, resolve_instance};
+use crate::discovery::{DiscoveryConfig, list_registered_instances, resolve_instance};
 use crate::mcp::input::{
     GetObjectInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput, ListLayersInput,
     ListObjectsInput, parse_instance_id,
@@ -481,40 +481,63 @@ impl ServerHandler for AviUtl2McpServer {
         info
     }
 
+    /// resource を列挙する。
+    ///
+    /// ここでは registry の descriptor を読むだけで、インスタンスへは接続しない。
+    /// plugin の pipe は同時 1 接続しか受け付けないため、一覧のたびに生存確認へ
+    /// 出ると実行中の tool call と競合して双方を失敗させてしまう。生存確認は
+    /// `read_resource` と tool が要求を送る時点で行う。
     async fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParams>,
+        request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
+        let offset = decode_cursor(request.and_then(|params| params.cursor).as_deref())?;
         let registry_dir = self.registry_dir();
-        let response = self
+        let registered = self
             .run_resource("resources/list", move || {
-                list_instances(
-                    &registry_dir,
-                    ListInstancesInput {
-                        offset: 0,
-                        limit: MAX_PAGE_LIMIT,
-                    },
-                )
+                list_registered_instances(&registry_dir).map_err(|_| {
+                    failure::from_code(
+                        ErrorCode::InternalError,
+                        "インスタンス登録情報を読み取れませんでした",
+                    )
+                })
             })
             .await?;
 
-        let mut resources = vec![
-            Resource::new(INSTANCES_RESOURCE_URI, "aviutl2 instances")
-                .with_description("生存確認済みの AviUtl2 インスタンス一覧")
-                .with_mime_type(RESOURCE_MIME_TYPE),
-        ];
-        for info in &response.instances {
+        // インスタンス一覧そのものは登録の有無によらず読めるため、先頭ページに載せる。
+        let mut resources = Vec::new();
+        if offset == 0 {
+            resources.push(
+                Resource::new(INSTANCES_RESOURCE_URI, "aviutl2 instances")
+                    .with_description("登録されている AviUtl2 インスタンス一覧")
+                    .with_mime_type(RESOURCE_MIME_TYPE),
+            );
+        }
+
+        let page: Vec<&InstanceId> = registered
+            .iter()
+            .skip(offset)
+            .take(RESOURCES_PAGE_SIZE)
+            .collect();
+        for instance_id in &page {
             resources.push(
                 Resource::new(
-                    edit_info_resource_uri(&info.instance_id),
-                    format!("aviutl2 edit info {}", info.instance_id),
+                    edit_info_resource_uri(instance_id),
+                    format!("aviutl2 edit info {}", redact::instance_id(instance_id)),
                 )
                 .with_description("インスタンスの現在の編集情報")
                 .with_mime_type(RESOURCE_MIME_TYPE),
             );
         }
-        Ok(ListResourcesResult::with_all_items(resources))
+
+        let mut result = ListResourcesResult::with_all_items(resources);
+        let next_offset = offset.saturating_add(page.len());
+        if next_offset < registered.len() {
+            // 続きを黙って落とさず、次ページの位置を返す。
+            result.next_cursor = Some(encode_cursor(next_offset));
+        }
+        Ok(result)
     }
 
     async fn read_resource(
@@ -541,7 +564,7 @@ impl ServerHandler for AviUtl2McpServer {
                                 limit: MAX_PAGE_LIMIT,
                             },
                         )?;
-                        to_structured(&response)?
+                        fitted_instances_value(response)?
                     }
                     ResourceTarget::EditInfo(instance_id) => {
                         let info: EditInfo = request_read(
@@ -554,10 +577,8 @@ impl ServerHandler for AviUtl2McpServer {
                         to_structured(&info)?
                     }
                 };
-                let text = serde_json::to_string_pretty(&value)
-                    .map_err(|_| failure::internal_error("resource を直列化できませんでした"))?;
                 Ok(
-                    ResourceContents::text(text, uri_for_content)
+                    ResourceContents::text(resource_text(&value)?, uri_for_content)
                         .with_mime_type(RESOURCE_MIME_TYPE),
                 )
             })
@@ -565,6 +586,64 @@ impl ServerHandler for AviUtl2McpServer {
 
         Ok(ReadResourceResult::new(vec![contents]))
     }
+}
+
+/// resource 一覧 1 ページに載せるインスタンス数の上限。
+const RESOURCES_PAGE_SIZE: usize = 100;
+
+/// 次ページの位置を cursor へ符号化する。
+fn encode_cursor(offset: usize) -> String {
+    offset.to_string()
+}
+
+/// cursor から開始位置を復元する。未指定は先頭を意味する。
+fn decode_cursor(cursor: Option<&str>) -> Result<usize, McpError> {
+    match cursor {
+        None => Ok(0),
+        Some(value) => value
+            .parse()
+            .map_err(|_| McpError::invalid_params("cursor を解釈できません", None)),
+    }
+}
+
+/// resource contents の text を組み立てる。
+///
+/// 上限を超える内容は途中で切ると JSON として読めなくなるため、超過した事実だけを
+/// 返して対応する tool のページ指定へ誘導する。
+fn resource_text(value: &Value) -> Result<String, ErrorObject> {
+    let text = pretty_json(value)?;
+    if text.chars().count() <= MAX_TEXT_CHARS {
+        return Ok(text);
+    }
+    pretty_json(&serde_json::json!({
+        "truncated": true,
+        "max_chars": MAX_TEXT_CHARS,
+        "reason": "resource の内容が上限を超えました。対応する tool にページ指定を与えて取得してください",
+    }))
+}
+
+/// インスタンス一覧を、resource の上限に収まる件数まで絞って値にする。
+///
+/// 落とした分は `has_more` / `next_offset` が示すため、続きは
+/// `aviutl2_list_instances` のページ指定で取得できる。
+fn fitted_instances_value(mut response: ListInstancesResponse) -> Result<Value, ErrorObject> {
+    loop {
+        let value = to_structured(&response)?;
+        if response.instances.is_empty() || pretty_json(&value)?.chars().count() <= MAX_TEXT_CHARS {
+            return Ok(value);
+        }
+        let keep = response.instances.len() / 2;
+        response.instances.truncate(keep);
+        response.count = keep as u32;
+        response.has_more = true;
+        response.next_offset = Some(response.offset.saturating_add(keep as u32));
+    }
+}
+
+/// 値を読みやすい JSON へ直列化する。
+fn pretty_json(value: &Value) -> Result<String, ErrorObject> {
+    serde_json::to_string_pretty(value)
+        .map_err(|_| failure::internal_error("resource を直列化できませんでした"))
 }
 
 /// resource URI が指す対象。
@@ -673,12 +752,22 @@ fn error_result(error: &ErrorObject) -> CallToolResult {
 }
 
 /// エラーを resource 応答用の protocol error へ変換する。
+///
+/// resource には tool result のような失敗表現が無く、protocol error だけが
+/// 返せる。コードを潰すと恒久的な失敗と区別できなくなるため、対象が今この
+/// server から見えないことを表すコードは `resource_not_found` へ写し、
+/// リトライ可否や `retry_after_ms` は `data` に残して呼び出し側へ渡す。
 fn to_mcp_error(error: &ErrorObject) -> McpError {
     let message = failure::text(error);
+    let data = Some(failure::structured(error));
     match error.code {
-        ErrorCode::InstanceNotFound => McpError::resource_not_found(message, None),
-        ErrorCode::InvalidArgument => McpError::invalid_params(message, None),
-        _ => McpError::internal_error(message, None),
+        // 登録が無い場合と、登録はあるが生存確認に失敗した場合のいずれも、
+        // 一覧を取り直せば解消し得る「今は存在しない resource」である。
+        ErrorCode::InstanceNotFound | ErrorCode::InstanceStale => {
+            McpError::resource_not_found(message, data)
+        }
+        ErrorCode::InvalidArgument => McpError::invalid_params(message, data),
+        _ => McpError::internal_error(message, data),
     }
 }
 
@@ -962,5 +1051,149 @@ mod tests {
             failure::from_resolve_error(&crate::discovery::ResolveInstanceError::NotRegistered);
         let mcp_error = to_mcp_error(&error);
         assert_eq!(mcp_error.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
+    }
+
+    #[test]
+    fn stale_instance_becomes_resource_not_found() {
+        // 一覧を取り直せば解消し得るため、恒久的な内部エラーにはしない。
+        let error = failure::from_resolve_error(&crate::discovery::ResolveInstanceError::Excluded(
+            crate::discovery::ExclusionReason::PipeUnreachable,
+        ));
+        let mcp_error = to_mcp_error(&error);
+        assert_eq!(mcp_error.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
+    }
+
+    #[test]
+    fn invalid_argument_becomes_invalid_params() {
+        let mcp_error = to_mcp_error(&failure::invalid_argument("limit が範囲外です"));
+        assert_eq!(mcp_error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn other_errors_become_internal_error() {
+        for code in [ErrorCode::HostBusy, ErrorCode::Timeout, ErrorCode::SdkError] {
+            let mcp_error = to_mcp_error(&failure::from_code(code.clone(), "失敗"));
+            assert_eq!(
+                mcp_error.code,
+                rmcp::model::ErrorCode::INTERNAL_ERROR,
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_error_carries_structured_details() {
+        let remote =
+            aviutl2_mcp_core::ErrorObject::new(ErrorCode::HostBusy, "起動処理中です", true)
+                .with_details(serde_json::json!({ "retry_after_ms": 500 }));
+        let error = failure::with_correlation_id(
+            failure::from_pipe_error(&crate::pipe_client::PipeClientError::Remote(Box::new(
+                remote,
+            ))),
+            "correlation",
+        );
+        let data = to_mcp_error(&error).data.expect("data がある");
+        assert_eq!(data["code"], serde_json::json!("host_busy"));
+        assert_eq!(data["retryable"], serde_json::json!(true));
+        assert_eq!(data["details"]["retry_after_ms"], serde_json::json!(500));
+        assert_eq!(data["correlation_id"], serde_json::json!("correlation"));
+    }
+
+    #[test]
+    fn cursor_round_trips() {
+        assert_eq!(decode_cursor(None).expect("未指定は先頭"), 0);
+        assert_eq!(
+            decode_cursor(Some(&encode_cursor(100))).expect("符号化した位置を戻せる"),
+            100
+        );
+    }
+
+    #[test]
+    fn malformed_cursor_is_rejected() {
+        for cursor in ["", "-1", "abc", "1.5"] {
+            let error = decode_cursor(Some(cursor)).expect_err("解釈できない cursor は拒否する");
+            assert_eq!(
+                error.code,
+                rmcp::model::ErrorCode::INVALID_PARAMS,
+                "{cursor}"
+            );
+        }
+    }
+
+    /// 表示名が長いインスタンスを指定件数だけ並べた一覧。
+    fn oversized_instances(count: usize) -> ListInstancesResponse {
+        let instances: Vec<aviutl2_mcp_core::InstanceInfo> = (0..count)
+            .map(|_| aviutl2_mcp_core::InstanceInfo {
+                instance_id: InstanceId::new_v4(),
+                state: aviutl2_mcp_core::InstanceState::Ready,
+                pid: 1234,
+                started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
+                project: Some(aviutl2_mcp_core::InstanceProject {
+                    display_name: "名".repeat(500),
+                    path: None,
+                    epoch: None,
+                    revision: None,
+                    modified: None,
+                }),
+                scene: None,
+            })
+            .collect();
+        ListInstancesResponse {
+            total_count: instances.len() as u32,
+            count: instances.len() as u32,
+            instances,
+            offset: 0,
+            has_more: false,
+            next_offset: None,
+        }
+    }
+
+    #[test]
+    fn instances_resource_shrinks_until_it_fits() {
+        let response = oversized_instances(MAX_PAGE_LIMIT as usize);
+        let value = fitted_instances_value(response).expect("値へ変換できる");
+        let text = pretty_json(&value).expect("直列化できる");
+        assert!(
+            text.chars().count() <= MAX_TEXT_CHARS,
+            "上限を超えています: {}",
+            text.chars().count()
+        );
+        // 落とした分は続きとして示され、黙って欠落しない。
+        assert_eq!(value["has_more"], serde_json::json!(true));
+        assert!(value["next_offset"].is_number());
+        assert!(
+            value["count"].as_u64().expect("count は数値") < MAX_PAGE_LIMIT as u64,
+            "件数が絞られていません"
+        );
+    }
+
+    #[test]
+    fn small_instances_resource_is_not_shrunk() {
+        let response = oversized_instances(1);
+        let value = fitted_instances_value(response).expect("値へ変換できる");
+        assert_eq!(value["count"], serde_json::json!(1));
+        assert_eq!(value["has_more"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn resource_text_stays_within_limit() {
+        let value = serde_json::json!({ "note": "え".repeat(MAX_TEXT_CHARS * 2) });
+        let text = resource_text(&value).expect("代替内容を返せる");
+        assert!(
+            text.chars().count() <= MAX_TEXT_CHARS,
+            "上限を超えています: {}",
+            text.chars().count()
+        );
+        // 途中で切らず、読み取れる JSON のまま超過を伝える。
+        let decoded: Value = serde_json::from_str(&text).expect("JSON として読める");
+        assert_eq!(decoded["truncated"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn resource_text_keeps_content_within_limit_intact() {
+        let value = serde_json::json!({ "note": "短い" });
+        let text = resource_text(&value).expect("直列化できる");
+        let decoded: Value = serde_json::from_str(&text).expect("JSON として読める");
+        assert_eq!(decoded, value);
     }
 }
