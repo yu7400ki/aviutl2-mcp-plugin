@@ -41,8 +41,8 @@ pub struct GetCurrentSceneParams {}
 pub struct ListLayersParams {
     /// 列挙時と同じシーンかを確認するための guard。
     pub expected_scene_id: i32,
-    /// ページ指定。
-    #[serde(default)]
+    /// ページ指定。要求では offset / limit / snapshot_revision として展開される。
+    #[serde(flatten)]
     pub page: PageRequest,
 }
 
@@ -55,8 +55,8 @@ pub struct ListObjectsParams {
     /// 絞り込み条件。
     #[serde(default)]
     pub filter: Option<ObjectFilter>,
-    /// ページ指定。
-    #[serde(default)]
+    /// ページ指定。要求では offset / limit / snapshot_revision として展開される。
+    #[serde(flatten)]
     pub page: PageRequest,
 }
 
@@ -87,8 +87,8 @@ pub struct ListAvailableEffectsParams {
     /// 種別で絞り込む。
     #[serde(default)]
     pub effect_type: Option<EffectType>,
-    /// ページ指定。
-    #[serde(default)]
+    /// ページ指定。要求では offset / limit / snapshot_revision として展開される。
+    #[serde(flatten)]
     pub page: PageRequest,
 }
 
@@ -211,6 +211,28 @@ mod tests {
     }
 
     #[test]
+    fn list_layers_params_wire_form_is_flat() {
+        // ページ指定は入れ子にせず、他の一覧系 params と同じく #[serde(flatten)] で平坦に並べる。
+        let params = ListLayersParams {
+            expected_scene_id: 0,
+            page: PageRequest {
+                offset: 10,
+                limit: 20,
+                snapshot_revision: Some(42),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(params).unwrap(),
+            serde_json::json!({
+                "expected_scene_id": 0,
+                "offset": 10,
+                "limit": 20,
+                "snapshot_revision": 42,
+            })
+        );
+    }
+
+    #[test]
     fn list_layers_params_defaults_page() {
         let params: ListLayersParams = serde_json::from_str(r#"{"expected_scene_id":0}"#).unwrap();
         assert_eq!(params.page.limit, DEFAULT_PAGE_LIMIT);
@@ -219,15 +241,24 @@ mod tests {
     }
 
     #[test]
+    fn list_layers_params_accept_flat_page_fields() {
+        let params: ListLayersParams =
+            serde_json::from_str(r#"{"expected_scene_id":3,"offset":5,"limit":10}"#).unwrap();
+        assert_eq!(params.expected_scene_id, 3);
+        assert_eq!(params.page.offset, 5);
+        assert_eq!(params.page.limit, 10);
+    }
+
+    #[test]
     fn list_layers_params_reject_unknown_field() {
-        // ページ指定は入れ子であり、外側にも内側にも未知フィールドを許さない。
+        // 平坦に並べても未知フィールドは拒否する。
         assert!(
-            serde_json::from_str::<ListLayersParams>(r#"{"expected_scene_id":0,"limit":10}"#)
+            serde_json::from_str::<ListLayersParams>(r#"{"expected_scene_id":0,"future":1}"#)
                 .is_err()
         );
         assert!(
             serde_json::from_str::<ListLayersParams>(
-                r#"{"expected_scene_id":0,"page":{"limit":10,"future":1}}"#
+                r#"{"expected_scene_id":0,"limit":10,"future":1}"#
             )
             .is_err()
         );
@@ -282,8 +313,25 @@ mod tests {
     }
 
     #[test]
+    fn list_available_effects_params_accept_flat_page_fields() {
+        let params: ListAvailableEffectsParams =
+            serde_json::from_str(r#"{"effect_type":"filter","offset":2,"limit":5}"#).unwrap();
+        assert_eq!(params.effect_type, Some(EffectType::Filter));
+        assert_eq!(params.page.offset, 2);
+        assert_eq!(params.page.limit, 5);
+    }
+
+    #[test]
     fn list_available_effects_params_reject_unknown_field() {
-        assert!(serde_json::from_str::<ListAvailableEffectsParams>(r#"{"offset":0}"#).is_err());
+        assert!(serde_json::from_str::<ListAvailableEffectsParams>(r#"{"future":1}"#).is_err());
+    }
+
+    #[test]
+    fn list_objects_params_reject_unknown_field() {
+        assert!(
+            serde_json::from_str::<ListObjectsParams>(r#"{"expected_scene_id":0,"future":1}"#)
+                .is_err()
+        );
     }
 
     #[test]
