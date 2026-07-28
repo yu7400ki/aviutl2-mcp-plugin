@@ -66,9 +66,10 @@ const WRITE_TIMEOUT: Duration = PLUGIN_WRITE_TIMEOUT;
 /// 読み取り operation の実行に許す上限。
 ///
 /// 要求が deadline を指定した場合は、この上限と deadline の短い方を採用する。
-/// 応答の送信はこの期限とは別に区切る。読み取りに費やした時間を差し引いた残りと
-/// [`WRITE_TIMEOUT`] の短い方を送信へ充てることで、読み取りが長引いた分だけ
-/// 送信の余地が奪われる。
+/// 応答の送信はこの期限とは別に区切るため、読み取りがこの上限を使い切っても
+/// 送信の持ち時間は [`WRITE_TIMEOUT`] のまま残る。送信へ充てるのは要求の
+/// deadline までの残りと [`WRITE_TIMEOUT`] の短い方であり、読み取りに費やした
+/// 時間そのものは差し引かない。
 const READ_TIMEOUT: Duration = PLUGIN_READ_TIMEOUT;
 
 /// 読み取りを受け付けられない状態で案内する再試行間隔（ミリ秒）。

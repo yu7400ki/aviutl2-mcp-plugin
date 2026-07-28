@@ -293,15 +293,19 @@ impl PipeClient {
         decode_result_value(result).map_err(|err| self.poison_on_desync(err))
     }
 
-    /// 以降のやり取りを信頼できない失敗を観測した接続に印を付ける。
+    /// フレーム境界を疑わせる破れを観測した接続に印を付ける。
     ///
     /// 期限超過・部分転送・切断のあとは、送りかけたフレームや読み残したバイトが
     /// pipe に残る。同じ接続で次の要求を送ると境界がずれたまま解釈され、
     /// 接続が壊れているのに framing や schema の誤りとして報告されてしまう。
     ///
-    /// 契約から外れた応答も同じく扱う。envelope・`result` のどちらが破れていても
-    /// 相手が契約どおりに応答していないことに変わりはなく、`request_id` の不一致は
-    /// 他の交換に属するフレームを読んだという最も明確な desync である。
+    /// 読めない本文も同じく扱う。envelope・`result` のどちらであっても、本文を
+    /// 解釈できないことと境界を取り違えたことは区別が付かない。`request_id` の
+    /// 不一致は他の交換に属するフレームを読んだという最も明確な desync である。
+    ///
+    /// `instance_id` や protocol MAJOR の不一致では印を付けない。フレームは 1 つ
+    /// 正しく読めており、相手が別のインスタンスであるか互換しない版であることを
+    /// 示すだけで、境界は保たれている。
     fn poison_on_desync(&self, err: PipeClientError) -> PipeClientError {
         if matches!(
             err,
@@ -424,7 +428,8 @@ impl PipeClient {
 /// いったんバイト列へ戻して [`deserialize_json`] を通し、応答の読み取りを
 /// 重複 key と非有限数を拒否する経路へ統一する。
 ///
-/// 接続の毒化は [`PipeClient::decode_result`] が行う。
+/// 本関数は接続に触れない。接続の毒化は接続を持つ側、すなわち
+/// [`PipeClient::exchange`] と [`PipeClient::decode_result`] が行う。
 fn decode_result_value<R: DeserializeOwned>(
     result: &serde_json::Value,
 ) -> Result<R, PipeClientError> {

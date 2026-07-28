@@ -342,7 +342,11 @@ impl ProjectState {
         self.revision.load(Ordering::Relaxed)
     }
 
-    /// 最後の load/save 以降に対象の更新イベントを受け取ったか。
+    /// 最後の load/save 以降に未保存の変更が生じたか。
+    ///
+    /// 対象の更新イベントに加え、シーン変更イベントでも真になる。シーン情報の
+    /// 更新と切り替えはイベントスレッドから区別できないため、未保存の変更を
+    /// 取りこぼさない側へ倒している。
     pub(crate) fn modified(&self) -> bool {
         self.modified.load(Ordering::Relaxed)
     }
