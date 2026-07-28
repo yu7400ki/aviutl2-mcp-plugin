@@ -292,9 +292,6 @@ fn run_request_loop(
                     read_deadline,
                 );
 
-                // 応答の JSON 直列化と送信は、読み取り口が所有型を返しきった後に
-                // 行う。SDK の参照区間の内側へ持ち込む処理を、読み取りそのものだけ
-                // に限る。
                 match decide_send(
                     Instant::now(),
                     Utc::now().timestamp_millis(),
@@ -465,6 +462,9 @@ fn admit_read(state: &InstanceState) -> Result<(), ErrorObject> {
 ///
 /// params の復号とページ指定の検証は読み取り口を呼ぶ前に済ませる。要求の誤りで
 /// SDK へ触れないようにするためである。
+///
+/// 読み取り口は SDK の参照区間を抜けてから所有型の DTO を返す。ページの切り出しと
+/// JSON への変換はいずれもその外側で行い、参照区間の内側には持ち込まない。
 fn dispatch_read(
     adapter: &dyn ReadAdapter,
     operation: ReadOperation,
