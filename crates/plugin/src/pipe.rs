@@ -625,6 +625,103 @@ mod tests {
         PipeServer::start(lifecycle.clone(), project_state, read_adapter).unwrap()
     }
 
+    /// 指定した読み取り口を添えて server を起動する。
+    fn start_server_with(
+        lifecycle: &Arc<Lifecycle>,
+        read_adapter: Arc<dyn ReadAdapter>,
+    ) -> PipeServer {
+        PipeServer::start(
+            lifecycle.clone(),
+            Arc::new(ProjectState::new()),
+            read_adapter,
+        )
+        .unwrap()
+    }
+
+    /// 応答が要求へ届くことだけを確かめるための読み取り口。
+    ///
+    /// 用いるのは編集情報の取得だけである。他の読み取りは呼ばれないが、呼ばれても
+    /// 接続が落ちないよう受付前と同じ失敗を返す。
+    struct StubReadAdapter;
+
+    /// 実在の値と取り違えないよう、応答に現れる値へ目印を付ける。
+    const STUB_SCENE_ID: i32 = 3;
+    const STUB_REVISION: u64 = 11;
+
+    impl ReadAdapter for StubReadAdapter {
+        fn get_edit_info(&self) -> Result<aviutl2_mcp_core::EditInfo, crate::read::ReadError> {
+            Ok(aviutl2_mcp_core::EditInfo {
+                scene: stub_scene(),
+                cursor: aviutl2_mcp_core::Cursor { frame: 0, layer: 0 },
+                extent: aviutl2_mcp_core::Extent {
+                    frame_max: 100,
+                    layer_max: 1,
+                },
+                display: aviutl2_mcp_core::DisplayRange {
+                    frame_start: 0,
+                    layer_start: 0,
+                    frame_num: 100,
+                    layer_num: 2,
+                },
+                selected_range: None,
+                grid_bpm: Vec::new(),
+                project_epoch: "0c9b1f2e-6d3a-4c85-9f10-2b7c4d5e6f70".to_string(),
+                project_revision: STUB_REVISION,
+            })
+        }
+
+        fn get_current_scene(
+            &self,
+        ) -> Result<(aviutl2_mcp_core::SceneInfo, u64), crate::read::ReadError> {
+            Err(crate::read::ReadError::NotReady)
+        }
+
+        fn list_layers(
+            &self,
+            _expected_scene_id: i32,
+        ) -> Result<crate::read::Snapshot<aviutl2_mcp_core::LayerInfo>, crate::read::ReadError>
+        {
+            Err(crate::read::ReadError::NotReady)
+        }
+
+        fn list_objects(
+            &self,
+            _expected_scene_id: i32,
+            _filter: Option<&aviutl2_mcp_core::ObjectFilter>,
+        ) -> Result<crate::read::Snapshot<aviutl2_mcp_core::ObjectSummary>, crate::read::ReadError>
+        {
+            Err(crate::read::ReadError::NotReady)
+        }
+
+        fn get_object(
+            &self,
+            _selector: &aviutl2_mcp_core::ObjectSelector,
+        ) -> Result<aviutl2_mcp_core::ObjectDetail, crate::read::ReadError> {
+            Err(crate::read::ReadError::NotReady)
+        }
+
+        fn list_available_effects(
+            &self,
+            _effect_type: Option<&aviutl2_mcp_core::EffectType>,
+        ) -> Result<crate::read::Snapshot<aviutl2_mcp_core::AvailableEffect>, crate::read::ReadError>
+        {
+            Err(crate::read::ReadError::NotReady)
+        }
+    }
+
+    fn stub_scene() -> aviutl2_mcp_core::SceneInfo {
+        aviutl2_mcp_core::SceneInfo {
+            id: STUB_SCENE_ID,
+            name: Some("Scene 1".to_string()),
+            width: 1920,
+            height: 1080,
+            fps: aviutl2_mcp_core::FiniteF64::try_new(60.0),
+            fps_rate: 60,
+            fps_scale: 1,
+            sample_rate: 48000,
+        }
+    }
+
     fn cleanup(dir: std::path::PathBuf) {
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -783,6 +880,25 @@ mod tests {
         .unwrap()
     }
 
+    /// 期限を指定しない要求フレームを組み立てる。
+    fn make_request(
+        version: ProtocolVersion,
+        request_id: aviutl2_mcp_core::RequestId,
+        instance_id: InstanceId,
+        operation: &str,
+    ) -> Vec<u8> {
+        serde_json::to_vec(&aviutl2_mcp_core::RequestEnvelope {
+            kind: aviutl2_mcp_core::RequestKind::Request,
+            protocol_version: version,
+            request_id,
+            instance_id,
+            deadline_unix_ms: None,
+            operation: operation.to_string(),
+            params: serde_json::json!({}),
+        })
+        .unwrap()
+    }
+
     /// handshake を完走し、採用バージョンを返す。
     fn complete_handshake(
         client: &PipeStream,
@@ -846,6 +962,86 @@ mod tests {
         let client = connect_client(&pipe_name_for(&id));
         let version = complete_handshake(&client, id, &secret);
         exchange_ping(&client, id, version);
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    /// 読み取り要求を 1 往復し、応答 Envelope を返す。
+    fn exchange_read(
+        client: &PipeStream,
+        id: InstanceId,
+        version: ProtocolVersion,
+        operation: &str,
+    ) -> aviutl2_mcp_core::ResponseEnvelope {
+        let request_id = aviutl2_mcp_core::RequestId::new();
+        send(
+            client,
+            &make_request(version, request_id, id, operation),
+            operation,
+        );
+
+        let body =
+            recv(client, operation).unwrap_or_else(|| panic!("{operation} の応答がありません"));
+        let response: aviutl2_mcp_core::ResponseEnvelope = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response.request_id, request_id);
+        assert_eq!(response.instance_id, id);
+        response
+    }
+
+    /// 読み取りの結果が要求元まで届くことを確かめる。
+    ///
+    /// 判定そのものは要求処理側の単体テストで確かめている。ここで確かめるのは、
+    /// その結果を成功応答として送り出す経路が繋がっていることである。
+    #[test]
+    fn read_request_receives_its_result() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = start_server_with(&lifecycle, Arc::new(StubReadAdapter));
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+
+        match exchange_read(&client, id, version, "get_edit_info").result {
+            aviutl2_mcp_core::ResponseResult::Ok { result } => {
+                assert_eq!(result["scene"]["id"], STUB_SCENE_ID);
+                assert_eq!(result["project_revision"], STUB_REVISION);
+            }
+            aviutl2_mcp_core::ResponseResult::Err { error } => {
+                panic!("読み取りがエラー応答になりました: {error:?}")
+            }
+        }
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    /// 未対応の operation が切断ではなくエラー応答として返ることを確かめる。
+    #[test]
+    fn unknown_operation_receives_an_error_response() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = start_server_with(&lifecycle, Arc::new(StubReadAdapter));
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+
+        match exchange_read(&client, id, version, "create_object").result {
+            aviutl2_mcp_core::ResponseResult::Err { error } => {
+                assert_eq!(
+                    error.code,
+                    aviutl2_mcp_core::ErrorCode::UnsupportedOperation
+                );
+                assert!(!error.retryable);
+            }
+            aviutl2_mcp_core::ResponseResult::Ok { result } => {
+                panic!("未対応の operation が受理されました: {result:?}")
+            }
+        }
 
         drop(client);
         server.stop(Duration::from_secs(5));
