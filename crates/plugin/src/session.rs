@@ -11,8 +11,8 @@ use crate::read::ReadAdapter;
 use anyhow::{Context, Result};
 use aviutl2_mcp_core::{
     ClientAuth, ClientHello, ErrorCode, ErrorObject, InstanceId, Nonce, ProtocolVersion,
-    RequestEnvelope, ResponseEnvelope, ResponseResult, compute_client_mac, compute_server_mac,
-    deserialize_json, negotiate, verify_mac,
+    RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult, compute_client_mac,
+    compute_server_mac, deserialize_json, negotiate, verify_mac,
 };
 use chrono::Utc;
 use std::sync::Arc;
@@ -154,14 +154,15 @@ fn run_request_loop(
         match classify_version(negotiated_version, request.protocol_version) {
             VersionCheck::Compatible => {}
             VersionCheck::MinorTooHigh => {
-                send_error_response(
+                send_error(
                     stream,
                     negotiated_version,
                     request.request_id,
                     request.instance_id,
-                    ErrorCode::ProtocolMismatch,
-                    "要求の MINOR が交渉結果を超えています",
-                    false,
+                    error_object(
+                        ErrorCode::ProtocolMismatch,
+                        "要求の MINOR が交渉結果を超えています",
+                    ),
                 )?;
                 continue;
             }
@@ -169,14 +170,15 @@ fn run_request_loop(
                 // MAJOR 不一致は互換性が無く接続を継続できない。handshake は
                 // 完了しているため理由を 1 度返し、以降の要求は処理せずに
                 // クライアントの切断を待ってから閉じる。
-                send_error_response(
+                send_error(
                     stream,
                     negotiated_version,
                     request.request_id,
                     request.instance_id,
-                    ErrorCode::ProtocolMismatch,
-                    "要求の MAJOR が交渉結果と一致しません",
-                    false,
+                    error_object(
+                        ErrorCode::ProtocolMismatch,
+                        "要求の MAJOR が交渉結果と一致しません",
+                    ),
                 )?;
                 await_peer_close(stream);
                 break;
@@ -184,27 +186,26 @@ fn run_request_loop(
         }
 
         if request.instance_id != lifecycle.instance_id() {
-            send_error_response(
+            send_error(
                 stream,
                 negotiated_version,
                 request.request_id,
                 request.instance_id,
-                ErrorCode::InstanceNotFound,
-                "インスタンス ID が一致しません",
-                false,
+                error_object(
+                    ErrorCode::InstanceNotFound,
+                    "インスタンス ID が一致しません",
+                ),
             )?;
             continue;
         }
 
         if request.operation != "ping" {
-            send_error_response(
+            send_error(
                 stream,
                 negotiated_version,
                 request.request_id,
                 request.instance_id,
-                ErrorCode::UnsupportedOperation,
-                "未対応の operation です",
-                false,
+                error_object(ErrorCode::UnsupportedOperation, "未対応の operation です"),
             )?;
             continue;
         }
@@ -221,14 +222,15 @@ fn run_request_loop(
             RequestDeadline::Within(deadline) => deadline,
             RequestDeadline::Exceeded => {
                 // 未開始の要求は中止する。副作用が無いため再試行可能として返す。
-                send_error_response(
+                send_error(
                     stream,
                     negotiated_version,
                     request.request_id,
                     request.instance_id,
-                    ErrorCode::Timeout,
-                    "要求の deadline を超過したため処理しません",
-                    true,
+                    error_object(
+                        ErrorCode::Timeout,
+                        "要求の deadline を超過したため処理しません",
+                    ),
                 )?;
                 continue;
             }
@@ -360,30 +362,50 @@ fn send_response(
     Ok(())
 }
 
+/// 要求の処理結果を応答 Envelope へ載せる。
+fn response_envelope(
+    protocol_version: ProtocolVersion,
+    request_id: RequestId,
+    instance_id: InstanceId,
+    outcome: Result<serde_json::Value, ErrorObject>,
+) -> ResponseEnvelope {
+    ResponseEnvelope {
+        kind: ResponseKind::Response,
+        protocol_version,
+        request_id,
+        instance_id,
+        result: match outcome {
+            Ok(result) => ResponseResult::Ok { result },
+            Err(error) => ResponseResult::Err { error },
+        },
+    }
+}
+
 /// エラー応答を送信する。
 ///
 /// 送信の期限には要求の deadline ではなくサーバー側上限を使う。期限超過を伝える
 /// 応答まで当の期限で打ち切ると、クライアントは理由を得られないまま切断だけを
-/// 観測することになる。
-fn send_error_response(
+/// 観測することになる。期限を引数で受け取らないことで、この規則を呼び出し側が
+/// 崩せないようにしている。
+fn send_error(
     stream: &PipeStream,
     protocol_version: ProtocolVersion,
-    request_id: aviutl2_mcp_core::RequestId,
+    request_id: RequestId,
     instance_id: InstanceId,
-    code: ErrorCode,
-    message: &str,
-    retryable: bool,
+    error: ErrorObject,
 ) -> Result<()> {
-    let response = ResponseEnvelope {
-        kind: aviutl2_mcp_core::ResponseKind::Response,
-        protocol_version,
-        request_id,
-        instance_id,
-        result: ResponseResult::Err {
-            error: ErrorObject::new(code, message, retryable),
-        },
-    };
+    let response = response_envelope(protocol_version, request_id, instance_id, Err(error));
     send_response(stream, &response, Instant::now() + WRITE_TIMEOUT)
+}
+
+/// エラーコードから既定の再試行可否を採ってエラーを組み立てる。
+///
+/// 相関 ID は付与しない。応答 Envelope が要求の `request_id` をそのまま返すため、
+/// この層の要求と応答は既に対応付けられる。複数の要求元をまたぐ相関は、要求を
+/// 発行した側が自身の識別子で付与する。
+fn error_object(code: ErrorCode, message: impl Into<String>) -> ErrorObject {
+    let retryable = code.default_retryable();
+    ErrorObject::new(code, message, retryable)
 }
 
 #[cfg(test)]
