@@ -6,7 +6,7 @@ use crate::win_io::{self, WinIoError};
 use aviutl2_mcp_core::{
     AuthSecret, ClientAuth, ClientHello, InstanceId, Nonce, ProtocolVersion, RequestEnvelope,
     RequestId, ResponseEnvelope, ResponseResult, ServerAuth, compute_client_mac,
-    compute_server_mac, encode_frame, pipe_name_for, verify_mac,
+    compute_server_mac, deserialize_json, encode_frame, pipe_name_for, verify_mac,
 };
 use std::ffi::OsStr;
 use std::io;
@@ -119,7 +119,7 @@ impl PipeClient {
 
         let response_body = self.read_frame(deadline)?;
         let response: ResponseEnvelope =
-            serde_json::from_slice(&response_body).map_err(|_| PipeClientError::Json)?;
+            deserialize_json(&response_body).map_err(|_| PipeClientError::Json)?;
 
         if response.request_id != request_id {
             warn!("request_id mismatch");
@@ -175,7 +175,7 @@ impl PipeClient {
         self.write_frame(&m1_body, deadline)?;
 
         let m2_body = self.read_frame(deadline)?;
-        let m2: ServerAuth = serde_json::from_slice(&m2_body).map_err(|_| PipeClientError::Json)?;
+        let m2: ServerAuth = deserialize_json(&m2_body).map_err(|_| PipeClientError::Json)?;
 
         trace!("received server auth");
 
