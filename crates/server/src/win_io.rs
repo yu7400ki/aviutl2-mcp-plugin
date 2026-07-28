@@ -239,8 +239,8 @@ impl OverlappedOp {
         if let Err(err) = self.raw_overlapped_result(true)
             && leaves_io_pending(&err)
         {
+            // ハンドルの値はログへ出さない。どの I/O かは呼び出し元の span が示す。
             error!(
-                handle = ?self.handle.0,
                 error = %err,
                 "保留中の I/O を排出できませんでした。転送バッファの解放を防ぐためプロセスを終了します"
             );
