@@ -129,6 +129,12 @@ impl Lifecycle {
                 descriptor_state = descriptor.state
             )
         })?;
+        tracing::info!(
+            instance_id = %self.instance_id,
+            from = %old_state,
+            to = %descriptor.state,
+            "lifecycle state を遷移しました"
+        );
         Ok(())
     }
 
@@ -166,6 +172,10 @@ impl Lifecycle {
         self.writer
             .remove(&self.instance_id)
             .context("descriptor の削除に失敗しました")?;
+        tracing::info!(
+            instance_id = %self.instance_id,
+            "descriptor を削除し gone へ移行しました"
+        );
         Ok(())
     }
 

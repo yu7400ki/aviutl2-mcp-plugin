@@ -37,6 +37,49 @@ static EDIT_HANDLE: aviutl2::generic::GlobalEditHandle = aviutl2::generic::Globa
 #[cfg(windows)]
 const PIPE_SERVER_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// ログ出力レベルを上書きする環境変数名。
+#[cfg(windows)]
+const LOG_ENV: &str = "AVIUTL2_MCP_LOG";
+
+/// tracing のイベントを AviUtl2 のログへ流す global subscriber を設定する。
+///
+/// 出力先は AviUtl2 本体のログで、level ごとに AviUtl2 側の
+/// ERROR / WARN / INFO / VERBOSE 区分へ振り分けられる。
+///
+/// 呼び出し順序: SDK は logger ハンドルの初期化をプラグイン初期化より先に行うため、
+/// `GenericPlugin::new` の時点で出力先は利用可能になっている。ここで設定しておくと、
+/// `register` 内の失敗に加え、ラッパーが `register` の panic を捕捉して発行する
+/// イベントも取りこぼさずに記録できる。
+///
+/// DLL は初期化が複数回呼ばれ得るため、設定は初回のみ行い、
+/// 既に global subscriber が設定済みの場合も何もせず戻る。
+///
+/// 既定 level は debug ビルドで `debug`、release ビルドで `info`。
+/// `AVIUTL2_MCP_LOG` 環境変数（`RUST_LOG` と同じ書式）で上書きできる。
+#[cfg(windows)]
+fn init_tracing() {
+    use aviutl2::tracing_subscriber::EnvFilter;
+
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let default_level = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "info"
+        };
+        let filter =
+            EnvFilter::try_from_env(LOG_ENV).unwrap_or_else(|_| EnvFilter::new(default_level));
+
+        // 他所で global subscriber が設定済みの場合は上書きせず、そのまま続行する。
+        let _ = aviutl2::tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .event_format(aviutl2::logger::AviUtl2Formatter)
+            .with_writer(aviutl2::logger::AviUtl2LogWriter)
+            .try_init();
+    });
+}
+
 #[cfg(windows)]
 #[aviutl2::plugin(GenericPlugin)]
 struct AviUtl2McpPlugin {
@@ -47,6 +90,7 @@ struct AviUtl2McpPlugin {
 #[cfg(windows)]
 impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
     fn new(_info: aviutl2::AviUtl2Info) -> AnyResult<Self> {
+        init_tracing();
         Ok(Self {
             lifecycle: None,
             pipe_server: None,
@@ -54,6 +98,7 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
     }
 
     fn register(&mut self, registry: &mut aviutl2::generic::HostAppHandle) {
+        init_tracing();
         EDIT_HANDLE.init(registry.create_edit_handle());
 
         let instance_id = aviutl2_mcp_core::InstanceId::new_v4();
@@ -100,6 +145,12 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
                 return;
             }
         };
+
+        tracing::info!(
+            instance_id = %instance_id,
+            pid,
+            "plugin を登録し named pipe server を起動しました"
+        );
 
         self.lifecycle = Some(lifecycle);
         self.pipe_server = Some(pipe_server);
@@ -174,8 +225,12 @@ impl Drop for AviUtl2McpPlugin {
             pipe_server.stop(PIPE_SERVER_STOP_TIMEOUT);
         }
         if let Some(lifecycle) = &self.lifecycle {
-            let _ = lifecycle.shutdown();
-            let _ = lifecycle.mark_gone();
+            if let Err(e) = lifecycle.shutdown() {
+                tracing::warn!("draining への移行に失敗しました: {e:?}");
+            }
+            if let Err(e) = lifecycle.mark_gone() {
+                tracing::error!("descriptor の削除に失敗しました: {e:?}");
+            }
         }
     }
 }
@@ -184,3 +239,18 @@ aviutl2::register_generic_plugin!(AviUtl2McpPlugin);
 
 #[cfg(not(windows))]
 pub fn placeholder() {}
+
+#[cfg(all(windows, test))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_tracing_is_idempotent() {
+        init_tracing();
+        init_tracing();
+
+        // subscriber 設定後のイベント発行が panic しないこと。
+        // AviUtl2 のログハンドルが無い環境では出力は破棄される。
+        tracing::info!("tracing subscriber の初期化テスト");
+    }
+}
