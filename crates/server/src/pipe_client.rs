@@ -6,9 +6,10 @@ use crate::redact;
 use crate::win_io::{self, WinIoError};
 use aviutl2_mcp_core::{
     AuthSecret, ClientAuth, ClientHello, ErrorCode, ErrorObject, FrameDecoder, InstanceId, Nonce,
-    PongResult, ProtocolVersion, RequestEnvelope, RequestId, RequestKind, ResponseEnvelope,
-    ResponseResult, SERVER_CONNECT_WAIT_CAP, ServerAuth, compute_client_mac, compute_server_mac,
-    deserialize_json, encode_frame, pipe_name_for, verify_mac,
+    PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_WRITE_TIMEOUT, PongResult, ProtocolVersion, RequestEnvelope,
+    RequestId, RequestKind, ResponseEnvelope, ResponseResult, SERVER_CONNECT_WAIT_CAP, ServerAuth,
+    compute_client_mac, compute_server_mac, deserialize_json, encode_frame, pipe_name_for,
+    verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -17,10 +18,10 @@ use std::cell::Cell;
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tracing::{debug, instrument, trace, warn};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_BUSY, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE, OPEN_EXISTING,
@@ -35,6 +36,12 @@ use windows::core::PCWSTR;
 /// 尽き、応答している接続先を期限超過として扱ってしまう。接続待ちが取り分けて
 /// よい上限を配分から取り、それ以上は待たない。
 const CONNECT_WAIT_CAP_MS: u128 = SERVER_CONNECT_WAIT_CAP.as_millis();
+
+/// 接続待ちが食い潰してはならない、handshake と ping の取り分。
+///
+/// 接続できた時点でこの取り分が残っていなければ、応答している接続先を期限超過と
+/// して扱ってしまう。残り時間がこれを下回った時点で接続待ちを打ち切る。
+const CONNECT_RESERVE: Duration = PLUGIN_HANDSHAKE_TIMEOUT.saturating_add(PLUGIN_WRITE_TIMEOUT);
 
 /// 1 回の読み取りで受け取る最大バイト数。
 ///
@@ -452,42 +459,56 @@ fn deadline_to_unix_ms(deadline: Instant) -> Option<u64> {
 }
 
 /// 指定 pipe 名に `deadline` までの範囲で接続する。
+///
+/// 接続先の pipe は同時 1 接続しか受け付けないため、先行する要求が処理中の間は
+/// 待受インスタンスが無く接続に失敗する。1 回の待ちは [`CONNECT_WAIT_CAP_MS`] で
+/// 頭打ちにするので、そこで諦めると解決の予算が余ったまま到達不能な相手として
+/// 扱ってしまう。handshake と ping の取り分を残した期限まで待ち直す。
+///
+/// 再試行するのは pipe が存在して塞がっている場合だけである。pipe そのものが
+/// 無い相手は待っても現れないため、即座に失敗として返す。
 fn connect_pipe(pipe_name: &str, deadline: Instant) -> Result<HANDLE, PipeClientError> {
     let wide: Vec<u16> = OsStr::new(pipe_name)
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
 
-    let remaining = win_io::remaining_until(deadline);
-    if remaining.is_zero() {
-        return Err(PipeClientError::Timeout);
-    }
+    loop {
+        let remaining = win_io::remaining_until(deadline);
+        if remaining <= CONNECT_RESERVE {
+            return Err(PipeClientError::Timeout);
+        }
 
-    // pipe サーバーが接続可能になるまで短時間待つ。
-    // 第 2 引数の 0 は NMPWAIT_NOWAIT ではなく NMPWAIT_USE_DEFAULT_WAIT（pipe 既定の
-    // タイムアウト）を意味するため、残り時間が 1 ミリ秒未満でも 0 を渡さない。
-    let wait_ms = remaining.as_millis().clamp(1, CONNECT_WAIT_CAP_MS) as u32;
-    // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
-    unsafe {
-        let _ = WaitNamedPipeW(PCWSTR(wide.as_ptr()), wait_ms);
-    }
+        // pipe サーバーが接続可能になるまで短時間待つ。
+        // 第 2 引数の 0 は NMPWAIT_NOWAIT ではなく NMPWAIT_USE_DEFAULT_WAIT（pipe 既定の
+        // タイムアウト）を意味するため、残り時間が 1 ミリ秒未満でも 0 を渡さない。
+        let wait_ms = (remaining - CONNECT_RESERVE)
+            .as_millis()
+            .clamp(1, CONNECT_WAIT_CAP_MS) as u32;
+        // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
+        unsafe {
+            let _ = WaitNamedPipeW(PCWSTR(wide.as_ptr()), wait_ms);
+        }
 
-    // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
-    unsafe {
-        let handle = CreateFileW(
-            PCWSTR(wide.as_ptr()),
-            GENERIC_READ.0 | GENERIC_WRITE.0,
-            FILE_SHARE_NONE,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAG_OVERLAPPED,
-            None,
-        );
+        // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                GENERIC_READ.0 | GENERIC_WRITE.0,
+                FILE_SHARE_NONE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                None,
+            )
+        };
 
         match handle {
-            Ok(h) if h != INVALID_HANDLE_VALUE => Ok(h),
-            Ok(_) => Err(PipeClientError::ConnectFailed),
-            Err(_) => Err(PipeClientError::ConnectFailed),
+            Ok(h) if h != INVALID_HANDLE_VALUE => return Ok(h),
+            Ok(_) => return Err(PipeClientError::ConnectFailed),
+            // 待受インスタンスが全て塞がっている。期限まで待ち直す。
+            Err(e) if e.code() == ERROR_PIPE_BUSY.into() => continue,
+            Err(_) => return Err(PipeClientError::ConnectFailed),
         }
     }
 }
@@ -495,13 +516,13 @@ fn connect_pipe(pipe_name: &str, deadline: Instant) -> Result<HANDLE, PipeClient
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::{InstanceId, InstanceState, ResponseKind};
+    use aviutl2_mcp_core::{InstanceId, InstanceState, ResponseKind, SERVER_RESOLVE_BUDGET};
     use serde::Deserialize;
     use std::time::Duration;
     use windows::Win32::Storage::FileSystem::{PIPE_ACCESS_DUPLEX, ReadFile, WriteFile};
     use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-        PIPE_TYPE_BYTE,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+        PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
     };
 
     #[test]
@@ -518,6 +539,115 @@ mod tests {
         let result = connect_pipe(&pipe_name_for(&id), deadline);
         assert!(matches!(result, Err(PipeClientError::Timeout)));
         assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn connect_fails_immediately_when_the_pipe_does_not_exist() {
+        // 待っても現れない相手に予算を使い切らない。
+        let id = InstanceId::new_v4();
+        let started = Instant::now();
+        let result = connect_pipe(&pipe_name_for(&id), started + SERVER_RESOLVE_BUDGET);
+        assert!(
+            matches!(result, Err(PipeClientError::ConnectFailed)),
+            "実際の結果: {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "存在しない pipe を {}ms 待っています",
+            started.elapsed().as_millis()
+        );
+    }
+
+    /// 待受インスタンスを 1 本だけ持つ pipe を作る。
+    fn create_single_instance_pipe(name: &str) -> HANDLE {
+        let wide: Vec<u16> = OsStr::new(name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
+        let handle = unsafe {
+            CreateNamedPipeW(
+                PCWSTR(wide.as_ptr()),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                4 * 1024,
+                4 * 1024,
+                0,
+                None,
+            )
+        };
+        assert!(!handle.is_invalid(), "テスト用 pipe の作成に失敗しました");
+        handle
+    }
+
+    /// 接続待ちの上限を超えて塞がっている pipe を表す。
+    struct BusyPipe {
+        server: HANDLE,
+        occupier: HANDLE,
+    }
+
+    // SAFETY: pipe ハンドルはスレッドを跨いで使用でき、所有権は移動しない。
+    unsafe impl Send for BusyPipe {}
+
+    #[test]
+    fn connect_retries_while_every_pipe_instance_is_busy() {
+        // 接続先は同時 1 接続しか受け付けない。先行する要求が処理中の間は
+        // 待受が無く、1 回の待ちの上限を超えて塞がることが設計上あり得る。
+        // そこで諦めると、生きている相手を到達不能として扱ってしまう。
+        let name = format!(r"\\.\pipe\aviutl2-mcp-busy-test-{}", InstanceId::new_v4());
+        let server = create_single_instance_pipe(&name);
+
+        let wide: Vec<u16> = OsStr::new(&name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
+        let occupier = unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                GENERIC_READ.0 | GENERIC_WRITE.0,
+                FILE_SHARE_NONE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                None,
+            )
+        }
+        .expect("唯一の待受インスタンスを占有できる");
+        // 接続済みのため `ConnectNamedPipe` は待たずに戻る。
+        // SAFETY: `server` は直前に作成した有効な pipe ハンドル。
+        let _ = unsafe { ConnectNamedPipe(server, None) };
+
+        // 1 回の待ちの上限を超えて塞ぎ、その後に待受を張り直す。
+        let busy_for = SERVER_CONNECT_WAIT_CAP + Duration::from_millis(300);
+        let pipe = BusyPipe { server, occupier };
+        let releaser = std::thread::spawn(move || {
+            let pipe = pipe;
+            std::thread::sleep(busy_for);
+            // SAFETY: いずれも本テストが所有する有効なハンドル。
+            unsafe {
+                let _ = CloseHandle(pipe.occupier);
+                let _ = DisconnectNamedPipe(pipe.server);
+                // 次の接続を受け入れる。接続が来るまで戻らない。
+                let _ = ConnectNamedPipe(pipe.server, None);
+            }
+        });
+
+        let started = Instant::now();
+        let handle = connect_pipe(&name, started + SERVER_RESOLVE_BUDGET)
+            .expect("塞がっていた pipe へ再試行で接続できる");
+        assert!(
+            started.elapsed() >= SERVER_CONNECT_WAIT_CAP,
+            "1 回の待ちで接続できており、再試行を確かめられていません"
+        );
+
+        releaser.join().expect("待受の張り直しが完了する");
+        // SAFETY: いずれも本テストが所有する有効なハンドル。
+        unsafe {
+            let _ = CloseHandle(handle);
+            let _ = CloseHandle(server);
+        }
     }
 
     /// フレーム受信を検証するための named pipe 対向端。
