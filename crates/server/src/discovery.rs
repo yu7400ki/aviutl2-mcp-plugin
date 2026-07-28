@@ -551,24 +551,36 @@ fn process_created_at_matches(descriptor_value: &str, actual: DateTime<Utc>) -> 
 /// ping 応答が運んだ場合にのみ入り、運ばれなければ欠落のままとする。既定値で埋めると
 /// 「未取得」と実測値が区別できなくなる。
 ///
+/// descriptor に project が無くても、ping が状態を運んでいれば project を組み立てる。
+/// descriptor へ project が載るのはプロジェクトファイルのパスが確定したときだけで、
+/// 未保存のプロジェクトでは載らない。そこで descriptor 側の有無を条件にすると、
+/// 未保存の変更があることを表す `modified` が真である状況でこそ、その値が落ちる。
+///
 /// 現在シーンは ping 応答に含まれない。シーンは編集ハンドルを介してしか読めず、
 /// 生存確認だけでは取得できないため `None` とする。
 fn build_instance_info(descriptor: InstanceDescriptor, pong: PongResult) -> InstanceInfo {
-    let project = pong.project;
+    let descriptor_project = descriptor.project;
+    let pong_project = pong.project;
+    let project = (descriptor_project.is_some() || pong_project.is_some()).then(|| {
+        let (display_name, path) = match descriptor_project {
+            Some(project) => (Some(project.display_name), Some(project.path)),
+            None => (None, None),
+        };
+        InstanceProject {
+            display_name,
+            path,
+            epoch: pong_project.as_ref().map(|p| p.epoch.clone()),
+            revision: pong_project.as_ref().map(|p| p.revision),
+            modified: pong_project.as_ref().map(|p| p.modified),
+        }
+    });
+
     InstanceInfo {
         instance_id: descriptor.instance_id,
         state: pong.state,
         pid: descriptor.pid,
         started_at: descriptor.started_at,
-        project: descriptor
-            .project
-            .map(|descriptor_project| InstanceProject {
-                display_name: descriptor_project.display_name,
-                path: Some(descriptor_project.path),
-                epoch: project.as_ref().map(|p| p.epoch.clone()),
-                revision: project.as_ref().map(|p| p.revision),
-                modified: project.as_ref().map(|p| p.modified),
-            }),
+        project,
         scene: None,
     }
 }
@@ -704,7 +716,7 @@ mod tests {
 
         let info = build_instance_info(sample_descriptor(id), pong);
         let project = info.project.expect("project が失われています");
-        assert_eq!(project.display_name, "Test");
+        assert_eq!(project.display_name.as_deref(), Some("Test"));
         assert_eq!(project.path.as_deref(), Some(r"C:\test.aup"));
         assert_eq!(
             project.epoch.as_deref(),
@@ -731,6 +743,45 @@ mod tests {
         assert_eq!(project.epoch, None);
         assert_eq!(project.revision, None);
         assert_eq!(project.modified, None);
+    }
+
+    #[test]
+    fn instance_info_keeps_the_ping_project_state_for_an_unsaved_project() {
+        // 未保存プロジェクトでは descriptor に project が載らない。descriptor 側の
+        // 有無で組み立てを打ち切ると、この状況でこそ真である modified が落ちる。
+        let id = InstanceId::new_v4();
+        let mut descriptor = sample_descriptor(id);
+        descriptor.project = None;
+        let pong =
+            PongResult::new(id, InstanceState::Ready).with_project(aviutl2_mcp_core::PongProject {
+                epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+                revision: 3,
+                modified: true,
+            });
+
+        let info = build_instance_info(descriptor, pong);
+        let project = info
+            .project
+            .expect("ping が運んだプロジェクトの状態が失われています");
+        assert_eq!(
+            project.epoch.as_deref(),
+            Some("78be92d1-c8c9-44c6-ae52-387548971468")
+        );
+        assert_eq!(project.revision, Some(3));
+        assert_eq!(project.modified, Some(true));
+        // ファイルに由来する値は descriptor にしか無いため欠落する。
+        assert_eq!(project.display_name, None);
+        assert_eq!(project.path, None);
+    }
+
+    #[test]
+    fn instance_info_has_no_project_when_neither_side_reports_one() {
+        let id = InstanceId::new_v4();
+        let mut descriptor = sample_descriptor(id);
+        descriptor.project = None;
+
+        let info = build_instance_info(descriptor, PongResult::new(id, InstanceState::Starting));
+        assert_eq!(info.project, None);
     }
 
     #[test]

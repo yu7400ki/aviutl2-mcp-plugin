@@ -425,7 +425,7 @@ fn print_instances(instances: &[InstanceInfo]) {
         let project = match &info.project {
             Some(project) => format!(
                 "{} ({})",
-                project.display_name,
+                project.display_name.as_deref().unwrap_or("未命名"),
                 project.path.as_deref().unwrap_or("未保存")
             ),
             None => "（プロジェクトなし）".to_string(),

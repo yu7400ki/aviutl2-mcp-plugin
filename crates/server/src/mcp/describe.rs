@@ -38,7 +38,8 @@ fn instance_line(info: &InstanceInfo) -> String {
     let project = info
         .project
         .as_ref()
-        .map(|p| clamp_chars(&p.display_name, MAX_NAME_CHARS))
+        .and_then(|p| p.display_name.as_deref())
+        .map(|name| clamp_chars(name, MAX_NAME_CHARS))
         .unwrap_or_else(|| "-".to_string());
     let scene = info
         .scene
@@ -318,7 +319,7 @@ mod tests {
                 pid: 1234,
                 started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
                 project: Some(InstanceProject {
-                    display_name: long_name(),
+                    display_name: Some(long_name()),
                     path: None,
                     epoch: None,
                     revision: None,

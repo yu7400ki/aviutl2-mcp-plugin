@@ -1417,7 +1417,7 @@ mod tests {
                 pid: 1234,
                 started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
                 project: Some(aviutl2_mcp_core::InstanceProject {
-                    display_name: "名".repeat(500),
+                    display_name: Some("名".repeat(500)),
                     path: None,
                     epoch: None,
                     revision: None,

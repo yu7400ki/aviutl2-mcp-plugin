@@ -93,7 +93,7 @@ fn instance_info() -> Value {
 
 fn instance_project() -> Value {
     object(&[
-        ("display_name", string()),
+        ("display_name", nullable_string()),
         ("path", nullable_string()),
         ("epoch", nullable_string()),
         ("revision", nullable_unsigned()),
@@ -633,7 +633,7 @@ mod tests {
                 pid: 1234,
                 started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
                 project: Some(InstanceProject {
-                    display_name: "Test".to_string(),
+                    display_name: Some("Test".to_string()),
                     path: Some(r"C:\test.aup2".to_string()),
                     epoch: Some("epoch".to_string()),
                     revision: Some(3),
@@ -655,6 +655,19 @@ mod tests {
     #[test]
     fn list_instances_schema_matches_dto() {
         assert_conforms(list_instances(), &to_value(&sample_instances_response()));
+    }
+
+    #[test]
+    fn list_instances_schema_accepts_a_project_without_a_file() {
+        // 未保存プロジェクトは表示名もパスも持たないが、実測した状態は運ばれる。
+        let mut response = sample_instances_response();
+        let project = response.instances[0]
+            .project
+            .as_mut()
+            .expect("標本は project を持つ");
+        project.display_name = None;
+        project.path = None;
+        assert_conforms(list_instances(), &to_value(&response));
     }
 
     #[test]

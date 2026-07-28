@@ -310,6 +310,40 @@ fn discovery_finds_live_mock_instance() {
 }
 
 #[test]
+fn discovery_keeps_the_ping_project_state_without_a_descriptor_project() {
+    // 未保存プロジェクトの descriptor は project を持たない。それでも ping が
+    // 運んだ epoch / revision / modified は一覧へ届かなければならない。
+    let dir = temp_registry_dir();
+    let id = InstanceId::new_v4();
+    let server = MockPipeServer::start(
+        id,
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+    );
+    server.write_descriptor_without_project(&dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let instances = find_instances(&dir, DiscoveryConfig::default(), true)
+        .expect("registry ディレクトリを列挙できる");
+    assert_eq!(instances.len(), 1);
+
+    let project = instances[0]
+        .project
+        .as_ref()
+        .expect("ping が運んだプロジェクトの状態が失われています");
+    assert_eq!(project.epoch.as_deref(), Some(support::MOCK_PROJECT_EPOCH));
+    assert_eq!(project.revision, Some(support::MOCK_PROJECT_REVISION));
+    assert_eq!(project.modified, Some(support::MOCK_PROJECT_MODIFIED));
+    // ファイルに由来する値は descriptor にしか無いため欠落する。
+    assert_eq!(project.display_name, None);
+    assert_eq!(project.path, None);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn discovery_excludes_draining_instance() {
     let dir = temp_registry_dir();
     let id = InstanceId::new_v4();

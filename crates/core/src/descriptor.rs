@@ -125,9 +125,14 @@ pub struct InstanceInfo {
 /// `epoch` / `revision` / `modified` は取得できていない状態を `None` で表す。
 /// 特に `modified` は「未保存の変更が無い」と「未取得」を混同すると保存確認の
 /// 要否を誤らせるため、既定値で埋めずに欠落として表す。
+///
+/// `display_name` と `path` はプロジェクトファイルに由来するため、未保存の
+/// プロジェクトではいずれも存在しない。名前を作って埋めると、実在するファイル名と
+/// 区別が付かなくなる。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceProject {
-    pub display_name: String,
+    /// プロジェクトの表示名。未保存プロジェクトでは None。
+    pub display_name: Option<String>,
     /// プロジェクトファイルのパス。未保存プロジェクトでは None。
     pub path: Option<String>,
     /// プロジェクトの epoch。未取得のときは None。
@@ -198,7 +203,7 @@ mod tests {
             pid: 5678,
             started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
             project: Some(InstanceProject {
-                display_name: "Project".to_string(),
+                display_name: Some("Project".to_string()),
                 path: Some(r"C:\project.aup".to_string()),
                 epoch: Some("78be92d1-c8c9-44c6-ae52-387548971468".to_string()),
                 revision: Some(42),
@@ -234,7 +239,7 @@ mod tests {
         let s = r#"{"instance_id":"8df98c04-e7c2-4f98-b3ce-fc1c39d76414","state":"ready","pid":1,"started_at":"x","project":{"display_name":"a","path":"b"}}"#;
         let info: InstanceInfo = serde_json::from_str(s).unwrap();
         let project = info.project.expect("project が読み取れる");
-        assert_eq!(project.display_name, "a");
+        assert_eq!(project.display_name.as_deref(), Some("a"));
         assert_eq!(project.path.as_deref(), Some("b"));
         assert_eq!(project.epoch, None);
         assert_eq!(project.revision, None);
@@ -269,19 +274,24 @@ mod tests {
     }
 
     #[test]
-    fn instance_project_path_is_null_when_unsaved() {
+    fn unsaved_project_has_neither_name_nor_path() {
+        // 未保存プロジェクトはファイルに由来する値を持たない。名前を作って埋めると
+        // 実在するファイル名と区別が付かなくなる。
         let info = InstanceInfo {
             project: Some(InstanceProject {
-                display_name: "新規プロジェクト".to_string(),
+                display_name: None,
                 path: None,
                 epoch: Some("78be92d1-c8c9-44c6-ae52-387548971468".to_string()),
                 revision: Some(0),
-                modified: Some(false),
+                modified: Some(true),
             }),
             ..sample_instance_info()
         };
         let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(value["project"]["display_name"], serde_json::Value::Null);
         assert_eq!(value["project"]["path"], serde_json::Value::Null);
+        // ファイルに由来する値が無くても、実測した状態は運ばれる。
+        assert_eq!(value["project"]["modified"], serde_json::json!(true));
         let restored: InstanceInfo = serde_json::from_value(value).unwrap();
         assert_eq!(restored, info);
     }

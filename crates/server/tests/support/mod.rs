@@ -237,13 +237,28 @@ impl MockPipeServer {
     }
 
     pub fn write_descriptor(&self, registry_dir: &std::path::Path) {
+        self.write_descriptor_value(registry_dir, self.descriptor(registry_dir.to_path_buf()));
+    }
+
+    /// project を持たない descriptor を registry へ書く。
+    ///
+    /// descriptor へ project が載るのはプロジェクトファイルのパスが確定した
+    /// ときだけで、未保存のプロジェクトでは載らない。ping 応答だけが状態を
+    /// 運ぶ経路を再現するために使う。
+    pub fn write_descriptor_without_project(&self, registry_dir: &std::path::Path) {
+        let mut descriptor = self.descriptor(registry_dir.to_path_buf());
+        descriptor.project = None;
+        self.write_descriptor_value(registry_dir, descriptor);
+    }
+
+    fn write_descriptor_value(
+        &self,
+        registry_dir: &std::path::Path,
+        descriptor: InstanceDescriptor,
+    ) {
         std::fs::create_dir_all(registry_dir).unwrap();
         let path = registry_dir.join(format!("{}.json", self.instance_id));
-        std::fs::write(
-            &path,
-            serde_json::to_string(&self.descriptor(registry_dir.to_path_buf())).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
     }
 }
 
