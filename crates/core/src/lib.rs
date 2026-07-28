@@ -10,10 +10,12 @@
 //!   fingerprint
 //! - 一覧取得: ページ要求・応答メタと切り出し規則
 //! - 読み取り operation の名前と params / result
+//! - IPC 1 往復の期限配分
 //!
 //! SDK や Windows API には依存しない。所有型のみを定義し、SDK からの変換は
 //! plugin 側が行う。
 
+pub mod budget;
 pub mod descriptor;
 pub mod edit_info;
 pub mod effect;
@@ -37,6 +39,10 @@ pub mod wire_format;
 #[cfg(test)]
 mod tests;
 
+pub use budget::{
+    PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT, PLUGIN_WRITE_TIMEOUT, SERVER_CONNECT_WAIT_CAP,
+    SERVER_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, TRANSPORT_HEADROOM,
+};
 pub use descriptor::{
     AuthSecret, DescriptorProject, InstanceDescriptor, InstanceInfo, InstanceProject,
 };
