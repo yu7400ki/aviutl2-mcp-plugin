@@ -1,20 +1,33 @@
-//! 接続ごとの handshake と ping 処理。
+//! 接続ごとの handshake と要求処理。
 //!
 //! 全メッセージは frame 形式でやり取りする。handshake 成功後にのみ
 //! `RequestEnvelope` を受理する。panic は `catch_unwind` で捕捉し、
 //! 当該接続のみ切断する。
+//!
+//! 読み取り要求は受け取ったその場で実行する。1 接続は接続受理スレッド上で
+//! 同期的に処理され、処理中は次の接続を受理しないため、読み取りは構造として
+//! 直列化される。同時実行数を数える仕組みも実行待ちのキューも持たないので、
+//! 受付から実行までの間に要求を取り消す余地は無く、飽和による滞留も生じない。
 
 use crate::lifecycle::Lifecycle;
 use crate::pipe::PipeStream;
 use crate::project::ProjectState;
-use crate::read::ReadAdapter;
+use crate::read::{ReadAdapter, ReadError};
 use anyhow::{Context, Result};
 use aviutl2_mcp_core::{
-    ClientAuth, ClientHello, ErrorCode, ErrorObject, InstanceId, Nonce, ProtocolVersion,
+    ClientAuth, ClientHello, ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult,
+    GetEditInfoParams, GetObjectParams, InstanceId, InstanceState, ListAvailableEffectsParams,
+    ListAvailableEffectsResult, ListLayersParams, ListLayersResult, ListObjectsParams,
+    ListObjectsResult, Nonce, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
+    OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
+    OPERATION_LIST_OBJECTS, ObjectFilterError, PageError, PageRequest, ProtocolVersion,
     RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult, compute_client_mac,
-    compute_server_mac, deserialize_json, negotiate, verify_mac,
+    compute_server_mac, deserialize_json, negotiate, take_page, verify_mac,
 };
 use chrono::Utc;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -40,6 +53,11 @@ const REQUEST_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 /// 要求が deadline を指定した場合は、この上限と deadline の短い方を採用する。
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 読み取りを受け付けられない状態で案内する再試行間隔（ミリ秒）。
+///
+/// 起動処理も終了処理も利用者の操作を待たずに進むため、待ち時間は短く採る。
+const HOST_BUSY_RETRY_AFTER_MS: u64 = 500;
+
 /// 1 接続の処理を panic boundary で包んで実行する。
 ///
 /// プロジェクト状態は全接続で共有される読み取り用の状態として受け取る。
@@ -48,10 +66,10 @@ pub fn handle_connection(
     stream: PipeStream,
     lifecycle: Arc<Lifecycle>,
     _project_state: Arc<ProjectState>,
-    _read_adapter: Arc<dyn ReadAdapter>,
+    read_adapter: Arc<dyn ReadAdapter>,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if let Err(e) = run_connection(&stream, &lifecycle) {
+        if let Err(e) = run_connection(&stream, &lifecycle, read_adapter.as_ref()) {
             tracing::warn!("接続処理を終了しました: {e:?}");
         }
     }));
@@ -61,9 +79,13 @@ pub fn handle_connection(
 }
 
 /// 接続単位のメインループ。
-fn run_connection(stream: &PipeStream, lifecycle: &Lifecycle) -> Result<()> {
+fn run_connection(
+    stream: &PipeStream,
+    lifecycle: &Lifecycle,
+    read_adapter: &dyn ReadAdapter,
+) -> Result<()> {
     let negotiated_version = perform_handshake(stream, lifecycle)?;
-    run_request_loop(stream, lifecycle, negotiated_version)
+    run_request_loop(stream, lifecycle, read_adapter, negotiated_version)
 }
 
 /// handshake を実行し、採用プロトコルバージョンを返す。
@@ -131,10 +153,11 @@ fn perform_handshake(stream: &PipeStream, lifecycle: &Lifecycle) -> Result<Proto
 fn run_request_loop(
     stream: &PipeStream,
     lifecycle: &Lifecycle,
+    read_adapter: &dyn ReadAdapter,
     negotiated_version: ProtocolVersion,
 ) -> Result<()> {
     loop {
-        if lifecycle.state() == aviutl2_mcp_core::state::InstanceState::Draining {
+        if lifecycle.state() == InstanceState::Draining {
             // draining では新規要求を受け付けず、接続を閉じる。
             break;
         }
@@ -199,7 +222,7 @@ fn run_request_loop(
             continue;
         }
 
-        if request.operation != "ping" {
+        let Some(operation) = classify_operation(&request.operation) else {
             send_error(
                 stream,
                 negotiated_version,
@@ -208,7 +231,7 @@ fn run_request_loop(
                 error_object(ErrorCode::UnsupportedOperation, "未対応の operation です"),
             )?;
             continue;
-        }
+        };
 
         // 期限は operation の実行に対する制約であり、要求自体の妥当性検証
         // （version・instance・operation）を通した後に評価する。妥当性の誤りは
@@ -236,16 +259,233 @@ fn run_request_loop(
             }
         };
 
-        let response = ResponseEnvelope::pong(
-            negotiated_version,
-            request.request_id,
-            lifecycle.instance_id(),
-            lifecycle.state(),
-        );
+        // 応答の JSON 直列化と送信は、読み取り口が所有型を返しきった後に行う。
+        // SDK の参照区間の内側へ持ち込む処理を、読み取りそのものだけに限る。
+        let response = match operation {
+            Operation::Ping => ResponseEnvelope::pong(
+                negotiated_version,
+                request.request_id,
+                lifecycle.instance_id(),
+                lifecycle.state(),
+            ),
+            Operation::Read(operation) => response_envelope(
+                negotiated_version,
+                request.request_id,
+                lifecycle.instance_id(),
+                execute_read(read_adapter, &lifecycle.state(), operation, &request.params),
+            ),
+        };
         send_response(stream, &response, response_deadline)?;
     }
 
     Ok(())
+}
+
+/// 受理できる operation。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Operation {
+    /// 生存確認。ライフサイクル状態を問わず受け付ける。
+    Ping,
+    /// 読み取り。受け付けられるライフサイクル状態でのみ実行する。
+    Read(ReadOperation),
+}
+
+/// 読み取り operation。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadOperation {
+    GetEditInfo,
+    GetCurrentScene,
+    ListLayers,
+    ListObjects,
+    GetObject,
+    ListAvailableEffects,
+}
+
+/// operation 名を処理経路へ対応付ける。未対応の名前は `None`。
+fn classify_operation(name: &str) -> Option<Operation> {
+    let operation = match name {
+        "ping" => return Some(Operation::Ping),
+        OPERATION_GET_EDIT_INFO => ReadOperation::GetEditInfo,
+        OPERATION_GET_CURRENT_SCENE => ReadOperation::GetCurrentScene,
+        OPERATION_LIST_LAYERS => ReadOperation::ListLayers,
+        OPERATION_LIST_OBJECTS => ReadOperation::ListObjects,
+        OPERATION_GET_OBJECT => ReadOperation::GetObject,
+        OPERATION_LIST_AVAILABLE_EFFECTS => ReadOperation::ListAvailableEffects,
+        _ => return None,
+    };
+    Some(Operation::Read(operation))
+}
+
+/// 受付判定を通してから読み取りを実行する。
+fn execute_read(
+    adapter: &dyn ReadAdapter,
+    state: &InstanceState,
+    operation: ReadOperation,
+    params: &Value,
+) -> Result<Value, ErrorObject> {
+    admit_read(state)?;
+    dispatch_read(adapter, operation, params)
+}
+
+/// ライフサイクル状態が読み取りを受け付けられるかを判定する。
+///
+/// 起動処理中は編集ハンドルが読み取り API を受け付けられず、呼ぶこと自体が
+/// 許されない。終了処理中は新規要求を受け付けない。いずれも要求内容の誤りでは
+/// ないため、間隔を空けた再試行を案内する。再生・出力中の判別は編集状態を
+/// 確かめられる読み取り口の責務であり、`busy` はここでは通す。
+fn admit_read(state: &InstanceState) -> Result<(), ErrorObject> {
+    let message = match state {
+        InstanceState::Ready | InstanceState::Busy => return Ok(()),
+        InstanceState::Starting => "起動処理中のため読み取りを受け付けられません",
+        InstanceState::Draining | InstanceState::Gone => {
+            "終了処理中のため読み取りを受け付けられません"
+        }
+        InstanceState::Unknown(_) => "読み取りを受け付けられない状態です",
+    };
+    Err(error_object(ErrorCode::HostBusy, message)
+        .with_details(json!({ "retry_after_ms": HOST_BUSY_RETRY_AFTER_MS })))
+}
+
+/// 読み取りを実行し、応答へ載せる result を組み立てる。
+///
+/// params の復号とページ指定の検証は読み取り口を呼ぶ前に済ませる。要求の誤りで
+/// SDK へ触れないようにするためである。
+fn dispatch_read(
+    adapter: &dyn ReadAdapter,
+    operation: ReadOperation,
+    params: &Value,
+) -> Result<Value, ErrorObject> {
+    match operation {
+        ReadOperation::GetEditInfo => {
+            decode_params::<GetEditInfoParams>(params)?;
+            to_result(&adapter.get_edit_info().map_err(read_error)?)
+        }
+        ReadOperation::GetCurrentScene => {
+            decode_params::<GetCurrentSceneParams>(params)?;
+            let (scene, project_revision) = adapter.get_current_scene().map_err(read_error)?;
+            to_result(&GetCurrentSceneResult {
+                scene,
+                project_revision,
+            })
+        }
+        ReadOperation::ListLayers => {
+            let params: ListLayersParams = decode_params(params)?;
+            params.page.validate().map_err(page_error)?;
+            let snapshot = adapter
+                .list_layers(params.expected_scene_id)
+                .map_err(read_error)?;
+            let (items, page) =
+                take_page(&snapshot.items, &params.page, snapshot.snapshot_revision)
+                    .map_err(page_error)?;
+            to_result(&ListLayersResult { items, page })
+        }
+        ReadOperation::ListObjects => {
+            let params: ListObjectsParams = decode_params(params)?;
+            params.page.validate().map_err(page_error)?;
+            if let Some(filter) = &params.filter {
+                filter.validate().map_err(filter_error)?;
+            }
+            let snapshot = adapter
+                .list_objects(params.expected_scene_id, params.filter.as_ref())
+                .map_err(read_error)?;
+            let (items, page) =
+                take_page(&snapshot.items, &params.page, snapshot.snapshot_revision)
+                    .map_err(page_error)?;
+            to_result(&ListObjectsResult { items, page })
+        }
+        ReadOperation::GetObject => {
+            let params: GetObjectParams = decode_params(params)?;
+            to_result(&adapter.get_object(&params.selector).map_err(read_error)?)
+        }
+        ReadOperation::ListAvailableEffects => {
+            let params: ListAvailableEffectsParams = decode_params(params)?;
+            params.page.validate().map_err(page_error)?;
+            let snapshot = adapter
+                .list_available_effects(params.effect_type.as_ref())
+                .map_err(read_error)?;
+            let (items, page) = take_page(
+                &snapshot.items,
+                &catalog_page_request(&params.page),
+                EFFECT_CATALOG_SNAPSHOT_REVISION,
+            )
+            .map_err(page_error)?;
+            to_result(&ListAvailableEffectsResult { items, page })
+        }
+    }
+}
+
+/// 登録済み effect の一覧に添える snapshot revision。
+///
+/// この一覧は登録済みプラグインの集合であり、プロジェクトの編集内容から独立して
+/// いる。列挙時点のプロジェクト revision を添えると、一覧と無関係な編集で値が
+/// 進んだだけでページ間の照合が食い違い、要求元は先頭からの取り直しを強いられる。
+/// 一方でカタログ自身の変化はその値に現れないため、照合しても取りこぼしは
+/// 防げない。照合に使える revision を持たないことを表す固定値を添える。
+const EFFECT_CATALOG_SNAPSHOT_REVISION: u64 = 0;
+
+/// 登録済み effect の一覧に対するページ要求から revision の照合指定を落とす。
+///
+/// 要求元が前ページの値を送り返しても照合しない。理由は
+/// [`EFFECT_CATALOG_SNAPSHOT_REVISION`] と同じである。
+fn catalog_page_request(page: &PageRequest) -> PageRequest {
+    PageRequest {
+        snapshot_revision: None,
+        ..*page
+    }
+}
+
+/// operation 別の params へ復号する。
+fn decode_params<T: DeserializeOwned>(params: &Value) -> Result<T, ErrorObject> {
+    serde_json::from_value(params.clone()).map_err(|e| {
+        error_object(
+            ErrorCode::InvalidArgument,
+            format!("params の解釈に失敗しました: {e}"),
+        )
+    })
+}
+
+/// 読み取り結果を応答へ載せる JSON へ変換する。
+///
+/// 変換できるかは DTO の定義だけで決まり、要求元には手立てが無い。失敗の詳細は
+/// ローカルのログにのみ残す。
+fn to_result<T: Serialize>(value: &T) -> Result<Value, ErrorObject> {
+    serde_json::to_value(value).map_err(|e| {
+        tracing::error!("読み取り結果の JSON 変換に失敗しました: {e}");
+        error_object(
+            ErrorCode::InternalError,
+            "読み取り結果を応答へ変換できませんでした",
+        )
+    })
+}
+
+/// 読み取りの失敗を応答用のエラーへ変換する。
+///
+/// 再試行間隔は読み取りの補助情報に含まれるため、ここで重ねて載せない。
+fn read_error(error: ReadError) -> ErrorObject {
+    ErrorObject::new(error.error_code(), error.to_string(), error.retryable())
+        .with_details(error.details())
+}
+
+/// ページ指定の失敗を応答用のエラーへ変換する。
+fn page_error(error: PageError) -> ErrorObject {
+    match error {
+        PageError::LimitOutOfRange(_) => {
+            error_object(ErrorCode::InvalidArgument, error.to_string())
+        }
+        PageError::SnapshotRevisionMismatch { requested, current } => error_object(
+            ErrorCode::PreconditionFailed,
+            "一覧が変化したため、先頭のページから取り直してください",
+        )
+        .with_details(json!({
+            "requested_snapshot_revision": requested,
+            "current_snapshot_revision": current,
+        })),
+    }
+}
+
+/// 絞り込み条件の失敗を応答用のエラーへ変換する。
+fn filter_error(error: ObjectFilterError) -> ErrorObject {
+    error_object(ErrorCode::InvalidArgument, error.to_string())
 }
 
 /// 送信済み応答が読み取られるのを待ってから接続を閉じるための待機。
