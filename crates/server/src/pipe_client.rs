@@ -7,8 +7,8 @@ use crate::win_io::{self, WinIoError};
 use aviutl2_mcp_core::{
     AuthSecret, ClientAuth, ClientHello, ErrorCode, ErrorObject, FrameDecoder, InstanceId,
     InstanceState, Nonce, ProtocolVersion, RequestEnvelope, RequestId, RequestKind,
-    ResponseEnvelope, ResponseResult, ServerAuth, compute_client_mac, compute_server_mac,
-    deserialize_json, encode_frame, pipe_name_for, verify_mac,
+    ResponseEnvelope, ResponseResult, SERVER_CONNECT_WAIT_CAP, ServerAuth, compute_client_mac,
+    compute_server_mac, deserialize_json, encode_frame, pipe_name_for, verify_mac,
 };
 use chrono::Utc;
 use serde::de::DeserializeOwned;
@@ -30,8 +30,11 @@ use windows::core::PCWSTR;
 
 /// `WaitNamedPipeW` へ渡す待機時間の上限（ミリ秒）。
 ///
-/// discovery の期限が長い場合でも 1 候補の接続待ちに引きずられないよう頭打ちにする。
-const CONNECT_WAIT_CAP_MS: u128 = 5_000;
+/// 解決フェーズの予算は接続待ち・handshake・ping 往復で分け合う。残り時間を
+/// そのまま接続待ちへ渡すと、接続できた時点で handshake と ping の持ち時間が
+/// 尽き、応答している接続先を期限超過として扱ってしまう。接続待ちが取り分けて
+/// よい上限を配分から取り、それ以上は待たない。
+const CONNECT_WAIT_CAP_MS: u128 = SERVER_CONNECT_WAIT_CAP.as_millis();
 
 /// 1 回の読み取りで受け取る最大バイト数。
 ///

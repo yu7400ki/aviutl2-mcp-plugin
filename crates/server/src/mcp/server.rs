@@ -19,6 +19,7 @@ use aviutl2_mcp_core::{
     GetEditInfoParams, InstanceId, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
     MAX_PAGE_LIMIT, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_OBJECT,
     OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS, ObjectDetail,
+    SERVER_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -48,6 +49,9 @@ const RESOURCE_MIME_TYPE: &str = "application/json";
 /// tool call 1 回分の実行予算。
 ///
 /// 要求が運ぶ期限とサーバー上限の短い方が採用されるため、ここではサーバー上限を持つ。
+/// 既定値は接続先と共有する配分から取る。接続先は自身の各段の上限をこの予算の
+/// 内側に収めるため、既定値を延ばす分には安全だが、縮めると接続先が上限まで
+/// 使った段の途中で予算が尽きる。
 #[derive(Debug, Clone, Copy)]
 pub struct CallLimits {
     /// インスタンス解決（接続・handshake・ping）の期限。
@@ -59,8 +63,8 @@ pub struct CallLimits {
 impl Default for CallLimits {
     fn default() -> Self {
         Self {
-            resolve: Duration::from_secs(5),
-            request: Duration::from_secs(5),
+            resolve: SERVER_RESOLVE_BUDGET,
+            request: SERVER_REQUEST_BUDGET,
         }
     }
 }
@@ -1075,6 +1079,30 @@ mod tests {
             structured["correlation_id"],
             serde_json::json!("correlation")
         );
+    }
+
+    #[test]
+    fn default_limits_come_from_the_shared_budget() {
+        // 既定値を接続先と共有する配分から外すと、接続先が自身の上限まで使った
+        // 段の途中で予算が尽き、応答しているインスタンスが期限超過になる。
+        let limits = CallLimits::default();
+        assert_eq!(limits.resolve, SERVER_RESOLVE_BUDGET);
+        assert_eq!(limits.request, SERVER_REQUEST_BUDGET);
+        assert_eq!(
+            DiscoveryConfig::default().per_candidate_deadline,
+            SERVER_RESOLVE_BUDGET
+        );
+    }
+
+    #[test]
+    fn call_limits_can_be_overridden() {
+        let limits = CallLimits {
+            resolve: Duration::from_millis(120),
+            request: Duration::from_millis(340),
+        };
+        let server = AviUtl2McpServer::with_limits(PathBuf::from("registry"), limits);
+        assert_eq!(server.limits.resolve, Duration::from_millis(120));
+        assert_eq!(server.limits.request, Duration::from_millis(340));
     }
 
     #[test]

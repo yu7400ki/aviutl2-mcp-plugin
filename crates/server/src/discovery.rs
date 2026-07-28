@@ -8,7 +8,8 @@ use crate::pipe_client::{PipeClient, PipeClientError};
 use crate::redact;
 use aviutl2_mcp_core::{
     ErrorCode, ErrorObject, InstanceDescriptor, InstanceId, InstanceInfo, InstanceProject,
-    InstanceState, ProtocolVersion, deserialize_json, parse_utc_timestamp, pipe_name_for,
+    InstanceState, ProtocolVersion, SERVER_RESOLVE_BUDGET, deserialize_json, parse_utc_timestamp,
+    pipe_name_for,
 };
 
 #[cfg(test)]
@@ -206,13 +207,16 @@ impl ExclusionReason {
 #[derive(Debug, Clone, Copy)]
 pub struct DiscoveryConfig {
     /// 1 候補あたりの discovery 期限。
+    ///
+    /// pipe 接続・handshake・ping 往復をこの 1 つの期限で束ねる。接続先は
+    /// 自身の各段の上限をこの予算の内側に収める。
     pub per_candidate_deadline: Duration,
 }
 
 impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self {
-            per_candidate_deadline: Duration::from_secs(5),
+            per_candidate_deadline: SERVER_RESOLVE_BUDGET,
         }
     }
 }
