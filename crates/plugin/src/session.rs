@@ -53,6 +53,14 @@ const REQUEST_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 /// 要求が deadline を指定した場合は、この上限と deadline の短い方を採用する。
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 読み取り operation の実行に許す上限。
+///
+/// 要求が deadline を指定した場合は、この上限と deadline の短い方を採用する。
+/// 応答の送信はこの期限とは別に区切る。読み取りに費やした時間を差し引いた残りと
+/// [`WRITE_TIMEOUT`] の短い方を送信へ充てることで、読み取りが長引いた分だけ
+/// 送信の余地が奪われる。
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// 読み取りを受け付けられない状態で案内する再試行間隔（ミリ秒）。
 ///
 /// 起動処理も終了処理も利用者の操作を待たずに進むため、待ち時間は短く採る。
@@ -236,46 +244,86 @@ fn run_request_loop(
         // 期限は operation の実行に対する制約であり、要求自体の妥当性検証
         // （version・instance・operation）を通した後に評価する。妥当性の誤りは
         // 再試行しても解消しないため、再試行可能な `timeout` より先に返す。
-        let response_deadline = match resolve_request_deadline(
-            Instant::now(),
-            Utc::now().timestamp_millis(),
-            WRITE_TIMEOUT,
-            request.deadline_unix_ms,
-        ) {
-            RequestDeadline::Within(deadline) => deadline,
-            RequestDeadline::Exceeded => {
-                // 未開始の要求は中止する。副作用が無いため再試行可能として返す。
-                send_error(
-                    stream,
+        match operation {
+            Operation::Ping => {
+                // 生存確認は状態を読むだけで、実行に費やす時間を持たない。
+                // 期限は応答の送信にそのまま充てる。
+                let deadline = match resolve_request_deadline(
+                    Instant::now(),
+                    Utc::now().timestamp_millis(),
+                    WRITE_TIMEOUT,
+                    request.deadline_unix_ms,
+                ) {
+                    RequestDeadline::Within(deadline) => deadline,
+                    RequestDeadline::Exceeded => {
+                        send_error(
+                            stream,
+                            negotiated_version,
+                            request.request_id,
+                            request.instance_id,
+                            timeout_before_execution(),
+                        )?;
+                        continue;
+                    }
+                };
+                let response = ResponseEnvelope::pong(
                     negotiated_version,
                     request.request_id,
-                    request.instance_id,
-                    error_object(
-                        ErrorCode::Timeout,
-                        "要求の deadline を超過したため処理しません",
-                    ),
-                )?;
-                continue;
+                    lifecycle.instance_id(),
+                    lifecycle.state(),
+                );
+                send_response(stream, &response, deadline)?;
             }
-        };
+            Operation::Read(operation) => {
+                let read_deadline = resolve_request_deadline(
+                    Instant::now(),
+                    Utc::now().timestamp_millis(),
+                    READ_TIMEOUT,
+                    request.deadline_unix_ms,
+                );
+                let outcome = execute_read(
+                    read_adapter,
+                    &lifecycle.state(),
+                    operation,
+                    &request.params,
+                    read_deadline,
+                );
 
-        // 応答の JSON 直列化と送信は、読み取り口が所有型を返しきった後に行う。
-        // SDK の参照区間の内側へ持ち込む処理を、読み取りそのものだけに限る。
-        let response = match operation {
-            Operation::Ping => ResponseEnvelope::pong(
-                negotiated_version,
-                request.request_id,
-                lifecycle.instance_id(),
-                lifecycle.state(),
-            ),
-            Operation::Read(operation) => response_envelope(
-                negotiated_version,
-                request.request_id,
-                lifecycle.instance_id(),
-                execute_read(read_adapter, &lifecycle.state(), operation, &request.params),
-            ),
-        };
-        send_response(stream, &response, response_deadline)?;
+                // 応答の JSON 直列化と送信は、読み取り口が所有型を返しきった後に
+                // 行う。SDK の参照区間の内側へ持ち込む処理を、読み取りそのものだけ
+                // に限る。
+                match decide_send(
+                    Instant::now(),
+                    Utc::now().timestamp_millis(),
+                    read_deadline,
+                    request.deadline_unix_ms,
+                ) {
+                    SendDecision::Send(deadline) => {
+                        let response = response_envelope(
+                            negotiated_version,
+                            request.request_id,
+                            lifecycle.instance_id(),
+                            outcome,
+                        );
+                        send_response(stream, &response, deadline)?;
+                    }
+                    SendDecision::Discard => {
+                        tracing::warn!(
+                            request_id = ?request.request_id,
+                            operation = %request.operation,
+                            "deadline を超過したため読み取り結果を破棄しました"
+                        );
+                        send_error(
+                            stream,
+                            negotiated_version,
+                            request.request_id,
+                            lifecycle.instance_id(),
+                            timeout_after_execution(),
+                        )?;
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -316,15 +364,74 @@ fn classify_operation(name: &str) -> Option<Operation> {
     Some(Operation::Read(operation))
 }
 
-/// 受付判定を通してから読み取りを実行する。
+/// 受付判定と期限判定を通してから読み取りを実行する。
+///
+/// 実行前に期限を超過している要求は読み取り口へ渡さない。読み取りは開始すると
+/// 参照区間の内側まで進み、途中で打ち切れないためである。
 fn execute_read(
     adapter: &dyn ReadAdapter,
     state: &InstanceState,
     operation: ReadOperation,
     params: &Value,
+    deadline: RequestDeadline,
 ) -> Result<Value, ErrorObject> {
     admit_read(state)?;
+    if deadline == RequestDeadline::Exceeded {
+        // 未開始の要求は中止する。副作用が無いため再試行可能として返す。
+        return Err(timeout_before_execution());
+    }
     dispatch_read(adapter, operation, params)
+}
+
+/// 実行前に期限を超過していた要求へ返すエラー。
+fn timeout_before_execution() -> ErrorObject {
+    error_object(
+        ErrorCode::Timeout,
+        "要求の deadline を超過したため処理しません",
+    )
+}
+
+/// 実行後に期限を超過し、結果を捨てた要求へ返すエラー。
+fn timeout_after_execution() -> ErrorObject {
+    error_object(
+        ErrorCode::Timeout,
+        "要求の deadline を超過したため読み取り結果を破棄しました",
+    )
+}
+
+/// 読み取りの結果を応答として送るかどうか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendDecision {
+    /// この期限までに応答を送る。
+    Send(Instant),
+    /// 期限を超過したため結果を捨てる。
+    Discard,
+}
+
+/// 読み取りを終えた時点で、結果を送るか捨てるかを決める。
+///
+/// 読み取りの期限を過ぎていれば結果を捨てる。読み取りは編集を伴わないため、
+/// 捨てても中途半端な状態は残らない。期限内であれば、要求の残り時間と送信上限の
+/// 短い方を応答送信の期限とする。
+///
+/// 実行前に期限を超過していた要求は読み取りを行っておらず、捨てる結果を持たない。
+/// 超過した理由を返せるよう、送信上限だけで送る。
+fn decide_send(
+    now: Instant,
+    now_unix_ms: i64,
+    read_deadline: RequestDeadline,
+    deadline_unix_ms: Option<u64>,
+) -> SendDecision {
+    let RequestDeadline::Within(read_deadline) = read_deadline else {
+        return SendDecision::Send(now + WRITE_TIMEOUT);
+    };
+    if now >= read_deadline {
+        return SendDecision::Discard;
+    }
+    match resolve_request_deadline(now, now_unix_ms, WRITE_TIMEOUT, deadline_unix_ms) {
+        RequestDeadline::Within(deadline) => SendDecision::Send(deadline),
+        RequestDeadline::Exceeded => SendDecision::Discard,
+    }
 }
 
 /// ライフサイクル状態が読み取りを受け付けられるかを判定する。
