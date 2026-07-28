@@ -72,6 +72,11 @@ impl<H: ReadHost> HostReadAdapter<H> {
     /// 境界の外へ伝播させるとホストのプロセスごと落ちる。クロージャを捕捉層で
     /// 包んでからホストへ渡し、境界を越える巻き戻しを起こさない。
     ///
+    /// 参照区間へ入る呼び出し自体も panic し得る。準備前の編集ハンドルは
+    /// 呼び出しの入口で落ちるため、渡すクロージャだけを包んでも捕捉できない。
+    /// 捕捉しなければ接続の境界まで巻き戻り、要求元は応答ではなく切断を
+    /// 観測する。呼び出し全体を捕捉層で包む。
+    ///
     /// クロージャを保持する領域は呼び出しごとに解放されないため、捕らえる値は
     /// 参照と数値だけに留め、所有値を移し込まない。
     fn read_section<T, F>(&self, f: F) -> Result<T, ReadError>
@@ -79,10 +84,11 @@ impl<H: ReadHost> HostReadAdapter<H> {
         T: Send + 'static,
         F: FnOnce(&dyn SceneReader) -> Result<T, ReadError> + Send,
     {
-        match self
-            .host
-            .enter_read_section(move |scene| guard(|| f(scene)))
-        {
+        let entered = catch(|| {
+            self.host
+                .enter_read_section(move |scene| guard(|| f(scene)))
+        })?;
+        match entered {
             Ok(result) => result,
             Err(error) => Err(self.classify_section_failure(error)),
         }
@@ -102,12 +108,14 @@ impl<H: ReadHost> HostReadAdapter<H> {
     }
 }
 
-/// クロージャの panic を型付きの失敗へ変換する。
+/// クロージャの panic を型付きの失敗へ変換し、戻り値はそのまま返す。
+fn catch<T>(f: impl FnOnce() -> T) -> Result<T, ReadError> {
+    catch_unwind(AssertUnwindSafe(f)).map_err(|_| ReadError::Panicked)
+}
+
+/// 失敗を返し得るクロージャの panic を型付きの失敗へ変換する。
 fn guard<T>(f: impl FnOnce() -> Result<T, ReadError>) -> Result<T, ReadError> {
-    match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(result) => result,
-        Err(_) => Err(ReadError::Panicked),
-    }
+    catch(f).and_then(|result| result)
 }
 
 impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
@@ -431,6 +439,8 @@ mod tests {
     enum PanicPoint {
         /// 参照区間の外。編集情報の取得で落ちる。
         EditInfo,
+        /// 参照区間へ入る呼び出しそのもの。クロージャは呼ばれない。
+        EnterSection,
         /// 参照区間の内側。
         SceneName,
         /// 参照区間の内側。
@@ -546,6 +556,13 @@ mod tests {
         {
             self.assert_ready("call_read_section");
             self.record("enter_read_section");
+            // 実際の SDK は準備前の呼び出しをこの位置の assert で落とす。
+            // クロージャは呼ばれないため、渡す側を包んでも捕捉できない。
+            assert_ne!(
+                self.panic_at,
+                Some(PanicPoint::EnterSection),
+                "参照区間へ入る呼び出しで panic させます"
+            );
             if self.section_fails {
                 return Err(ReadError::Sdk {
                     operation: "call_read_section",
@@ -889,6 +906,39 @@ mod tests {
         let selector = sample_selector(&adapter);
 
         let error = with_silent_panic_hook(|| adapter.get_object(&selector).unwrap_err());
+        assert_eq!(error.error_code(), ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn panic_entering_the_read_section_becomes_internal_error() {
+        // 参照区間へ入る呼び出しは、渡すクロージャを包んでも捕捉できない位置で
+        // 落ち得る。捕捉しなければ接続の境界まで巻き戻り、要求元は応答ではなく
+        // 切断を観測する。
+        let adapter = adapter_with(|_| FakeHost {
+            panic_at: Some(PanicPoint::EnterSection),
+            ..FakeHost::new()
+        });
+        let selector = sample_selector(&adapter);
+
+        with_silent_panic_hook(|| {
+            for error in [
+                adapter.get_edit_info().unwrap_err(),
+                adapter.get_current_scene().unwrap_err(),
+                adapter.list_layers(0).unwrap_err(),
+                adapter.list_objects(0, None).unwrap_err(),
+                adapter.get_object(&selector).unwrap_err(),
+            ] {
+                assert_eq!(error.error_code(), ErrorCode::InternalError);
+            }
+        });
+    }
+
+    #[test]
+    fn catch_returns_the_value_without_flattening() {
+        assert_eq!(catch(|| 7).unwrap(), 7);
+        let error = with_silent_panic_hook(|| {
+            catch::<()>(|| panic!("参照区間へ入る呼び出しで panic させます")).unwrap_err()
+        });
         assert_eq!(error.error_code(), ErrorCode::InternalError);
     }
 
