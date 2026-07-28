@@ -22,6 +22,7 @@ use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
 };
+use windows::Win32::System::Threading::SetEvent;
 use windows::core::PCWSTR;
 
 /// pipe の入出力バッファサイズ。
@@ -519,6 +520,23 @@ fn await_connection(pipe: &OwnedPipeHandle, stop: &StopSignal) -> Result<Connect
         unsafe { ConnectNamedPipe(pipe.raw(), Some(overlapped)) }
     });
 
+    // `ConnectNamedPipe` が同期的に失敗した場合、I/O はカーネルへ渡っていない。
+    // それでも `OVERLAPPED` は保留状態のまま残され、完了通知イベントが
+    // シグナルされることは二度とない。`OverlappedOp` は解放時に必ず保留 I/O を
+    // 排出する（`GetOverlappedResult` を bWait = TRUE で待つ）ため、
+    // このままでは接続受理スレッドが永久に戻らなくなる。
+    // カーネルがこの `OVERLAPPED` を保持していないことは同期失敗が保証するので、
+    // 完了通知イベントを自分でシグナルして排出を終わらせる。
+    if let Err(e) = &result
+        && e.code() != ERROR_IO_PENDING.into()
+    {
+        // SAFETY: `op` が所有する有効なイベントハンドルをシグナルするだけであり、
+        // 保留中の I/O は存在しない。
+        unsafe {
+            let _ = SetEvent(op.event_handle());
+        }
+    }
+
     // `GetLastError` の遅延読み取りは他の API 呼び出しで上書きされ得るため、
     // 戻り値そのものが持つエラーコードで分岐する。
     match result {
@@ -782,6 +800,36 @@ mod tests {
         exchange_ping(&client, id, version);
 
         drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    #[test]
+    fn listener_is_reestablished_after_rejected_frame() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+        let name = pipe_name_for(&id);
+
+        // server 側から切断した直後の再接続では、`CreateNamedPipeW` と
+        // `ConnectNamedPipe` の間にクライアントが接続する経路を通りやすい。
+        // その経路でも待受が止まらないことを確かめる。
+        for round in 0..3 {
+            let client = connect_client_within(&name, Duration::from_secs(10));
+            complete_handshake(&client, id, &secret);
+            client
+                .write_all(
+                    &0u32.to_le_bytes(),
+                    Instant::now() + CLIENT_IO_TIMEOUT,
+                    "不正なフレーム長の送信",
+                )
+                .unwrap();
+            let body = recv_or_disconnected(&client, "不正なフレーム長の送信後");
+            assert!(body.is_none(), "{round} 回目に応答が返されました: {body:?}");
+            drop(client);
+        }
+
         server.stop(Duration::from_secs(5));
         cleanup(dir);
     }
