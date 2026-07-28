@@ -24,14 +24,14 @@ pub enum FrameError {
 }
 
 /// フレームデコーダーの状態。
+///
+/// 完成したフレームは内部キューへ積まれ、状態は `ReadingLength` へ戻る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderState {
     /// 長さ 4 バイトを読み取り中。
     ReadingLength,
     /// body を読み取り中。
     ReadingBody { length: u32 },
-    /// 1 フレームが完成して取り出し可能。
-    Complete,
 }
 
 /// byte stream からの部分受信に対応した frame デコーダー。
@@ -113,11 +113,6 @@ impl FrameDecoder {
                         self.pending.push_back(body);
                         self.reset();
                     }
-                }
-                DecoderState::Complete => {
-                    // 前回のフレームがまだ取り出されていない。
-                    // 新しいデータが来た場合は内部バッファをクリアして次のフレームから処理を続行する。
-                    self.reset();
                 }
             }
         }
@@ -319,12 +314,12 @@ mod tests {
             let mut decoder = FrameDecoder::new();
             match decoder.feed(&bytes) {
                 Ok(()) => {
-                    let state = decoder.state();
+                    // 完成したフレームはキューへ積まれるため、feed 後の状態は常に読み取り待ちのいずれか。
                     let waiting = matches!(
-                        state,
+                        decoder.state(),
                         DecoderState::ReadingLength | DecoderState::ReadingBody { .. }
                     );
-                    prop_assert!(waiting || decoder.take_frame().is_some());
+                    prop_assert!(waiting);
                 }
                 Err(e) => {
                     prop_assert!(matches!(
