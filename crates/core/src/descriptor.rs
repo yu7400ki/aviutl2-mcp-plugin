@@ -1,5 +1,6 @@
 //! descriptor DTO と InstanceInfo。
 
+use crate::edit_info::SceneRef;
 use crate::identifier::{InstanceId, ProtocolVersion};
 use crate::state::InstanceState;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -112,14 +113,25 @@ pub struct InstanceInfo {
     /// 起動時刻。書式は [`crate::format_utc_timestamp`]。
     pub started_at: String,
     pub project: Option<InstanceProject>,
+    /// 現在シーンの参照。取得不能時は None。
+    pub scene: Option<SceneRef>,
 }
 
 /// `InstanceInfo` 内のプロジェクト情報。
+///
+/// 応答型の内側であるため未知フィールドを拒否しない。将来の MINOR で
+/// 追加されたフィールドを含む応答を、旧版の受信側が受理できるようにする。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct InstanceProject {
     pub display_name: String,
-    pub path: String,
+    /// プロジェクトファイルのパス。未保存プロジェクトでは None。
+    pub path: Option<String>,
+    /// プロジェクトの epoch。
+    pub epoch: String,
+    /// プロジェクトの revision。
+    pub revision: u64,
+    /// 未保存の変更があるか。
+    pub modified: bool,
 }
 
 #[cfg(test)]
@@ -175,18 +187,29 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn instance_info_roundtrip() {
-        let info = InstanceInfo {
+    fn sample_instance_info() -> InstanceInfo {
+        InstanceInfo {
             instance_id: InstanceId::new_v4(),
             state: InstanceState::Busy,
             pid: 5678,
             started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
             project: Some(InstanceProject {
                 display_name: "Project".to_string(),
-                path: r"C:\project.aup".to_string(),
+                path: Some(r"C:\project.aup".to_string()),
+                epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+                revision: 42,
+                modified: true,
             }),
-        };
+            scene: Some(SceneRef {
+                id: 0,
+                name: Some("Scene 1".to_string()),
+            }),
+        }
+    }
+
+    #[test]
+    fn instance_info_roundtrip() {
+        let info = sample_instance_info();
         let s = serde_json::to_string(&info).unwrap();
         // auth_secret は含まれない
         assert!(!s.contains("auth_secret"));
@@ -196,8 +219,59 @@ mod tests {
 
     #[test]
     fn instance_info_allows_unknown_optional_fields() {
-        let s = r#"{"instance_id":"8df98c04-e7c2-4f98-b3ce-fc1c39d76414","state":"ready","pid":1,"started_at":"x","project":null,"future":1}"#;
+        let s = r#"{"instance_id":"8df98c04-e7c2-4f98-b3ce-fc1c39d76414","state":"ready","pid":1,"started_at":"x","project":null,"scene":null,"future":1}"#;
         let result: Result<InstanceInfo, _> = serde_json::from_str(s);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn instance_project_allows_unknown_optional_fields() {
+        // 応答型の内側でも将来の MINOR 追加を受理する。
+        let info = sample_instance_info();
+        let mut value = serde_json::to_value(&info).unwrap();
+        value["project"]
+            .as_object_mut()
+            .unwrap()
+            .insert("future".to_string(), serde_json::json!(1));
+        let restored: InstanceInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, info);
+    }
+
+    #[test]
+    fn instance_project_path_is_null_when_unsaved() {
+        let info = InstanceInfo {
+            project: Some(InstanceProject {
+                display_name: "新規プロジェクト".to_string(),
+                path: None,
+                epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+                revision: 0,
+                modified: false,
+            }),
+            ..sample_instance_info()
+        };
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(value["project"]["path"], serde_json::Value::Null);
+        let restored: InstanceInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, info);
+    }
+
+    #[test]
+    fn instance_info_scene_can_be_absent() {
+        let info = InstanceInfo {
+            scene: None,
+            ..sample_instance_info()
+        };
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(value["scene"], serde_json::Value::Null);
+        let restored: InstanceInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.scene, None);
+    }
+
+    #[test]
+    fn descriptor_project_still_rejects_unknown_fields() {
+        // registry ファイルの入力型は strict のままとする。
+        let result: Result<DescriptorProject, _> =
+            serde_json::from_str(r#"{"display_name":"x","path":"y","future":1}"#);
+        assert!(result.is_err());
     }
 }

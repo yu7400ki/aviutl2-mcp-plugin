@@ -423,7 +423,11 @@ fn print_instances(instances: &[InstanceInfo]) {
     println!("列挙結果 {} 件:", instances.len());
     for info in instances {
         let project = match &info.project {
-            Some(project) => format!("{} ({})", project.display_name, project.path),
+            Some(project) => format!(
+                "{} ({})",
+                project.display_name,
+                project.path.as_deref().unwrap_or("未保存")
+            ),
             None => "（プロジェクトなし）".to_string(),
         };
         println!(

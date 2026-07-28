@@ -338,8 +338,12 @@ fn build_instance_info(descriptor: InstanceDescriptor, state: InstanceState) -> 
         started_at: descriptor.started_at,
         project: descriptor.project.map(|p| InstanceProject {
             display_name: p.display_name,
-            path: p.path,
+            path: Some(p.path),
+            epoch: String::new(),
+            revision: 0,
+            modified: false,
         }),
+        scene: None,
     }
 }
 
