@@ -426,9 +426,10 @@ fn run_pipe_handshake_and_ping(
 /// `PipeClientError` を `ExclusionReason` へ対応付ける。
 fn map_pipe_error(err: PipeClientError) -> ExclusionReason {
     match err {
-        PipeClientError::ConnectFailed | PipeClientError::Timeout | PipeClientError::Io(_) => {
-            ExclusionReason::PipeUnreachable
-        }
+        PipeClientError::ConnectFailed
+        | PipeClientError::Timeout
+        | PipeClientError::Io(_)
+        | PipeClientError::Desynced => ExclusionReason::PipeUnreachable,
         // 接続先は応答したが契約どおりの内容ではなく、生存を確認できていない。
         PipeClientError::Framing
         | PipeClientError::Json

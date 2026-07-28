@@ -12,6 +12,7 @@ use aviutl2_mcp_core::{
 use chrono::Utc;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -67,6 +68,12 @@ pub enum PipeClientError {
     /// 無効な応答。
     #[error("無効な応答を受信しました")]
     InvalidResponse,
+    /// フレーム境界を見失った接続に対する要求。
+    ///
+    /// 期限超過や部分転送のあとは pipe に読み切れなかったバイトが残るため、
+    /// 同じ接続で次の要求を送っても境界がずれたまま解釈される。
+    #[error("接続はフレーム境界を見失っています")]
+    Desynced,
     /// 接続先が返したエラー応答。
     ///
     /// 呼び出し側がそのまま外部へ渡せるよう、受け取った [`ErrorObject`] を
@@ -88,6 +95,7 @@ impl PipeClientError {
             | Self::Framing
             | Self::Json
             | Self::InvalidResponse
+            | Self::Desynced
             | Self::InstanceStale => ErrorCode::InstanceStale,
             Self::Timeout => ErrorCode::Timeout,
             Self::AuthenticationFailed => ErrorCode::AuthenticationFailed,
@@ -111,6 +119,11 @@ pub struct PipeClient {
     handle: HANDLE,
     instance_id: InstanceId,
     protocol_version: ProtocolVersion,
+    /// フレーム境界を見失った接続を再利用させないための印。
+    ///
+    /// 要求は `&self` で送るため内部可変性で持つ。本型は生ハンドルを持ち
+    /// `!Sync` であるため、[`Cell`] で足りる。
+    desynced: Cell<bool>,
 }
 
 impl PipeClient {
@@ -132,6 +145,7 @@ impl PipeClient {
             handle,
             instance_id: descriptor_id,
             protocol_version: ProtocolVersion::CURRENT,
+            desynced: Cell::new(false),
         };
 
         client.handshake(
@@ -215,13 +229,21 @@ impl PipeClient {
         request: RequestEnvelope,
         deadline: Instant,
     ) -> Result<serde_json::Value, PipeClientError> {
-        let request_id = request.request_id;
-        let request_body = serde_json::to_vec(&request).map_err(|_| PipeClientError::Json)?;
-        self.write_frame(&request_body, deadline)?;
+        if self.desynced.get() {
+            return Err(PipeClientError::Desynced);
+        }
 
-        let response_body = self.read_frame(deadline)?;
-        let response: ResponseEnvelope =
-            deserialize_json(&response_body).map_err(|_| PipeClientError::Json)?;
+        let request_id = request.request_id;
+        // 直列化の失敗はまだ何も送っていないため、接続の境界には影響しない。
+        let request_body = serde_json::to_vec(&request).map_err(|_| PipeClientError::Json)?;
+        self.write_frame(&request_body, deadline)
+            .map_err(|err| self.poison_on_desync(err))?;
+
+        let response_body = self
+            .read_frame(deadline)
+            .map_err(|err| self.poison_on_desync(err))?;
+        let response: ResponseEnvelope = deserialize_json(&response_body)
+            .map_err(|_| self.poison_on_desync(PipeClientError::Json))?;
 
         if response.request_id != request_id {
             warn!("request_id mismatch");
@@ -243,6 +265,27 @@ impl PipeClient {
                 Err(PipeClientError::Remote(Box::new(error)))
             }
         }
+    }
+
+    /// フレーム境界を保てない失敗を観測した接続に印を付ける。
+    ///
+    /// 期限超過・部分転送・切断のあとは、送りかけたフレームや読み残したバイトが
+    /// pipe に残る。同じ接続で次の要求を送ると境界がずれたまま解釈され、
+    /// 接続が壊れているのに framing や schema の誤りとして報告されてしまう。
+    /// 応答本体を読み切ったあとの schema 破れも、相手が契約から外れている以上
+    /// 以降のやり取りを信頼できないため同様に扱う。
+    fn poison_on_desync(&self, err: PipeClientError) -> PipeClientError {
+        if matches!(
+            err,
+            PipeClientError::Timeout
+                | PipeClientError::Io(_)
+                | PipeClientError::Framing
+                | PipeClientError::Json
+        ) {
+            warn!("connection lost frame alignment; refusing further requests");
+            self.desynced.set(true);
+        }
+        err
     }
 
     /// client 側 handshake を実行する。
@@ -513,6 +556,7 @@ mod tests {
                 handle: client_handle,
                 instance_id: InstanceId::new_v4(),
                 protocol_version: ProtocolVersion::CURRENT,
+                desynced: Cell::new(false),
             };
             (Self { handle: peer }, client)
         }
@@ -856,34 +900,6 @@ mod tests {
     }
 
     #[test]
-    fn request_rejects_response_with_duplicate_json_key() {
-        let (peer, client) = MockPeer::connected();
-        let instance_id = client.instance_id;
-
-        let responder = respond_once(&peer, move |request| {
-            let response = response_for(
-                request,
-                instance_id,
-                ResponseResult::Ok {
-                    result: serde_json::json!({}),
-                },
-            );
-            // 末尾の `}` の直前に既出の key を足して重複させる。
-            let serialized = serde_json::to_string(&response).unwrap();
-            format!("{},\"ok\":true{}", &serialized[..serialized.len() - 1], "}").into_bytes()
-        });
-
-        let failure = client
-            .request("get_edit_info", serde_json::json!({}), test_deadline())
-            .expect_err("重複 JSON key を含む応答は拒否される");
-        responder.join().unwrap();
-        assert!(
-            matches!(failure, PipeClientError::Json),
-            "実際のエラー: {failure:?}"
-        );
-    }
-
-    #[test]
     fn request_times_out_without_response() {
         let (_peer, client) = MockPeer::connected();
 
@@ -905,6 +921,144 @@ mod tests {
             "期限を大きく超えて待っています: {}ms",
             started.elapsed().as_millis()
         );
+    }
+
+    /// 毒化した接続が I/O を出さずに要求を拒否することを確認する。
+    ///
+    /// 期限を十分先に置くため、拒否せず送受信していれば期限まで待ち続ける。
+    fn assert_rejects_without_io(client: &PipeClient) {
+        let started = Instant::now();
+        let failure = client
+            .request(
+                "get_edit_info",
+                serde_json::json!({}),
+                started + Duration::from_secs(10),
+            )
+            .expect_err("境界を見失った接続は再利用できない");
+        assert!(
+            matches!(failure, PipeClientError::Desynced),
+            "実際のエラー: {failure:?}"
+        );
+        assert_eq!(failure.error_code(), ErrorCode::InstanceStale);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "pipe への I/O が発生しています: {}ms",
+            started.elapsed().as_millis()
+        );
+    }
+
+    #[test]
+    fn timed_out_request_poisons_connection() {
+        let (_peer, client) = MockPeer::connected();
+
+        // 応答が無いまま期限を超過させ、読み残しがある状態を作る。
+        let failure = client
+            .request(
+                "get_edit_info",
+                serde_json::json!({}),
+                Instant::now() + Duration::from_millis(200),
+            )
+            .expect_err("応答が無ければ期限を超過する");
+        assert!(
+            matches!(failure, PipeClientError::Timeout),
+            "実際のエラー: {failure:?}"
+        );
+
+        assert_rejects_without_io(&client);
+    }
+
+    #[test]
+    fn framing_error_poisons_connection() {
+        let (peer, client) = MockPeer::connected();
+        // 本体を伴わない不正なフレーム長を送り、境界を見失わせる。
+        peer.send(&0u32.to_le_bytes());
+
+        let failure = client
+            .request(
+                "get_edit_info",
+                serde_json::json!({}),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect_err("不正なフレーム長は拒否される");
+        assert!(
+            matches!(failure, PipeClientError::Framing),
+            "実際のエラー: {failure:?}"
+        );
+
+        assert_rejects_without_io(&client);
+    }
+
+    #[test]
+    fn malformed_response_body_poisons_connection() {
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+
+        let responder = respond_once(&peer, move |request| {
+            let response = response_for(
+                request,
+                instance_id,
+                ResponseResult::Ok {
+                    result: serde_json::json!({}),
+                },
+            );
+            // 末尾の `}` の直前に既出の key を足して重複させる。
+            let serialized = serde_json::to_string(&response).unwrap();
+            format!("{},\"ok\":true{}", &serialized[..serialized.len() - 1], "}").into_bytes()
+        });
+
+        let failure = client
+            .request(
+                "get_edit_info",
+                serde_json::json!({}),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect_err("重複 JSON key を含む応答は拒否される");
+        responder.join().unwrap();
+        assert!(
+            matches!(failure, PipeClientError::Json),
+            "実際のエラー: {failure:?}"
+        );
+
+        assert_rejects_without_io(&client);
+    }
+
+    #[test]
+    fn remote_error_keeps_connection_usable() {
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+
+        let responder = respond_once(&peer, move |request| {
+            let response = response_for(
+                request,
+                instance_id,
+                ResponseResult::Err {
+                    error: ErrorObject::new(ErrorCode::NotFound, "見つかりません", false),
+                },
+            );
+            serde_json::to_vec(&response).unwrap()
+        });
+
+        let failure = client
+            .request("get_object", serde_json::json!({}), test_deadline())
+            .expect_err("エラー応答は失敗として返る");
+        responder.join().unwrap();
+        assert!(matches!(failure, PipeClientError::Remote(_)));
+
+        // 契約どおりのエラー応答は境界を壊さないため、接続は使い続けられる。
+        let result = serde_json::json!({ "ok": 1 });
+        let payload = result.clone();
+        let responder = respond_once(&peer, move |request| {
+            let response =
+                response_for(request, instance_id, ResponseResult::Ok { result: payload });
+            serde_json::to_vec(&response).unwrap()
+        });
+        assert_eq!(
+            client
+                .request("get_edit_info", serde_json::json!({}), test_deadline())
+                .expect("エラー応答の後も要求を送れる"),
+            result
+        );
+        responder.join().unwrap();
     }
 
     #[derive(Debug, Deserialize, PartialEq)]
@@ -1034,6 +1188,7 @@ mod tests {
             (PipeClientError::Framing, ErrorCode::InstanceStale),
             (PipeClientError::Json, ErrorCode::InstanceStale),
             (PipeClientError::InvalidResponse, ErrorCode::InstanceStale),
+            (PipeClientError::Desynced, ErrorCode::InstanceStale),
             (PipeClientError::InstanceStale, ErrorCode::InstanceStale),
             (PipeClientError::Timeout, ErrorCode::Timeout),
             (
