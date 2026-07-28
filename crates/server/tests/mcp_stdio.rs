@@ -6,16 +6,16 @@
 mod support;
 
 use aviutl2_mcp_core::{
-    AuthSecret, Cursor, DisplayRange, EditInfo, Extent, FiniteF64, FrameRange, InstanceId,
-    InstanceState, SceneInfo,
+    AuthSecret, Cursor, DisplayRange, EditInfo, ErrorCode, ErrorObject, Extent, FiniteF64,
+    FrameRange, InstanceId, InstanceState, SceneInfo,
 };
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use support::{
-    MOCK_STARTUP_GRACE, MockPipeServer, OperationResponses, current_process_created_at, ok_result,
-    temp_registry_dir, write_bare_descriptor,
+    MOCK_STARTUP_GRACE, MockPipeServer, OperationResponses, current_process_created_at, err_result,
+    ok_result, temp_registry_dir, write_bare_descriptor,
 };
 
 /// stdio セッションの結果。
@@ -756,6 +756,205 @@ fn unreachable_instance_resource_reports_not_found_with_details() {
     assert_eq!(error["data"]["retryable"], json!(true));
     assert!(error["data"]["correlation_id"].is_string());
 
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+/// resource が返す protocol error の JSON-RPC コード。
+const RESOURCE_NOT_FOUND_CODE: i32 = rmcp::model::ErrorCode::RESOURCE_NOT_FOUND.0;
+
+#[test]
+fn busy_instance_resource_reports_not_found_with_retry_after() {
+    let registry_dir = temp_registry_dir();
+    // 生存はしているが読み取りには応じられないインスタンス。生存確認の ping は
+    // 通るため、失敗は resource の読み取り経路そのもので起きる。
+    let mock = MockPipeServer::start_with_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        OperationResponses::from([(
+            "get_edit_info".to_string(),
+            err_result(
+                ErrorObject::new(ErrorCode::HostBusy, "読み取りキューが飽和しています", true)
+                    .with_details(json!({ "retry_after_ms": 500 })),
+            ),
+        )]),
+    );
+    mock.write_descriptor(&registry_dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/read",
+        "params": { "uri": format!("aviutl2://instances/{}/edit-info", mock.instance_id()) },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+    let response = session.response(2);
+    let error = &response["error"];
+    assert!(error.is_object(), "{response}");
+    // 待てば取得し得る失敗を server 自身の不具合として返さない。
+    assert_eq!(error["code"], json!(RESOURCE_NOT_FOUND_CODE), "{response}");
+    assert_eq!(error["data"]["code"], json!("host_busy"), "{response}");
+    assert_eq!(error["data"]["retryable"], json!(true), "{response}");
+    assert_eq!(
+        error["data"]["details"]["retry_after_ms"],
+        json!(500),
+        "{response}"
+    );
+    assert!(error["data"]["correlation_id"].is_string(), "{response}");
+
+    drop(mock);
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+/// インスタンス一覧の resource を上限超えにするための表示名の長さ。
+const LONG_DISPLAY_NAME_CHARS: usize = 4_000;
+
+/// 上限超過を起こすために登録する生存インスタンスの数。
+const CROWDED_INSTANCES: usize = 10;
+
+/// 表示名を差し替えた descriptor を registry へ書く。
+fn write_descriptor_with_display_name(
+    mock: &MockPipeServer,
+    registry_dir: &Path,
+    display_name: String,
+) {
+    let mut descriptor = mock.descriptor(registry_dir.to_path_buf());
+    let project = descriptor
+        .project
+        .as_mut()
+        .expect("mock の descriptor は project を持つ");
+    project.display_name = display_name;
+    std::fs::create_dir_all(registry_dir).expect("registry を作れる");
+    std::fs::write(
+        registry_dir.join(format!("{}.json", descriptor.instance_id)),
+        serde_json::to_string(&descriptor).expect("直列化できる"),
+    )
+    .expect("descriptor を書ける");
+}
+
+#[test]
+fn crowded_instances_resource_stays_within_the_text_limit() {
+    let registry_dir = temp_registry_dir();
+    let mocks: Vec<MockPipeServer> = (0..CROWDED_INSTANCES)
+        .map(|_| {
+            MockPipeServer::start(
+                InstanceId::new_v4(),
+                AuthSecret::generate(),
+                std::process::id(),
+                current_process_created_at(),
+                InstanceState::Ready,
+            )
+        })
+        .collect();
+    for mock in &mocks {
+        write_descriptor_with_display_name(
+            mock,
+            &registry_dir,
+            "名".repeat(LONG_DISPLAY_NAME_CHARS),
+        );
+    }
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/read",
+        "params": { "uri": "aviutl2://instances" },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+    let response = session.response(2);
+    let text = response["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("resource の内容がありません: {response}"));
+    // resource は tool result と別経路であり、tool 側の切り詰めに守られていない。
+    assert!(
+        text.chars().count() <= MAX_TOOL_TEXT_CHARS,
+        "resource の text が上限を超えています: {}",
+        text.chars().count()
+    );
+
+    let decoded: Value = serde_json::from_str(text).expect("JSON として読める");
+    // 上限に収めるために内容ごと捨ててはならない。総件数と続きの位置を示し、
+    // 残りは一覧 tool のページ指定で取得できる形にする。
+    assert_eq!(
+        decoded["total_count"],
+        json!(CROWDED_INSTANCES),
+        "{decoded}"
+    );
+    let listed = decoded["instances"].as_array().expect("instances は配列");
+    assert!(!listed.is_empty(), "内容が丸ごと落ちています: {decoded}");
+    assert!(
+        listed.len() < CROWDED_INSTANCES,
+        "件数が絞られていません: {}",
+        listed.len()
+    );
+    assert_eq!(decoded["has_more"], json!(true), "{decoded}");
+    assert!(decoded["next_offset"].is_number(), "{decoded}");
+
+    drop(mocks);
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+/// 編集情報の resource を上限超えにするための grid_bpm の要素数。
+const OVERSIZED_GRID_BPM: usize = 5_000;
+
+#[test]
+fn oversized_edit_info_resource_reports_truncation_as_readable_json() {
+    let registry_dir = temp_registry_dir();
+    let mut edit_info = sample_edit_info();
+    edit_info.grid_bpm = (0..OVERSIZED_GRID_BPM)
+        .map(|index| FiniteF64::try_new(120.0 + index as f64).expect("有限値"))
+        .collect();
+    let mock = MockPipeServer::start_with_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        OperationResponses::from([(
+            "get_edit_info".to_string(),
+            ok_result(serde_json::to_value(&edit_info).expect("直列化できる")),
+        )]),
+    );
+    mock.write_descriptor(&registry_dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/read",
+        "params": { "uri": format!("aviutl2://instances/{}/edit-info", mock.instance_id()) },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+    let response = session.response(2);
+    let text = response["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("resource の内容がありません: {response}"));
+    assert!(
+        text.chars().count() <= MAX_TOOL_TEXT_CHARS,
+        "resource の text が上限を超えています: {}",
+        text.chars().count()
+    );
+
+    // 途中で切ると JSON として読めなくなるため、超過した事実を返す。
+    let decoded: Value = serde_json::from_str(text).expect("JSON として読める");
+    assert_eq!(decoded["truncated"], json!(true), "{decoded}");
+    assert_eq!(
+        decoded["max_chars"],
+        json!(MAX_TOOL_TEXT_CHARS),
+        "{decoded}"
+    );
+
+    drop(mock);
     let _ = std::fs::remove_dir_all(&registry_dir);
 }
 
