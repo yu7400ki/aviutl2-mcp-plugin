@@ -13,12 +13,32 @@ use aviutl2_mcp_core::{
     deserialize_json, negotiate, verify_mac,
 };
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// handshake（M1 受信 〜 M3 検証）全体に許す上限。
+///
+/// handshake は接続確立直後に 3 往復で完結する軽量な処理であり、
+/// クライアントの待ち時間は含まない。未応答のクライアントが待受を占有する
+/// 時間をこの値に抑える。
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 認証済み接続で次の要求フレームを待つ上限。
+///
+/// discovery クライアントは接続を保ったまま間欠的に要求を送るため、
+/// handshake より長くとる。一方で切断を検知できないまま待受を占有し続けない
+/// よう有限にする。
+const REQUEST_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 1 フレームの送信に許す上限。
+///
+/// 受信側がバッファを読み出さない場合でも送信側が滞留しないようにする。
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 1 接続の処理を panic boundary で包んで実行する。
 pub fn handle_connection(stream: PipeStream, lifecycle: Arc<Lifecycle>) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if let Err(e) = run_connection(&stream, &lifecycle) {
-            tracing::error!("接続処理中にエラーが発生しました: {e:?}");
+            tracing::warn!("接続処理を終了しました: {e:?}");
         }
     }));
     if result.is_err() {
@@ -33,36 +53,22 @@ fn run_connection(stream: &PipeStream, lifecycle: &Lifecycle) -> Result<()> {
 }
 
 /// handshake を実行し、採用プロトコルバージョンを返す。
+///
+/// 検証に失敗した場合はエラー応答を返さずに `Err` を返し、呼び出し元が接続を
+/// 切断する。未認証の相手へ失敗理由を開示しないため、理由はローカルログにのみ
+/// 記録する。`auth_secret`・nonce・MAC はログに出さない。
 fn perform_handshake(stream: &PipeStream, lifecycle: &Lifecycle) -> Result<ProtocolVersion> {
-    let client_hello =
-        read_frame_as::<ClientHello>(stream).context("ClientHello の受信に失敗しました")?;
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+
+    let client_hello = read_frame_as::<ClientHello>(stream, deadline)
+        .context("ClientHello の受信に失敗しました")?;
 
     if client_hello.instance_id != lifecycle.instance_id() {
-        let _ = send_error_response(
-            stream,
-            client_hello.protocol_version,
-            aviutl2_mcp_core::RequestId::new(),
-            client_hello.instance_id,
-            ErrorCode::InstanceNotFound,
-            "インスタンス ID が一致しません",
-        );
-        anyhow::bail!("ClientHello の instance_id が一致しません");
+        anyhow::bail!("ClientHello の instance_id が一致しないため接続を切断します");
     }
 
-    let negotiated = match negotiate(ProtocolVersion::CURRENT, client_hello.protocol_version) {
-        Ok(v) => v,
-        Err(_) => {
-            let _ = send_error_response(
-                stream,
-                client_hello.protocol_version,
-                aviutl2_mcp_core::RequestId::new(),
-                client_hello.instance_id,
-                ErrorCode::ProtocolMismatch,
-                "プロトコルバージョンが一致しません",
-            );
-            anyhow::bail!("プロトコルバージョンが一致しません");
-        }
-    };
+    let negotiated = negotiate(ProtocolVersion::CURRENT, client_hello.protocol_version)
+        .map_err(|_| anyhow::anyhow!("プロトコルバージョンが一致しないため接続を切断します"))?;
 
     let server_nonce = Nonce::generate();
     let server_mac = compute_server_mac(
@@ -85,11 +91,11 @@ fn perform_handshake(stream: &PipeStream, lifecycle: &Lifecycle) -> Result<Proto
     let server_auth_body =
         serde_json::to_vec(&server_auth).context("ServerAuth の JSON 直列化に失敗しました")?;
     stream
-        .write_frame(&server_auth_body)
+        .write_frame(&server_auth_body, deadline)
         .context("ServerAuth の送信に失敗しました")?;
 
     let client_auth =
-        read_frame_as::<ClientAuth>(stream).context("ClientAuth の受信に失敗しました")?;
+        read_frame_as::<ClientAuth>(stream, deadline).context("ClientAuth の受信に失敗しました")?;
     let expected_client_mac = compute_client_mac(
         lifecycle.auth_secret().as_bytes(),
         &server_auth.server_nonce,
@@ -97,23 +103,17 @@ fn perform_handshake(stream: &PipeStream, lifecycle: &Lifecycle) -> Result<Proto
     );
 
     if !verify_mac(&expected_client_mac, &client_auth.client_mac) {
-        // クライアントが read で待機している場合、即座に切断するとデッドロックし得るため、
-        // エラー応答を送信してから切断する。
-        let _ = send_error_response(
-            stream,
-            negotiated,
-            aviutl2_mcp_core::RequestId::new(),
-            lifecycle.instance_id(),
-            ErrorCode::AuthenticationFailed,
-            "認証に失敗しました",
-        );
-        anyhow::bail!("ClientAuth の MAC 検証に失敗しました");
+        anyhow::bail!("ClientAuth の MAC 検証に失敗したため接続を切断します");
     }
 
     Ok(negotiated)
 }
 
 /// 認証済み接続での要求処理ループ。
+///
+/// 応答送信直後には閉じず、次の受信でクライアント切断（EOF）か期限超過を
+/// 待ってから抜ける。送信済み応答がクライアントに読まれる前にハンドルを
+/// 破棄しないための構造。
 fn run_request_loop(
     stream: &PipeStream,
     lifecycle: &Lifecycle,
@@ -125,8 +125,9 @@ fn run_request_loop(
             break;
         }
 
+        let deadline = Instant::now() + REQUEST_IDLE_TIMEOUT;
         let body = match stream
-            .read_frame()
+            .read_frame(deadline)
             .context("要求フレームの受信に失敗しました")?
         {
             Some(b) => b,
@@ -135,6 +136,18 @@ fn run_request_loop(
 
         let request: RequestEnvelope = deserialize_json(&body)
             .map_err(|e| anyhow::anyhow!("RequestEnvelope のデコードに失敗しました: {e}"))?;
+
+        if !is_compatible(negotiated_version, request.protocol_version) {
+            send_error_response(
+                stream,
+                negotiated_version,
+                request.request_id,
+                request.instance_id,
+                ErrorCode::ProtocolMismatch,
+                "要求のプロトコルバージョンが交渉結果と互換ではありません",
+            )?;
+            continue;
+        }
 
         if request.instance_id != lifecycle.instance_id() {
             send_error_response(
@@ -172,12 +185,19 @@ fn run_request_loop(
     Ok(())
 }
 
-fn read_frame_as<T>(stream: &PipeStream) -> Result<T>
+/// 要求の `protocol_version` が交渉結果と互換かを判定する。
+///
+/// MAJOR は完全一致、MINOR は交渉結果以下でなければならない。
+fn is_compatible(negotiated: ProtocolVersion, requested: ProtocolVersion) -> bool {
+    requested.major == negotiated.major && requested.minor <= negotiated.minor
+}
+
+fn read_frame_as<T>(stream: &PipeStream, deadline: Instant) -> Result<T>
 where
     T: for<'de> serde::Deserialize<'de>,
 {
     let body = stream
-        .read_frame()
+        .read_frame(deadline)
         .context("フレームの受信に失敗しました")?
         .context("接続が閉じられました")?;
     let value = deserialize_json(&body)
@@ -188,7 +208,7 @@ where
 fn send_response(stream: &PipeStream, response: &ResponseEnvelope) -> Result<()> {
     let body = serde_json::to_vec(response).context("応答の JSON 直列化に失敗しました")?;
     stream
-        .write_frame(&body)
+        .write_frame(&body, Instant::now() + WRITE_TIMEOUT)
         .context("応答の送信に失敗しました")?;
     Ok(())
 }
@@ -211,4 +231,35 @@ fn send_error_response(
         },
     };
     send_response(stream, &response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compatible_when_same_major_and_minor_within_negotiated() {
+        let negotiated = ProtocolVersion { major: 1, minor: 3 };
+        assert!(is_compatible(
+            negotiated,
+            ProtocolVersion { major: 1, minor: 3 }
+        ));
+        assert!(is_compatible(
+            negotiated,
+            ProtocolVersion { major: 1, minor: 0 }
+        ));
+    }
+
+    #[test]
+    fn incompatible_on_major_mismatch_or_higher_minor() {
+        let negotiated = ProtocolVersion { major: 1, minor: 3 };
+        assert!(!is_compatible(
+            negotiated,
+            ProtocolVersion { major: 2, minor: 3 }
+        ));
+        assert!(!is_compatible(
+            negotiated,
+            ProtocolVersion { major: 1, minor: 4 }
+        ));
+    }
 }
