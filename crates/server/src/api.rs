@@ -77,9 +77,6 @@ pub fn aviutl2_list_instances(
     registry_dir: &Path,
     request: ListInstancesRequest,
 ) -> Result<ListInstancesResponse, ListInstancesError> {
-    if request.offset > i64::MAX as u32 {
-        return Err(ListInstancesError::InvalidArgument);
-    }
     if request.limit == 0 || request.limit > MAX_LIMIT {
         return Err(ListInstancesError::InvalidArgument);
     }
@@ -90,16 +87,18 @@ pub fn aviutl2_list_instances(
     let offset = request.offset as usize;
     let limit = request.limit as usize;
 
+    // offset は u32 なので下限側の検証は不要。上限は総件数で頭打ちにし、
+    // 総件数を超える offset は空ページとして返す。
+    let page_end = offset.saturating_add(limit);
     let page = if offset >= all.len() {
         Vec::new()
     } else {
-        let end = (offset + limit).min(all.len());
-        all[offset..end].to_vec()
+        all[offset..page_end.min(all.len())].to_vec()
     };
 
     let count = page.len() as u32;
-    let next_offset = if offset + limit < all.len() {
-        Some((offset + limit) as u32)
+    let next_offset = if page_end < all.len() {
+        Some(page_end as u32)
     } else {
         None
     };
@@ -232,6 +231,43 @@ mod tests {
         assert_eq!(error.error_code(), ErrorCode::InternalError);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn offset_beyond_total_returns_empty_page() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let response = aviutl2_list_instances(
+            &dir,
+            ListInstancesRequest {
+                offset: u32::MAX,
+                limit: MAX_LIMIT,
+            },
+        )
+        .expect("総件数を超える offset は空ページを返す");
+        assert_eq!(response.offset, u32::MAX);
+        assert_eq!(response.total_count, 0);
+        assert_eq!(response.count, 0);
+        assert!(!response.has_more);
+        assert!(response.next_offset.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn limit_boundaries_accepted() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        for limit in [1, MAX_LIMIT] {
+            assert!(
+                aviutl2_list_instances(&dir, ListInstancesRequest { offset: 0, limit }).is_ok(),
+                "limit {limit} は許容される"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
