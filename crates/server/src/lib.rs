@@ -7,6 +7,7 @@ pub mod api;
 pub mod discovery;
 pub mod identity;
 pub mod pipe_client;
+pub mod win_io;
 
 /// ログを stderr へ構造化出力するよう初期化する。
 ///
