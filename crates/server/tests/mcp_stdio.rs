@@ -1193,3 +1193,51 @@ fn logs_expose_neither_full_identifiers_nor_absolute_paths() {
     drop(mock);
     let _ = std::fs::remove_dir_all(&registry_dir);
 }
+
+#[test]
+fn verbose_logging_does_not_leak_full_identifiers_from_any_crate() {
+    // 不具合の報告時に最も自然な操作は `RUST_LOG=debug` である。要求本文を
+    // そのまま出す依存 crate があると、匿名化した識別子だけを記録している
+    // 自クレートの努力が迂回される。対象を絞らずに stderr 全体を検査する。
+    let registry_dir = temp_registry_dir();
+    let edit_info = serde_json::to_value(sample_edit_info()).expect("直列化できる");
+    let mock = MockPipeServer::start_with_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        OperationResponses::from([("get_edit_info".to_string(), ok_result(edit_info))]),
+    );
+    mock.write_descriptor(&registry_dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let instance_id = mock.instance_id().to_string();
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_get_edit_info",
+            "arguments": { "instance_id": instance_id },
+        },
+    }));
+
+    let session = run_session_with_log(&registry_dir, &requests, Some("debug"));
+
+    // 応答は届く。ログの絞り込みが処理そのものを妨げていないことを確かめる。
+    assert!(
+        session.response(2)["result"]["isError"] != json!(true),
+        "tool call が失敗しています: {}",
+        session.stdout
+    );
+    assert!(
+        !session.stderr.contains(&instance_id),
+        "完全な instance_id がログに出ています: {}",
+        session.stderr
+    );
+
+    drop(mock);
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
