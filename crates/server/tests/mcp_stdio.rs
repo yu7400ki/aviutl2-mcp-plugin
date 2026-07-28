@@ -201,8 +201,32 @@ fn stdout_carries_only_mcp_messages() {
         session.stderr
     );
 
-    let tools = session.response(2);
-    assert!(tools["result"]["tools"].is_array());
+    // annotation と outputSchema はワイヤ形式で確かめる。SDK の直列化が変われば
+    // Rust の構造体を見るだけでは気づけない。
+    let listed = session.response(2);
+    let tools = listed["result"]["tools"].as_array().expect("tools は配列");
+    assert!(!tools.is_empty());
+    for tool in tools {
+        let name = tool["name"].as_str().expect("name がある");
+        assert_eq!(tool["annotations"]["readOnlyHint"], json!(true), "{name}");
+        assert_eq!(
+            tool["annotations"]["destructiveHint"],
+            json!(false),
+            "{name}"
+        );
+        assert_eq!(tool["annotations"]["idempotentHint"], json!(true), "{name}");
+        assert_eq!(tool["annotations"]["openWorldHint"], json!(false), "{name}");
+        assert!(
+            tool["outputSchema"]["properties"].is_object(),
+            "{name} の outputSchema がありません"
+        );
+        assert_eq!(
+            tool["inputSchema"]["additionalProperties"],
+            json!(false),
+            "{name}"
+        );
+    }
+
     let call = session.response(3);
     assert_eq!(call["result"]["isError"], json!(false));
 

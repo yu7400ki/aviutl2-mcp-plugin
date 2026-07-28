@@ -207,6 +207,7 @@ impl AviUtl2McpServer {
     /// 生存確認済みの AviUtl2 インスタンスを列挙する。
     /// 返る instance_id は他のすべての tool で必須の引数となる。
     /// 本サーバーが扱う frame 番号と layer 番号はいずれも 0 始まりである。
+    /// offset と limit（1〜200、既定 50）でページを指定する。
     #[tool(
         name = "aviutl2_list_instances",
         annotations(
@@ -310,7 +311,8 @@ impl AviUtl2McpServer {
 
     /// 現在シーンのレイヤーを列挙する。
     /// layer 番号は 0 始まりであり、frame 番号も 0 始まりである。
-    /// 2 ページ目以降は先頭ページが返した snapshot_revision を指定する。
+    /// offset と limit（1〜200、既定 50）でページを指定し、
+    /// 2 ページ目以降は先頭ページが返した snapshot_revision を添える。
     #[tool(
         name = "aviutl2_list_layers",
         annotations(
@@ -350,6 +352,8 @@ impl AviUtl2McpServer {
     /// 現在シーンのオブジェクトを列挙する。
     /// frame 番号と layer 番号はいずれも 0 始まりである。
     /// 各要素の selector は aviutl2_get_object へそのまま渡せる。
+    /// offset と limit（1〜200、既定 50）でページを指定し、
+    /// 2 ページ目以降は先頭ページが返した snapshot_revision を添える。
     #[tool(
         name = "aviutl2_list_objects",
         annotations(
@@ -426,7 +430,9 @@ impl AviUtl2McpServer {
     }
 
     /// インスタンスが利用できる effect の一覧と設定項目の定義を取得する。
-    /// frame 番号と layer 番号はいずれも 0 始まりである。
+    /// effect_type を指定すると種別で絞り込める。
+    /// offset と limit（1〜200、既定 50）でページを指定し、
+    /// 2 ページ目以降は先頭ページが返した snapshot_revision を添える。
     #[tool(
         name = "aviutl2_list_available_effects",
         annotations(
@@ -777,6 +783,19 @@ mod tests {
 
     use rmcp::model::Tool;
 
+    /// frame / layer を入出力に持ち、0 始まりであることの明記が要る tool。
+    ///
+    /// `aviutl2_list_available_effects` は effect カタログだけを扱い frame も
+    /// layer も現れないため、ここには含めない。
+    const ZERO_BASED_TOOLS: &[&str] = &[
+        "aviutl2_list_instances",
+        "aviutl2_get_edit_info",
+        "aviutl2_get_current_scene",
+        "aviutl2_list_layers",
+        "aviutl2_list_objects",
+        "aviutl2_get_object",
+    ];
+
     /// 現在登録されている全 tool の一覧。読み取り専用の read tool のみで構成される。
     const READ_TOOLS: &[&str] = &[
         "aviutl2_list_instances",
@@ -838,12 +857,51 @@ mod tests {
                 .description
                 .as_ref()
                 .unwrap_or_else(|| panic!("{} に説明がありません", tool.name));
+            if !ZERO_BASED_TOOLS.contains(&tool.name.as_ref()) {
+                continue;
+            }
             assert!(
                 description.contains("0 始まり"),
                 "{} の説明に 0 始まりの明記がありません",
                 tool.name
             );
         }
+    }
+
+    #[test]
+    fn paginated_tool_descriptions_explain_page_arguments() {
+        let mut checked = 0;
+        for tool in tools() {
+            let properties = tool
+                .input_schema
+                .get("properties")
+                .and_then(|v| v.as_object())
+                .unwrap_or_else(|| panic!("{} に properties がありません", tool.name));
+            let description = tool
+                .description
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} に説明がありません", tool.name));
+
+            // ページ指定を受け取る tool は、その使い方を説明にも書く。
+            if properties.contains_key("limit") {
+                checked += 1;
+                for keyword in ["offset", "limit"] {
+                    assert!(
+                        description.contains(keyword),
+                        "{} の説明に {keyword} がありません",
+                        tool.name
+                    );
+                }
+            }
+            if properties.contains_key("snapshot_revision") {
+                assert!(
+                    description.contains("snapshot_revision"),
+                    "{} の説明に snapshot_revision がありません",
+                    tool.name
+                );
+            }
+        }
+        assert!(checked >= 4, "ページ指定を持つ tool を検査していません");
     }
 
     #[test]
