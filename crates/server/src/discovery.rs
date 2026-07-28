@@ -138,9 +138,11 @@ pub fn default_registry_dir() -> Option<PathBuf> {
 
 /// registry ディレクトリ内の生存インスタンスを発見する。
 ///
-/// registry ディレクトリを読み取れなかった場合も 0 件として畳み込む。
-/// 「読み取れなかった」と「本当に 0 件」を区別する必要がある場合は
-/// [`try_find_instances`] を使う。
+/// registry ディレクトリを読み取れなかった場合も 0 件として畳み込むため、
+/// 「読み取れなかった」と「本当に 0 件」を区別できない。
+///
+/// 既存の呼び出し元との互換のために残している暫定 API であり、新しい呼び出し元を
+/// 作ってはならない。[`try_find_instances`] を使うこと。
 pub fn find_instances(
     registry_dir: &Path,
     config: DiscoveryConfig,
@@ -557,7 +559,7 @@ mod tests {
             "存在しない PID は除外される"
         );
 
-        find_instances(&dir, DiscoveryConfig::default(), true);
+        try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
         assert!(!path.exists(), "stale descriptor should be cleaned up");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -617,7 +619,7 @@ mod tests {
             "不正 UTF-8 の descriptor は除外される"
         );
 
-        find_instances(&dir, DiscoveryConfig::default(), true);
+        try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
         assert!(path.exists(), "不正 UTF-8 の descriptor は削除されない");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -691,7 +693,7 @@ mod tests {
         let path = dir.join(format!("{}.json", id));
         std::fs::write(&path, b"{ broken").unwrap();
 
-        find_instances(&dir, DiscoveryConfig::default(), true);
+        try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
         assert!(
             path.exists(),
             "パース不能な descriptor は削除せず除外にとどめる"
@@ -711,7 +713,7 @@ mod tests {
         let path = dir.join(format!("{}.json", id));
         std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
 
-        let instances = find_instances(&dir, DiscoveryConfig::default(), true);
+        let instances = try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
         assert!(
             instances.is_empty(),
             "未知 schema の descriptor は除外される"
@@ -738,7 +740,7 @@ mod tests {
         let path = dir.join(format!("{}.json", id));
         std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
 
-        let instances = find_instances(&dir, DiscoveryConfig::default(), true);
+        let instances = try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
         assert!(instances.is_empty(), "MAJOR 不一致の候補は除外される");
         assert!(
             path.exists(),
