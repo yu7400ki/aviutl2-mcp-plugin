@@ -102,6 +102,33 @@ impl ErrorCode {
             ErrorCode::Unknown(s) => s.clone(),
         }
     }
+
+    /// コードから導かれる既定のリトライ可否を返す。
+    ///
+    /// 時間経過や状態遷移で解消し得るものだけを true とする。要求内容そのものが
+    /// 不正なものは再送しても同じ結果になるため false とする。
+    /// [`ErrorCode::SdkError`] は実際には状態依存だが、成功する保証が無いため
+    /// 既定は false とし、リトライ可能と判断できた呼び出し側が明示的に上書きする。
+    pub fn default_retryable(&self) -> bool {
+        match self {
+            ErrorCode::InstanceStale
+            | ErrorCode::HostBusy
+            | ErrorCode::Timeout
+            | ErrorCode::Cancelled
+            | ErrorCode::PreconditionFailed
+            | ErrorCode::EditBlocked => true,
+            ErrorCode::InstanceNotFound
+            | ErrorCode::ProtocolMismatch
+            | ErrorCode::AuthenticationFailed
+            | ErrorCode::InvalidArgument
+            | ErrorCode::InternalError
+            | ErrorCode::NotFound
+            | ErrorCode::AmbiguousSelector
+            | ErrorCode::UnsupportedOperation
+            | ErrorCode::SdkError
+            | ErrorCode::Unknown(_) => false,
+        }
+    }
 }
 
 impl Serialize for ErrorCode {
@@ -182,6 +209,43 @@ mod tests {
         assert_eq!(code, ErrorCode::Unknown("future_code".to_string()));
         let s2 = serde_json::to_string(&code).unwrap();
         assert_eq!(s2, "\"future_code\"");
+    }
+
+    #[test]
+    fn default_retryable_matches_code() {
+        for code in [
+            ErrorCode::InstanceStale,
+            ErrorCode::HostBusy,
+            ErrorCode::Timeout,
+            ErrorCode::Cancelled,
+            ErrorCode::PreconditionFailed,
+            ErrorCode::EditBlocked,
+        ] {
+            assert!(code.default_retryable(), "{code} はリトライ可能である");
+        }
+
+        for code in [
+            ErrorCode::InstanceNotFound,
+            ErrorCode::ProtocolMismatch,
+            ErrorCode::AuthenticationFailed,
+            ErrorCode::InvalidArgument,
+            ErrorCode::InternalError,
+            ErrorCode::NotFound,
+            ErrorCode::AmbiguousSelector,
+            ErrorCode::UnsupportedOperation,
+            ErrorCode::SdkError,
+            ErrorCode::Unknown("future_code".to_string()),
+        ] {
+            assert!(!code.default_retryable(), "{code} はリトライ不可である");
+        }
+    }
+
+    #[test]
+    fn error_object_keeps_explicit_retryable() {
+        // 既定値の導出は ErrorObject::new の引数を置き換えない。
+        let err = ErrorObject::new(ErrorCode::SdkError, "sdk failed", true);
+        assert!(err.retryable);
+        assert!(!err.code.default_retryable());
     }
 
     #[test]
