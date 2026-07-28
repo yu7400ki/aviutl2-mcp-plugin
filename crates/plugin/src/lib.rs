@@ -84,7 +84,7 @@ fn init_tracing() {
 #[aviutl2::plugin(GenericPlugin)]
 struct AviUtl2McpPlugin {
     lifecycle: Option<Arc<lifecycle::Lifecycle>>,
-    pipe_server: Option<Arc<pipe::PipeServer>>,
+    pipe_server: Option<pipe::PipeServer>,
 }
 
 #[cfg(windows)]

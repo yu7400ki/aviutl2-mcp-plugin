@@ -290,7 +290,11 @@ pub struct PipeServer {
 
 impl PipeServer {
     /// 指定したライフサイクルに紐づく named pipe server を起動する。
-    pub fn start(lifecycle: Arc<Lifecycle>) -> Result<Arc<Self>> {
+    ///
+    /// 戻り値は制御ハンドルであり、accept スレッドとは共有しない。スレッドへ
+    /// 渡すのは停止イベントとライフサイクルのみで、スレッドから制御ハンドルを
+    /// 触る経路は存在しない。
+    pub fn start(lifecycle: Arc<Lifecycle>) -> Result<Self> {
         let stop_signal = Arc::new(StopSignal::new()?);
         // 送信は行わない。スレッド終了時に `tx` が drop され、受信側が
         // `Disconnected` を得ることでスレッド終了を検知する。
@@ -309,14 +313,14 @@ impl PipeServer {
             }
         });
 
-        Ok(Arc::new(Self {
+        Ok(Self {
             stop_signal,
             thread: Mutex::new(Some(ServerThread {
                 join_handle,
                 finished: rx,
             })),
             stopped: AtomicBool::new(false),
-        }))
+        })
     }
 
     /// サーバーを停止する。
