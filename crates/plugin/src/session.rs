@@ -383,7 +383,11 @@ fn classify_operation(name: &str) -> Result<Operation, ErrorObject> {
     Ok(Operation::Read(operation))
 }
 
-/// 受付判定と期限判定を通してから読み取りを実行する。
+/// params の復号・受付判定・期限判定を通してから読み取りを実行する。
+///
+/// params の復号を最初に行う。要求内容の誤りはライフサイクル状態にも期限にも
+/// 依存せず、状態由来の再試行可能なエラーで返すと要求元に解消しない再試行を
+/// 促してしまう。
 ///
 /// 実行前に期限を超過している要求は読み取り口へ渡さない。読み取りは開始すると
 /// 参照区間の内側まで進み、途中で打ち切れないためである。
@@ -394,12 +398,13 @@ fn execute_read(
     params: &Value,
     deadline: RequestDeadline,
 ) -> Result<Value, ErrorObject> {
+    let request = decode_request(operation, params)?;
     admit_read(state)?;
     if deadline == RequestDeadline::Exceeded {
         // 未開始の要求は中止する。副作用が無いため再試行可能として返す。
         return Err(timeout_before_execution());
     }
-    dispatch_read(adapter, operation, params)
+    dispatch_read(adapter, request)
 }
 
 /// 実行前に期限を超過していた要求へ返すエラー。
@@ -529,34 +534,72 @@ fn host_busy(message: &str) -> ErrorObject {
         .with_details(json!({ "retry_after_ms": HOST_BUSY_RETRY_AFTER_MS }))
 }
 
-/// 読み取りを実行し、応答へ載せる result を組み立てる。
+/// 復号と検証を終えた読み取り要求。
 ///
-/// params の復号とページ指定の検証は読み取り口を呼ぶ前に済ませる。要求の誤りで
-/// SDK へ触れないようにするためである。
+/// この型を作れた時点で、要求内容だけで判定できる誤りは残っていない。
+#[derive(Debug, Clone, PartialEq)]
+enum ReadRequest {
+    GetEditInfo,
+    GetCurrentScene,
+    ListLayers(ListLayersParams),
+    ListObjects(ListObjectsParams),
+    GetObject(Box<GetObjectParams>),
+    ListAvailableEffects(ListAvailableEffectsParams),
+}
+
+/// operation 別の params を復号し、要求内容だけで決まる検証を済ませる。
 ///
-/// 読み取り口は SDK の参照区間を抜けてから所有型の DTO を返す。ページの切り出しと
-/// JSON への変換はいずれもその外側で行い、参照区間の内側には持ち込まない。
-fn dispatch_read(
-    adapter: &dyn ReadAdapter,
-    operation: ReadOperation,
-    params: &Value,
-) -> Result<Value, ErrorObject> {
-    match operation {
+/// ページ指定と絞り込み条件の検証もここで行う。いずれも要求内容だけで決まり、
+/// ライフサイクル状態にも期限にも読み取り口の応答にも依存しない。
+fn decode_request(operation: ReadOperation, params: &Value) -> Result<ReadRequest, ErrorObject> {
+    Ok(match operation {
         ReadOperation::GetEditInfo => {
             decode_params::<GetEditInfoParams>(params)?;
-            to_result(&adapter.get_edit_info().map_err(read_error)?)
+            ReadRequest::GetEditInfo
         }
         ReadOperation::GetCurrentScene => {
             decode_params::<GetCurrentSceneParams>(params)?;
+            ReadRequest::GetCurrentScene
+        }
+        ReadOperation::ListLayers => {
+            let params: ListLayersParams = decode_params(params)?;
+            params.page.validate().map_err(page_error)?;
+            ReadRequest::ListLayers(params)
+        }
+        ReadOperation::ListObjects => {
+            let params: ListObjectsParams = decode_params(params)?;
+            params.page.validate().map_err(page_error)?;
+            if let Some(filter) = &params.filter {
+                filter.validate().map_err(filter_error)?;
+            }
+            ReadRequest::ListObjects(params)
+        }
+        ReadOperation::GetObject => {
+            ReadRequest::GetObject(Box::new(decode_params::<GetObjectParams>(params)?))
+        }
+        ReadOperation::ListAvailableEffects => {
+            let params: ListAvailableEffectsParams = decode_params(params)?;
+            params.page.validate().map_err(page_error)?;
+            ReadRequest::ListAvailableEffects(params)
+        }
+    })
+}
+
+/// 読み取りを実行し、応答へ載せる result を組み立てる。
+///
+/// 読み取り口は SDK の参照区間を抜けてから所有型の DTO を返す。ページの切り出しと
+/// JSON への変換はいずれもその外側で行い、参照区間の内側には持ち込まない。
+fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Value, ErrorObject> {
+    match request {
+        ReadRequest::GetEditInfo => to_result(&adapter.get_edit_info().map_err(read_error)?),
+        ReadRequest::GetCurrentScene => {
             let (scene, project_revision) = adapter.get_current_scene().map_err(read_error)?;
             to_result(&GetCurrentSceneResult {
                 scene,
                 project_revision,
             })
         }
-        ReadOperation::ListLayers => {
-            let params: ListLayersParams = decode_params(params)?;
-            params.page.validate().map_err(page_error)?;
+        ReadRequest::ListLayers(params) => {
             let snapshot = adapter
                 .list_layers(params.expected_scene_id)
                 .map_err(read_error)?;
@@ -565,12 +608,7 @@ fn dispatch_read(
                     .map_err(page_error)?;
             to_result(&ListLayersResult { items, page })
         }
-        ReadOperation::ListObjects => {
-            let params: ListObjectsParams = decode_params(params)?;
-            params.page.validate().map_err(page_error)?;
-            if let Some(filter) = &params.filter {
-                filter.validate().map_err(filter_error)?;
-            }
+        ReadRequest::ListObjects(params) => {
             let snapshot = adapter
                 .list_objects(params.expected_scene_id, params.filter.as_ref())
                 .map_err(read_error)?;
@@ -579,13 +617,10 @@ fn dispatch_read(
                     .map_err(page_error)?;
             to_result(&ListObjectsResult { items, page })
         }
-        ReadOperation::GetObject => {
-            let params: GetObjectParams = decode_params(params)?;
+        ReadRequest::GetObject(params) => {
             to_result(&adapter.get_object(&params.selector).map_err(read_error)?)
         }
-        ReadOperation::ListAvailableEffects => {
-            let params: ListAvailableEffectsParams = decode_params(params)?;
-            params.page.validate().map_err(page_error)?;
+        ReadRequest::ListAvailableEffects(params) => {
             let snapshot = adapter
                 .list_available_effects(params.effect_type.as_ref())
                 .map_err(read_error)?;
@@ -1540,6 +1575,112 @@ mod tests {
                 adapter.calls().is_empty(),
                 "{operation:?} が起動処理中に読み取り口を呼びました"
             );
+        }
+    }
+
+    /// 各 operation が受理しない params。
+    fn malformed_params_of_all_operations() -> Vec<(ReadOperation, Value)> {
+        all_operations()
+            .into_iter()
+            .map(|(operation, params)| {
+                let mut params = params;
+                params
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("future".to_string(), json!(1));
+                (operation, params)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn invalid_params_are_rejected_regardless_of_the_lifecycle_state() {
+        // 要求内容の誤りは状態に依存しない。受付判定を先に通すと、解消しない
+        // 誤りが再試行を促す host_busy として返ってしまう。
+        for state in [
+            InstanceState::Starting,
+            InstanceState::Draining,
+            InstanceState::Gone,
+            InstanceState::Unknown("future".to_string()),
+        ] {
+            for (operation, params) in malformed_params_of_all_operations() {
+                let adapter = FakeAdapter::new();
+                let error = execute_read(
+                    &adapter,
+                    &state,
+                    operation,
+                    &params,
+                    RequestDeadline::Within(Instant::now() + READ_TIMEOUT),
+                )
+                .unwrap_err();
+
+                assert_eq!(
+                    error.code,
+                    ErrorCode::InvalidArgument,
+                    "{state} の {operation:?} が状態由来のエラーで返りました"
+                );
+                assert!(adapter.calls().is_empty(), "{state}: {operation:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_params_are_rejected_before_the_deadline_is_evaluated() {
+        // 期限超過は再試行可能として返る。要求内容の誤りをその後ろに置くと、
+        // 解消しない誤りが再試行可能なエラーに化ける。
+        for (operation, params) in malformed_params_of_all_operations() {
+            let adapter = FakeAdapter::new();
+            let error = execute_read(
+                &adapter,
+                &InstanceState::Ready,
+                operation,
+                &params,
+                RequestDeadline::Exceeded,
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error.code,
+                ErrorCode::InvalidArgument,
+                "{operation:?} が期限超過として返りました"
+            );
+        }
+    }
+
+    #[test]
+    fn page_and_filter_violations_are_rejected_regardless_of_the_state() {
+        let cases = [
+            (
+                ReadOperation::ListLayers,
+                json!({ "expected_scene_id": SCENE_ID, "limit": 0 }),
+            ),
+            (
+                ReadOperation::ListObjects,
+                json!({
+                    "expected_scene_id": SCENE_ID,
+                    "filter": { "layer_min": 2, "layer_max": 1 },
+                }),
+            ),
+            (ReadOperation::ListAvailableEffects, json!({ "limit": 201 })),
+        ];
+
+        for (operation, params) in cases {
+            let adapter = FakeAdapter::new();
+            let error = execute_read(
+                &adapter,
+                &InstanceState::Starting,
+                operation,
+                &params,
+                RequestDeadline::Within(Instant::now() + READ_TIMEOUT),
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error.code,
+                ErrorCode::InvalidArgument,
+                "{operation:?} が起動処理中に状態由来のエラーで返りました"
+            );
+            assert!(adapter.calls().is_empty(), "{operation:?}");
         }
     }
 
