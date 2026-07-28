@@ -165,10 +165,13 @@ impl OverlappedOp {
     /// 立てるため、`start` が I/O をカーネルへ渡した直後に巻き戻っても
     /// `Drop` が確実にキャンセルを試みる。
     ///
-    /// `ERROR_IO_PENDING` 以外のエラーで同期的に失敗した場合、I/O はカーネルへ
-    /// 渡っておらず完了通知イベントがシグナルされることは二度とない。保留状態を
-    /// 残すと `Drop` の排出（`GetOverlappedResult` を bWait = TRUE で待つ）が
-    /// 永久に戻らなくなるため、ここで落とす。
+    /// `start` に渡せるのは、`ERROR_IO_PENDING` 以外のエラーで同期的に失敗した
+    /// 場合に I/O をカーネルへ渡さない API に限る（`ReadFile` / `WriteFile` /
+    /// `ConnectNamedPipe` はこれを満たす）。この前提の下では完了通知イベントが
+    /// 後からシグナルされることはないため、同期失敗時に保留状態を落とす。
+    /// 保留状態を残すと `Drop` の排出（`GetOverlappedResult` を bWait = TRUE で
+    /// 待つ）が永久に戻らなくなる。逆に、同期失敗後も完了通知を出し得る API を
+    /// 渡すと、保留 I/O を残したまま `OVERLAPPED` を解放することになる。
     pub(crate) fn issue(
         &mut self,
         start: impl FnOnce(*mut OVERLAPPED) -> windows::core::Result<()>,
@@ -243,7 +246,11 @@ impl OverlappedOp {
     }
 
     /// 次の I/O 発行に備えてイベントと `OVERLAPPED` を初期状態へ戻す。
+    ///
+    /// 保留中の I/O がある状態で呼ぶと、カーネルが参照している `OVERLAPPED` を
+    /// 上書きしてしまう。
     fn rearm(&mut self) -> windows::core::Result<()> {
+        debug_assert!(!self.pending, "保留中の I/O がある状態で再発行はできない");
         // SAFETY: `event` は本型が所有する有効なイベントハンドル。
         unsafe { ResetEvent(self.event.raw()) }?;
         let event = self.event.raw();
