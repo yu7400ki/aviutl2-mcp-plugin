@@ -132,28 +132,27 @@ pub struct ListAvailableEffectsResult {
 mod tests {
     use super::*;
     use crate::effect::{AvailableEffectItem, EffectFlags, EffectItemType};
-    use crate::fingerprint::{FingerprintAlgorithm, object_fingerprint};
+    use crate::fingerprint::ObjectFingerprintInput;
     use crate::number::FiniteF64;
+    use crate::object::ObjectSummary;
     use crate::page::DEFAULT_PAGE_LIMIT;
 
+    fn sample_object_summary() -> ObjectSummary {
+        ObjectSummary::new(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            ObjectFingerprintInput {
+                scene_id: 0,
+                layer: 2,
+                frame_start: 120,
+                frame_end: 240,
+                name: Some("立ち絵"),
+                alias: "alias",
+            },
+        )
+    }
+
     fn sample_object_selector() -> ObjectSelector {
-        ObjectSelector {
-            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
-            scene_id: 0,
-            layer: 2,
-            frame: 120,
-            name: Some("立ち絵".to_string()),
-            fingerprint: object_fingerprint(
-                &FingerprintAlgorithm::RawV1,
-                0,
-                2,
-                120,
-                240,
-                Some("立ち絵"),
-                "alias",
-            ),
-            fingerprint_algorithm: FingerprintAlgorithm::RawV1,
-        }
+        sample_object_summary().selector
     }
 
     fn sample_page_meta() -> PageMeta {
@@ -350,14 +349,7 @@ mod tests {
     #[test]
     fn list_objects_result_roundtrip() {
         let result = ListObjectsResult {
-            items: vec![ObjectSummary {
-                layer: 2,
-                frame_start: 120,
-                frame_end: 240,
-                name: Some("立ち絵".to_string()),
-                fingerprint: sample_object_selector().fingerprint.clone(),
-                selector: sample_object_selector(),
-            }],
+            items: vec![sample_object_summary()],
             page: sample_page_meta(),
         };
         let s = serde_json::to_string(&result).unwrap();

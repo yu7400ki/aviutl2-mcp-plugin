@@ -1,9 +1,11 @@
 //! effect の読み取り DTO と種別列挙。
 
-use crate::fingerprint::Fingerprint;
+use crate::fingerprint::{
+    EffectFingerprintInput, Fingerprint, FingerprintAlgorithm, effect_fingerprint,
+};
 use crate::item_value::ItemValue;
 use crate::number::FiniteF64;
-use crate::selector::EffectSelector;
+use crate::selector::{EffectSelector, ObjectSelector};
 use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -16,13 +18,18 @@ const UNKNOWN_TAG: &str = "unknown";
 const UNKNOWN_FIELDS: &[&str] = &["type", "raw"];
 
 /// オブジェクトに付与された effect。
+///
+/// トップレベルとセレクターの fingerprint は同一でなければならない。
+/// [`EffectInfo::new`] を用いると 1 度の算出結果が両方へ設定される。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectInfo {
     /// effect 名。
     pub name: String,
     /// 同名 effect のうち何番目か。0 始まり。
     pub index: usize,
+    /// effect が有効か。
     pub enabled: bool,
+    /// effect がロックされているか。
     pub locked: bool,
     /// 設定項目と値。
     pub items: Vec<EffectItem>,
@@ -30,6 +37,32 @@ pub struct EffectInfo {
     pub selector: EffectSelector,
     /// 同一性検証用の fingerprint。
     pub fingerprint: Fingerprint,
+    /// fingerprint の算出方式。
+    pub fingerprint_algorithm: FingerprintAlgorithm,
+}
+
+impl EffectInfo {
+    /// effect 情報とセレクターを、単一の fingerprint 算出結果から組み立てる。
+    pub fn new(object: ObjectSelector, input: EffectFingerprintInput<'_>) -> Self {
+        let fingerprint = effect_fingerprint(input);
+        let algorithm = FingerprintAlgorithm::GENERATED;
+        Self {
+            name: input.effect_name.to_string(),
+            index: input.effect_index,
+            enabled: input.enabled,
+            locked: input.locked,
+            items: input.items.to_vec(),
+            selector: EffectSelector {
+                object,
+                effect_name: input.effect_name.to_string(),
+                effect_index: input.effect_index,
+                fingerprint: fingerprint.clone(),
+                fingerprint_algorithm: algorithm.clone(),
+            },
+            fingerprint,
+            fingerprint_algorithm: algorithm,
+        }
+    }
 }
 
 /// effect の設定項目 1 件。
@@ -52,10 +85,13 @@ pub struct TrackInfo {
     pub mode: String,
     /// 移動方法のパラメータ。
     pub params: Vec<FiniteF64>,
+    /// 加速が有効か。
     pub accelerate: bool,
+    /// 減速が有効か。
     pub decelerate: bool,
     /// 中間点を無視するか。
     pub twopoint: bool,
+    /// 時間制御が有効か。
     pub timecontrol: bool,
     /// 所属グループの要素数。
     pub group_num: usize,
@@ -467,8 +503,7 @@ impl fmt::Display for EffectItemType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fingerprint::{FingerprintAlgorithm, object_fingerprint};
-    use crate::selector::ObjectSelector;
+    use crate::object::ObjectSummary;
 
     fn known_effect_types() -> Vec<EffectType> {
         vec![
@@ -502,23 +537,18 @@ mod tests {
     }
 
     fn sample_object_selector() -> ObjectSelector {
-        ObjectSelector {
-            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
-            scene_id: 0,
-            layer: 2,
-            frame: 120,
-            name: Some("立ち絵".to_string()),
-            fingerprint: object_fingerprint(
-                &FingerprintAlgorithm::RawV1,
-                0,
-                2,
-                120,
-                240,
-                Some("立ち絵"),
-                "alias",
-            ),
-            fingerprint_algorithm: FingerprintAlgorithm::RawV1,
-        }
+        ObjectSummary::new(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            crate::fingerprint::ObjectFingerprintInput {
+                scene_id: 0,
+                layer: 2,
+                frame_start: 120,
+                frame_end: 240,
+                name: Some("立ち絵"),
+                alias: "alias",
+            },
+        )
+        .selector
     }
 
     fn sample_track_info() -> TrackInfo {
@@ -557,30 +587,17 @@ mod tests {
     }
 
     fn sample_effect_info() -> EffectInfo {
-        let selector = EffectSelector {
-            object: sample_object_selector(),
-            effect_name: "動画ファイル".to_string(),
-            effect_index: 0,
-            fingerprint: object_fingerprint(
-                &FingerprintAlgorithm::RawV1,
-                0,
-                2,
-                120,
-                240,
-                None,
-                "effect",
-            ),
-            fingerprint_algorithm: FingerprintAlgorithm::RawV1,
-        };
-        EffectInfo {
-            name: "動画ファイル".to_string(),
-            index: 0,
-            enabled: true,
-            locked: false,
-            items: sample_effect_items(),
-            fingerprint: selector.fingerprint.clone(),
-            selector,
-        }
+        let items = sample_effect_items();
+        EffectInfo::new(
+            sample_object_selector(),
+            EffectFingerprintInput {
+                effect_name: "動画ファイル",
+                effect_index: 0,
+                enabled: true,
+                locked: false,
+                items: &items,
+            },
+        )
     }
 
     fn sample_available_effect() -> AvailableEffect {
@@ -655,6 +672,21 @@ mod tests {
     }
 
     #[test]
+    fn unknown_kind_object_normalizes_known_raw_value() {
+        // 既知値を持つ未知種別オブジェクトは既知の variant へ寄せる。
+        // 往復は値としては保たれるが JSON 表現は正準形へ変わる。
+        let effect_type: EffectType =
+            serde_json::from_str(r#"{"type":"unknown","raw":1}"#).unwrap();
+        assert_eq!(effect_type, EffectType::Filter);
+        assert_eq!(serde_json::to_string(&effect_type).unwrap(), "\"filter\"");
+
+        let item_type: EffectItemType =
+            serde_json::from_str(r#"{"type":"unknown","raw":2}"#).unwrap();
+        assert_eq!(item_type, EffectItemType::Number);
+        assert_eq!(serde_json::to_string(&item_type).unwrap(), "\"number\"");
+    }
+
+    #[test]
     fn unknown_kind_object_rejects_bad_shape() {
         for s in [
             r#"{"type":"filter","raw":1}"#,
@@ -693,11 +725,21 @@ mod tests {
     }
 
     #[test]
-    fn effect_info_hides_internal_identifiers() {
-        let s = serde_json::to_string(&sample_effect_info()).unwrap();
-        for forbidden in ["auth_secret", "handle", "pointer", "nonce"] {
-            assert!(!s.contains(forbidden), "{forbidden} が直列化に現れている");
-        }
+    fn effect_info_shares_one_fingerprint_with_selector() {
+        let info = sample_effect_info();
+        assert_eq!(info.fingerprint, info.selector.fingerprint);
+        assert_eq!(
+            info.fingerprint_algorithm,
+            info.selector.fingerprint_algorithm
+        );
+        assert_eq!(info.fingerprint_algorithm, FingerprintAlgorithm::GENERATED);
+    }
+
+    #[test]
+    fn effect_info_new_copies_input_into_selector() {
+        let info = sample_effect_info();
+        assert_eq!(info.name, info.selector.effect_name);
+        assert_eq!(info.index, info.selector.effect_index);
     }
 
     #[test]

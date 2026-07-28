@@ -37,8 +37,8 @@ pub use effect::{
 pub use envelope::{RequestEnvelope, RequestKind, ResponseEnvelope, ResponseKind, ResponseResult};
 pub use error::{ErrorCode, ErrorObject};
 pub use fingerprint::{
-    Fingerprint, FingerprintAlgorithm, FingerprintFormatError, effect_fingerprint,
-    object_fingerprint,
+    EffectFingerprintInput, Fingerprint, FingerprintAlgorithm, FingerprintFormatError,
+    ObjectFingerprintInput, effect_fingerprint, object_fingerprint,
 };
 pub use framing::{
     DecoderState, FrameDecoder, FrameError, MAX_FRAME_SIZE, encode_frame, encode_length,

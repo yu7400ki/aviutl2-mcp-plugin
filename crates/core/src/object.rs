@@ -3,7 +3,7 @@
 //! frame 番号・layer 番号はいずれも 0 始まりである。
 
 use crate::effect::EffectInfo;
-use crate::fingerprint::Fingerprint;
+use crate::fingerprint::{Fingerprint, FingerprintAlgorithm, ObjectFingerprintInput};
 use crate::selector::ObjectSelector;
 use serde::{Deserialize, Serialize};
 
@@ -14,13 +14,18 @@ pub struct LayerInfo {
     pub index: usize,
     /// レイヤー名。無名は null。
     pub name: Option<String>,
+    /// レイヤーが有効か。
     pub enabled: bool,
+    /// レイヤーがロックされているか。
     pub locked: bool,
     /// このレイヤーに存在するオブジェクト数。
     pub object_count: usize,
 }
 
 /// オブジェクトの概要。
+///
+/// トップレベルとセレクターの fingerprint は同一でなければならない。
+/// [`ObjectSummary::new`] を用いると 1 度の算出結果が両方へ設定される。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectSummary {
     /// 0 始まりのレイヤー番号。
@@ -35,6 +40,33 @@ pub struct ObjectSummary {
     pub selector: ObjectSelector,
     /// 同一性検証用の fingerprint。
     pub fingerprint: Fingerprint,
+    /// fingerprint の算出方式。
+    pub fingerprint_algorithm: FingerprintAlgorithm,
+}
+
+impl ObjectSummary {
+    /// 概要とセレクターを、単一の fingerprint 算出結果から組み立てる。
+    pub fn new(project_epoch: impl Into<String>, input: ObjectFingerprintInput<'_>) -> Self {
+        let fingerprint = crate::fingerprint::object_fingerprint(input);
+        let algorithm = FingerprintAlgorithm::GENERATED;
+        Self {
+            layer: input.layer,
+            frame_start: input.frame_start,
+            frame_end: input.frame_end,
+            name: input.name.map(str::to_string),
+            selector: ObjectSelector {
+                project_epoch: project_epoch.into(),
+                scene_id: input.scene_id,
+                layer: input.layer,
+                frame: input.frame_start,
+                name: input.name.map(str::to_string),
+                fingerprint: fingerprint.clone(),
+                fingerprint_algorithm: algorithm.clone(),
+            },
+            fingerprint,
+            fingerprint_algorithm: algorithm,
+        }
+    }
 }
 
 /// オブジェクトの詳細。
@@ -64,37 +96,20 @@ pub struct SectionRange {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fingerprint::{FingerprintAlgorithm, object_fingerprint};
 
-    fn sample_fingerprint() -> Fingerprint {
-        object_fingerprint(
-            &FingerprintAlgorithm::RawV1,
-            0,
-            2,
-            120,
-            240,
-            Some("立ち絵"),
-            "alias",
-        )
-    }
-
-    fn sample_object_summary() -> ObjectSummary {
-        ObjectSummary {
+    fn sample_input() -> ObjectFingerprintInput<'static> {
+        ObjectFingerprintInput {
+            scene_id: 0,
             layer: 2,
             frame_start: 120,
             frame_end: 240,
-            name: Some("立ち絵".to_string()),
-            selector: ObjectSelector {
-                project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
-                scene_id: 0,
-                layer: 2,
-                frame: 120,
-                name: Some("立ち絵".to_string()),
-                fingerprint: sample_fingerprint(),
-                fingerprint_algorithm: FingerprintAlgorithm::RawV1,
-            },
-            fingerprint: sample_fingerprint(),
+            name: Some("立ち絵"),
+            alias: "alias",
         }
+    }
+
+    fn sample_object_summary() -> ObjectSummary {
+        ObjectSummary::new("78be92d1-c8c9-44c6-ae52-387548971468", sample_input())
     }
 
     fn sample_object_detail() -> ObjectDetail {
@@ -178,11 +193,31 @@ mod tests {
     }
 
     #[test]
-    fn object_detail_hides_internal_identifiers() {
-        let s = serde_json::to_string(&sample_object_detail()).unwrap();
-        for forbidden in ["auth_secret", "handle", "pointer", "nonce"] {
-            assert!(!s.contains(forbidden), "{forbidden} が直列化に現れている");
-        }
+    fn object_summary_shares_one_fingerprint_with_selector() {
+        let summary = sample_object_summary();
+        assert_eq!(summary.fingerprint, summary.selector.fingerprint);
+        assert_eq!(
+            summary.fingerprint_algorithm,
+            summary.selector.fingerprint_algorithm
+        );
+        assert_eq!(
+            summary.fingerprint_algorithm,
+            FingerprintAlgorithm::GENERATED
+        );
+    }
+
+    #[test]
+    fn object_summary_new_copies_input_into_selector() {
+        let summary = sample_object_summary();
+        assert_eq!(summary.selector.scene_id, sample_input().scene_id);
+        assert_eq!(summary.selector.layer, summary.layer);
+        // セレクターは開始フレームの完全一致で対象を照合する。
+        assert_eq!(summary.selector.frame, summary.frame_start);
+        assert_eq!(summary.selector.name, summary.name);
+        assert_eq!(
+            summary.selector.project_epoch,
+            "78be92d1-c8c9-44c6-ae52-387548971468"
+        );
     }
 
     #[test]

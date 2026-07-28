@@ -2,7 +2,8 @@
 
 use crate::effect::{EffectItem, EffectItemType, TrackInfo};
 use crate::fingerprint::{
-    Fingerprint, FingerprintAlgorithm, effect_fingerprint, object_fingerprint,
+    EffectFingerprintInput, Fingerprint, ObjectFingerprintInput, effect_fingerprint,
+    object_fingerprint,
 };
 use crate::handshake::{Mac, Nonce, compute_client_mac, compute_server_mac, verify_mac};
 use crate::identifier::{InstanceId, ProtocolVersion};
@@ -296,17 +297,9 @@ proptest! {
 // fingerprint
 // ============================================================================
 
-fn fingerprint_algorithm_strategy() -> impl Strategy<Value = FingerprintAlgorithm> {
-    prop_oneof![
-        Just(FingerprintAlgorithm::NormalizedAliasV1),
-        Just(FingerprintAlgorithm::RawV1),
-    ]
-}
-
-/// `object_fingerprint` の引数一式。
+/// `object_fingerprint` の入力を所有する形。
 #[derive(Debug, Clone, PartialEq)]
-struct ObjectFingerprintInput {
-    algorithm: FingerprintAlgorithm,
+struct OwnedObjectInput {
     scene_id: i32,
     layer: usize,
     frame_start: usize,
@@ -315,23 +308,21 @@ struct ObjectFingerprintInput {
     alias: String,
 }
 
-impl ObjectFingerprintInput {
+impl OwnedObjectInput {
     fn compute(&self) -> Fingerprint {
-        object_fingerprint(
-            &self.algorithm,
-            self.scene_id,
-            self.layer,
-            self.frame_start,
-            self.frame_end,
-            self.name.as_deref(),
-            &self.alias,
-        )
+        object_fingerprint(ObjectFingerprintInput {
+            scene_id: self.scene_id,
+            layer: self.layer,
+            frame_start: self.frame_start,
+            frame_end: self.frame_end,
+            name: self.name.as_deref(),
+            alias: &self.alias,
+        })
     }
 }
 
-fn object_fingerprint_input_strategy() -> impl Strategy<Value = ObjectFingerprintInput> {
+fn object_input_strategy() -> impl Strategy<Value = OwnedObjectInput> {
     (
-        fingerprint_algorithm_strategy(),
         any::<i32>(),
         0..1_000usize,
         0..1_000_000usize,
@@ -340,16 +331,13 @@ fn object_fingerprint_input_strategy() -> impl Strategy<Value = ObjectFingerprin
         ".*",
     )
         .prop_map(
-            |(algorithm, scene_id, layer, frame_start, frame_end, name, alias)| {
-                ObjectFingerprintInput {
-                    algorithm,
-                    scene_id,
-                    layer,
-                    frame_start,
-                    frame_end,
-                    name,
-                    alias,
-                }
+            |(scene_id, layer, frame_start, frame_end, name, alias)| OwnedObjectInput {
+                scene_id,
+                layer,
+                frame_start,
+                frame_end,
+                name,
+                alias,
             },
         )
 }
@@ -425,10 +413,9 @@ fn effect_item_strategy() -> impl Strategy<Value = EffectItem> {
         })
 }
 
-/// `effect_fingerprint` の引数一式。
-#[derive(Debug, Clone)]
-struct EffectFingerprintInput {
-    algorithm: FingerprintAlgorithm,
+/// `effect_fingerprint` の入力を所有する形。
+#[derive(Debug, Clone, PartialEq)]
+struct OwnedEffectInput {
     effect_name: String,
     effect_index: usize,
     enabled: bool,
@@ -436,22 +423,20 @@ struct EffectFingerprintInput {
     items: Vec<EffectItem>,
 }
 
-impl EffectFingerprintInput {
+impl OwnedEffectInput {
     fn compute(&self) -> Fingerprint {
-        effect_fingerprint(
-            &self.algorithm,
-            &self.effect_name,
-            self.effect_index,
-            self.enabled,
-            self.locked,
-            &self.items,
-        )
+        effect_fingerprint(EffectFingerprintInput {
+            effect_name: &self.effect_name,
+            effect_index: self.effect_index,
+            enabled: self.enabled,
+            locked: self.locked,
+            items: &self.items,
+        })
     }
 }
 
-fn effect_fingerprint_input_strategy() -> impl Strategy<Value = EffectFingerprintInput> {
+fn effect_input_strategy() -> impl Strategy<Value = OwnedEffectInput> {
     (
-        fingerprint_algorithm_strategy(),
         ".*",
         0..8usize,
         any::<bool>(),
@@ -459,15 +444,12 @@ fn effect_fingerprint_input_strategy() -> impl Strategy<Value = EffectFingerprin
         prop::collection::vec(effect_item_strategy(), 0..4),
     )
         .prop_map(
-            |(algorithm, effect_name, effect_index, enabled, locked, items)| {
-                EffectFingerprintInput {
-                    algorithm,
-                    effect_name,
-                    effect_index,
-                    enabled,
-                    locked,
-                    items,
-                }
+            |(effect_name, effect_index, enabled, locked, items)| OwnedEffectInput {
+                effect_name,
+                effect_index,
+                enabled,
+                locked,
+                items,
             },
         )
 }
@@ -484,12 +466,12 @@ fn is_canonical_fingerprint(fingerprint: &Fingerprint) -> bool {
 
 proptest! {
     #[test]
-    fn object_fingerprint_is_deterministic(input in object_fingerprint_input_strategy()) {
+    fn object_fingerprint_is_deterministic(input in object_input_strategy()) {
         prop_assert_eq!(input.compute(), input.compute());
     }
 
     #[test]
-    fn object_fingerprint_has_canonical_form(input in object_fingerprint_input_strategy()) {
+    fn object_fingerprint_has_canonical_form(input in object_input_strategy()) {
         let fingerprint = input.compute();
         prop_assert!(is_canonical_fingerprint(&fingerprint));
         prop_assert!(fingerprint.as_str().parse::<Fingerprint>().is_ok());
@@ -497,7 +479,7 @@ proptest! {
 
     #[test]
     fn object_fingerprint_differs_for_distinct_inputs(
-        (a, b) in (object_fingerprint_input_strategy(), object_fingerprint_input_strategy()),
+        (a, b) in (object_input_strategy(), object_input_strategy()),
     ) {
         if a != b {
             prop_assert_ne!(a.compute(), b.compute());
@@ -506,20 +488,29 @@ proptest! {
 
     #[test]
     fn object_fingerprint_distinguishes_absent_name_from_empty(
-        input in object_fingerprint_input_strategy(),
+        input in object_input_strategy(),
     ) {
-        let absent = ObjectFingerprintInput { name: None, ..input.clone() };
-        let empty = ObjectFingerprintInput { name: Some(String::new()), ..input };
+        let absent = OwnedObjectInput { name: None, ..input.clone() };
+        let empty = OwnedObjectInput { name: Some(String::new()), ..input };
         prop_assert_ne!(absent.compute(), empty.compute());
     }
 
     #[test]
-    fn effect_fingerprint_is_deterministic(input in effect_fingerprint_input_strategy()) {
+    fn effect_fingerprint_is_deterministic(input in effect_input_strategy()) {
         prop_assert_eq!(input.compute(), input.compute());
     }
 
     #[test]
-    fn effect_fingerprint_has_canonical_form(input in effect_fingerprint_input_strategy()) {
+    fn effect_fingerprint_has_canonical_form(input in effect_input_strategy()) {
         prop_assert!(is_canonical_fingerprint(&input.compute()));
+    }
+
+    #[test]
+    fn effect_fingerprint_differs_for_distinct_inputs(
+        (a, b) in (effect_input_strategy(), effect_input_strategy()),
+    ) {
+        if a != b {
+            prop_assert_ne!(a.compute(), b.compute());
+        }
     }
 }

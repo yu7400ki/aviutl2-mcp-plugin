@@ -105,6 +105,13 @@ pub enum FingerprintAlgorithm {
 }
 
 impl FingerprintAlgorithm {
+    /// 本 crate が生成する fingerprint の方式。
+    ///
+    /// 生成関数は方式を引数に取らない。alias を正規化しないまま
+    /// [`FingerprintAlgorithm::NormalizedAliasV1`] を名乗るダイジェストを
+    /// 作れないよう、方式を型で固定している。
+    pub const GENERATED: Self = FingerprintAlgorithm::RawV1;
+
     /// 方式名を返す。
     pub fn as_str(&self) -> &str {
         match self {
@@ -183,8 +190,15 @@ impl FingerprintInput {
         self.text(name, if value { "true" } else { "false" });
     }
 
+    /// 浮動小数点をビット表現で書く。
+    ///
+    /// 十進整形を経由すると標準ライブラリの整形規則の変更でダイジェストが
+    /// 変わってしまうため、整形に依存しないビット列を用いる。負のゼロは
+    /// 値として正のゼロと等しいので、ビット表現も正のゼロへ寄せる。
     fn number(&mut self, name: &str, value: FiniteF64) {
-        self.text(name, &value.to_string());
+        let raw = value.get();
+        let normalized = if raw == 0.0 { 0.0 } else { raw };
+        self.field(name, &normalized.to_bits().to_le_bytes());
     }
 
     /// 省略可能な文字列を、存在フラグを伴って書く。
@@ -194,6 +208,14 @@ impl FingerprintInput {
         self.boolean(&format!("{name}.present"), value.is_some());
         if let Some(value) = value {
             self.text(name, value);
+        }
+    }
+
+    /// 省略可能な件数を、存在フラグを伴って書く。
+    fn optional_count(&mut self, name: &str, value: Option<usize>) {
+        self.boolean(&format!("{name}.present"), value.is_some());
+        if let Some(value) = value {
+            self.count(name, value);
         }
     }
 
@@ -207,24 +229,53 @@ impl FingerprintInput {
     }
 }
 
-/// 設定値を曖昧さのない文字列へ正規化する。
-fn canonical_item_value(value: &ItemValue) -> String {
+/// 設定値を、種別タグと種別ごとの値フィールドとして書く。
+///
+/// 種別を独立したフィールドとして先に書くため、異なる種別の同じ内容が
+/// 同じバイト列になることがない。
+fn write_item_value(input: &mut FingerprintInput, value: &ItemValue) {
     match value {
-        ItemValue::Number { value } => format!("number:{value}"),
-        ItemValue::Integer { value } => format!("integer:{value}"),
-        ItemValue::Bool { value } => format!("bool:{value}"),
-        ItemValue::Color { value } => format!("color:{value}"),
-        // index は数字のみで構成されるため、最初の ":" までが index、
-        // 空なら未特定であると一意に読み取れる。
-        ItemValue::Choice { value, index } => match index {
-            Some(index) => format!("choice:{index}:{value}"),
-            None => format!("choice::{value}"),
-        },
-        ItemValue::File { path } => format!("file:{path}"),
-        ItemValue::Folder { path } => format!("folder:{path}"),
-        ItemValue::Font { name } => format!("font:{name}"),
-        ItemValue::Text { value } => format!("text:{value}"),
-        ItemValue::Unknown { raw } => format!("unknown:{raw}"),
+        ItemValue::Number { value } => {
+            input.text("item_value.kind", "number");
+            input.number("item_value.number", *value);
+        }
+        ItemValue::Integer { value } => {
+            input.text("item_value.kind", "integer");
+            input.integer("item_value.integer", *value);
+        }
+        ItemValue::Bool { value } => {
+            input.text("item_value.kind", "bool");
+            input.boolean("item_value.bool", *value);
+        }
+        ItemValue::Color { value } => {
+            input.text("item_value.kind", "color");
+            input.text("item_value.color", value);
+        }
+        ItemValue::Choice { value, index } => {
+            input.text("item_value.kind", "choice");
+            input.text("item_value.choice", value);
+            input.optional_count("item_value.choice_index", *index);
+        }
+        ItemValue::File { path } => {
+            input.text("item_value.kind", "file");
+            input.text("item_value.file", path);
+        }
+        ItemValue::Folder { path } => {
+            input.text("item_value.kind", "folder");
+            input.text("item_value.folder", path);
+        }
+        ItemValue::Font { name } => {
+            input.text("item_value.kind", "font");
+            input.text("item_value.font", name);
+        }
+        ItemValue::Text { value } => {
+            input.text("item_value.kind", "text");
+            input.text("item_value.text", value);
+        }
+        ItemValue::Unknown { raw } => {
+            input.text("item_value.kind", "unknown");
+            input.text("item_value.unknown", raw);
+        }
     }
 }
 
@@ -248,65 +299,91 @@ fn write_track(input: &mut FingerprintInput, track: Option<&TrackInfo>) {
     input.optional_text("track.group_name", track.group_name.as_deref());
 }
 
+/// [`object_fingerprint`] の入力。
+///
+/// 同じ型の引数を並べて取り違えると、症状が「セレクターが解決できない」と
+/// いう診断しづらい形で現れるため、名前付きの構造体で受け取る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ObjectFingerprintInput<'a> {
+    /// シーン ID。
+    pub scene_id: i32,
+    /// 0 始まりのレイヤー番号。
+    pub layer: usize,
+    /// 0 始まりの開始フレーム番号。
+    pub frame_start: usize,
+    /// 0 始まりの終了フレーム番号。
+    pub frame_end: usize,
+    /// オブジェクト名。標準名のままなら None。
+    pub name: Option<&'a str>,
+    /// 正規化前の alias。
+    pub alias: &'a str,
+}
+
+/// [`effect_fingerprint`] の入力。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectFingerprintInput<'a> {
+    /// effect 名。
+    pub effect_name: &'a str,
+    /// 同名 effect のうち何番目か。0 始まり。
+    pub effect_index: usize,
+    /// effect が有効か。
+    pub enabled: bool,
+    /// effect がロックされているか。
+    pub locked: bool,
+    /// 設定項目と値。
+    pub items: &'a [EffectItem],
+}
+
 /// オブジェクトの fingerprint を算出する。
 ///
-/// 同一入力に対して常に同一のダイジェストを返す。
+/// 方式は [`FingerprintAlgorithm::GENERATED`] に固定される。同一入力に対して
+/// 常に同一のダイジェストを返す。
 ///
 /// ```
-/// # use aviutl2_mcp_core::{FingerprintAlgorithm, object_fingerprint};
-/// let algorithm = FingerprintAlgorithm::RawV1;
-/// let fingerprint = object_fingerprint(&algorithm, 0, 2, 120, 240, Some("立ち絵"), "alias");
+/// # use aviutl2_mcp_core::{ObjectFingerprintInput, object_fingerprint};
+/// let input = ObjectFingerprintInput {
+///     scene_id: 0,
+///     layer: 2,
+///     frame_start: 120,
+///     frame_end: 240,
+///     name: Some("立ち絵"),
+///     alias: "alias",
+/// };
+/// let fingerprint = object_fingerprint(input);
 /// assert!(fingerprint.as_str().starts_with("sha256:"));
-/// assert_eq!(
-///     fingerprint,
-///     object_fingerprint(&algorithm, 0, 2, 120, 240, Some("立ち絵"), "alias")
-/// );
+/// assert_eq!(fingerprint, object_fingerprint(input));
 /// ```
-pub fn object_fingerprint(
-    algorithm: &FingerprintAlgorithm,
-    scene_id: i32,
-    layer: usize,
-    frame_start: usize,
-    frame_end: usize,
-    name: Option<&str>,
-    alias: &str,
-) -> Fingerprint {
-    let mut input = FingerprintInput::new();
-    input.text("algorithm", algorithm.as_str());
-    input.integer("scene_id", i64::from(scene_id));
-    input.count("layer", layer);
-    input.count("frame_start", frame_start);
-    input.count("frame_end", frame_end);
-    input.optional_text("name", name);
-    input.text("alias", alias);
-    input.finish()
+pub fn object_fingerprint(input: ObjectFingerprintInput<'_>) -> Fingerprint {
+    let mut bytes = FingerprintInput::new();
+    bytes.text("algorithm", FingerprintAlgorithm::GENERATED.as_str());
+    bytes.integer("scene_id", i64::from(input.scene_id));
+    bytes.count("layer", input.layer);
+    bytes.count("frame_start", input.frame_start);
+    bytes.count("frame_end", input.frame_end);
+    bytes.optional_text("name", input.name);
+    bytes.text("alias", input.alias);
+    bytes.finish()
 }
 
 /// effect の fingerprint を算出する。
 ///
-/// 同一入力に対して常に同一のダイジェストを返す。
-pub fn effect_fingerprint(
-    algorithm: &FingerprintAlgorithm,
-    effect_name: &str,
-    effect_index: usize,
-    enabled: bool,
-    locked: bool,
-    items: &[EffectItem],
-) -> Fingerprint {
-    let mut input = FingerprintInput::new();
-    input.text("algorithm", algorithm.as_str());
-    input.text("effect_name", effect_name);
-    input.count("effect_index", effect_index);
-    input.boolean("enabled", enabled);
-    input.boolean("locked", locked);
-    input.count("item_count", items.len());
-    for item in items {
-        input.text("item_name", &item.name);
-        input.integer("item_type", i64::from(item.item_type.as_raw()));
-        input.text("item_value", &canonical_item_value(&item.value));
-        write_track(&mut input, item.track.as_ref());
+/// 方式は [`FingerprintAlgorithm::GENERATED`] に固定される。同一入力に対して
+/// 常に同一のダイジェストを返す。
+pub fn effect_fingerprint(input: EffectFingerprintInput<'_>) -> Fingerprint {
+    let mut bytes = FingerprintInput::new();
+    bytes.text("algorithm", FingerprintAlgorithm::GENERATED.as_str());
+    bytes.text("effect_name", input.effect_name);
+    bytes.count("effect_index", input.effect_index);
+    bytes.boolean("enabled", input.enabled);
+    bytes.boolean("locked", input.locked);
+    bytes.count("item_count", input.items.len());
+    for item in input.items {
+        bytes.text("item_name", &item.name);
+        bytes.integer("item_type", i64::from(item.item_type.as_raw()));
+        write_item_value(&mut bytes, &item.value);
+        write_track(&mut bytes, item.track.as_ref());
     }
-    input.finish()
+    bytes.finish()
 }
 
 #[cfg(test)]
@@ -314,8 +391,16 @@ mod tests {
     use super::*;
     use crate::effect::EffectItemType;
 
-    fn raw_object_fingerprint(name: Option<&str>, alias: &str) -> Fingerprint {
-        object_fingerprint(&FingerprintAlgorithm::RawV1, 0, 2, 120, 240, name, alias)
+    /// 既定の位置情報で object fingerprint を算出する。
+    fn object_at(name: Option<&str>, alias: &str) -> Fingerprint {
+        object_fingerprint(ObjectFingerprintInput {
+            scene_id: 0,
+            layer: 2,
+            frame_start: 120,
+            frame_end: 240,
+            name,
+            alias,
+        })
     }
 
     fn sample_items() -> Vec<EffectItem> {
@@ -325,34 +410,38 @@ mod tests {
             value: ItemValue::Number {
                 value: FiniteF64::try_new(12.5).unwrap(),
             },
-            track: Some(TrackInfo {
-                mode: "直線移動".to_string(),
-                params: vec![FiniteF64::try_new(0.5).unwrap()],
-                accelerate: true,
-                decelerate: false,
-                twopoint: false,
-                timecontrol: false,
-                group_num: 2,
-                group_index: 0,
-                group_name: Some("座標".to_string()),
-            }),
+            track: Some(sample_track("座標")),
         }]
     }
 
-    fn raw_effect_fingerprint(items: &[EffectItem]) -> Fingerprint {
-        effect_fingerprint(
-            &FingerprintAlgorithm::RawV1,
-            "動画ファイル",
-            0,
-            true,
-            false,
+    fn sample_track(group_name: &str) -> TrackInfo {
+        TrackInfo {
+            mode: "直線移動".to_string(),
+            params: vec![FiniteF64::try_new(0.5).unwrap()],
+            accelerate: true,
+            decelerate: false,
+            twopoint: false,
+            timecontrol: false,
+            group_num: 2,
+            group_index: 0,
+            group_name: Some(group_name.to_string()),
+        }
+    }
+
+    /// 既定の effect 属性で effect fingerprint を算出する。
+    fn effect_with(items: &[EffectItem]) -> Fingerprint {
+        effect_fingerprint(EffectFingerprintInput {
+            effect_name: "動画ファイル",
+            effect_index: 0,
+            enabled: true,
+            locked: false,
             items,
-        )
+        })
     }
 
     #[test]
     fn fingerprint_has_canonical_form() {
-        let fingerprint = raw_object_fingerprint(Some("立ち絵"), "alias");
+        let fingerprint = object_at(Some("立ち絵"), "alias");
         let hex = fingerprint.as_str().strip_prefix("sha256:").unwrap();
         assert_eq!(hex.len(), 64);
         assert!(hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
@@ -361,130 +450,126 @@ mod tests {
     #[test]
     fn fingerprint_is_deterministic() {
         assert_eq!(
-            raw_object_fingerprint(Some("立ち絵"), "alias"),
-            raw_object_fingerprint(Some("立ち絵"), "alias")
+            object_at(Some("立ち絵"), "alias"),
+            object_at(Some("立ち絵"), "alias")
         );
-        assert_eq!(
-            raw_effect_fingerprint(&sample_items()),
-            raw_effect_fingerprint(&sample_items())
-        );
+        assert_eq!(effect_with(&sample_items()), effect_with(&sample_items()));
     }
 
     #[test]
     fn object_fingerprint_distinguishes_none_from_empty_name() {
+        assert_ne!(object_at(None, "alias"), object_at(Some(""), "alias"));
+    }
+
+    #[test]
+    fn object_fingerprint_survives_field_name_absorption() {
+        // name の直後に書く alias は、フィールド名が値の先頭と一致し得る。
+        // 長さを前置しなければ次の 2 つはどちらも
+        // "name" "x" "alias" "alias" "y" と並び、同じバイト列になる。
         assert_ne!(
-            raw_object_fingerprint(None, "alias"),
-            raw_object_fingerprint(Some(""), "alias")
+            object_at(Some("x"), "aliasy"),
+            object_at(Some("xalias"), "y")
         );
     }
 
     #[test]
-    fn object_fingerprint_distinguishes_field_boundaries() {
-        // 隣接フィールドの内容を移し替えても、長さ前置により別のダイジェストになる。
+    fn effect_fingerprint_survives_field_name_absorption() {
+        // 1 つ目の項目の track.group_name の直後には 2 つ目の項目の
+        // item_name が続く。長さを前置しなければ次の 2 つはどちらも
+        // "track.group_name" "g" "item_name" "item_name" "n" と並ぶ。
+        let items = |group_name: &str, second_name: &str| {
+            vec![
+                EffectItem {
+                    name: "a".to_string(),
+                    item_type: EffectItemType::Text,
+                    value: ItemValue::Text {
+                        value: "v".to_string(),
+                    },
+                    track: Some(sample_track(group_name)),
+                },
+                EffectItem {
+                    name: second_name.to_string(),
+                    item_type: EffectItemType::Text,
+                    value: ItemValue::Text {
+                        value: "w".to_string(),
+                    },
+                    track: None,
+                },
+            ]
+        };
         assert_ne!(
-            raw_object_fingerprint(Some("ab"), "cd"),
-            raw_object_fingerprint(Some("abc"), "d")
+            effect_with(&items("g", "item_namen")),
+            effect_with(&items("gitem_name", "n"))
         );
     }
 
     #[test]
     fn object_fingerprint_depends_on_every_input() {
-        let base = raw_object_fingerprint(Some("立ち絵"), "alias");
-        assert_ne!(
-            base,
-            object_fingerprint(
-                &FingerprintAlgorithm::NormalizedAliasV1,
-                0,
-                2,
-                120,
-                240,
-                Some("立ち絵"),
-                "alias"
-            )
-        );
+        let base = ObjectFingerprintInput {
+            scene_id: 0,
+            layer: 2,
+            frame_start: 120,
+            frame_end: 240,
+            name: Some("立ち絵"),
+            alias: "alias",
+        };
         for changed in [
-            object_fingerprint(
-                &FingerprintAlgorithm::RawV1,
-                1,
-                2,
-                120,
-                240,
-                Some("立ち絵"),
-                "alias",
-            ),
-            object_fingerprint(
-                &FingerprintAlgorithm::RawV1,
-                0,
-                3,
-                120,
-                240,
-                Some("立ち絵"),
-                "alias",
-            ),
-            object_fingerprint(
-                &FingerprintAlgorithm::RawV1,
-                0,
-                2,
-                121,
-                240,
-                Some("立ち絵"),
-                "alias",
-            ),
-            object_fingerprint(
-                &FingerprintAlgorithm::RawV1,
-                0,
-                2,
-                120,
-                241,
-                Some("立ち絵"),
-                "alias",
-            ),
-            raw_object_fingerprint(Some("座り絵"), "alias"),
-            raw_object_fingerprint(Some("立ち絵"), "alias2"),
+            ObjectFingerprintInput {
+                scene_id: 1,
+                ..base
+            },
+            ObjectFingerprintInput { layer: 3, ..base },
+            ObjectFingerprintInput {
+                frame_start: 121,
+                ..base
+            },
+            ObjectFingerprintInput {
+                frame_end: 241,
+                ..base
+            },
+            ObjectFingerprintInput {
+                name: Some("座り絵"),
+                ..base
+            },
+            ObjectFingerprintInput {
+                alias: "alias2",
+                ..base
+            },
         ] {
-            assert_ne!(base, changed);
+            assert_ne!(object_fingerprint(base), object_fingerprint(changed));
         }
     }
 
     #[test]
     fn effect_fingerprint_depends_on_every_input() {
-        let base = raw_effect_fingerprint(&sample_items());
+        let items = sample_items();
+        let base = EffectFingerprintInput {
+            effect_name: "動画ファイル",
+            effect_index: 0,
+            enabled: true,
+            locked: false,
+            items: &items,
+        };
         for changed in [
-            effect_fingerprint(
-                &FingerprintAlgorithm::RawV1,
-                "別の effect",
-                0,
-                true,
-                false,
-                &sample_items(),
-            ),
-            effect_fingerprint(
-                &FingerprintAlgorithm::RawV1,
-                "動画ファイル",
-                1,
-                true,
-                false,
-                &sample_items(),
-            ),
-            effect_fingerprint(
-                &FingerprintAlgorithm::RawV1,
-                "動画ファイル",
-                0,
-                false,
-                false,
-                &sample_items(),
-            ),
-            effect_fingerprint(
-                &FingerprintAlgorithm::RawV1,
-                "動画ファイル",
-                0,
-                true,
-                true,
-                &sample_items(),
-            ),
-            raw_effect_fingerprint(&[]),
+            EffectFingerprintInput {
+                effect_name: "別の effect",
+                ..base
+            },
+            EffectFingerprintInput {
+                effect_index: 1,
+                ..base
+            },
+            EffectFingerprintInput {
+                enabled: false,
+                ..base
+            },
+            EffectFingerprintInput {
+                locked: true,
+                ..base
+            },
+            EffectFingerprintInput { items: &[], ..base },
         ] {
-            assert_ne!(base, changed);
+            assert_ne!(effect_fingerprint(base), effect_fingerprint(changed));
         }
     }
 
@@ -492,16 +577,13 @@ mod tests {
     fn effect_fingerprint_distinguishes_missing_track() {
         let mut without_track = sample_items();
         without_track[0].track = None;
-        assert_ne!(
-            raw_effect_fingerprint(&sample_items()),
-            raw_effect_fingerprint(&without_track)
-        );
+        assert_ne!(effect_with(&sample_items()), effect_with(&without_track));
     }
 
     #[test]
     fn effect_fingerprint_distinguishes_item_value_variants() {
         let make = |value: ItemValue| {
-            raw_effect_fingerprint(&[EffectItem {
+            effect_with(&[EffectItem {
                 name: "項目".to_string(),
                 item_type: EffectItemType::Text,
                 value,
@@ -526,6 +608,23 @@ mod tests {
                 index: Some(0)
             })
         );
+    }
+
+    #[test]
+    fn effect_fingerprint_treats_signed_zero_as_equal() {
+        // FiniteF64 の等値判定と一致させるため、正負のゼロは同じ扱いにする。
+        let make = |value: f64| {
+            effect_with(&[EffectItem {
+                name: "項目".to_string(),
+                item_type: EffectItemType::Number,
+                value: ItemValue::Number {
+                    value: FiniteF64::try_new(value).unwrap(),
+                },
+                track: None,
+            }])
+        };
+        assert_eq!(make(0.0), make(-0.0));
+        assert_ne!(make(0.0), make(1.0));
     }
 
     #[test]
@@ -554,7 +653,7 @@ mod tests {
 
     #[test]
     fn fingerprint_json_roundtrip() {
-        let fingerprint = raw_object_fingerprint(Some("立ち絵"), "alias");
+        let fingerprint = object_at(Some("立ち絵"), "alias");
         let s = serde_json::to_string(&fingerprint).unwrap();
         assert_eq!(s, format!("\"{fingerprint}\""));
         let restored: Fingerprint = serde_json::from_str(&s).unwrap();
@@ -591,6 +690,31 @@ mod tests {
             serde_json::to_string(&algorithm).unwrap(),
             "\"sha256-future-v9\""
         );
+    }
+
+    #[test]
+    fn fingerprint_algorithm_known_names_never_become_unknown() {
+        // 既知の方式名は Unknown に落ちないため、名前が一致するのに
+        // variant が食い違う値が逆直列化から生まれることはない。
+        for algorithm in [
+            FingerprintAlgorithm::NormalizedAliasV1,
+            FingerprintAlgorithm::RawV1,
+        ] {
+            let restored: FingerprintAlgorithm =
+                serde_json::from_str(&format!("\"{}\"", algorithm.as_str())).unwrap();
+            assert_eq!(restored, algorithm);
+            assert_ne!(
+                restored,
+                FingerprintAlgorithm::Unknown(algorithm.as_str().to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn generated_algorithm_is_raw_v1() {
+        // 生成関数は方式を引数に取らず、常にこの方式で算出する。
+        assert_eq!(FingerprintAlgorithm::GENERATED, FingerprintAlgorithm::RawV1);
+        assert_eq!(FingerprintAlgorithm::GENERATED.as_str(), "sha256-raw-v1");
     }
 
     #[test]

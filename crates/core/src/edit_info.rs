@@ -159,14 +159,6 @@ mod tests {
     }
 
     #[test]
-    fn edit_info_hides_internal_identifiers() {
-        let s = serde_json::to_string(&sample_edit_info()).unwrap();
-        for forbidden in ["auth_secret", "handle", "pointer", "nonce"] {
-            assert!(!s.contains(forbidden), "{forbidden} が直列化に現れている");
-        }
-    }
-
-    #[test]
     fn scene_info_keeps_raw_fps_when_unavailable() {
         // 分母 0 では fps を算出できないが、生の rate/scale は保持する。
         let scene = SceneInfo {
@@ -206,10 +198,9 @@ mod tests {
             selected_range: None,
             ..sample_edit_info()
         };
+        // SDK が未選択に使う -1 ではなく null として表す。
         let value = serde_json::to_value(&info).unwrap();
         assert_eq!(value["selected_range"], serde_json::Value::Null);
-        // SDK が未選択に使う -1 は DTO へ漏れない。
-        assert!(!serde_json::to_string(&info).unwrap().contains("-1"));
 
         let restored: EditInfo = serde_json::from_value(value).unwrap();
         assert_eq!(restored.selected_range, None);

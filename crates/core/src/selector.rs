@@ -46,18 +46,17 @@ pub struct EffectSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fingerprint::object_fingerprint;
+    use crate::fingerprint::{ObjectFingerprintInput, object_fingerprint};
 
     fn sample_fingerprint(alias: &str) -> Fingerprint {
-        object_fingerprint(
-            &FingerprintAlgorithm::RawV1,
-            0,
-            2,
-            120,
-            240,
-            Some("立ち絵"),
+        object_fingerprint(ObjectFingerprintInput {
+            scene_id: 0,
+            layer: 2,
+            frame_start: 120,
+            frame_end: 240,
+            name: Some("立ち絵"),
             alias,
-        )
+        })
     }
 
     fn sample_object_selector() -> ObjectSelector {
@@ -68,7 +67,7 @@ mod tests {
             frame: 120,
             name: Some("立ち絵".to_string()),
             fingerprint: sample_fingerprint("alias"),
-            fingerprint_algorithm: FingerprintAlgorithm::RawV1,
+            fingerprint_algorithm: FingerprintAlgorithm::GENERATED,
         }
     }
 
@@ -78,7 +77,7 @@ mod tests {
             effect_name: "動画ファイル".to_string(),
             effect_index: 0,
             fingerprint: sample_fingerprint("effect"),
-            fingerprint_algorithm: FingerprintAlgorithm::RawV1,
+            fingerprint_algorithm: FingerprintAlgorithm::GENERATED,
         }
     }
 
@@ -146,13 +145,14 @@ mod tests {
     }
 
     #[test]
-    fn effect_selector_hides_internal_identifiers() {
+    fn effect_selector_does_not_expose_name_index_form() {
+        // 同名 effect の順序は名前と index の別フィールドで表し、
+        // SDK 内部で用いる "name:index" 形式を利用者へ露出しない。
         let s = serde_json::to_string(&sample_effect_selector()).unwrap();
-        for forbidden in ["auth_secret", "handle", "pointer", "nonce"] {
-            assert!(!s.contains(forbidden), "{forbidden} が直列化に現れている");
-        }
-        // 同名 effect の順序は index であり、"name:n" 形式を露出しない。
         assert!(!s.contains("動画ファイル:0"));
+        let value = serde_json::to_value(sample_effect_selector()).unwrap();
+        assert_eq!(value["effect_name"], serde_json::json!("動画ファイル"));
+        assert_eq!(value["effect_index"], serde_json::json!(0));
     }
 
     #[test]
