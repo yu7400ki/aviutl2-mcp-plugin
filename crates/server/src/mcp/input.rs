@@ -3,6 +3,9 @@
 //! 未知フィールドを拒否し、文字列長・整数範囲・配列長を schema で制約する。
 //! ページ指定は IPC の params と同じ平坦な形（`offset` / `limit` /
 //! `snapshot_revision`）で受け取る。
+//!
+//! 例外は [`ObjectSelectorInput`] で、応答が返した値をそのまま送り返す双方向の
+//! 値であるため未知フィールドを拒否しない。
 
 use crate::mcp::failure::invalid_argument;
 use aviutl2_mcp_core::{
@@ -181,8 +184,12 @@ pub struct GetObjectInput {
 }
 
 /// オブジェクトを再指定するセレクター。
+///
+/// 応答が返した値をそのまま送り返す双方向の値であり、未知フィールドを拒否しない。
+/// server はこの値を解釈せず接続先へ転送するだけなので、ここで弾いても得るものが
+/// 無い一方、フィールドが増えた応答をそのまま渡すクライアントを入口で
+/// `invalid_argument` にしてしまう。既知フィールドの検証は従来どおり行う。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ObjectSelectorInput {
     /// 応答が返したプロジェクトの epoch。
     #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
@@ -482,13 +489,40 @@ mod tests {
     }
 
     #[test]
-    fn get_object_input_rejects_unknown_selector_field() {
+    fn get_object_input_accepts_unknown_selector_field() {
+        // 応答へフィールドが増えても、返された selector をそのまま渡すクライアントを
+        // 入口で拒否しない。既知フィールドは失われずに接続先へ届く。
         let mut selector = selector_json();
         selector["future"] = serde_json::json!(1);
+        let input: GetObjectInput = serde_json::from_value(serde_json::json!({
+            "instance_id": SAMPLE_ID,
+            "selector": selector,
+        }))
+        .expect("未知フィールドを含む selector を受理する");
+
+        let params = input.to_params().expect("params へ変換できる");
+        assert_eq!(
+            params.selector.project_epoch,
+            "78be92d1-c8c9-44c6-ae52-387548971468"
+        );
+        assert_eq!(params.selector.scene_id, 0);
+        assert_eq!(params.selector.layer, 2);
+        assert_eq!(params.selector.frame, 120);
+        assert_eq!(params.selector.name.as_deref(), Some("立ち絵"));
+        assert_eq!(params.selector.fingerprint.as_str(), SAMPLE_FINGERPRINT);
+        assert_eq!(
+            params.selector.fingerprint_algorithm.as_str(),
+            "sha256-raw-v1"
+        );
+    }
+
+    #[test]
+    fn get_object_input_rejects_unknown_top_level_field() {
         assert!(
             serde_json::from_value::<GetObjectInput>(serde_json::json!({
                 "instance_id": SAMPLE_ID,
-                "selector": selector,
+                "selector": selector_json(),
+                "future": 1,
             }))
             .is_err()
         );
