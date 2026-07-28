@@ -229,6 +229,9 @@ impl PipeClient {
         }
 
         let request_id = request.request_id;
+        // 呼び出し元の相関 ID を持つ span の中で記録し、MCP の tool call と
+        // IPC の要求を後から突き合わせられるようにする。
+        debug!(request_id = ?request_id, "sending request");
         // 直列化の失敗はまだ何も送っていないため、接続の境界には影響しない。
         let request_body = serde_json::to_vec(&request).map_err(|_| PipeClientError::Json)?;
         self.write_frame(&request_body, deadline)

@@ -372,6 +372,17 @@ fn tool_call_over_stdio_reaches_the_instance() {
         "read operation が届いていません: {requests:?}"
     );
 
+    // tool call の相関 ID と IPC の request_id を同じログ行から辿れる。
+    let correlated = session
+        .stderr
+        .lines()
+        .find(|line| line.contains("request_id"))
+        .unwrap_or_else(|| panic!("request_id のログがありません: {}", session.stderr));
+    assert!(
+        correlated.contains("correlation_id"),
+        "request_id が相関 ID と結び付いていません: {correlated}"
+    );
+
     drop(mock);
     let _ = std::fs::remove_dir_all(&registry_dir);
 }
