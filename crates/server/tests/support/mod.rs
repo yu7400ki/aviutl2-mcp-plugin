@@ -14,12 +14,13 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, c_void};
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, HANDLE};
 use windows::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX, ReadFile};
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-    PIPE_TYPE_BYTE,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
 };
 use windows::core::PCWSTR;
 
@@ -50,6 +51,9 @@ pub fn err_result(error: ErrorObject) -> ResponseResult {
     ResponseResult::Err { error }
 }
 
+/// mock server が受け取った要求の記録。
+pub type ReceivedRequests = Arc<Mutex<Vec<RequestEnvelope>>>;
+
 /// mock server がクライアントへ提示する identity と応答。
 pub struct MockBehavior {
     instance_id: InstanceId,
@@ -58,6 +62,7 @@ pub struct MockBehavior {
     process_created_at: String,
     state: InstanceState,
     responses: OperationResponses,
+    received: ReceivedRequests,
 }
 
 pub struct MockPipeServer {
@@ -68,6 +73,7 @@ pub struct MockPipeServer {
     state: InstanceState,
     handle: SendHandle,
     stop_event: EventHandle,
+    received: ReceivedRequests,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -123,6 +129,7 @@ impl MockPipeServer {
         let stop_event = EventHandle::new_manual_reset().unwrap();
         let handle_raw = handle.0 as usize;
         let stop_event_raw = stop_event.handle().0 as usize;
+        let received: ReceivedRequests = Arc::new(Mutex::new(Vec::new()));
         let behavior = MockBehavior {
             instance_id,
             auth_secret: auth_secret.clone(),
@@ -130,6 +137,7 @@ impl MockPipeServer {
             process_created_at: process_created_at.clone(),
             state: state.clone(),
             responses,
+            received: Arc::clone(&received),
         };
 
         let thread = std::thread::spawn(move || {
@@ -148,8 +156,22 @@ impl MockPipeServer {
             state,
             handle: SendHandle(handle),
             stop_event,
+            received,
             thread: Some(thread),
         }
+    }
+
+    /// これまでに受け取った要求を古い順に返す。
+    pub fn received_requests(&self) -> Vec<RequestEnvelope> {
+        self.received
+            .lock()
+            .expect("received のロックは毒化しない")
+            .clone()
+    }
+
+    /// この mock の instance_id。
+    pub fn instance_id(&self) -> InstanceId {
+        self.instance_id
     }
 
     pub fn descriptor(&self, _registry_dir: PathBuf) -> InstanceDescriptor {
@@ -197,11 +219,38 @@ impl Drop for MockPipeServer {
     }
 }
 
+/// 接続を受け付け直しながら要求に応答し続ける。
+///
+/// server は tool call ごとに接続を張り直すため、1 接続で終わらせない。
 pub fn server_loop(handle: HANDLE, behavior: MockBehavior, stop_event: HANDLE) {
-    if !accept_connection(handle, stop_event) {
-        return;
+    loop {
+        if !accept_connection(handle, stop_event) {
+            return;
+        }
+        serve_connection(handle, &behavior, stop_event);
+        // SAFETY: `handle` は MockPipeServer が所有し、スレッドの join 後にのみ閉じられる。
+        unsafe {
+            let _ = DisconnectNamedPipe(handle);
+        }
+        if stop_requested(stop_event) {
+            return;
+        }
     }
+}
 
+/// 停止が要求されているかを待たずに確認する。
+fn stop_requested(stop_event: HANDLE) -> bool {
+    matches!(
+        win_io::wait_any(
+            &[stop_event],
+            Some(Instant::now() + Duration::from_millis(1))
+        ),
+        WaitAnyOutcome::Signaled(0)
+    )
+}
+
+/// 1 接続分の handshake と要求ループを処理する。
+fn serve_connection(handle: HANDLE, behavior: &MockBehavior, stop_event: HANDLE) {
     // M1 受信。
     let m1_body = match read_frame(handle, io_deadline()) {
         Some(body) => body,
@@ -254,7 +303,12 @@ pub fn server_loop(handle: HANDLE, behavior: MockBehavior, stop_event: HANDLE) {
         let Ok(request) = serde_json::from_slice::<RequestEnvelope>(&body) else {
             return;
         };
-        let response = build_response(&request, &behavior, negotiated);
+        behavior
+            .received
+            .lock()
+            .expect("received のロックは毒化しない")
+            .push(request.clone());
+        let response = build_response(&request, behavior, negotiated);
         let response_body = serde_json::to_vec(&response).unwrap();
         if write_frame(handle, &response_body, io_deadline()).is_err() {
             return;

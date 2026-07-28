@@ -1,0 +1,377 @@
+//! stdio 越しの MCP セッションを実プロセスで確認する。
+//!
+//! stdout に MCP メッセージ以外が混じらないこと、resource の list / read が
+//! 往復することを、ログ出力を最大にした状態で検証する。
+
+mod support;
+
+use aviutl2_mcp_core::{
+    AuthSecret, Cursor, DisplayRange, EditInfo, Extent, FiniteF64, FrameRange, InstanceId,
+    InstanceState, SceneInfo,
+};
+use serde_json::{Value, json};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
+use std::process::{Command, Stdio};
+use support::{
+    MOCK_STARTUP_GRACE, MockPipeServer, OperationResponses, current_process_created_at, ok_result,
+    temp_registry_dir,
+};
+
+/// stdio セッションの結果。
+struct Session {
+    stdout: String,
+    stderr: String,
+}
+
+impl Session {
+    /// stdout の各行を JSON-RPC メッセージとして解釈する。
+    ///
+    /// 1 行でも解釈できなければ stdout が汚染されている。
+    fn messages(&self) -> Vec<Value> {
+        self.stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let message: Value = serde_json::from_str(line).unwrap_or_else(|e| {
+                    panic!("stdout に MCP 以外の出力があります: {line:?} ({e})")
+                });
+                assert_eq!(
+                    message["jsonrpc"],
+                    json!("2.0"),
+                    "JSON-RPC ではない出力があります: {line}"
+                );
+                message
+            })
+            .collect()
+    }
+
+    /// 指定 id の応答を取り出す。
+    fn response(&self, id: u64) -> Value {
+        self.messages()
+            .into_iter()
+            .find(|message| message["id"] == json!(id))
+            .unwrap_or_else(|| panic!("id={id} の応答がありません: {}", self.stdout))
+    }
+}
+
+/// registry を指定してサーバーを起こし、要求を 1 件ずつ往復させて結果を得る。
+///
+/// 要求を一度に流し込むとサーバーが並行に処理し、インスタンスへの接続が重なる。
+/// 実際のクライアントと同じく、直前の応答を受け取ってから次を送る。
+fn run_session(registry_dir: &Path, requests: &[Value]) -> Session {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aviutl2-mcp-server"))
+        .env("AVIUTL2_MCP_REGISTRY_DIR", registry_dir)
+        // ログが stdout へ漏れないことを確かめるため、最も冗長な設定で走らせる。
+        .env("RUST_LOG", "trace")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("MCP サーバーを起動できる");
+
+    let mut stdin = child.stdin.take().expect("stdin を得られる");
+    let mut reader = BufReader::new(child.stdout.take().expect("stdout を得られる"));
+    // stderr を読み続けないとログでパイプが詰まる。
+    let mut stderr_pipe = child.stderr.take().expect("stderr を得られる");
+    let stderr_reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr_pipe.read_to_string(&mut text);
+        text
+    });
+
+    let mut stdout = String::new();
+    for request in requests {
+        let line = serde_json::to_string(request).expect("直列化できる");
+        writeln!(stdin, "{line}").expect("要求を書き込める");
+        stdin.flush().expect("要求を送出できる");
+
+        let Some(id) = request.get("id") else {
+            continue;
+        };
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).expect("stdout を読める") == 0 {
+                break;
+            }
+            stdout.push_str(&line);
+            let responded = serde_json::from_str::<Value>(line.trim_end())
+                .is_ok_and(|message| message.get("id") == Some(id));
+            if responded {
+                break;
+            }
+        }
+    }
+
+    // stdin を閉じてサーバーの終了を促す。
+    drop(stdin);
+    reader
+        .read_to_string(&mut stdout)
+        .expect("残りの stdout を読める");
+    child.wait().expect("サーバーの終了を待てる");
+
+    Session {
+        stdout,
+        stderr: stderr_reader.join().expect("stderr の読み取りが完了する"),
+    }
+}
+
+fn initialize_requests() -> Vec<Value> {
+    vec![
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "1" },
+            },
+        }),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    ]
+}
+
+fn sample_edit_info() -> EditInfo {
+    EditInfo {
+        scene: SceneInfo {
+            id: 3,
+            name: Some("Scene 1".to_string()),
+            width: 1920,
+            height: 1080,
+            fps: FiniteF64::try_new(60.0),
+            fps_rate: 60,
+            fps_scale: 1,
+            sample_rate: 48_000,
+        },
+        cursor: Cursor { frame: 5, layer: 2 },
+        extent: Extent {
+            frame_max: 240,
+            layer_max: 4,
+        },
+        display: DisplayRange {
+            frame_start: 0,
+            layer_start: 0,
+            frame_num: 100,
+            layer_num: 10,
+        },
+        selected_range: Some(FrameRange { start: 0, end: 10 }),
+        grid_bpm: vec![FiniteF64::try_new(120.0).expect("有限値")],
+        project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+        project_revision: 42,
+    }
+}
+
+#[test]
+fn stdout_carries_only_mcp_messages() {
+    let registry_dir = temp_registry_dir();
+    std::fs::create_dir_all(&registry_dir).expect("registry を作れる");
+
+    let mut requests = initialize_requests();
+    requests.push(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": { "name": "aviutl2_list_instances", "arguments": {} },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+    let messages = session.messages();
+    assert!(!messages.is_empty(), "応答がありません");
+    assert!(
+        session.stderr.contains("aviutl2-mcp-server started"),
+        "ログが stderr に出ていません: {}",
+        session.stderr
+    );
+
+    let tools = session.response(2);
+    assert!(tools["result"]["tools"].is_array());
+    let call = session.response(3);
+    assert_eq!(call["result"]["isError"], json!(false));
+
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+#[test]
+fn rejected_tool_calls_do_not_pollute_stdout() {
+    let registry_dir = temp_registry_dir();
+    std::fs::create_dir_all(&registry_dir).expect("registry を作れる");
+    let instance_id = InstanceId::new_v4().to_string();
+
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": { "name": "no_such_tool", "arguments": {} },
+    }));
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_list_layers",
+            "arguments": {
+                "instance_id": instance_id,
+                "expected_scene_id": 0,
+                "future": 1,
+            },
+        },
+    }));
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_list_layers",
+            "arguments": {
+                "instance_id": instance_id,
+                "expected_scene_id": 0,
+                "limit": 0,
+            },
+        },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+    // 未知 tool は経路が存在しないため protocol error になる。
+    assert!(
+        session.response(2)["error"].is_object(),
+        "未知の tool は protocol error"
+    );
+
+    let unknown_field = session.response(3);
+    assert_eq!(unknown_field["result"]["isError"], json!(true));
+    let message = unknown_field["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text がある");
+    assert!(
+        message.contains("future"),
+        "未知フィールドの拒否理由: {message}"
+    );
+
+    // schema の範囲は server 側でも検証し、構造化したエラーを返す。
+    let out_of_range = session.response(4);
+    assert_eq!(out_of_range["result"]["isError"], json!(true));
+    assert_eq!(
+        out_of_range["result"]["structuredContent"]["code"],
+        json!("invalid_argument")
+    );
+
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+#[test]
+fn resources_round_trip_over_stdio() {
+    let registry_dir = temp_registry_dir();
+    let edit_info = serde_json::to_value(sample_edit_info()).expect("直列化できる");
+    let mock = MockPipeServer::start_with_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        OperationResponses::from([("get_edit_info".to_string(), ok_result(edit_info.clone()))]),
+    );
+    mock.write_descriptor(&registry_dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let instances_uri = "aviutl2://instances";
+    let edit_info_uri = format!("{instances_uri}/{}/edit-info", mock.instance_id());
+
+    let mut requests = initialize_requests();
+    requests.push(json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }));
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "resources/read",
+        "params": { "uri": instances_uri },
+    }));
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "resources/read",
+        "params": { "uri": edit_info_uri },
+    }));
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "resources/read",
+        "params": { "uri": "aviutl2://instances/unknown/edit-info" },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+
+    let listed = session.response(2);
+    let uris: Vec<String> = listed["result"]["resources"]
+        .as_array()
+        .expect("resources は配列")
+        .iter()
+        .map(|resource| resource["uri"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(uris.contains(&instances_uri.to_string()), "{uris:?}");
+    assert!(uris.contains(&edit_info_uri), "{uris:?}");
+
+    let instances = session.response(3);
+    let text = instances["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("text がある");
+    let decoded: Value = serde_json::from_str(text).expect("JSON として読める");
+    assert_eq!(decoded["total_count"], json!(1));
+
+    let read_edit_info = session.response(4);
+    let text = read_edit_info["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("text がある");
+    let decoded: Value = serde_json::from_str(text).expect("JSON として読める");
+    assert_eq!(decoded, edit_info);
+
+    assert!(
+        session.response(5)["error"].is_object(),
+        "未知の resource URI は拒否される"
+    );
+
+    drop(mock);
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+#[test]
+fn tool_call_over_stdio_reaches_the_instance() {
+    let registry_dir = temp_registry_dir();
+    let edit_info = serde_json::to_value(sample_edit_info()).expect("直列化できる");
+    let mock = MockPipeServer::start_with_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        OperationResponses::from([("get_edit_info".to_string(), ok_result(edit_info.clone()))]),
+    );
+    mock.write_descriptor(&registry_dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_get_edit_info",
+            "arguments": { "instance_id": mock.instance_id().to_string() },
+        },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+    let call = session.response(2);
+    assert_eq!(call["result"]["isError"], json!(false), "{call}");
+    assert_eq!(call["result"]["structuredContent"], edit_info);
+
+    let requests = mock.received_requests();
+    assert!(
+        requests.iter().any(|r| r.operation == "get_edit_info"),
+        "read operation が届いていません: {requests:?}"
+    );
+
+    drop(mock);
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}

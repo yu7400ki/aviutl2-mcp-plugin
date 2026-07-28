@@ -1,0 +1,566 @@
+//! read tool から IPC operation への変換と、失敗時の tool result を確認する。
+
+mod support;
+
+use aviutl2_mcp_core::AuthSecret;
+use aviutl2_mcp_core::{
+    AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags, EffectType,
+    ErrorCode, ErrorObject, Extent, FiniteF64, FrameRange, GetCurrentSceneResult, InstanceId,
+    InstanceState, LayerInfo, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
+    ObjectDetail, ObjectFingerprintInput, ObjectSummary, PageMeta, RequestEnvelope, SceneInfo,
+    SectionRange,
+};
+use aviutl2_mcp_server::mcp::AviUtl2McpServer;
+use aviutl2_mcp_server::mcp::input::{
+    GetObjectInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput, ListLayersInput,
+    ListObjectsInput, ObjectFilterInput, ObjectSelectorInput, PageInput,
+};
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::CallToolResult;
+use serde_json::{Value, json};
+use std::path::PathBuf;
+use support::{
+    MOCK_STARTUP_GRACE, MockPipeServer, OperationResponses, current_process_created_at, err_result,
+    ok_result, temp_registry_dir,
+};
+
+/// 生存する mock インスタンスと、それを見る MCP サーバー。
+struct Harness {
+    server: AviUtl2McpServer,
+    mock: MockPipeServer,
+    registry_dir: PathBuf,
+}
+
+impl Harness {
+    /// 指定の operation 応答を返す mock を起こす。
+    fn start(responses: OperationResponses) -> Self {
+        let registry_dir = temp_registry_dir();
+        let mock = MockPipeServer::start_with_operations(
+            InstanceId::new_v4(),
+            AuthSecret::generate(),
+            std::process::id(),
+            current_process_created_at(),
+            InstanceState::Ready,
+            responses,
+        );
+        mock.write_descriptor(&registry_dir);
+        std::thread::sleep(MOCK_STARTUP_GRACE);
+        Self {
+            server: AviUtl2McpServer::new(registry_dir.clone()),
+            mock,
+            registry_dir,
+        }
+    }
+
+    fn instance_id(&self) -> String {
+        self.mock.instance_id().to_string()
+    }
+
+    /// 生存確認の ping を除いた read 要求。
+    fn read_requests(&self) -> Vec<RequestEnvelope> {
+        self.mock
+            .received_requests()
+            .into_iter()
+            .filter(|request| request.operation != "ping")
+            .collect()
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.registry_dir);
+    }
+}
+
+fn structured(result: &CallToolResult) -> Value {
+    result
+        .structured_content
+        .clone()
+        .expect("structuredContent がある")
+}
+
+fn text_of(result: &CallToolResult) -> String {
+    result
+        .content
+        .first()
+        .and_then(|content| content.as_text())
+        .map(|text| text.text.clone())
+        .expect("text content がある")
+}
+
+fn responses(operation: &str, result: serde_json::Value) -> OperationResponses {
+    OperationResponses::from([(operation.to_string(), ok_result(result))])
+}
+
+fn sample_scene_info() -> SceneInfo {
+    SceneInfo {
+        id: 3,
+        name: Some("Scene 1".to_string()),
+        width: 1920,
+        height: 1080,
+        fps: FiniteF64::try_new(60.0),
+        fps_rate: 60,
+        fps_scale: 1,
+        sample_rate: 48_000,
+    }
+}
+
+fn sample_page_meta() -> PageMeta {
+    PageMeta {
+        total_count: 1,
+        count: 1,
+        offset: 0,
+        has_more: false,
+        next_offset: None,
+        snapshot_revision: 42,
+    }
+}
+
+fn sample_edit_info() -> EditInfo {
+    EditInfo {
+        scene: sample_scene_info(),
+        cursor: Cursor { frame: 5, layer: 2 },
+        extent: Extent {
+            frame_max: 240,
+            layer_max: 4,
+        },
+        display: DisplayRange {
+            frame_start: 0,
+            layer_start: 0,
+            frame_num: 100,
+            layer_num: 10,
+        },
+        selected_range: Some(FrameRange { start: 0, end: 10 }),
+        grid_bpm: vec![FiniteF64::try_new(120.0).expect("有限値")],
+        project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+        project_revision: 42,
+    }
+}
+
+fn sample_object_summary() -> ObjectSummary {
+    ObjectSummary::new(
+        "78be92d1-c8c9-44c6-ae52-387548971468",
+        ObjectFingerprintInput {
+            scene_id: 3,
+            layer: 2,
+            frame_start: 120,
+            frame_end: 240,
+            name: Some("立ち絵"),
+            alias: "alias",
+        },
+    )
+}
+
+fn selector_input() -> ObjectSelectorInput {
+    let selector = sample_object_summary().selector;
+    ObjectSelectorInput {
+        project_epoch: selector.project_epoch,
+        scene_id: selector.scene_id,
+        layer: selector.layer as u32,
+        frame: selector.frame as u32,
+        name: selector.name,
+        fingerprint: selector.fingerprint.as_str().to_string(),
+        fingerprint_algorithm: selector.fingerprint_algorithm.as_str().to_string(),
+    }
+}
+
+fn page_input(offset: u32, limit: u32, snapshot_revision: Option<u64>) -> PageInput {
+    PageInput {
+        offset,
+        limit,
+        snapshot_revision,
+    }
+}
+
+#[tokio::test]
+async fn get_edit_info_tool_sends_get_edit_info_operation() {
+    let expected = serde_json::to_value(sample_edit_info()).expect("直列化できる");
+    let harness = Harness::start(responses("get_edit_info", expected.clone()));
+
+    let result = harness
+        .server
+        .aviutl2_get_edit_info(Parameters(InstanceInput {
+            instance_id: harness.instance_id(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+
+    let requests = harness.read_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].operation, "get_edit_info");
+    assert_eq!(requests[0].params, json!({}));
+    assert_eq!(requests[0].instance_id.to_string(), harness.instance_id());
+    assert!(
+        requests[0].deadline_unix_ms.is_some(),
+        "要求へ期限が設定される"
+    );
+    assert!(text_of(&result).contains("project_revision=42"));
+}
+
+#[tokio::test]
+async fn get_current_scene_tool_sends_get_current_scene_operation() {
+    let expected = serde_json::to_value(GetCurrentSceneResult {
+        scene: sample_scene_info(),
+        project_revision: 7,
+    })
+    .expect("直列化できる");
+    let harness = Harness::start(responses("get_current_scene", expected.clone()));
+
+    let result = harness
+        .server
+        .aviutl2_get_current_scene(Parameters(InstanceInput {
+            instance_id: harness.instance_id(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+    let requests = harness.read_requests();
+    assert_eq!(requests[0].operation, "get_current_scene");
+    assert_eq!(requests[0].params, json!({}));
+}
+
+#[tokio::test]
+async fn list_layers_tool_sends_flat_page_params() {
+    let expected = serde_json::to_value(ListLayersResult {
+        items: vec![LayerInfo {
+            index: 0,
+            name: Some("背景".to_string()),
+            enabled: true,
+            locked: false,
+            object_count: 2,
+        }],
+        page: sample_page_meta(),
+    })
+    .expect("直列化できる");
+    let harness = Harness::start(responses("list_layers", expected.clone()));
+
+    let result = harness
+        .server
+        .aviutl2_list_layers(Parameters(ListLayersInput {
+            instance_id: harness.instance_id(),
+            expected_scene_id: 3,
+            page: page_input(5, 10, Some(42)),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+    let requests = harness.read_requests();
+    assert_eq!(requests[0].operation, "list_layers");
+    assert_eq!(
+        requests[0].params,
+        json!({
+            "expected_scene_id": 3,
+            "offset": 5,
+            "limit": 10,
+            "snapshot_revision": 42,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn list_objects_tool_sends_filter_and_page() {
+    let expected = serde_json::to_value(ListObjectsResult {
+        items: vec![sample_object_summary()],
+        page: sample_page_meta(),
+    })
+    .expect("直列化できる");
+    let harness = Harness::start(responses("list_objects", expected.clone()));
+
+    let result = harness
+        .server
+        .aviutl2_list_objects(Parameters(ListObjectsInput {
+            instance_id: harness.instance_id(),
+            expected_scene_id: 3,
+            filter: Some(ObjectFilterInput {
+                layer_min: Some(1),
+                layer_max: Some(8),
+            }),
+            page: page_input(0, 50, None),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+    let requests = harness.read_requests();
+    assert_eq!(requests[0].operation, "list_objects");
+    assert_eq!(
+        requests[0].params,
+        json!({
+            "expected_scene_id": 3,
+            "filter": { "layer_min": 1, "layer_max": 8 },
+            "offset": 0,
+            "limit": 50,
+            "snapshot_revision": null,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn get_object_tool_sends_selector() {
+    let summary = sample_object_summary();
+    let expected = serde_json::to_value(ObjectDetail {
+        summary: summary.clone(),
+        alias: "[vo]\n_name=立ち絵\n".to_string(),
+        sections: vec![SectionRange {
+            start: 120,
+            end: 240,
+        }],
+        effects: Vec::new(),
+        project_revision: 42,
+    })
+    .expect("直列化できる");
+    let harness = Harness::start(responses("get_object", expected.clone()));
+
+    let result = harness
+        .server
+        .aviutl2_get_object(Parameters(GetObjectInput {
+            instance_id: harness.instance_id(),
+            selector: selector_input(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+    let requests = harness.read_requests();
+    assert_eq!(requests[0].operation, "get_object");
+    assert_eq!(
+        requests[0].params,
+        json!({ "selector": serde_json::to_value(&summary.selector).expect("直列化できる") }),
+    );
+}
+
+#[tokio::test]
+async fn list_available_effects_tool_sends_effect_type() {
+    let expected = serde_json::to_value(ListAvailableEffectsResult {
+        items: vec![AvailableEffect {
+            name: "ぼかし".to_string(),
+            effect_type: EffectType::Filter,
+            flags: EffectFlags::from_raw(9),
+            items: vec![AvailableEffectItem {
+                name: "範囲".to_string(),
+                item_type: aviutl2_mcp_core::EffectItemType::Integer,
+            }],
+        }],
+        page: sample_page_meta(),
+    })
+    .expect("直列化できる");
+    let harness = Harness::start(responses("list_available_effects", expected.clone()));
+
+    let result = harness
+        .server
+        .aviutl2_list_available_effects(Parameters(ListAvailableEffectsInput {
+            instance_id: harness.instance_id(),
+            effect_type: Some(aviutl2_mcp_server::mcp::input::EffectTypeInput::Filter),
+            page: page_input(0, 50, None),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+    let requests = harness.read_requests();
+    assert_eq!(requests[0].operation, "list_available_effects");
+    assert_eq!(
+        requests[0].params,
+        json!({
+            "effect_type": "filter",
+            "offset": 0,
+            "limit": 50,
+            "snapshot_revision": null,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn list_instances_tool_lists_live_mock() {
+    let harness = Harness::start(OperationResponses::new());
+
+    let result = harness
+        .server
+        .aviutl2_list_instances(Parameters(ListInstancesInput {
+            offset: 0,
+            limit: 50,
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    let structured = structured(&result);
+    assert_eq!(structured["total_count"], json!(1));
+    assert_eq!(
+        structured["instances"][0]["instance_id"],
+        json!(harness.instance_id())
+    );
+    assert!(text_of(&result).contains(&harness.instance_id()));
+}
+
+#[tokio::test]
+async fn unknown_instance_id_becomes_instance_not_found() {
+    let harness = Harness::start(OperationResponses::new());
+
+    let result = harness
+        .server
+        .aviutl2_get_edit_info(Parameters(InstanceInput {
+            instance_id: InstanceId::new_v4().to_string(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("instance_not_found"));
+    assert_eq!(structured["retryable"], json!(false));
+    assert!(structured["correlation_id"].is_string());
+    assert!(harness.read_requests().is_empty());
+}
+
+#[tokio::test]
+async fn dead_instance_becomes_instance_stale() {
+    let registry_dir = temp_registry_dir();
+    let mock = MockPipeServer::start(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+    );
+    // 生存しない PID を指す descriptor を書き、生存確認を落とす。
+    let mut descriptor = mock.descriptor(registry_dir.clone());
+    descriptor.pid = 0xFFFF_FFFF;
+    std::fs::create_dir_all(&registry_dir).expect("registry を作れる");
+    std::fs::write(
+        registry_dir.join(format!("{}.json", descriptor.instance_id)),
+        serde_json::to_string(&descriptor).expect("直列化できる"),
+    )
+    .expect("descriptor を書ける");
+
+    let server = AviUtl2McpServer::new(registry_dir.clone());
+    let result = server
+        .aviutl2_get_edit_info(Parameters(InstanceInput {
+            instance_id: descriptor.instance_id.to_string(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("instance_stale"));
+    assert_eq!(structured["retryable"], json!(true));
+
+    drop(mock);
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+#[tokio::test]
+async fn malformed_instance_id_becomes_invalid_argument() {
+    let harness = Harness::start(OperationResponses::new());
+
+    let result = harness
+        .server
+        .aviutl2_get_edit_info(Parameters(InstanceInput {
+            instance_id: "not-a-uuid".to_string(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["code"], json!("invalid_argument"));
+    assert!(
+        harness.mock.received_requests().is_empty(),
+        "検証前に IPC を発生させない"
+    );
+}
+
+#[tokio::test]
+async fn out_of_range_limit_becomes_invalid_argument() {
+    let harness = Harness::start(OperationResponses::new());
+
+    let result = harness
+        .server
+        .aviutl2_list_layers(Parameters(ListLayersInput {
+            instance_id: harness.instance_id(),
+            expected_scene_id: 0,
+            page: page_input(0, 201, None),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["code"], json!("invalid_argument"));
+    assert!(harness.read_requests().is_empty());
+}
+
+#[tokio::test]
+async fn remote_error_is_returned_as_tool_error_with_retry_after() {
+    let error = ErrorObject::new(ErrorCode::HostBusy, "読み取りキューが飽和しています", true)
+        .with_details(json!({ "retry_after_ms": 500 }));
+    let harness = Harness::start(OperationResponses::from([(
+        "get_edit_info".to_string(),
+        err_result(error),
+    )]));
+
+    let result = harness
+        .server
+        .aviutl2_get_edit_info(Parameters(InstanceInput {
+            instance_id: harness.instance_id(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("host_busy"));
+    assert_eq!(structured["retryable"], json!(true));
+    assert_eq!(structured["details"]["retry_after_ms"], json!(500));
+    assert!(structured["correlation_id"].is_string());
+}
+
+#[tokio::test]
+async fn unsupported_operation_from_instance_is_reported() {
+    let harness = Harness::start(OperationResponses::new());
+
+    let result = harness
+        .server
+        .aviutl2_get_object(Parameters(GetObjectInput {
+            instance_id: harness.instance_id(),
+            selector: selector_input(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["code"], json!("unsupported_operation"));
+}
+
+#[tokio::test]
+async fn response_of_wrong_shape_is_rejected() {
+    let harness = Harness::start(responses("get_edit_info", json!({ "unexpected": true })));
+
+    let result = harness
+        .server
+        .aviutl2_get_edit_info(Parameters(InstanceInput {
+            instance_id: harness.instance_id(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["code"], json!("instance_stale"));
+}
+
+#[tokio::test]
+async fn each_tool_call_uses_a_fresh_connection() {
+    let expected = serde_json::to_value(sample_edit_info()).expect("直列化できる");
+    let harness = Harness::start(responses("get_edit_info", expected.clone()));
+
+    for _ in 0..3 {
+        let result = harness
+            .server
+            .aviutl2_get_edit_info(Parameters(InstanceInput {
+                instance_id: harness.instance_id(),
+            }))
+            .await;
+        assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    }
+
+    // 接続ごとに生存確認の ping が 1 回入るため、read 要求と同数になる。
+    let all = harness.mock.received_requests();
+    let pings = all.iter().filter(|r| r.operation == "ping").count();
+    assert_eq!(pings, 3, "tool call ごとに接続を張り直す");
+    assert_eq!(harness.read_requests().len(), 3);
+}
