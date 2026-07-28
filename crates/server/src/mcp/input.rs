@@ -1,11 +1,22 @@
 //! read tool の入力型。
 //!
-//! 未知フィールドを拒否し、文字列長・整数範囲・配列長を schema で制約する。
+//! 未知フィールドを拒否し、文字列長・整数範囲を schema で制約する。
 //! ページ指定は IPC の params と同じ平坦な形（`offset` / `limit` /
 //! `snapshot_revision`）で受け取る。
 //!
 //! 例外は [`ObjectSelectorInput`] で、応答が返した値をそのまま送り返す双方向の
 //! 値であるため未知フィールドを拒否しない。
+//!
+//! schema の制約は宣言であり、要求がそれを満たすかどうかは検証されない。
+//! 宣言した制約は本モジュールで実際に検証し、違反を `invalid_argument` として
+//! 接続前に返す。検証を省くと、過大な入力が接続先へ送られてフレーム長の上限で
+//! 落ち、要求の誤りが再試行可能な転送の失敗として報告されてしまう。
+//!
+//! 対応は次のとおり。
+//! - `limit` の範囲: [`build_page_request`]
+//! - `instance_id` の長さと書式: [`parse_instance_id`]
+//! - `selector` の各文字列長: [`ObjectSelectorInput::validate`]
+//! - `selector.fingerprint` の書式: [`ObjectSelectorInput::to_selector`]
 
 use crate::mcp::failure::invalid_argument;
 use aviutl2_mcp_core::{
@@ -19,6 +30,9 @@ use serde::Deserialize;
 /// `instance_id` が満たすべき UUID の書式。
 const UUID_PATTERN: &str =
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+
+/// [`UUID_PATTERN`] が定める各群の文字数。
+const UUID_GROUP_LENGTHS: [usize; 5] = [8, 4, 4, 4, 12];
 
 /// fingerprint が満たすべき書式。
 const FINGERPRINT_PATTERN: &str = r"^sha256:[0-9a-f]{64}$";
@@ -250,8 +264,47 @@ impl From<EffectTypeInput> for EffectType {
     }
 }
 
+/// 文字列が宣言した文字数の範囲に収まることを確かめる。
+///
+/// 長さは JSON Schema の `minLength` / `maxLength` と同じく文字数で数える。
+/// 違反した値そのものは説明へ含めない。過大な入力をそのまま応答へ写すと、
+/// 入力の誤りを伝える応答自体が過大になる。
+fn ensure_length(field: &str, value: &str, min: u32, max: u32) -> Result<(), ErrorObject> {
+    let length = value.chars().count();
+    if length < min as usize || length > max as usize {
+        return Err(invalid_argument(format!(
+            "{field} は {min} 文字以上 {max} 文字以下である必要があります"
+        )));
+    }
+    Ok(())
+}
+
+/// [`UUID_PATTERN`] に一致するかを判定する。
+///
+/// 群の長さが定まるため、一致すれば全体の長さも 36 文字に定まる。中括弧付きや
+/// URN 形式のような他の UUID 表記はここで弾かれる。
+fn is_canonical_uuid(value: &str) -> bool {
+    let mut groups = value.split('-');
+    for length in UUID_GROUP_LENGTHS {
+        let Some(group) = groups.next() else {
+            return false;
+        };
+        if group.len() != length || !group.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    groups.next().is_none()
+}
+
 /// `instance_id` 文字列を識別子へ変換する。
+///
+/// 書式を先に確かめることで、schema が宣言する長さと書式の双方を検証する。
 pub fn parse_instance_id(value: &str) -> Result<InstanceId, ErrorObject> {
+    if !is_canonical_uuid(value) {
+        return Err(invalid_argument(
+            "instance_id はハイフン区切りの UUID である必要があります",
+        ));
+    }
     serde_json::from_value(serde_json::Value::String(value.to_string()))
         .map_err(|_| invalid_argument("instance_id は UUID である必要があります"))
 }
@@ -314,8 +367,29 @@ impl GetObjectInput {
 }
 
 impl ObjectSelectorInput {
-    /// セレクターへ変換する。fingerprint の書式はここで検証される。
+    /// 各フィールドが schema で宣言した文字数の範囲に収まることを確かめる。
+    fn validate(&self) -> Result<(), ErrorObject> {
+        ensure_length(
+            "selector.project_epoch",
+            &self.project_epoch,
+            1,
+            MAX_EPOCH_CHARS,
+        )?;
+        if let Some(name) = &self.name {
+            ensure_length("selector.name", name, 0, MAX_NAME_CHARS)?;
+        }
+        ensure_length(
+            "selector.fingerprint_algorithm",
+            &self.fingerprint_algorithm,
+            1,
+            MAX_ALGORITHM_CHARS,
+        )?;
+        Ok(())
+    }
+
+    /// セレクターへ変換する。文字数と fingerprint の書式はここで検証される。
     fn to_selector(&self) -> Result<ObjectSelector, ErrorObject> {
+        self.validate()?;
         let value = serde_json::json!({
             "project_epoch": self.project_epoch,
             "scene_id": self.scene_id,
@@ -433,6 +507,89 @@ mod tests {
     fn instance_id_must_be_uuid() {
         assert!(parse_instance_id("not-a-uuid").is_err());
         assert!(parse_instance_id(SAMPLE_ID).is_ok());
+    }
+
+    #[test]
+    fn instance_id_must_match_the_declared_form() {
+        // schema は長さ 36 とハイフン区切りの十六進を宣言している。他の UUID
+        // 表記や過大な入力を受け付けると、宣言と実際の受理範囲が食い違う。
+        for value in [
+            "",
+            &format!("{{{SAMPLE_ID}}}"),
+            &format!("urn:uuid:{SAMPLE_ID}"),
+            &SAMPLE_ID.replace('-', ""),
+            &format!("{SAMPLE_ID} "),
+            &"9".repeat(100_000),
+        ] {
+            let error = parse_instance_id(value).expect_err("宣言外の書式は拒否される");
+            assert_eq!(error.code, ErrorCode::InvalidArgument);
+        }
+        assert_eq!(SAMPLE_ID.chars().count(), 36);
+        assert!(is_canonical_uuid(SAMPLE_ID));
+    }
+
+    #[test]
+    fn selector_strings_are_bounded_before_the_request_is_sent() {
+        // schema が宣言する上限を超える値は接続前に拒否する。接続先へ送ると
+        // フレーム長の上限で落ち、要求の誤りが転送の失敗として報告される。
+        let cases = [
+            ("project_epoch", "x".repeat(MAX_EPOCH_CHARS as usize + 1)),
+            ("name", "あ".repeat(MAX_NAME_CHARS as usize + 1)),
+            (
+                "fingerprint_algorithm",
+                "x".repeat(MAX_ALGORITHM_CHARS as usize + 1),
+            ),
+        ];
+
+        for (field, value) in cases {
+            let mut selector = selector_json();
+            selector[field] = serde_json::json!(value);
+            let input = GetObjectInput {
+                instance_id: SAMPLE_ID.to_string(),
+                selector: serde_json::from_value(selector).expect("入力型としては受理される"),
+            };
+            let error = input
+                .to_params()
+                .err()
+                .unwrap_or_else(|| panic!("{field} の上限超過が受理されました"));
+            assert_eq!(error.code, ErrorCode::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn selector_strings_reject_empty_where_declared() {
+        for field in ["project_epoch", "fingerprint_algorithm"] {
+            let mut selector = selector_json();
+            selector[field] = serde_json::json!("");
+            let input = GetObjectInput {
+                instance_id: SAMPLE_ID.to_string(),
+                selector: serde_json::from_value(selector).expect("入力型としては受理される"),
+            };
+            let error = input
+                .to_params()
+                .expect_err(&format!("{field} の空文字列が受理されました"));
+            assert_eq!(error.code, ErrorCode::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn selector_within_the_declared_bounds_is_accepted() {
+        let mut selector = selector_json();
+        selector["name"] = serde_json::json!("あ".repeat(MAX_NAME_CHARS as usize));
+        selector["project_epoch"] = serde_json::json!("e".repeat(MAX_EPOCH_CHARS as usize));
+        let input = GetObjectInput {
+            instance_id: SAMPLE_ID.to_string(),
+            selector: serde_json::from_value(selector).expect("入力型としては受理される"),
+        };
+        assert!(input.to_params().is_ok(), "上限ちょうどが拒否されました");
+    }
+
+    #[test]
+    fn length_is_counted_in_characters() {
+        assert_eq!(ensure_length("f", "あああ", 1, 3), Ok(()));
+        assert!(ensure_length("f", "あああ", 1, 2).is_err());
+        assert!(ensure_length("f", "", 1, 2).is_err());
+        assert_eq!(ensure_length("f", "", 0, 2), Ok(()));
     }
 
     #[test]
