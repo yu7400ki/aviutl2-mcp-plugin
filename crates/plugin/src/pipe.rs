@@ -5,6 +5,7 @@
 //! pipe は overlapped で作成し、読み書きには必ず期限を与える。
 
 use crate::lifecycle::Lifecycle;
+use crate::project::ProjectState;
 use crate::security::ProtectedSecurityAttributes;
 use crate::session;
 use crate::win_io::{self, EventHandle, IoError, OverlappedOp, WaitOutcome};
@@ -292,9 +293,9 @@ impl PipeServer {
     /// 指定したライフサイクルに紐づく named pipe server を起動する。
     ///
     /// 戻り値は制御ハンドルであり、accept スレッドとは共有しない。スレッドへ
-    /// 渡すのは停止イベントとライフサイクルのみで、スレッドから制御ハンドルを
-    /// 触る経路は存在しない。
-    pub fn start(lifecycle: Arc<Lifecycle>) -> Result<Self> {
+    /// 渡すのは停止イベントとライフサイクル・プロジェクト状態のみで、
+    /// スレッドから制御ハンドルを触る経路は存在しない。
+    pub fn start(lifecycle: Arc<Lifecycle>, project_state: Arc<ProjectState>) -> Result<Self> {
         let stop_signal = Arc::new(StopSignal::new()?);
         // 送信は行わない。スレッド終了時に `tx` が drop され、受信側が
         // `Disconnected` を得ることでスレッド終了を検知する。
@@ -308,7 +309,7 @@ impl PipeServer {
             // その Drop がこのスレッドを join する。ここで同じ write lock を
             // 要求すると確実にデッドロックする。
             let _finished = tx;
-            if let Err(e) = accept_loop(lifecycle, stop_for_thread) {
+            if let Err(e) = accept_loop(lifecycle, project_state, stop_for_thread) {
                 tracing::error!("named pipe server ループが異常終了しました: {e:?}");
             }
         });
@@ -394,7 +395,11 @@ impl Drop for OwnedPipeHandle {
 /// pipe 接続ハンドルの所有権はこのループのみが持つ。`PipeServer::stop` は
 /// 停止イベントを立てるだけでハンドルに触れないため、二重クローズと
 /// クローズ済みハンドルの使用が構造的に発生しない。
-fn accept_loop(lifecycle: Arc<Lifecycle>, stop: Arc<StopSignal>) -> Result<()> {
+fn accept_loop(
+    lifecycle: Arc<Lifecycle>,
+    project_state: Arc<ProjectState>,
+    stop: Arc<StopSignal>,
+) -> Result<()> {
     let pipe_name = pipe_name_for(&lifecycle.instance_id());
     let sa = ProtectedSecurityAttributes::new().context("pipe 用 DACL の作成に失敗しました")?;
     let name_wide = to_wide(&pipe_name);
@@ -438,7 +443,7 @@ fn accept_loop(lifecycle: Arc<Lifecycle>, stop: Arc<StopSignal>) -> Result<()> {
                 if stop.is_signaled() {
                     break;
                 }
-                session::handle_connection(stream, lifecycle.clone());
+                session::handle_connection(stream, lifecycle.clone(), project_state.clone());
             }
             Connection::Stopped => break,
             Connection::Retry { reason } => {
@@ -598,6 +603,11 @@ mod tests {
         .unwrap();
         lifecycle.transition_to(InstanceState::Ready).unwrap();
         (Arc::new(lifecycle), dir)
+    }
+
+    /// テスト用のプロジェクト状態を添えて server を起動する。
+    fn start_server(lifecycle: &Arc<Lifecycle>) -> PipeServer {
+        PipeServer::start(lifecycle.clone(), Arc::new(ProjectState::new())).unwrap()
     }
 
     fn cleanup(dir: std::path::PathBuf) {
@@ -814,7 +824,7 @@ mod tests {
     #[test]
     fn handshake_and_ping() {
         let (lifecycle, dir) = temp_lifecycle();
-        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let server = start_server(&lifecycle);
         let id = lifecycle.instance_id();
         let secret = *lifecycle.auth_secret().as_bytes();
 
@@ -830,7 +840,7 @@ mod tests {
     #[test]
     fn frame_split_across_writes_is_reassembled() {
         let (lifecycle, dir) = temp_lifecycle();
-        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let server = start_server(&lifecycle);
         let id = lifecycle.instance_id();
         let secret = *lifecycle.auth_secret().as_bytes();
 
@@ -857,7 +867,7 @@ mod tests {
     #[test]
     fn frames_batched_in_single_write_are_processed_in_order() {
         let (lifecycle, dir) = temp_lifecycle();
-        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let server = start_server(&lifecycle);
         let id = lifecycle.instance_id();
         let secret = *lifecycle.auth_secret().as_bytes();
 
@@ -897,7 +907,7 @@ mod tests {
     /// 過大なバッファが確保される。長さの検証は本体を読む前に行われる。
     fn assert_invalid_frame_length_disconnects(length: u32) {
         let (lifecycle, dir) = temp_lifecycle();
-        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let server = start_server(&lifecycle);
         let id = lifecycle.instance_id();
         let secret = *lifecycle.auth_secret().as_bytes();
 
@@ -943,7 +953,7 @@ mod tests {
     #[test]
     fn listener_is_reestablished_after_rejected_frame() {
         let (lifecycle, dir) = temp_lifecycle();
-        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let server = start_server(&lifecycle);
         let id = lifecycle.instance_id();
         let secret = *lifecycle.auth_secret().as_bytes();
         let name = pipe_name_for(&id);
@@ -977,7 +987,7 @@ mod tests {
     #[test]
     fn major_mismatch_request_receives_protocol_mismatch_response() {
         let (lifecycle, dir) = temp_lifecycle();
-        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let server = start_server(&lifecycle);
         let id = lifecycle.instance_id();
         let secret = *lifecycle.auth_secret().as_bytes();
 
@@ -1018,7 +1028,7 @@ mod tests {
     #[test]
     fn wrong_client_mac_disconnects_without_response() {
         let (lifecycle, dir) = temp_lifecycle();
-        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let server = start_server(&lifecycle);
         let id = lifecycle.instance_id();
         let secret = *lifecycle.auth_secret().as_bytes();
 
@@ -1054,7 +1064,7 @@ mod tests {
     #[test]
     fn silent_client_does_not_occupy_listener() {
         let (lifecycle, dir) = temp_lifecycle();
-        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let server = start_server(&lifecycle);
         let id = lifecycle.instance_id();
         let secret = *lifecycle.auth_secret().as_bytes();
         let name = pipe_name_for(&id);
@@ -1079,7 +1089,7 @@ mod tests {
     #[test]
     fn stop_returns_promptly_while_client_is_connected() {
         let (lifecycle, dir) = temp_lifecycle();
-        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let server = start_server(&lifecycle);
         let id = lifecycle.instance_id();
 
         // 何も送らないクライアントを接続したまま停止要求を出しても、

@@ -6,6 +6,7 @@
 
 use crate::lifecycle::Lifecycle;
 use crate::pipe::PipeStream;
+use crate::project::ProjectState;
 use anyhow::{Context, Result};
 use aviutl2_mcp_core::{
     ClientAuth, ClientHello, ErrorCode, ErrorObject, InstanceId, Nonce, ProtocolVersion,
@@ -39,7 +40,13 @@ const REQUEST_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 1 接続の処理を panic boundary で包んで実行する。
-pub fn handle_connection(stream: PipeStream, lifecycle: Arc<Lifecycle>) {
+///
+/// プロジェクト状態は全接続で共有される読み取り用の状態として受け取る。
+pub fn handle_connection(
+    stream: PipeStream,
+    lifecycle: Arc<Lifecycle>,
+    _project_state: Arc<ProjectState>,
+) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if let Err(e) = run_connection(&stream, &lifecycle) {
             tracing::warn!("接続処理を終了しました: {e:?}");

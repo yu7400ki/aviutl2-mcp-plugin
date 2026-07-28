@@ -10,6 +10,8 @@ pub mod lifecycle;
 #[cfg(windows)]
 pub mod pipe;
 #[cfg(windows)]
+pub mod project;
+#[cfg(windows)]
 pub mod registry;
 #[cfg(windows)]
 pub mod security;
@@ -84,6 +86,7 @@ fn init_tracing() {
 #[aviutl2::plugin(GenericPlugin)]
 struct AviUtl2McpPlugin {
     lifecycle: Option<Arc<lifecycle::Lifecycle>>,
+    project_state: Option<Arc<project::ProjectState>>,
     pipe_server: Option<pipe::PipeServer>,
 }
 
@@ -93,6 +96,7 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
         init_tracing();
         Ok(Self {
             lifecycle: None,
+            project_state: None,
             pipe_server: None,
         })
     }
@@ -100,6 +104,11 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
     fn register(&mut self, registry: &mut aviutl2::generic::HostAppHandle) {
         init_tracing();
         EDIT_HANDLE.init(registry.create_edit_handle());
+
+        // イベントハンドラは registry への登録直後から呼ばれ得るため、
+        // 失敗し得る初期化より先に用意する。
+        let project_state = Arc::new(project::ProjectState::new());
+        self.project_state = Some(project_state.clone());
 
         let instance_id = aviutl2_mcp_core::InstanceId::new_v4();
         let auth_secret = aviutl2_mcp_core::AuthSecret::generate();
@@ -138,7 +147,7 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
             }
         };
 
-        let pipe_server = match pipe::PipeServer::start(lifecycle.clone()) {
+        let pipe_server = match pipe::PipeServer::start(lifecycle.clone(), project_state) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!("named pipe server の起動に失敗しました: {e:?}");
@@ -170,11 +179,13 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
         if let Some(lifecycle) = &self.lifecycle {
             let _ = lifecycle.transition_to(aviutl2_mcp_core::state::InstanceState::Ready);
         }
-        self.sync_project(project.get_path());
+        // ロードはプロジェクトが切り替わる境界であり、新しい epoch を発行する。
+        self.sync_project(project.get_path(), ProjectBoundary::Renewed);
     }
 
     fn on_project_save(&mut self, project: &mut aviutl2::generic::ProjectFile) {
-        self.sync_project(project.get_path());
+        // 保存は同一プロジェクトに対する操作であり、epoch を維持する。
+        self.sync_project(project.get_path(), ProjectBoundary::Retained);
     }
 
     fn on_clear_cache(&mut self, _edit_section: &aviutl2::generic::EditSection) {
@@ -187,13 +198,31 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
     fn event_change_focus_object(&mut self) {}
 }
 
+/// project handler が表すプロジェクト境界の扱い。
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectBoundary {
+    /// プロジェクトが切り替わった。
+    Renewed,
+    /// 同一プロジェクトが継続している。
+    Retained,
+}
+
 #[cfg(windows)]
 impl AviUtl2McpPlugin {
-    /// project handler が確定したパスを descriptor へ反映する。
+    /// project handler が確定したパスを read 用の状態と descriptor へ反映する。
     ///
-    /// ロード時と保存時で反映する内容は同じであり、確定したパスの有無だけが
-    /// 入力となる。
-    fn sync_project(&self, path: Option<std::path::PathBuf>) {
+    /// ロード時と保存時で異なるのは epoch を再発行するかどうかだけであり、
+    /// descriptor への反映内容は共通である。
+    fn sync_project(&self, path: Option<std::path::PathBuf>, boundary: ProjectBoundary) {
+        if let Some(project_state) = &self.project_state {
+            let path = path.as_ref().map(|path| path.to_string_lossy());
+            match boundary {
+                ProjectBoundary::Renewed => project_state.on_project_load(path.as_deref()),
+                ProjectBoundary::Retained => project_state.on_project_save(path.as_deref()),
+            }
+        }
+
         let Some(lifecycle) = &self.lifecycle else {
             return;
         };
