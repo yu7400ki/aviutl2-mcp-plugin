@@ -368,3 +368,433 @@ fn nullable_number() -> Value {
 fn nullable(inner: Value) -> Value {
     json!({ "anyOf": [inner, { "type": "null" }] })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::ListInstancesResponse;
+    use aviutl2_mcp_core::{
+        AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo,
+        EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem, EffectItemType, EffectType,
+        Extent, FiniteF64, FrameRange, GetCurrentSceneResult, InstanceId, InstanceInfo,
+        InstanceProject, InstanceState, ItemValue, LayerInfo, ListAvailableEffectsResult,
+        ListLayersResult, ListObjectsResult, ObjectDetail, ObjectFingerprintInput, ObjectSummary,
+        PageMeta, SceneInfo, SceneRef, SectionRange, TrackInfo,
+    };
+
+    /// 値が schema に適合するかを再帰的に検査する。
+    ///
+    /// object は property 名の集合が一致することまで求める。DTO にフィールドが
+    /// 増減した場合、schema を直していなければここで検出される。
+    fn check(schema: &Value, value: &Value, path: &str) -> Result<(), String> {
+        if let Some(branches) = schema.get("oneOf").or_else(|| schema.get("anyOf")) {
+            let branches = branches.as_array().ok_or("oneOf / anyOf は配列")?;
+            let mut failures = Vec::new();
+            for branch in branches {
+                match check(branch, value, path) {
+                    Ok(()) => return Ok(()),
+                    Err(e) => failures.push(e),
+                }
+            }
+            return Err(format!("{path}: どの分岐にも適合しません: {failures:?}"));
+        }
+
+        if let Some(expected) = schema.get("const")
+            && expected != value
+        {
+            return Err(format!("{path}: const {expected} と一致しません"));
+        }
+        if let Some(Value::Array(allowed)) = schema.get("enum")
+            && !allowed.contains(value)
+        {
+            return Err(format!("{path}: enum に含まれません: {value}"));
+        }
+
+        let actual = json_type_name(value);
+        match schema.get("type") {
+            Some(Value::String(expected)) if !type_matches(expected, actual) => {
+                return Err(format!("{path}: type {expected} ではなく {actual}"));
+            }
+            Some(Value::Array(expected)) => {
+                let accepted = expected
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|name| type_matches(name, actual));
+                if !accepted {
+                    return Err(format!("{path}: type {expected:?} ではなく {actual}"));
+                }
+            }
+            _ => {}
+        }
+
+        match value {
+            Value::Object(map) => {
+                let Some(Value::Object(properties)) = schema.get("properties") else {
+                    return Ok(());
+                };
+                let declared: std::collections::BTreeSet<&String> = properties.keys().collect();
+                let present: std::collections::BTreeSet<&String> = map.keys().collect();
+                if declared != present {
+                    return Err(format!(
+                        "{path}: property が一致しません schema={declared:?} value={present:?}"
+                    ));
+                }
+                for (key, item) in map {
+                    check(&properties[key], item, &format!("{path}.{key}"))?;
+                }
+                Ok(())
+            }
+            Value::Array(items) => {
+                let Some(item_schema) = schema.get("items") else {
+                    return Ok(());
+                };
+                for (index, item) in items.iter().enumerate() {
+                    check(item_schema, item, &format!("{path}[{index}]"))?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn json_type_name(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Number(n) if n.is_f64() => "number",
+            Value::Number(_) => "integer",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    }
+
+    /// JSON Schema の型名と実際の型が両立するか。整数は number にも適合する。
+    fn type_matches(expected: &str, actual: &str) -> bool {
+        expected == actual || (expected == "number" && actual == "integer")
+    }
+
+    fn assert_conforms(schema: Value, value: &Value) {
+        if let Err(e) = check(&schema, value, "$") {
+            panic!("schema に適合しません: {e}");
+        }
+    }
+
+    fn to_value<T: serde::Serialize>(value: &T) -> Value {
+        serde_json::to_value(value).expect("DTO は直列化できる")
+    }
+
+    fn sample_scene_info() -> SceneInfo {
+        SceneInfo {
+            id: 0,
+            name: Some("Scene 1".to_string()),
+            width: 1920,
+            height: 1080,
+            fps: FiniteF64::try_new(60.0),
+            fps_rate: 60,
+            fps_scale: 1,
+            sample_rate: 48_000,
+        }
+    }
+
+    fn sample_page_meta() -> PageMeta {
+        PageMeta {
+            total_count: 3,
+            count: 1,
+            offset: 0,
+            has_more: true,
+            next_offset: Some(1),
+            snapshot_revision: 42,
+        }
+    }
+
+    fn sample_object_summary() -> ObjectSummary {
+        ObjectSummary::new(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            ObjectFingerprintInput {
+                scene_id: 0,
+                layer: 2,
+                frame_start: 120,
+                frame_end: 240,
+                name: Some("立ち絵"),
+                alias: "alias",
+            },
+        )
+    }
+
+    /// すべての種別を 1 つずつ含む設定項目。
+    fn sample_effect_items() -> Vec<EffectItem> {
+        let values = [
+            ItemValue::Number {
+                value: FiniteF64::try_new(1.5).expect("有限値"),
+            },
+            ItemValue::Integer { value: 3 },
+            ItemValue::Bool { value: true },
+            ItemValue::Color {
+                value: "#ffffff".to_string(),
+            },
+            ItemValue::Choice {
+                value: "標準".to_string(),
+                index: Some(0),
+            },
+            ItemValue::File {
+                path: r"C:\clip.mp4".to_string(),
+            },
+            ItemValue::Folder {
+                path: r"C:\clips".to_string(),
+            },
+            ItemValue::Font {
+                name: "MS Gothic".to_string(),
+            },
+            ItemValue::Text {
+                value: "字幕".to_string(),
+            },
+            ItemValue::Unknown {
+                raw: "raw".to_string(),
+            },
+        ];
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| EffectItem {
+                name: format!("項目{index}"),
+                item_type: if index == 0 {
+                    EffectItemType::Unknown(99)
+                } else {
+                    EffectItemType::Number
+                },
+                value,
+                track: (index == 0).then(|| TrackInfo {
+                    mode: "直線移動".to_string(),
+                    params: vec![FiniteF64::try_new(0.0).expect("有限値")],
+                    accelerate: false,
+                    decelerate: true,
+                    twopoint: false,
+                    timecontrol: false,
+                    group_num: 2,
+                    group_index: 1,
+                    group_name: Some("グループ".to_string()),
+                }),
+            })
+            .collect()
+    }
+
+    fn sample_object_detail() -> ObjectDetail {
+        let summary = sample_object_summary();
+        let items = sample_effect_items();
+        let effect = EffectInfo::new(
+            summary.selector.clone(),
+            EffectFingerprintInput {
+                effect_name: "動画ファイル",
+                effect_index: 0,
+                enabled: true,
+                locked: false,
+                items: &items,
+            },
+        );
+        ObjectDetail {
+            summary,
+            alias: "[vo]\n_name=立ち絵\n".to_string(),
+            sections: vec![SectionRange {
+                start: 120,
+                end: 240,
+            }],
+            effects: vec![effect],
+            project_revision: 42,
+        }
+    }
+
+    fn sample_edit_info() -> EditInfo {
+        EditInfo {
+            scene: sample_scene_info(),
+            cursor: Cursor { frame: 0, layer: 0 },
+            extent: Extent {
+                frame_max: 240,
+                layer_max: 4,
+            },
+            display: DisplayRange {
+                frame_start: 0,
+                layer_start: 0,
+                frame_num: 100,
+                layer_num: 10,
+            },
+            selected_range: Some(FrameRange { start: 0, end: 10 }),
+            grid_bpm: vec![FiniteF64::try_new(120.0).expect("有限値")],
+            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            project_revision: 42,
+        }
+    }
+
+    fn sample_instances_response() -> ListInstancesResponse {
+        ListInstancesResponse {
+            instances: vec![InstanceInfo {
+                instance_id: InstanceId::new_v4(),
+                state: InstanceState::Ready,
+                pid: 1234,
+                started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
+                project: Some(InstanceProject {
+                    display_name: "Test".to_string(),
+                    path: Some(r"C:\test.aup2".to_string()),
+                    epoch: Some("epoch".to_string()),
+                    revision: Some(3),
+                    modified: Some(false),
+                }),
+                scene: Some(SceneRef {
+                    id: 0,
+                    name: Some("Scene 1".to_string()),
+                }),
+            }],
+            total_count: 1,
+            count: 1,
+            offset: 0,
+            has_more: false,
+            next_offset: None,
+        }
+    }
+
+    #[test]
+    fn list_instances_schema_matches_dto() {
+        assert_conforms(list_instances(), &to_value(&sample_instances_response()));
+    }
+
+    #[test]
+    fn list_instances_schema_accepts_absent_project_and_scene() {
+        let mut response = sample_instances_response();
+        response.instances[0].project = None;
+        response.instances[0].scene = None;
+        assert_conforms(list_instances(), &to_value(&response));
+    }
+
+    #[test]
+    fn edit_info_schema_matches_dto() {
+        assert_conforms(edit_info(), &to_value(&sample_edit_info()));
+    }
+
+    #[test]
+    fn edit_info_schema_accepts_absent_selection() {
+        let mut info = sample_edit_info();
+        info.selected_range = None;
+        info.scene.name = None;
+        info.scene.fps = None;
+        assert_conforms(edit_info(), &to_value(&info));
+    }
+
+    #[test]
+    fn current_scene_schema_matches_dto() {
+        let result = GetCurrentSceneResult {
+            scene: sample_scene_info(),
+            project_revision: 42,
+        };
+        assert_conforms(current_scene(), &to_value(&result));
+    }
+
+    #[test]
+    fn list_layers_schema_matches_dto() {
+        let result = ListLayersResult {
+            items: vec![LayerInfo {
+                index: 0,
+                name: Some("背景".to_string()),
+                enabled: true,
+                locked: false,
+                object_count: 2,
+            }],
+            page: sample_page_meta(),
+        };
+        assert_conforms(list_layers(), &to_value(&result));
+    }
+
+    #[test]
+    fn list_objects_schema_matches_dto() {
+        let result = ListObjectsResult {
+            items: vec![sample_object_summary()],
+            page: sample_page_meta(),
+        };
+        assert_conforms(list_objects(), &to_value(&result));
+    }
+
+    #[test]
+    fn object_detail_schema_matches_dto() {
+        assert_conforms(object_detail(), &to_value(&sample_object_detail()));
+    }
+
+    #[test]
+    fn list_available_effects_schema_matches_dto() {
+        let result = ListAvailableEffectsResult {
+            items: vec![
+                AvailableEffect {
+                    name: "ぼかし".to_string(),
+                    effect_type: EffectType::Filter,
+                    flags: EffectFlags::from_raw(9),
+                    items: vec![AvailableEffectItem {
+                        name: "範囲".to_string(),
+                        item_type: EffectItemType::Integer,
+                    }],
+                },
+                AvailableEffect {
+                    name: "未知".to_string(),
+                    effect_type: EffectType::Unknown(42),
+                    flags: EffectFlags::from_raw(0),
+                    items: vec![AvailableEffectItem {
+                        name: "未知項目".to_string(),
+                        item_type: EffectItemType::Unknown(77),
+                    }],
+                },
+            ],
+            page: sample_page_meta(),
+        };
+        assert_conforms(list_available_effects(), &to_value(&result));
+    }
+
+    #[test]
+    fn checker_detects_added_field() {
+        let mut value = to_value(&sample_edit_info());
+        value
+            .as_object_mut()
+            .expect("object")
+            .insert("future".to_string(), json!(1));
+        assert!(
+            check(&edit_info(), &value, "$").is_err(),
+            "増えたフィールドを検出できていません"
+        );
+    }
+
+    #[test]
+    fn checker_detects_removed_field() {
+        let mut value = to_value(&sample_edit_info());
+        value.as_object_mut().expect("object").remove("cursor");
+        assert!(
+            check(&edit_info(), &value, "$").is_err(),
+            "欠けたフィールドを検出できていません"
+        );
+    }
+
+    #[test]
+    fn checker_detects_wrong_type() {
+        let mut value = to_value(&sample_edit_info());
+        value["project_revision"] = json!("42");
+        assert!(
+            check(&edit_info(), &value, "$").is_err(),
+            "型の誤りを検出できていません"
+        );
+    }
+
+    #[test]
+    fn checker_detects_nested_field_drift() {
+        let mut value = to_value(&sample_object_detail());
+        value["summary"]["selector"]
+            .as_object_mut()
+            .expect("object")
+            .remove("fingerprint");
+        assert!(
+            check(&object_detail(), &value, "$").is_err(),
+            "入れ子のフィールド差分を検出できていません"
+        );
+    }
+
+    #[test]
+    fn as_tool_schema_keeps_properties() {
+        let schema = as_tool_schema(list_layers());
+        assert_eq!(schema["type"], json!("object"));
+        assert!(schema["properties"]["items"].is_object());
+    }
+}

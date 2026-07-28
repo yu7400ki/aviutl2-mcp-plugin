@@ -675,3 +675,270 @@ fn to_mcp_error(error: &ErrorObject) -> McpError {
         _ => McpError::internal_error(message, None),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::summary::MAX_TEXT_CHARS;
+    use rmcp::model::Tool;
+
+    /// 現在登録されている全 tool の一覧。読み取り専用の read tool のみで構成される。
+    const READ_TOOLS: &[&str] = &[
+        "aviutl2_list_instances",
+        "aviutl2_get_edit_info",
+        "aviutl2_get_current_scene",
+        "aviutl2_list_layers",
+        "aviutl2_list_objects",
+        "aviutl2_get_object",
+        "aviutl2_list_available_effects",
+    ];
+
+    fn server() -> AviUtl2McpServer {
+        AviUtl2McpServer::new(PathBuf::from(r"C:\nonexistent-registry"))
+    }
+
+    fn tools() -> Vec<Tool> {
+        server().tools()
+    }
+
+    #[test]
+    fn read_tools_are_registered() {
+        let names: std::collections::BTreeSet<String> =
+            tools().iter().map(|tool| tool.name.to_string()).collect();
+        let expected: std::collections::BTreeSet<String> =
+            READ_TOOLS.iter().map(|name| name.to_string()).collect();
+        assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn read_tools_are_annotated_as_read_only() {
+        for tool in tools() {
+            let annotations = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} に annotation がありません", tool.name));
+            assert_eq!(annotations.read_only_hint, Some(true), "{}", tool.name);
+            assert_eq!(annotations.destructive_hint, Some(false), "{}", tool.name);
+            assert_eq!(annotations.idempotent_hint, Some(true), "{}", tool.name);
+            assert_eq!(annotations.open_world_hint, Some(false), "{}", tool.name);
+        }
+    }
+
+    #[test]
+    fn read_tools_declare_output_schema() {
+        for tool in tools() {
+            let schema = tool
+                .output_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} に outputSchema がありません", tool.name));
+            assert_eq!(schema["type"], serde_json::json!("object"), "{}", tool.name);
+            assert!(schema.contains_key("properties"), "{}", tool.name);
+        }
+    }
+
+    #[test]
+    fn read_tool_descriptions_state_zero_based_numbering() {
+        for tool in tools() {
+            let description = tool
+                .description
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} に説明がありません", tool.name));
+            assert!(
+                description.contains("0 始まり"),
+                "{} の説明に 0 始まりの明記がありません",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn input_schemas_reject_unknown_fields() {
+        for tool in tools() {
+            assert_eq!(
+                tool.input_schema.get("additionalProperties"),
+                Some(&serde_json::json!(false)),
+                "{} の入力 schema が未知フィールドを許しています",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn instance_id_is_required_except_for_list_instances() {
+        for tool in tools() {
+            let required = tool
+                .input_schema
+                .get("required")
+                .and_then(|v| v.as_array())
+                .map(|items| items.contains(&serde_json::json!("instance_id")))
+                .unwrap_or(false);
+            if tool.name == "aviutl2_list_instances" {
+                assert!(!required, "一覧取得は instance_id を要求しない");
+            } else {
+                assert!(required, "{} は instance_id を必須にする", tool.name);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn panicking_tool_body_becomes_internal_error() {
+        let result = server().run("test_tool", || panic!("意図的な panic")).await;
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structuredContent がある");
+        assert_eq!(structured["code"], serde_json::json!("internal_error"));
+        assert!(structured["correlation_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn failed_tool_call_carries_correlation_id() {
+        let result = server()
+            .run("test_tool", || {
+                Err(failure::invalid_argument("limit が範囲外です"))
+            })
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structuredContent がある");
+        assert_eq!(structured["code"], serde_json::json!("invalid_argument"));
+        assert_eq!(structured["retryable"], serde_json::json!(false));
+        assert!(
+            structured["correlation_id"]
+                .as_str()
+                .is_some_and(|id| id.len() == 36),
+            "correlation_id が UUID ではありません: {structured}"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_tool_call_returns_text_and_structured_content() {
+        let result = server()
+            .run("test_tool", || {
+                Ok(ToolSuccess {
+                    text: "ok".to_string(),
+                    structured: serde_json::json!({ "value": 1 }),
+                })
+            })
+            .await;
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({ "value": 1 }))
+        );
+        assert_eq!(
+            result
+                .content
+                .first()
+                .and_then(|c| c.as_text())
+                .map(|t| t.text.clone()),
+            Some("ok".to_string())
+        );
+    }
+
+    #[test]
+    fn error_result_text_stays_within_limit() {
+        let error = failure::with_correlation_id(
+            failure::internal_error("え".repeat(100_000)),
+            "0190abcd-1234-7def-89ab-0123456789ab",
+        );
+        let result = error_result(&error);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("text content がある");
+        assert!(
+            text.chars().count() <= MAX_TEXT_CHARS,
+            "上限を超えています: {}",
+            text.chars().count()
+        );
+    }
+
+    #[test]
+    fn error_result_excludes_secrets_and_handles() {
+        let remote = aviutl2_mcp_core::ErrorObject::new(ErrorCode::SdkError, "失敗", false)
+            .with_details(serde_json::json!({
+                "auth_secret": "s3cret",
+                "server_nonce": "n0nce",
+                "object_handle": 1234,
+                "raw_pointer": "0xdeadbeef",
+                "pipe_name": r"\\.\pipe\aviutl2-mcp",
+                "current_project_revision": 7,
+            }));
+        let error = failure::with_correlation_id(
+            failure::from_pipe_error(&crate::pipe_client::PipeClientError::Remote(Box::new(
+                remote,
+            ))),
+            "correlation",
+        );
+        let result = error_result(&error);
+        let serialized = serde_json::to_string(&result).expect("直列化できる");
+        for forbidden in ["s3cret", "n0nce", "0xdeadbeef", "pipe"] {
+            assert!(
+                !serialized.contains(forbidden),
+                "{forbidden} が応答に含まれています: {serialized}"
+            );
+        }
+        let structured = result.structured_content.expect("structuredContent がある");
+        assert_eq!(structured["code"], serde_json::json!("sdk_error"));
+        assert_eq!(
+            structured["details"]["current_project_revision"],
+            serde_json::json!(7)
+        );
+        assert_eq!(
+            structured["correlation_id"],
+            serde_json::json!("correlation")
+        );
+    }
+
+    #[test]
+    fn resource_uri_for_instances_is_recognized() {
+        assert_eq!(
+            parse_resource_uri(INSTANCES_RESOURCE_URI),
+            Some(ResourceTarget::Instances)
+        );
+    }
+
+    #[test]
+    fn edit_info_resource_uri_round_trips() {
+        let id = InstanceId::new_v4();
+        let uri = edit_info_resource_uri(&id);
+        assert_eq!(parse_resource_uri(&uri), Some(ResourceTarget::EditInfo(id)));
+    }
+
+    #[test]
+    fn unknown_resource_uri_is_rejected() {
+        for uri in [
+            "aviutl2://artifacts/1",
+            "aviutl2://instances/not-a-uuid/edit-info",
+            "aviutl2://instances//edit-info",
+            "file:///etc/passwd",
+            "aviutl2://instances/8df98c04-e7c2-4f98-b3ce-fc1c39d76414",
+        ] {
+            assert_eq!(parse_resource_uri(uri), None, "{uri} を受理しています");
+        }
+    }
+
+    #[test]
+    fn anonymized_instance_id_keeps_only_a_prefix() {
+        let id = InstanceId::new_v4();
+        let anonymized = anonymized_instance_id(&id);
+        assert!(anonymized.chars().count() <= ANONYMIZED_ID_CHARS);
+        assert!(!anonymized.contains(&id.to_string()));
+    }
+
+    #[test]
+    fn correlation_ids_are_unique_uuids() {
+        let first = new_correlation_id();
+        let second = new_correlation_id();
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 36);
+    }
+
+    #[test]
+    fn instance_not_found_becomes_resource_not_found() {
+        let error =
+            failure::from_resolve_error(&crate::discovery::ResolveInstanceError::NotRegistered);
+        let mcp_error = to_mcp_error(&error);
+        assert_eq!(mcp_error.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
+    }
+}
