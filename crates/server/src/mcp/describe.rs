@@ -227,11 +227,15 @@ fn optional_name(name: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::summary::MAX_TEXT_CHARS;
+    use crate::mcp::summary::{MAX_TEXT_CHARS, TRUNCATION_NOTICE};
     use aviutl2_mcp_core::{
-        AvailableEffect, EffectFlags, EffectType, InstanceId, InstanceState, LayerInfo,
-        ObjectFingerprintInput, ObjectSummary,
+        AvailableEffect, EffectFingerprintInput, EffectFlags, EffectInfo, EffectType, InstanceId,
+        InstanceProject, InstanceState, LayerInfo, ObjectFingerprintInput, ObjectSummary,
+        SectionRange,
     };
+
+    /// 上限を必ず超える件数。要求上限を無視した応答でも打ち切られることを確かめる。
+    const OVERSIZED_COUNT: usize = 2_000;
 
     fn page(total: u32, count: u32) -> PageMeta {
         PageMeta {
@@ -246,6 +250,19 @@ mod tests {
 
     fn long_name() -> String {
         "名".repeat(5_000)
+    }
+
+    /// 上限を超えず、超過分が打ち切られたことを示していること。
+    fn assert_truncated_within_limit(text: &str) {
+        assert!(
+            text.chars().count() <= MAX_TEXT_CHARS,
+            "上限を超えています: {}",
+            text.chars().count()
+        );
+        assert!(
+            text.ends_with(TRUNCATION_NOTICE),
+            "打ち切りが示されていません"
+        );
     }
 
     #[test]
@@ -272,8 +289,37 @@ mod tests {
     }
 
     #[test]
-    fn layers_text_is_bounded_for_long_names() {
-        let items: Vec<LayerInfo> = (0..200)
+    fn instances_text_is_bounded_for_oversized_results() {
+        let listed: Vec<InstanceInfo> = (0..OVERSIZED_COUNT)
+            .map(|_| InstanceInfo {
+                instance_id: InstanceId::new_v4(),
+                state: InstanceState::Ready,
+                pid: 1234,
+                started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
+                project: Some(InstanceProject {
+                    display_name: long_name(),
+                    path: None,
+                    epoch: None,
+                    revision: None,
+                    modified: None,
+                }),
+                scene: None,
+            })
+            .collect();
+        let response = ListInstancesResponse {
+            total_count: listed.len() as u32,
+            count: listed.len() as u32,
+            instances: listed,
+            offset: 0,
+            has_more: false,
+            next_offset: None,
+        };
+        assert_truncated_within_limit(&instances(&response));
+    }
+
+    #[test]
+    fn layers_text_is_bounded_for_oversized_results() {
+        let items: Vec<LayerInfo> = (0..OVERSIZED_COUNT)
             .map(|index| LayerInfo {
                 index,
                 name: Some(long_name()),
@@ -284,19 +330,14 @@ mod tests {
             .collect();
         let result = ListLayersResult {
             items,
-            page: page(1_000, 200),
+            page: page(10_000, OVERSIZED_COUNT as u32),
         };
-        let text = layers(&result);
-        assert!(
-            text.chars().count() <= MAX_TEXT_CHARS,
-            "上限を超えています: {}",
-            text.chars().count()
-        );
+        assert_truncated_within_limit(&layers(&result));
     }
 
     #[test]
-    fn objects_text_is_bounded_for_long_names() {
-        let items: Vec<ObjectSummary> = (0..200)
+    fn objects_text_is_bounded_for_oversized_results() {
+        let items: Vec<ObjectSummary> = (0..OVERSIZED_COUNT)
             .map(|i| {
                 ObjectSummary::new(
                     "78be92d1-c8c9-44c6-ae52-387548971468",
@@ -313,19 +354,14 @@ mod tests {
             .collect();
         let result = ListObjectsResult {
             items,
-            page: page(10_000, 200),
+            page: page(100_000, OVERSIZED_COUNT as u32),
         };
-        let text = objects(&result);
-        assert!(
-            text.chars().count() <= MAX_TEXT_CHARS,
-            "上限を超えています: {}",
-            text.chars().count()
-        );
+        assert_truncated_within_limit(&objects(&result));
     }
 
     #[test]
-    fn available_effects_text_is_bounded_for_long_names() {
-        let items: Vec<AvailableEffect> = (0..200)
+    fn available_effects_text_is_bounded_for_oversized_results() {
+        let items: Vec<AvailableEffect> = (0..OVERSIZED_COUNT)
             .map(|_| AvailableEffect {
                 name: long_name(),
                 effect_type: EffectType::Filter,
@@ -335,14 +371,63 @@ mod tests {
             .collect();
         let result = ListAvailableEffectsResult {
             items,
-            page: page(200, 200),
+            page: page(10_000, OVERSIZED_COUNT as u32),
         };
-        let text = available_effects(&result);
-        assert!(
-            text.chars().count() <= MAX_TEXT_CHARS,
-            "上限を超えています: {}",
-            text.chars().count()
+        assert_truncated_within_limit(&available_effects(&result));
+    }
+
+    #[test]
+    fn object_detail_text_is_bounded_for_oversized_results() {
+        let summary = ObjectSummary::new(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            ObjectFingerprintInput {
+                scene_id: 0,
+                layer: 2,
+                frame_start: 0,
+                frame_end: 10,
+                name: Some(&long_name()),
+                alias: "alias",
+            },
         );
+        let effects: Vec<EffectInfo> = (0..OVERSIZED_COUNT)
+            .map(|index| {
+                EffectInfo::new(
+                    summary.selector.clone(),
+                    EffectFingerprintInput {
+                        effect_name: &long_name(),
+                        effect_index: index,
+                        enabled: true,
+                        locked: false,
+                        items: &[],
+                    },
+                )
+            })
+            .collect();
+        let detail = ObjectDetail {
+            summary,
+            alias: long_name(),
+            sections: vec![SectionRange { start: 0, end: 10 }],
+            effects,
+            project_revision: 42,
+        };
+        assert_truncated_within_limit(&object_detail(&detail));
+    }
+
+    #[test]
+    fn short_results_are_not_truncated() {
+        let result = ListLayersResult {
+            items: vec![LayerInfo {
+                index: 0,
+                name: Some("背景".to_string()),
+                enabled: true,
+                locked: false,
+                object_count: 2,
+            }],
+            page: page(1, 1),
+        };
+        let text = layers(&result);
+        assert!(!text.contains(TRUNCATION_NOTICE));
+        assert!(text.contains("layer=0"));
     }
 
     #[test]

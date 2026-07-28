@@ -13,7 +13,7 @@ pub const MAX_TEXT_CHARS: usize = 25_000;
 const MAX_LINE_CHARS: usize = 200;
 
 /// 打ち切りを示す末尾表記。
-const TRUNCATION_NOTICE: &str = "…（text content の上限に達したため以降を省略しました。全件は structuredContent を参照してください）";
+pub const TRUNCATION_NOTICE: &str = "…（text content の上限に達したため以降を省略しました。全件は structuredContent を参照してください）";
 
 /// 切り詰めた行の末尾に付ける表記。
 const ELLIPSIS: char = '…';
