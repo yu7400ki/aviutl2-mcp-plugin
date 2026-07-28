@@ -62,6 +62,13 @@ pub trait ReadAdapter: Send + Sync {
     fn get_object(&self, selector: &ObjectSelector) -> Result<ObjectDetail, ReadError>;
 
     /// 登録済み effect を全件列挙する。
+    ///
+    /// 結果は登録済みプラグインの集合であり、プロジェクトの編集内容から独立して
+    /// いる。返す `snapshot_revision` は列挙時点のプロジェクト revision だが、
+    /// 一覧の内容はこの値に連動しない。revision の一致をページ間の一貫性検証に
+    /// 用いると、無関係な編集で revision が進んだだけで後続ページが拒否される
+    /// 一方、カタログ自体の変化は検出できない。この operation は revision による
+    /// 一貫性検証の対象にしない。
     fn list_available_effects(
         &self,
         effect_type: Option<&EffectType>,
