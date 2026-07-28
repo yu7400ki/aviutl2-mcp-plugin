@@ -40,6 +40,15 @@ pub enum DiscoveryError {
     RegistryUnreadable(#[source] std::io::Error),
 }
 
+impl DiscoveryError {
+    /// 原因となった I/O エラーの種別を返す。
+    pub fn io_error_kind(&self) -> std::io::ErrorKind {
+        match self {
+            DiscoveryError::RegistryUnreadable(e) => e.kind(),
+        }
+    }
+}
+
 /// 除外理由。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExclusionReason {
@@ -64,7 +73,7 @@ pub enum ExclusionReason {
 /// 除外は「一覧に出さない」だけの可逆な措置であるのに対し、削除は不可逆であり、
 /// 他プロセスが所有するファイルを消す。両者を型で分離し、既定を除外側に置く。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CleanupEligibility {
+pub(crate) enum CleanupEligibility {
     /// 一覧から除外するのみで、descriptor ファイルは残す。
     ExcludeOnly,
     /// descriptor が指すインスタンスの不在を示せるため、再検証のうえ削除してよい。
@@ -89,7 +98,7 @@ impl ExclusionReason {
     ///
     /// 削除を許すのは「descriptor が指すインスタンスがもう存在しない」ことを
     /// 積極的に示せる理由に限る。判断できない理由は除外にとどめる。
-    pub fn cleanup_eligibility(&self) -> CleanupEligibility {
+    pub(crate) fn cleanup_eligibility(&self) -> CleanupEligibility {
         match self {
             // descriptor を解釈できていないため PID すら取り出せず、対応する
             // インスタンスの不在を示せない。将来 schema の descriptor（稼働中の
@@ -99,11 +108,9 @@ impl ExclusionReason {
             ExclusionReason::ProtocolMismatch => CleanupEligibility::ExcludeOnly,
             // panic により何も判定できていない。
             ExclusionReason::InternalError => CleanupEligibility::ExcludeOnly,
-            // descriptor の PID にプロセスが無いか、PID が再利用されており
-            // descriptor のインスタンスではないことを確認済み。
+            // descriptor は解釈できているため、削除直前の再検証でプロセスの
+            // 不在を確定できる。稼働中や判定不能であればそこで削除を取りやめる。
             ExclusionReason::ProcessIdentityMismatch => CleanupEligibility::RemovalAllowed,
-            // descriptor は解釈できており、削除直前の再検証でプロセス生存を
-            // 確認できる。稼働中であればそこで削除を取りやめる。
             ExclusionReason::PipeUnreachable
             | ExclusionReason::AuthenticationFailed
             | ExclusionReason::PingFailed => CleanupEligibility::RemovalAllowed,
@@ -265,7 +272,8 @@ fn discover_candidate(path: &Path, config: DiscoveryConfig) -> DiscoveryResult {
 
 /// descriptor ファイルを検証する。
 ///
-/// JSON は strict 規則（不正 UTF-8・重複 key・非有限数を拒否）で解釈する。
+/// JSON は不正 UTF-8・重複 key・非有限数を拒否する strict 規則で解釈する。
+/// IPC の両端が同一の拒否規則を共有し、片側の検証漏れが他方の防御で塞がれるようにする。
 fn validate_descriptor_file(path: &Path) -> Result<InstanceDescriptor, ExclusionReason> {
     let content = std::fs::read(path).map_err(|_| ExclusionReason::InvalidDescriptor)?;
     let descriptor: InstanceDescriptor =
@@ -761,6 +769,29 @@ mod tests {
         assert!(
             path.exists(),
             "MAJOR 不一致は別版で稼働中のインスタンスであり得るため削除しない"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_but_unreachable_instance_is_excluded_without_removal() {
+        let dir = temp_registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = InstanceId::new_v4();
+        // 自 PID を指す descriptor。pipe は待ち受けていないため接続に失敗する。
+        let descriptor = sample_descriptor(id);
+        let path = dir.join(format!("{}.json", id));
+        std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
+
+        let instances = try_find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
+        assert!(
+            instances.is_empty(),
+            "pipe に接続できない候補は一覧に含まれない"
+        );
+        assert!(
+            path.exists(),
+            "プロセスが稼働中である限り descriptor は削除されない"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

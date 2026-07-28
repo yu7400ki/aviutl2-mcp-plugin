@@ -54,8 +54,9 @@ pub enum ListInstancesError {
     /// registry ディレクトリ自体を読み取れなかった。
     ///
     /// インスタンスが 0 件である場合と区別するため、正常な空結果にはしない。
-    #[error("インスタンス登録情報を読み取れませんでした")]
-    RegistryUnreadable,
+    /// 原因種別のみを保持し、パスなどの詳細は応答へ載せない。
+    #[error("インスタンス登録情報を読み取れませんでした: {0:?}")]
+    RegistryUnreadable(std::io::ErrorKind),
 }
 
 impl ListInstancesError {
@@ -64,7 +65,7 @@ impl ListInstancesError {
         match self {
             ListInstancesError::InvalidArgument => ErrorCode::InvalidArgument,
             // 呼び出し側の入力に起因しない、server 環境側の想定外失敗。
-            ListInstancesError::RegistryUnreadable => ErrorCode::InternalError,
+            ListInstancesError::RegistryUnreadable(_) => ErrorCode::InternalError,
         }
     }
 }
@@ -82,7 +83,7 @@ pub fn aviutl2_list_instances(
     }
 
     let all = try_find_instances(registry_dir, DiscoveryConfig::default(), true)
-        .map_err(|_| ListInstancesError::RegistryUnreadable)?;
+        .map_err(|e| ListInstancesError::RegistryUnreadable(e.io_error_kind()))?;
     let total_count = all.len() as u32;
     let offset = request.offset as usize;
     let limit = request.limit as usize;
@@ -227,7 +228,15 @@ mod tests {
             },
         )
         .expect_err("読み取り失敗は 0 件と区別してエラーにする");
-        assert_eq!(error, ListInstancesError::RegistryUnreadable);
+        assert!(
+            matches!(error, ListInstancesError::RegistryUnreadable(_)),
+            "実際のエラー: {error:?}"
+        );
+        assert_ne!(
+            error,
+            ListInstancesError::RegistryUnreadable(std::io::ErrorKind::NotFound),
+            "ディレクトリ不在は 0 件として扱われるため、この経路には現れない"
+        );
         assert_eq!(error.error_code(), ErrorCode::InternalError);
 
         let _ = std::fs::remove_file(&path);
