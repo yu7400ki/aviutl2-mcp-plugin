@@ -170,7 +170,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
             let mut items = Vec::with_capacity(layer_max.saturating_add(1));
             for index in 0..=layer_max {
                 let layer = scene.layer(index)?;
-                let object_count = scene.objects_in_layer(index)?.len();
+                let object_count = scene.object_count(index)?;
                 items.push(LayerInfo {
                     index,
                     name: layer.name,
@@ -581,7 +581,18 @@ mod tests {
             })
         }
 
+        fn object_count(&self, layer: usize) -> Result<usize, ReadError> {
+            self.host.record("object_count");
+            Ok(self
+                .host
+                .layers
+                .get(layer)
+                .map(|fake| fake.objects.len())
+                .unwrap_or_default())
+        }
+
         fn objects_in_layer(&self, layer: usize) -> Result<Vec<HostObject>, ReadError> {
+            self.host.record("objects_in_layer");
             assert_ne!(
                 self.host.panic_at,
                 Some(PanicPoint::ObjectsInLayer),
@@ -1038,6 +1049,21 @@ mod tests {
         assert_eq!(snapshot.items[1].object_count, 2);
         assert!(!snapshot.items[2].enabled);
         assert_eq!(snapshot.items[2].object_count, 0);
+    }
+
+    #[test]
+    fn list_layers_counts_objects_without_reading_them() {
+        // 件数のために名前と alias まで読むと、参照ロックを保持する時間が
+        // オブジェクト数に比例して伸びる。
+        let adapter = adapter();
+        adapter.list_layers(0).unwrap();
+
+        let calls = adapter.host.calls();
+        assert!(calls.contains(&"object_count"), "{calls:?}");
+        assert!(
+            !calls.contains(&"objects_in_layer"),
+            "件数のためにオブジェクトを列挙しています: {calls:?}"
+        );
     }
 
     #[test]

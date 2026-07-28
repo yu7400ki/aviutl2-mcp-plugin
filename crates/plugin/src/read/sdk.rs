@@ -149,6 +149,22 @@ impl SceneReader for SdkSceneReader<'_> {
         })
     }
 
+    fn object_count(&self, layer: usize) -> Result<usize, ReadError> {
+        // 件数しか要らないため、名前と alias は読まない。参照ロックを保持した
+        // まま不要な文字列を写すのを避ける。
+        let positions = scan_layer(|frame| {
+            let Some(handle) = self.find_object_from(layer, frame)? else {
+                return Ok(None);
+            };
+            let position = self
+                .section
+                .get_object_layer_frame(handle)
+                .map_err(|_| sdk("get_object_layer_frame"))?;
+            Ok(Some((position.end, ())))
+        })?;
+        Ok(positions.len())
+    }
+
     fn objects_in_layer(&self, layer: usize) -> Result<Vec<HostObject>, ReadError> {
         scan_layer(|frame| {
             let Some(handle) = self.find_object_from(layer, frame)? else {

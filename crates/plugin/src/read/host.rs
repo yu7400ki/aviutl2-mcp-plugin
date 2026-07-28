@@ -147,7 +147,15 @@ pub trait SceneReader {
     /// レイヤーの属性。
     fn layer(&self, layer: usize) -> Result<HostLayer, ReadError>;
 
+    /// レイヤー内のオブジェクト数。
+    ///
+    /// 件数だけを必要とする経路が名前や alias を読まずに済むよう、列挙とは
+    /// 別のメソッドにしてある。
+    fn object_count(&self, layer: usize) -> Result<usize, ReadError>;
+
     /// レイヤー内のオブジェクトを開始フレームの昇順で全件返す。
+    ///
+    /// 途中で走査を打ち切った不完全な一覧は返さない。全件を返せない場合は失敗する。
     fn objects_in_layer(&self, layer: usize) -> Result<Vec<HostObject>, ReadError>;
 
     /// 開始フレームが完全一致するオブジェクトの詳細を返す。
