@@ -216,22 +216,57 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
     fn event_change_focus_object(&mut self) {}
 }
 
+/// 終了手順を段ごとに panic から隔離して順に実行する。
+///
+/// 各段はログ出力を伴い、ログ出力そのものが panic し得る。ログの出力先は
+/// level ごとの mutex に守られており、その mutex が毒されると以後あらゆる
+/// スレッドのログ出力が panic するためである。前段の panic で
+/// `remove_descriptor` が飛ばされると、実体の無い descriptor が registry に
+/// 残り続け、後続の探索が存在しないインスタンスを返してしまう。
+///
+/// 捕捉した panic をここでログ化しないのは、ログ経路自体が panic 源であり
+/// 得るためである。また `Drop` から panic を漏らさないことで、ホストの
+/// 終了処理が巻き戻り経路へ入るのも防ぐ。
+#[cfg(windows)]
+fn run_shutdown_sequence(
+    stop_pipe: impl FnOnce(),
+    drain: impl FnOnce(),
+    remove_descriptor: impl FnOnce(),
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(stop_pipe));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(drain));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(remove_descriptor));
+}
+
 #[cfg(windows)]
 impl Drop for AviUtl2McpPlugin {
     fn drop(&mut self) {
+        let pipe_server = self.pipe_server.take();
+        let lifecycle = self.lifecycle.take();
+
         // pipe を停止してから descriptor を削除する。順序を逆にすると
         // descriptor が消えた後も pipe が接続を受け付ける窓ができる。
-        if let Some(pipe_server) = self.pipe_server.take() {
-            pipe_server.stop(PIPE_SERVER_STOP_TIMEOUT);
-        }
-        if let Some(lifecycle) = &self.lifecycle {
-            if let Err(e) = lifecycle.shutdown() {
-                tracing::warn!("draining への移行に失敗しました: {e:?}");
-            }
-            if let Err(e) = lifecycle.mark_gone() {
-                tracing::error!("descriptor の削除に失敗しました: {e:?}");
-            }
-        }
+        run_shutdown_sequence(
+            || {
+                if let Some(pipe_server) = pipe_server {
+                    pipe_server.stop(PIPE_SERVER_STOP_TIMEOUT);
+                }
+            },
+            || {
+                if let Some(lifecycle) = &lifecycle
+                    && let Err(e) = lifecycle.shutdown()
+                {
+                    tracing::warn!("draining への移行に失敗しました: {e:?}");
+                }
+            },
+            || {
+                if let Some(lifecycle) = &lifecycle
+                    && let Err(e) = lifecycle.mark_gone()
+                {
+                    tracing::error!("descriptor の削除に失敗しました: {e:?}");
+                }
+            },
+        );
     }
 }
 
@@ -246,6 +281,63 @@ pub fn placeholder() {}
 #[cfg(all(windows, test))]
 mod tests {
     use super::*;
+
+    /// panic のたびに既定フックが標準エラーへ出力するのを抑える。
+    ///
+    /// フックはプロセス全体で共有されるため、復元まで含めて呼び出し側が行う。
+    fn with_silent_panic_hook(f: impl FnOnce()) {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        std::panic::set_hook(previous);
+        assert!(result.is_ok(), "終了手順から panic が漏れました");
+    }
+
+    #[test]
+    fn shutdown_sequence_removes_descriptor_even_if_earlier_steps_panic() {
+        let drained = std::cell::Cell::new(false);
+        let removed = std::cell::Cell::new(false);
+
+        with_silent_panic_hook(|| {
+            run_shutdown_sequence(
+                || panic!("pipe 停止時のログ出力が失敗しました"),
+                || {
+                    drained.set(true);
+                    panic!("draining 遷移時のログ出力が失敗しました");
+                },
+                || removed.set(true),
+            );
+        });
+
+        assert!(
+            drained.get(),
+            "pipe 停止の panic で draining が飛ばされました"
+        );
+        assert!(
+            removed.get(),
+            "前段の panic で descriptor の削除が飛ばされました"
+        );
+    }
+
+    #[test]
+    fn shutdown_sequence_runs_steps_in_order() {
+        let order = std::cell::RefCell::new(Vec::new());
+
+        run_shutdown_sequence(
+            || order.borrow_mut().push("pipe"),
+            || order.borrow_mut().push("drain"),
+            || order.borrow_mut().push("remove"),
+        );
+
+        assert_eq!(order.into_inner(), vec!["pipe", "drain", "remove"]);
+    }
+
+    #[test]
+    fn shutdown_sequence_does_not_propagate_panic() {
+        with_silent_panic_hook(|| {
+            run_shutdown_sequence(|| panic!("pipe"), || panic!("drain"), || panic!("remove"));
+        });
+    }
 
     #[test]
     fn init_tracing_is_idempotent() {
