@@ -443,6 +443,7 @@ mod tests {
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     /// panic させる位置。
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -487,6 +488,11 @@ mod tests {
         section_fails: bool,
         /// 参照区間へ入る直前に進めるプロジェクト revision の回数。
         bump_on_enter: u64,
+        /// 参照区間へ入る直前にプロジェクト境界を更新するか。
+        ///
+        /// 境界は非再入の Mutex で守られている。読み取りが区間を跨いでそれを
+        /// 保持していれば、この更新で待ち合わせが解けなくなる。
+        renew_boundary_on_enter: bool,
         project: Option<Arc<ProjectState>>,
         calls: Mutex<Vec<&'static str>>,
     }
@@ -507,6 +513,7 @@ mod tests {
                 panic_at: None,
                 section_fails: false,
                 bump_on_enter: 0,
+                renew_boundary_on_enter: false,
                 project: None,
                 calls: Mutex::new(Vec::new()),
             }
@@ -581,6 +588,9 @@ mod tests {
             if let Some(project) = &self.project {
                 for _ in 0..self.bump_on_enter {
                     project.on_object_updated();
+                }
+                if self.renew_boundary_on_enter {
+                    project.on_project_load(Some(r"C:\projects\reopened.aup2"));
                 }
             }
             let scene = FakeScene { host: self };
@@ -1334,6 +1344,177 @@ mod tests {
         assert!(
             !adapter.host.calls().contains(&"enter_read_section"),
             "方式不一致で参照区間へ入りました"
+        );
+    }
+
+    /// 参照区間へ入った回数。
+    fn section_entries(adapter: &HostReadAdapter<FakeHost>) -> usize {
+        adapter
+            .host
+            .calls()
+            .iter()
+            .filter(|call| **call == "enter_read_section")
+            .count()
+    }
+
+    /// 対象が動いた後のセレクターが、一致する対象なしとして拒否されることを確かめる。
+    #[test]
+    fn get_object_reports_not_found_after_the_target_moved() {
+        let adapter = adapter_with(|_| {
+            // レイヤー 1 の対象が開始フレーム 100 から 105 へ動く。
+            let mut layers = fake_layers();
+            layers[1].objects[0] = object(1, 105, 205, Some("立ち絵"));
+            FakeHost {
+                layers,
+                ..FakeHost::new()
+            }
+        });
+        let selector = sample_selector(&adapter);
+
+        assert_eq!(
+            adapter.get_object(&selector).unwrap_err().error_code(),
+            ErrorCode::NotFound
+        );
+    }
+
+    /// 移動先へ別の対象が居座った場合に、fingerprint の照合で拒否されることを
+    /// 確かめる。
+    ///
+    /// 位置だけで対象を決めていると、旧セレクターが別の対象へ解決されてしまう。
+    #[test]
+    fn get_object_reports_precondition_failed_when_another_object_took_the_place() {
+        let adapter = adapter_with(|_| {
+            let mut layers = fake_layers();
+            // 元の対象は動き、空いた位置に同名で別内容の対象が入る。
+            layers[1].objects[0] = object(1, 105, 205, Some("立ち絵"));
+            let mut intruder = object(1, 100, 150, Some("立ち絵"));
+            intruder.alias = "[1:100]#2".to_string();
+            layers[1].objects.push(intruder);
+            FakeHost {
+                layers,
+                ..FakeHost::new()
+            }
+        });
+        let selector = sample_selector(&adapter);
+
+        assert_eq!(
+            adapter.get_object(&selector).unwrap_err().error_code(),
+            ErrorCode::PreconditionFailed
+        );
+    }
+
+    /// 対象が動くと、読み取り口が返す fingerprint も変わることを確かめる。
+    ///
+    /// epoch を共有させるため、プロジェクト状態は 2 つの adapter で共用する。
+    /// これにより差分は対象の位置だけになる。
+    #[test]
+    fn fingerprint_from_the_adapter_changes_when_the_target_moves() {
+        let project = Arc::new(ProjectState::new());
+        let before = HostReadAdapter::new(FakeHost::new(), Arc::clone(&project));
+        let after = HostReadAdapter::new(
+            FakeHost {
+                layers: {
+                    let mut layers = fake_layers();
+                    layers[1].objects[0] = object(1, 105, 205, Some("立ち絵"));
+                    layers
+                },
+                ..FakeHost::new()
+            },
+            Arc::clone(&project),
+        );
+
+        let fingerprint_of = |adapter: &HostReadAdapter<FakeHost>, frame_start: usize| {
+            adapter
+                .list_objects(0, None)
+                .unwrap()
+                .items
+                .into_iter()
+                .find(|item| item.layer == 1 && item.frame_start == frame_start)
+                .unwrap_or_else(|| panic!("開始フレーム {frame_start} の対象がありません"))
+                .fingerprint
+        };
+
+        assert_ne!(
+            fingerprint_of(&before, 100),
+            fingerprint_of(&after, 105),
+            "対象が動いても fingerprint が変わりません"
+        );
+    }
+
+    /// プロジェクトを開き直すと、旧セレクターが拒否されることを確かめる。
+    ///
+    /// epoch の再発行はプロジェクト境界そのものであり、それ以前に得た
+    /// セレクターは参照区間へ入る前に拒否される。
+    #[test]
+    fn get_object_is_rejected_after_the_project_is_reopened() {
+        let adapter = adapter();
+        let selector = sample_selector(&adapter);
+        adapter
+            .get_object(&selector)
+            .expect("開き直す前のセレクターが解決できません");
+        let entered = section_entries(&adapter);
+
+        adapter
+            .project
+            .on_project_load(Some(r"C:\projects\reopened.aup2"));
+
+        let error = adapter.get_object(&selector).unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+        assert_eq!(
+            section_entries(&adapter),
+            entered,
+            "epoch を再発行した後のセレクターで参照区間へ入りました"
+        );
+    }
+
+    /// 別スレッドで実行し、期限内に完了しなければ落とす。
+    ///
+    /// 待ち合わせが解けない場合をここで検出する。完了すればその時点で戻るため、
+    /// 期限まで待つことはない。
+    fn complete_within<T: Send + 'static>(
+        timeout: Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(f());
+        });
+        receiver
+            .recv_timeout(timeout)
+            .expect("読み取りが期限内に完了しませんでした")
+    }
+
+    /// 参照区間の内側からプロジェクト境界へ触れても読み取りが完了することを
+    /// 確かめる。
+    ///
+    /// 境界は非再入の Mutex で守られている。読み取りが区間を跨いでそれを保持して
+    /// いれば、同じスレッドからの更新で待ち合わせが解けなくなる。epoch を区間の
+    /// 外で採ることが、この経路を成立させている。
+    #[test]
+    fn reading_completes_when_the_project_boundary_changes_inside_the_section() {
+        let project = Arc::new(ProjectState::new());
+        let epoch = project.epoch();
+        let adapter = HostReadAdapter::new(
+            FakeHost {
+                renew_boundary_on_enter: true,
+                project: Some(Arc::clone(&project)),
+                ..FakeHost::new()
+            },
+            Arc::clone(&project),
+        );
+
+        let (grid_bpm, object_count) = complete_within(Duration::from_secs(10), move || {
+            let info = adapter.get_edit_info().unwrap();
+            let objects = adapter.list_objects(0, None).unwrap();
+            (info.grid_bpm.len(), objects.items.len())
+        });
+
+        assert_eq!(grid_bpm, 1);
+        assert_eq!(object_count, 3);
+        assert_ne!(
+            project.epoch(),
+            epoch,
+            "参照区間の内側で境界が更新されていません"
         );
     }
 
