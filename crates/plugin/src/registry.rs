@@ -52,7 +52,7 @@ impl RegistryWriter {
 
     /// `descriptor` を registry に原子的に書き込む。
     pub fn write(&self, descriptor: &InstanceDescriptor) -> Result<()> {
-        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = self.lock.lock().unwrap_or_else(|e| e.into_inner());
 
         if !self.registry_dir.exists() {
             create_protected_directory(&self.registry_dir)
@@ -64,7 +64,7 @@ impl RegistryWriter {
 
         let tmp_path = self.temp_path(&descriptor.instance_id);
         let target_path = self.target_path(&descriptor.instance_id);
-        let _guard = TempFileGuard(&tmp_path);
+        let _temp_file = TempFileGuard(&tmp_path);
 
         let mut file = create_protected_file(&tmp_path).with_context(|| {
             format!(
@@ -101,7 +101,7 @@ impl RegistryWriter {
     ///
     /// ファイルが存在しない場合は無視する。
     pub fn remove(&self, instance_id: &InstanceId) -> Result<()> {
-        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let path = self.target_path(instance_id);
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
