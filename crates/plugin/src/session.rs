@@ -154,7 +154,8 @@ fn run_request_loop(
             }
             VersionCheck::MajorMismatch => {
                 // MAJOR 不一致は互換性が無く接続を継続できない。handshake は
-                // 完了しているため理由を 1 度返してから切断する。
+                // 完了しているため理由を 1 度返し、以降の要求は処理せずに
+                // クライアントの切断を待ってから閉じる。
                 send_error_response(
                     stream,
                     negotiated_version,
@@ -163,6 +164,7 @@ fn run_request_loop(
                     ErrorCode::ProtocolMismatch,
                     "要求の MAJOR が交渉結果と一致しません",
                 )?;
+                await_peer_close(stream);
                 break;
             }
         }
@@ -201,6 +203,29 @@ fn run_request_loop(
     }
 
     Ok(())
+}
+
+/// 送信済み応答が読み取られるのを待ってから接続を閉じるための待機。
+///
+/// クライアント切断（EOF）か期限超過まで受信を続け、受け取ったフレームは
+/// 処理せずに捨てる。応答送信の直後にハンドルを破棄すると、
+/// `DisconnectNamedPipe` が pipe バッファの未読データを捨てるため、
+/// クライアントは応答ではなく切断を観測してしまう。
+///
+/// 期限超過や I/O エラーはいずれも接続を閉じる契機であり、呼び出し元は
+/// この待機の成否で処理を変えないため、結果は返さない。
+fn await_peer_close(stream: &PipeStream) {
+    let deadline = Instant::now() + REQUEST_IDLE_TIMEOUT;
+    loop {
+        match stream.read_frame(deadline) {
+            Ok(Some(_)) => continue,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::debug!("切断待ちを終了しました: {e}");
+                return;
+            }
+        }
+    }
 }
 
 /// 要求の `protocol_version` を交渉結果と照合した結果。

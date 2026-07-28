@@ -964,6 +964,51 @@ mod tests {
         cleanup(dir);
     }
 
+    /// MAJOR 不一致の要求には、切断ではなく `protocol_mismatch` 応答が返る。
+    ///
+    /// 応答送信の直後にハンドルを破棄すると pipe バッファの未読データが
+    /// 捨てられ、クライアントは応答を読めないまま切断だけを観測する。
+    #[test]
+    fn major_mismatch_request_receives_protocol_mismatch_response() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = PipeServer::start(lifecycle.clone()).unwrap();
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+        assert_eq!(version, ProtocolVersion::CURRENT);
+
+        let mismatched = ProtocolVersion {
+            major: version.major + 1,
+            minor: 0,
+        };
+        let request_id = aviutl2_mcp_core::RequestId::new();
+        send(
+            &client,
+            &make_ping(mismatched, request_id, id),
+            "MAJOR 不一致の要求",
+        );
+
+        let response_body =
+            recv(&client, "MAJOR 不一致の応答").expect("MAJOR 不一致の応答が受信できません");
+        let response: aviutl2_mcp_core::ResponseEnvelope =
+            serde_json::from_slice(&response_body).unwrap();
+        assert_eq!(response.request_id, request_id);
+        match response.result {
+            aviutl2_mcp_core::ResponseResult::Err { error } => {
+                assert_eq!(error.code, aviutl2_mcp_core::ErrorCode::ProtocolMismatch);
+            }
+            aviutl2_mcp_core::ResponseResult::Ok { result } => {
+                panic!("MAJOR 不一致が受理されました: {result:?}")
+            }
+        }
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
     #[test]
     fn wrong_client_mac_disconnects_without_response() {
         let (lifecycle, dir) = temp_lifecycle();
