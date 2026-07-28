@@ -22,11 +22,12 @@ use aviutl2_mcp_core::{
     SERVER_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, ContentBlock, Implementation, ListResourcesResult, PaginatedRequestParams,
-    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
-    ServerInfo,
+    CallToolRequestParams, CallToolResult, ContentBlock, Implementation, ListResourcesResult,
+    PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, Resource,
+    ResourceContents, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_handler, tool_router};
@@ -106,6 +107,10 @@ impl AviUtl2McpServer {
     /// tool call 1 回をブロッキングタスクで実行し、結果を tool result へ変換する。
     ///
     /// `body` の panic はタスク境界で捕捉し `internal_error` として隔離する。
+    ///
+    /// 成功・失敗・panic のいずれでも `structuredContent` を設定する。この不変条件が
+    /// [`normalize_tool_result`] の判別の根拠であり、崩すと tool 本体を経た結果が
+    /// 引数の拒否として組み直されてしまう。
     async fn run<F>(&self, tool: &'static str, body: F) -> CallToolResult
     where
         F: FnOnce() -> Result<ToolSuccess, ErrorObject> + Send + 'static,
@@ -133,7 +138,7 @@ impl AviUtl2McpServer {
         match joined {
             Ok(Ok(success)) => {
                 tracing::info!(duration_ms, result = "ok", "tool call succeeded");
-                let mut result = CallToolResult::success(vec![text_content(&success.text)]);
+                let mut result = CallToolResult::success(vec![ContentBlock::text(success.text)]);
                 result.structured_content = Some(success.structured);
                 result
             }
@@ -497,6 +502,25 @@ impl ServerHandler for AviUtl2McpServer {
         info
     }
 
+    /// tool call を処理する。
+    ///
+    /// tool router は引数を型へ写せなかった場合、tool 本体を呼ばずに
+    /// `isError: true` の結果を自前で組み立てて返す。その結果は本 server の
+    /// 応答規約を通っていないため、ここで組み直したうえで返す。判別は
+    /// [`normalize_tool_result`] が構造で行う。
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let tool = request.name.to_string();
+        let result = self
+            .tool_router
+            .call(ToolCallContext::new(self, request, context))
+            .await?;
+        Ok(normalize_tool_result(&tool, result))
+    }
+
     /// resource を列挙する。
     ///
     /// ここでは registry の descriptor を読むだけで、インスタンスへは接続しない。
@@ -747,12 +771,68 @@ fn to_structured<T: Serialize>(value: &T) -> Result<Value, ErrorObject> {
     serde_json::to_value(value).map_err(|_| failure::internal_error("応答を直列化できませんでした"))
 }
 
-/// text content を上限内へ収めて 1 ブロックにする。
+/// 引数を解釈できなかった理由として残す最大文字数。
+const MAX_ARGUMENT_ERROR_DETAIL_CHARS: usize = 300;
+
+/// tool router が返した結果を、この server の応答規約へ揃える。
 ///
-/// [`describe`] は予算を管理して組み立てるが、tool を足すときに素の文字列を
-/// 渡しても上限を破れないよう、応答を作る唯一の経路をここへ通す。
-fn text_content(text: &str) -> ContentBlock {
-    ContentBlock::text(clamp_chars(text, MAX_TEXT_CHARS))
+/// router は引数を型へ写せなかった場合、tool 本体を呼ばずに `isError: true` の
+/// 結果を返す。この経路の判別に router のメッセージ文言は用いない。文言は SDK の
+/// 都合で変わり得るため、変わった瞬間に判別が黙って外れる。代わりに構造で判別する。
+/// 本 server の tool は成功・失敗のいずれでも `structuredContent` を設定するため、
+/// `isError` が真で `structuredContent` を持たない結果は tool 本体を経ていない。
+///
+/// text content の上限もここで保証する。router が組み立てた結果はクライアントが
+/// 送った key をそのまま含み得るため、応答を返す唯一の経路で必ず切り詰める。
+fn normalize_tool_result(tool: &str, mut result: CallToolResult) -> CallToolResult {
+    if result.is_error == Some(true) && result.structured_content.is_none() {
+        let correlation_id = new_correlation_id();
+        tracing::warn!(
+            component = "mcp",
+            operation = tool,
+            correlation_id = %correlation_id,
+            result = "invalid_argument",
+            "tool call rejected before dispatch",
+        );
+        let error = failure::with_correlation_id(
+            failure::invalid_argument(argument_error_message(&result)),
+            &correlation_id,
+        );
+        result = error_result(&error);
+    }
+    clamp_text_content(&mut result);
+    result
+}
+
+/// 引数を解釈できなかった旨の説明を組み立てる。
+///
+/// router が付けた説明はどのフィールドが不正かを示すため残す価値があるが、
+/// 内容にはクライアントが送った key がそのまま現れる。長さを抑えて載せる。
+fn argument_error_message(result: &CallToolResult) -> String {
+    let detail: String = result
+        .content
+        .iter()
+        .filter_map(|content| content.as_text())
+        .map(|text| text.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let detail = clamp_chars(detail.trim(), MAX_ARGUMENT_ERROR_DETAIL_CHARS);
+    if detail.is_empty() {
+        "引数を解釈できませんでした".to_string()
+    } else {
+        format!("引数を解釈できませんでした: {detail}")
+    }
+}
+
+/// tool result の text content を [`MAX_TEXT_CHARS`] 以内へ収める。
+fn clamp_text_content(result: &mut CallToolResult) {
+    for content in &mut result.content {
+        if let ContentBlock::Text(block) = content
+            && block.text.chars().count() > MAX_TEXT_CHARS
+        {
+            block.text = clamp_chars(&block.text, MAX_TEXT_CHARS);
+        }
+    }
 }
 
 /// エラーを `isError: true` の tool result へ変換する。
@@ -762,7 +842,7 @@ fn text_content(text: &str) -> ContentBlock {
 /// 呼び出し側が機械的に扱えるのは code / retryable / details / correlation_id で
 /// あるため、成功時の形に寄せるより失敗の内訳を残す方を採る。
 fn error_result(error: &ErrorObject) -> CallToolResult {
-    let mut result = CallToolResult::error(vec![text_content(&failure::text(error))]);
+    let mut result = CallToolResult::error(vec![ContentBlock::text(failure::text(error))]);
     result.structured_content = Some(failure::structured(error));
     result
 }
@@ -1000,6 +1080,21 @@ mod tests {
         );
     }
 
+    /// tool result の先頭 text content を取り出す。
+    fn text_of(result: &CallToolResult) -> String {
+        result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("text content がある")
+    }
+
+    /// tool 本体を経ていない、router が組み立てた失敗結果。
+    fn router_argument_error(message: impl Into<String>) -> CallToolResult {
+        CallToolResult::error(vec![ContentBlock::text(message.into())])
+    }
+
     #[tokio::test]
     async fn oversized_tool_text_is_clamped_by_the_call_boundary() {
         // describe を経ずに素の文字列を返す tool を足しても上限は破れない。
@@ -1011,12 +1106,7 @@ mod tests {
                 })
             })
             .await;
-        let text = result
-            .content
-            .first()
-            .and_then(|c| c.as_text())
-            .map(|t| t.text.clone())
-            .expect("text content がある");
+        let text = text_of(&normalize_tool_result("test_tool", result));
         assert!(
             text.chars().count() <= MAX_TEXT_CHARS,
             "上限を超えています: {}",
@@ -1030,18 +1120,91 @@ mod tests {
             failure::internal_error("え".repeat(100_000)),
             "0190abcd-1234-7def-89ab-0123456789ab",
         );
-        let result = error_result(&error);
-        let text = result
-            .content
-            .first()
-            .and_then(|c| c.as_text())
-            .map(|t| t.text.clone())
-            .expect("text content がある");
+        let text = text_of(&normalize_tool_result("test_tool", error_result(&error)));
         assert!(
             text.chars().count() <= MAX_TEXT_CHARS,
             "上限を超えています: {}",
             text.chars().count()
         );
+    }
+
+    #[test]
+    fn argument_decoding_failure_gains_structured_content() {
+        // router は tool 本体を呼ばずに結果を組み立てるため、そのままでは
+        // code / retryable / correlation_id が欠ける。
+        let result = normalize_tool_result(
+            "aviutl2_list_layers",
+            router_argument_error("failed to deserialize parameters: unknown field `future`"),
+        );
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result
+            .structured_content
+            .as_ref()
+            .expect("structuredContent がある");
+        assert_eq!(structured["code"], serde_json::json!("invalid_argument"));
+        assert_eq!(structured["retryable"], serde_json::json!(false));
+        assert!(
+            structured["correlation_id"]
+                .as_str()
+                .is_some_and(|id| id.len() == 36),
+            "correlation_id が UUID ではありません: {structured}"
+        );
+        assert!(
+            structured["details"].is_object() || structured["details"].is_null(),
+            "details が安全な形ではありません: {structured}"
+        );
+        // どのフィールドが不正かは残す。
+        assert!(text_of(&result).contains("future"), "{}", text_of(&result));
+    }
+
+    #[test]
+    fn argument_decoding_failure_text_stays_within_limit() {
+        // 拒否の説明にはクライアントが送った key がそのまま現れるため、
+        // 巨大な key を送られても text は上限に収まらなければならない。
+        let key = "k".repeat(100_000);
+        let result = normalize_tool_result(
+            "aviutl2_list_instances",
+            router_argument_error(format!(
+                "failed to deserialize parameters: unknown field `{key}`, expected `offset` or `limit`"
+            )),
+        );
+        let text = text_of(&result);
+        assert!(
+            text.chars().count() <= MAX_TEXT_CHARS,
+            "上限を超えています: {}",
+            text.chars().count()
+        );
+        let structured = result.structured_content.expect("structuredContent がある");
+        assert!(
+            structured["message"]
+                .as_str()
+                .is_some_and(|message| message.chars().count() <= MAX_TEXT_CHARS),
+            "message が上限を超えています: {structured}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_results_pass_through_normalization_unchanged() {
+        // tool 本体を経た結果は structuredContent を持つため組み直さない。
+        for expected in [
+            server()
+                .run("test_tool", || {
+                    Ok(ToolSuccess {
+                        text: "ok".to_string(),
+                        structured: serde_json::json!({ "value": 1 }),
+                    })
+                })
+                .await,
+            server()
+                .run("test_tool", || Err(failure::invalid_argument("範囲外")))
+                .await,
+        ] {
+            let normalized = normalize_tool_result("test_tool", expected.clone());
+            assert_eq!(normalized.content, expected.content);
+            assert_eq!(normalized.structured_content, expected.structured_content);
+            assert_eq!(normalized.is_error, expected.is_error);
+        }
     }
 
     #[test]
