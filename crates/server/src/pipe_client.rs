@@ -320,6 +320,11 @@ mod tests {
     use super::*;
     use aviutl2_mcp_core::InstanceId;
     use std::time::Duration;
+    use windows::Win32::Storage::FileSystem::{PIPE_ACCESS_DUPLEX, WriteFile};
+    use windows::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+        PIPE_TYPE_BYTE,
+    };
 
     #[test]
     fn pipe_name_generation_matches_descriptor() {
@@ -335,5 +340,177 @@ mod tests {
         let result = connect_pipe(&pipe_name_for(&id), deadline);
         assert!(matches!(result, Err(PipeClientError::Timeout)));
         assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    /// フレーム受信を検証するための named pipe 対向端。
+    ///
+    /// 相手側（plugin 役）のハンドルを保持し、任意のバイト列を送出する。
+    /// 読み取り側は本番と同じ [`PipeClient::read_frame`] を通る。
+    struct MockPeer {
+        handle: HANDLE,
+    }
+
+    impl MockPeer {
+        /// 対向端と、それに接続済みの `PipeClient` を作る。
+        fn connected() -> (Self, PipeClient) {
+            let name = format!(r"\\.\pipe\aviutl2-mcp-frame-test-{}", InstanceId::new_v4());
+            let wide: Vec<u16> = OsStr::new(&name)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
+            let peer = unsafe {
+                CreateNamedPipeW(
+                    PCWSTR(wide.as_ptr()),
+                    PIPE_ACCESS_DUPLEX,
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
+                    1,
+                    64 * 1024,
+                    64 * 1024,
+                    0,
+                    None,
+                )
+            };
+            assert!(!peer.is_invalid(), "テスト用 pipe の作成に失敗しました");
+
+            // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
+            let client_handle = unsafe {
+                CreateFileW(
+                    PCWSTR(wide.as_ptr()),
+                    GENERIC_READ.0 | GENERIC_WRITE.0,
+                    FILE_SHARE_NONE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAG_OVERLAPPED,
+                    None,
+                )
+            }
+            .expect("テスト用 pipe への接続に失敗しました");
+
+            // 接続済みのため `ConnectNamedPipe` は待たずに戻る。
+            // SAFETY: `peer` は直前に作成した有効な pipe ハンドル。
+            let _ = unsafe { ConnectNamedPipe(peer, None) };
+
+            let client = PipeClient {
+                handle: client_handle,
+                instance_id: InstanceId::new_v4(),
+                protocol_version: ProtocolVersion::CURRENT,
+            };
+            (Self { handle: peer }, client)
+        }
+
+        fn raw(&self) -> HANDLE {
+            self.handle
+        }
+
+        fn send(&self, bytes: &[u8]) {
+            send_bytes(self.handle, bytes);
+        }
+    }
+
+    impl Drop for MockPeer {
+        fn drop(&mut self) {
+            // SAFETY: `self.handle` は本型のみが所有しており、ここでのみ閉じられる。
+            unsafe {
+                let _ = CloseHandle(self.handle);
+            }
+        }
+    }
+
+    /// 対向端へ同期的に全バイトを書き込む。
+    fn send_bytes(handle: HANDLE, bytes: &[u8]) {
+        let mut written = 0u32;
+        // SAFETY: `handle` は生存中の pipe ハンドル、`bytes` は本呼び出し中に生存する。
+        unsafe { WriteFile(handle, Some(bytes), Some(&mut written), None) }
+            .expect("テスト用 pipe への書き込みに失敗しました");
+        assert_eq!(written as usize, bytes.len());
+    }
+
+    /// スレッド間で渡すための生ハンドル。
+    ///
+    /// ハンドルの所有権は `MockPeer` が持ち続け、こちらは値の複製のみを運ぶ。
+    struct SendHandle(HANDLE);
+
+    // SAFETY: pipe ハンドルはスレッドを跨いで使用でき、所有権は移動しない。
+    unsafe impl Send for SendHandle {}
+
+    #[test]
+    fn read_frame_reassembles_frame_split_across_writes() {
+        let (peer, client) = MockPeer::connected();
+        let body = b"{\"kind\":\"split\"}".to_vec();
+        let frame = encode_frame(&body).unwrap();
+
+        // 長さ・本体の双方が複数回の読み取りに跨るよう、間隔を空けて送出する。
+        let handle = SendHandle(peer.raw());
+        let parts: Vec<Vec<u8>> = vec![
+            frame[..2].to_vec(),
+            frame[2..4].to_vec(),
+            frame[4..6].to_vec(),
+            frame[6..].to_vec(),
+        ];
+        let writer = std::thread::spawn(move || {
+            let handle = handle;
+            for part in parts {
+                std::thread::sleep(Duration::from_millis(20));
+                send_bytes(handle.0, &part);
+            }
+        });
+
+        let received = client
+            .read_frame(Instant::now() + Duration::from_secs(10))
+            .expect("分割送信されたフレームを受信できません");
+        assert_eq!(received, body);
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn read_frame_reads_batched_frames_in_order() {
+        let (peer, client) = MockPeer::connected();
+        let first = b"{\"n\":1}".to_vec();
+        let second = b"{\"n\":2}".to_vec();
+
+        // 2 フレームを 1 回の書き込みでまとめて送る。
+        let mut batched = encode_frame(&first).unwrap();
+        batched.extend_from_slice(&encode_frame(&second).unwrap());
+        peer.send(&batched);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        assert_eq!(client.read_frame(deadline).unwrap(), first);
+        assert_eq!(client.read_frame(deadline).unwrap(), second);
+    }
+
+    #[test]
+    fn read_frame_reassembles_body_larger_than_read_chunk() {
+        let (peer, client) = MockPeer::connected();
+        // 1 回の読み取り上限を超える本体は複数回に分けて読み取られる。
+        let body = vec![b'x'; READ_CHUNK_SIZE * 2 + 123];
+        peer.send(&encode_frame(&body).unwrap());
+
+        let received = client
+            .read_frame(Instant::now() + Duration::from_secs(10))
+            .expect("大きな本体を受信できません");
+        assert_eq!(received, body);
+    }
+
+    #[test]
+    fn read_frame_rejects_invalid_length_without_reading_body() {
+        for length in [0u32, aviutl2_mcp_core::MAX_FRAME_SIZE + 1] {
+            let (peer, client) = MockPeer::connected();
+            // 本体を 1 バイトも送らずに長さだけを送る。
+            peer.send(&length.to_le_bytes());
+
+            let started = Instant::now();
+            let result = client.read_frame(started + Duration::from_secs(5));
+            assert!(
+                matches!(result, Err(PipeClientError::Framing)),
+                "フレーム長 {length} が拒否されませんでした"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "フレーム長 {length} の拒否に {}ms かかりました（本体を待っています）",
+                started.elapsed().as_millis()
+            );
+        }
     }
 }
