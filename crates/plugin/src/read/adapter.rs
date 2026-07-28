@@ -79,8 +79,26 @@ impl<H: ReadHost> HostReadAdapter<H> {
         T: Send + 'static,
         F: FnOnce(&dyn SceneReader) -> Result<T, ReadError> + Send,
     {
-        self.host
-            .enter_read_section(move |scene| guard(|| f(scene)))?
+        match self
+            .host
+            .enter_read_section(move |scene| guard(|| f(scene)))
+        {
+            Ok(result) => result,
+            Err(error) => Err(self.classify_section_failure(error)),
+        }
+    }
+
+    /// 参照区間へ入れなかった失敗を、現在の編集状態で分類し直す。
+    ///
+    /// 参照の確保は再生・出力中に失敗する。受付判定と参照の確保の間に再生や
+    /// 出力が始まる競合がこの失敗の主因であり、戻り値だけでは他の失敗と
+    /// 区別できない。編集状態を読み直して再生・出力中であれば、時間を置けば
+    /// 解消する失敗として返す。読み直しにも失敗した場合は元の分類を保つ。
+    fn classify_section_failure(&self, error: ReadError) -> ReadError {
+        match self.edit_state() {
+            Ok(EditState::Edit) | Err(_) => error,
+            Ok(state) => ReadError::EditBlocked { state },
+        }
     }
 }
 
@@ -407,6 +425,7 @@ mod tests {
         ItemValue, SectionRange,
     };
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// panic させる位置。
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,6 +453,9 @@ mod tests {
     struct FakeHost {
         ready: bool,
         state: EditState,
+        /// 2 回目以降の編集状態。参照区間の失敗後の読み直しに使う。
+        later_state: Option<EditState>,
+        edit_state_calls: AtomicUsize,
         info: HostEditInfo,
         scene_name: Option<String>,
         grid_bpm: Vec<FiniteF64>,
@@ -441,6 +463,8 @@ mod tests {
         effects: Vec<HostEffect>,
         catalog: Vec<AvailableEffect>,
         panic_at: Option<PanicPoint>,
+        /// 参照区間の確保そのものを失敗させる。
+        section_fails: bool,
         /// 参照区間へ入る直前に進めるプロジェクト revision の回数。
         bump_on_enter: u64,
         project: Option<Arc<ProjectState>>,
@@ -452,6 +476,8 @@ mod tests {
             Self {
                 ready: true,
                 state: EditState::Edit,
+                later_state: None,
+                edit_state_calls: AtomicUsize::new(0),
                 info: fake_edit_info(),
                 scene_name: Some("Scene 1".to_string()),
                 grid_bpm: vec![FiniteF64::try_new(120.0).unwrap()],
@@ -459,6 +485,7 @@ mod tests {
                 effects: fake_effects(),
                 catalog: fake_catalog(),
                 panic_at: None,
+                section_fails: false,
                 bump_on_enter: 0,
                 project: None,
                 calls: Mutex::new(Vec::new()),
@@ -481,7 +508,12 @@ mod tests {
 
         fn edit_state(&self) -> Result<EditState, ReadError> {
             self.record("edit_state");
-            Ok(self.state)
+            let calls = self.edit_state_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(if calls == 0 {
+                self.state
+            } else {
+                self.later_state.unwrap_or(self.state)
+            })
         }
 
         fn edit_info(&self) -> Result<HostEditInfo, ReadError> {
@@ -505,6 +537,11 @@ mod tests {
             F: FnOnce(&dyn SceneReader) -> T + Send,
         {
             self.record("enter_read_section");
+            if self.section_fails {
+                return Err(ReadError::Sdk {
+                    operation: "call_read_section",
+                });
+            }
             if let Some(project) = &self.project {
                 for _ in 0..self.bump_on_enter {
                     project.on_object_updated();
@@ -858,6 +895,52 @@ mod tests {
         assert!(
             !adapter.host.calls().contains(&"enter_read_section"),
             "編集情報を取得できないまま参照区間へ入りました"
+        );
+    }
+
+    #[test]
+    fn section_failure_during_playback_is_reported_as_edit_blocked() {
+        // 受付判定と参照の確保の間に再生が始まると、参照の確保だけが失敗する。
+        // 編集状態を読み直して、時間を置けば解消する失敗として返す。
+        let adapter = adapter_with(|_| FakeHost {
+            section_fails: true,
+            later_state: Some(EditState::Preview),
+            ..FakeHost::new()
+        });
+
+        let error = adapter.get_edit_info().unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::EditBlocked);
+        assert_eq!(error.details()["edit_state"], "preview");
+        assert!(error.retryable());
+        assert!(error.retry_after_ms().is_some());
+    }
+
+    #[test]
+    fn section_failure_while_editing_remains_sdk_error() {
+        // 再生・出力に由来しない失敗は分類を変えない。
+        let adapter = adapter_with(|_| FakeHost {
+            section_fails: true,
+            ..FakeHost::new()
+        });
+
+        let error = adapter.get_edit_info().unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::SdkError);
+        assert_eq!(error.details()["sdk_operation"], "call_read_section");
+    }
+
+    #[test]
+    fn errors_from_inside_the_section_are_not_reclassified() {
+        // 参照区間へは入れており、内側の失敗は編集状態と無関係である。
+        let adapter = adapter_with(|_| FakeHost {
+            later_state: Some(EditState::Save),
+            ..FakeHost::new()
+        });
+        let mut selector = sample_selector(&adapter);
+        selector.frame = 1000;
+
+        assert_eq!(
+            adapter.get_object(&selector).unwrap_err().error_code(),
+            ErrorCode::NotFound
         );
     }
 
