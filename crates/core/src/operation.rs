@@ -72,6 +72,33 @@ pub struct ObjectFilter {
     pub layer_max: Option<usize>,
 }
 
+impl ObjectFilter {
+    /// レイヤー範囲の整合を検証する。
+    ///
+    /// 空集合になる指定は、結果 0 件と区別できるよう要求の誤りとして扱う。
+    pub fn validate(&self) -> Result<(), ObjectFilterError> {
+        if let (Some(min), Some(max)) = (self.layer_min, self.layer_max)
+            && min > max
+        {
+            return Err(ObjectFilterError::InvertedLayerRange { min, max });
+        }
+        Ok(())
+    }
+}
+
+/// 絞り込み条件の検証失敗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ObjectFilterError {
+    /// `layer_min` が `layer_max` を上回っている。
+    #[error("layer_min は layer_max 以下である必要があります: {min} > {max}")]
+    InvertedLayerRange {
+        /// 指定された最小レイヤー番号。
+        min: usize,
+        /// 指定された最大レイヤー番号。
+        max: usize,
+    },
+}
+
 /// `get_object` の params。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -293,6 +320,43 @@ mod tests {
     #[test]
     fn object_filter_rejects_unknown_field() {
         assert!(serde_json::from_str::<ObjectFilter>(r#"{"name":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn object_filter_accepts_valid_layer_range() {
+        for filter in [
+            ObjectFilter::default(),
+            ObjectFilter {
+                layer_min: Some(3),
+                layer_max: None,
+            },
+            ObjectFilter {
+                layer_min: None,
+                layer_max: Some(3),
+            },
+            ObjectFilter {
+                layer_min: Some(3),
+                layer_max: Some(3),
+            },
+            ObjectFilter {
+                layer_min: Some(1),
+                layer_max: Some(8),
+            },
+        ] {
+            assert_eq!(filter.validate(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn object_filter_rejects_inverted_layer_range() {
+        let filter = ObjectFilter {
+            layer_min: Some(8),
+            layer_max: Some(1),
+        };
+        assert_eq!(
+            filter.validate(),
+            Err(ObjectFilterError::InvertedLayerRange { min: 8, max: 1 })
+        );
     }
 
     #[test]

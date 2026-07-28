@@ -158,13 +158,22 @@ mod tests {
     }
 
     #[test]
-    fn item_value_number_rejects_non_finite() {
-        // JSON リテラルとしての NaN / Infinity は受理しない。
+    fn item_value_number_rejects_non_finite_json_literals() {
+        // NaN / Infinity は JSON の字句として存在しないため、
+        // FiniteF64 の検証へ到達する前にパーサが拒否する。
         for literal in ["NaN", "Infinity", "-Infinity"] {
             let s = format!(r#"{{"type":"number","value":{literal}}}"#);
             let result: Result<ItemValue, _> = serde_json::from_str(&s);
             assert!(result.is_err(), "{literal} が受理された");
         }
+    }
+
+    #[test]
+    fn item_value_number_rejects_out_of_range_exponent() {
+        // 表現範囲を超える指数も数値へ変換できないため拒否される。
+        let result: Result<ItemValue, _> =
+            serde_json::from_str(r#"{"type":"number","value":1e309}"#);
+        assert!(result.is_err());
     }
 
     #[test]

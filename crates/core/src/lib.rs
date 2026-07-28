@@ -1,7 +1,18 @@
 //! AviUtl2 MCP プラグインの core crate。
 //!
-//! plugin/server 双方が共有する IPC 契約（識別子、Envelope、framing、
-//! バージョン交渉、HMAC handshake）を提供する。
+//! plugin/server 双方が共有する契約を提供する。
+//!
+//! - IPC の外枠: 識別子、Envelope、framing、バージョン交渉、HMAC handshake、
+//!   strict JSON、エラーモデル
+//! - 読み取りデータモデル: 編集情報・シーン・レイヤー・オブジェクト・effect の
+//!   DTO と設定値
+//! - 対象の再指定: opaque handle を公開しないセレクターと同一性検証の
+//!   fingerprint
+//! - 一覧取得: ページ要求・応答メタと切り出し規則
+//! - 読み取り operation の名前と params / result
+//!
+//! SDK や Windows API には依存しない。所有型のみを定義し、SDK からの変換は
+//! plugin 側が行う。
 
 pub mod descriptor;
 pub mod edit_info;
@@ -57,7 +68,7 @@ pub use operation::{
     ListAvailableEffectsParams, ListAvailableEffectsResult, ListLayersParams, ListLayersResult,
     ListObjectsParams, ListObjectsResult, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
     OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
-    OPERATION_LIST_OBJECTS, ObjectFilter,
+    OPERATION_LIST_OBJECTS, ObjectFilter, ObjectFilterError,
 };
 pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
 pub use selector::{EffectSelector, ObjectSelector};
