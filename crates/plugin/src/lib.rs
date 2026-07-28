@@ -30,6 +30,13 @@ use aviutl2_mcp_core::DescriptorProject;
 #[cfg(windows)]
 static EDIT_HANDLE: aviutl2::generic::GlobalEditHandle = aviutl2::generic::GlobalEditHandle::new();
 
+/// named pipe server 停止時の bounded join 上限。
+///
+/// ホスト終了時に無期限で待たないため有限にする。期限内に終了しなければ
+/// スレッドを切り離してログ化する。
+#[cfg(windows)]
+const PIPE_SERVER_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[cfg(windows)]
 #[aviutl2::plugin(GenericPlugin)]
 struct AviUtl2McpPlugin {
@@ -161,12 +168,15 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
 #[cfg(windows)]
 impl Drop for AviUtl2McpPlugin {
     fn drop(&mut self) {
+        // pipe を停止してから descriptor を削除する。順序を逆にすると
+        // descriptor が消えた後も pipe が接続を受け付ける窓ができる。
+        if let Some(pipe_server) = self.pipe_server.take() {
+            pipe_server.stop(PIPE_SERVER_STOP_TIMEOUT);
+        }
         if let Some(lifecycle) = &self.lifecycle {
             let _ = lifecycle.shutdown();
             let _ = lifecycle.mark_gone();
         }
-        // pipe_server は Drop で停止する。
-        self.pipe_server.take();
     }
 }
 
