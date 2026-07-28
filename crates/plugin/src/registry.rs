@@ -23,6 +23,7 @@ use windows::core::PCWSTR;
 ///
 /// 書き込みは同一インスタンスに対する複数の並行更新を防ぐため内部で直列化する。
 pub struct RegistryWriter {
+    root_dir: PathBuf,
     registry_dir: PathBuf,
     lock: Mutex<()>,
 }
@@ -33,21 +34,37 @@ impl RegistryWriter {
     pub fn new() -> Result<Self> {
         let local_app_data =
             std::env::var("LOCALAPPDATA").context("LOCALAPPDATA 環境変数が取得できませんでした")?;
-        let registry_dir = PathBuf::from(local_app_data)
-            .join("AviUtl2Mcp")
-            .join("instances");
+        let root_dir = PathBuf::from(local_app_data).join("AviUtl2Mcp");
+        let registry_dir = root_dir.join("instances");
 
-        let parent = registry_dir
-            .parent()
-            .context("registry ディレクトリの親パスを決定できませんでした")?;
-        std::fs::create_dir_all(parent).context("registry 親ディレクトリを作成できませんでした")?;
-        create_protected_directory(&registry_dir)
-            .context("registry ディレクトリを作成できませんでした")?;
-
-        Ok(Self {
+        let writer = Self {
+            root_dir,
             registry_dir,
             lock: Mutex::new(()),
-        })
+        };
+        writer.ensure_directories()?;
+        Ok(writer)
+    }
+
+    /// registry ルートと instances ディレクトリを保護 DACL 付きで用意する。
+    ///
+    /// ルート（`%LOCALAPPDATA%\AviUtl2Mcp`）にも instances と同じ DACL を設定する。
+    /// ルートを保護しなければ、instances 自体の DACL を持たない第三者が
+    /// ルート側の権限でサブディレクトリごと差し替えられるため、保護対象は
+    /// ルートから連続している必要がある。
+    ///
+    /// 既存ディレクトリに対しても毎回 DACL を再設定する。作成時点の DACL だけに
+    /// 依存すると、以前のバージョンが継承 ACE 付きで作成したディレクトリや
+    /// 外部から緩められた DACL がそのまま残るためで、これは
+    /// 「継承だけに依存しない」という DACL 規定に従った扱いである。
+    ///
+    /// `%LOCALAPPDATA%` 自体は作成対象にも DACL 設定対象にも含めない。
+    fn ensure_directories(&self) -> Result<()> {
+        create_protected_directory(&self.root_dir)
+            .context("registry ルートディレクトリを作成できませんでした")?;
+        create_protected_directory(&self.registry_dir)
+            .context("registry ディレクトリを作成できませんでした")?;
+        Ok(())
     }
 
     /// `descriptor` を registry に原子的に書き込む。
@@ -55,8 +72,7 @@ impl RegistryWriter {
         let _lock = self.lock.lock().unwrap_or_else(|e| e.into_inner());
 
         if !self.registry_dir.exists() {
-            create_protected_directory(&self.registry_dir)
-                .context("registry ディレクトリを作成できませんでした")?;
+            self.ensure_directories()?;
         }
 
         let json = serde_json::to_string_pretty(descriptor)
@@ -183,7 +199,7 @@ mod tests {
         ProtocolVersion, pipe_name_for,
     };
 
-    fn temp_registry_dir() -> PathBuf {
+    fn temp_registry_root() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "aviutl2-mcp-registry-test-{}",
             InstanceId::new_v4()
@@ -230,7 +246,7 @@ mod tests {
 
     #[test]
     fn write_and_read_roundtrip() {
-        let dir = temp_registry_dir();
+        let dir = temp_registry_root();
         let writer = RegistryWriter::for_dir(dir.clone());
         let descriptor = sample_descriptor();
 
@@ -246,7 +262,7 @@ mod tests {
 
     #[test]
     fn update_existing_descriptor() {
-        let dir = temp_registry_dir();
+        let dir = temp_registry_root();
         let writer = RegistryWriter::for_dir(dir.clone());
         let id = InstanceId::new_v4();
         let first = sample_descriptor_with_project(id);
@@ -267,7 +283,7 @@ mod tests {
 
     #[test]
     fn remove_descriptor() {
-        let dir = temp_registry_dir();
+        let dir = temp_registry_root();
         let writer = RegistryWriter::for_dir(dir.clone());
         let descriptor = sample_descriptor();
 
@@ -285,8 +301,21 @@ mod tests {
     }
 
     #[test]
+    fn root_and_instances_directories_are_protected() {
+        let dir = temp_registry_root();
+        let writer = RegistryWriter::for_dir(dir.clone());
+
+        writer.write(&sample_descriptor()).unwrap();
+
+        crate::security::assert_protected_dacl(&dir);
+        crate::security::assert_protected_dacl(&dir.join("instances"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn written_json_contains_auth_secret_field() {
-        let dir = temp_registry_dir();
+        let dir = temp_registry_root();
         let writer = RegistryWriter::for_dir(dir.clone());
         let descriptor = sample_descriptor();
 
@@ -301,8 +330,12 @@ mod tests {
     }
 
     impl RegistryWriter {
-        pub(crate) fn for_dir(registry_dir: PathBuf) -> Self {
+        /// `root_dir` を registry ルートに見立て、その配下の `instances` を
+        /// 書き込み先とする（本番と同じ 2 階層構成）。
+        pub(crate) fn for_dir(root_dir: PathBuf) -> Self {
+            let registry_dir = root_dir.join("instances");
             Self {
+                root_dir,
                 registry_dir,
                 lock: Mutex::new(()),
             }

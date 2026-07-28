@@ -265,19 +265,134 @@ fn to_wide(path: &Path) -> Vec<u16> {
         .collect()
 }
 
+/// 指定パスの DACL が保護済みであることを検証する。
+///
+/// 検証内容は次の 3 点。
+///
+/// - 全 ACE が許可型であること
+/// - 全 ACE の主体が現在ユーザー・SYSTEM・Administrators のいずれかであり、
+///   3 主体すべてが含まれること
+/// - 継承が無効化（`SE_DACL_PROTECTED`）されていること
+///
+/// ACE 数そのものは検証しない。`SECURITY_ATTRIBUTES` で新規作成した場合は
+/// 与えた ACL がそのまま格納されて 3 個になるが、既存オブジェクトへ
+/// `SetNamedSecurityInfoW` で設定した場合、コンテナとオブジェクトで
+/// 意味の異なる汎用アクセス権を持つ継承可能 ACE が、対象自身に効く ACE と
+/// 子へ継承させる `INHERIT_ONLY` の ACE へ分割されて 6 個になる。
+/// どちらも許可される主体は変わらないため、主体の集合で検証する。
+///
+/// 検証に失敗した場合は panic する。
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) fn assert_protected_dacl(path: &Path) {
     use std::mem::MaybeUninit;
-    use std::path::PathBuf;
     use std::ptr;
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
     use windows::Win32::Security::Authorization::GetNamedSecurityInfoW;
     use windows::Win32::Security::{
-        ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, GetAce,
+        ACCESS_ALLOWED_ACE, ACL_SIZE_INFORMATION, AclSizeInformation, EqualSid, GetAce,
         GetAclInformation, GetSecurityDescriptorControl,
     };
     use windows::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+
+    let expected_sids = [
+        ("現在のユーザー", current_user_sid().unwrap()),
+        ("SYSTEM", well_known_sid(WinLocalSystemSid).unwrap()),
+        (
+            "Administrators",
+            well_known_sid(WinBuiltinAdministratorsSid).unwrap(),
+        ),
+    ];
+    let mut seen = [false; 3];
+
+    let wide = to_wide(path);
+    // SAFETY: wide は NUL 終端済みで、以降の呼び出し中は生存する。acl と各 ACE は
+    // sd が指すバッファ内を指すため、sd を LocalFree するまでの間だけ参照する。
+    // expected_sids の各バッファは有効な SID であり、この関数の間は生存する。
+    unsafe {
+        let mut acl = ptr::null_mut::<ACL>();
+        let mut sd = PSECURITY_DESCRIPTOR(ptr::null_mut());
+        GetNamedSecurityInfoW(
+            PCWSTR(wide.as_ptr()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(&mut acl),
+            None,
+            &mut sd,
+        )
+        .ok()
+        .unwrap_or_else(|e| panic!("DACL の取得に失敗しました: path={}, {e}", path.display()));
+
+        let mut info = MaybeUninit::<ACL_SIZE_INFORMATION>::uninit();
+        GetAclInformation(
+            acl,
+            info.as_mut_ptr().cast::<c_void>(),
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+        .expect("ACL 情報の取得に失敗しました");
+        let info = info.assume_init();
+        assert!(
+            info.AceCount >= 3,
+            "ACE は 3 主体分以上必要です: path={}, count={}",
+            path.display(),
+            info.AceCount
+        );
+
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        GetSecurityDescriptorControl(sd, &mut control, &mut revision)
+            .expect("セキュリティ記述子コントロールの取得に失敗しました");
+        assert_ne!(
+            control & SE_DACL_PROTECTED.0,
+            0,
+            "DACL 継承は無効化されている必要があります: path={}",
+            path.display()
+        );
+
+        for i in 0..info.AceCount {
+            let mut ace = ptr::null_mut();
+            GetAce(acl, i, &mut ace).expect("ACE の取得に失敗しました");
+            let ace = &*(ace as *const ACCESS_ALLOWED_ACE);
+            assert_eq!(
+                ace.Header.AceType as u32,
+                ACCESS_ALLOWED_ACE_TYPE,
+                "ACE は許可型である必要があります: path={}",
+                path.display()
+            );
+
+            let ace_sid = PSID(ptr::addr_of!(ace.SidStart) as *mut c_void);
+            let matched = expected_sids
+                .iter()
+                .position(|(_, sid)| {
+                    EqualSid(ace_sid, PSID(sid.as_ptr().cast::<c_void>() as *mut c_void)).is_ok()
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "想定外の主体を許可する ACE があります: path={}, index={i}",
+                        path.display()
+                    )
+                });
+            seen[matched] = true;
+        }
+
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+    }
+
+    for (idx, (name, _)) in expected_sids.iter().enumerate() {
+        assert!(
+            seen[idx],
+            "{name} を許可する ACE がありません: path={}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
 
     fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -294,7 +409,7 @@ mod tests {
         create_protected_directory(&dir).unwrap();
 
         assert!(dir.exists());
-        verify_dacl(&dir);
+        assert_protected_dacl(&dir);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -311,61 +426,19 @@ mod tests {
         }
 
         assert!(file_path.exists());
-        verify_dacl(&file_path);
+        assert_protected_dacl(&file_path);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn verify_dacl(path: &Path) {
-        let wide = to_wide(path);
-        unsafe {
-            let mut acl = ptr::null_mut::<ACL>();
-            let mut sd = PSECURITY_DESCRIPTOR(ptr::null_mut());
-            GetNamedSecurityInfoW(
-                PCWSTR(wide.as_ptr()),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                None,
-                None,
-                Some(&mut acl),
-                None,
-                &mut sd,
-            )
-            .ok()
-            .unwrap_or_else(|e| panic!("DACL の取得に失敗しました: {e}"));
+    #[test]
+    fn existing_directory_dacl_is_reapplied() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
 
-            let mut info = MaybeUninit::<ACL_SIZE_INFORMATION>::uninit();
-            GetAclInformation(
-                acl,
-                info.as_mut_ptr().cast::<c_void>(),
-                std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
-                AclSizeInformation,
-            )
-            .expect("ACL 情報の取得に失敗しました");
-            let info = info.assume_init();
-            assert_eq!(info.AceCount, 3, "ACE は 3 つである必要があります");
+        create_protected_directory(&dir).unwrap();
+        assert_protected_dacl(&dir);
 
-            let mut control = 0u16;
-            let mut revision = 0u32;
-            GetSecurityDescriptorControl(sd, &mut control, &mut revision)
-                .expect("セキュリティ記述子コントロールの取得に失敗しました");
-            assert_ne!(
-                control & SE_DACL_PROTECTED.0,
-                0,
-                "DACL 継承は無効化されている必要があります"
-            );
-
-            for i in 0..info.AceCount {
-                let mut ace = ptr::null_mut();
-                GetAce(acl, i, &mut ace).expect("ACE の取得に失敗しました");
-                let header = &*(ace as *const ACE_HEADER);
-                assert_eq!(
-                    header.AceType as u32, ACCESS_ALLOWED_ACE_TYPE,
-                    "ACE は許可型である必要があります"
-                );
-            }
-
-            let _ = LocalFree(Some(HLOCAL(sd.0)));
-        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

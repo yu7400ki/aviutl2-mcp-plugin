@@ -165,15 +165,19 @@ mod tests {
     use aviutl2_mcp_core::AuthSecret;
     use std::path::PathBuf;
 
+    /// registry ルートを一時ディレクトリに向けた writer と、そのルートパスを返す。
     fn temp_writer() -> (RegistryWriter, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "aviutl2-mcp-lifecycle-test-{}",
             InstanceId::new_v4()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        // RegistryWriter::for_dir は tests 用に registry.rs で定義されている。
-        // ここではその存在を利用する。
         (RegistryWriter::for_dir(dir.clone()), dir)
+    }
+
+    /// registry ルート配下の descriptor パスを返す。
+    fn descriptor_path(root: &std::path::Path, id: InstanceId) -> PathBuf {
+        root.join("instances").join(format!("{}.json", id))
     }
 
     fn sample_identity() -> (InstanceId, AuthSecret, u32, String, Option<String>, String) {
@@ -195,7 +199,7 @@ mod tests {
             Lifecycle::new(id, secret, pid, created_at, hwnd, started_at, writer).unwrap();
 
         assert_eq!(lifecycle.state(), InstanceState::Starting);
-        assert!(dir.join(format!("{}.json", id)).exists());
+        assert!(descriptor_path(&dir, id).exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -210,7 +214,7 @@ mod tests {
         lifecycle.transition_to(InstanceState::Ready).unwrap();
         assert_eq!(lifecycle.state(), InstanceState::Ready);
 
-        let content = std::fs::read_to_string(dir.join(format!("{}.json", id))).unwrap();
+        let content = std::fs::read_to_string(descriptor_path(&dir, id)).unwrap();
         let parsed: aviutl2_mcp_core::InstanceDescriptor = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed.state, InstanceState::Ready);
 
@@ -258,7 +262,7 @@ mod tests {
 
         lifecycle.mark_gone().unwrap();
         assert_eq!(lifecycle.state(), InstanceState::Gone);
-        assert!(!dir.join(format!("{}.json", id)).exists());
+        assert!(!descriptor_path(&dir, id).exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
