@@ -2,6 +2,10 @@
 //!
 //! discovery と読み取り operation を MCP の read tool / resource として提供する。
 //! stdout は MCP プロトコル専用であり、ログは stderr の構造化ログへ出す。
+//!
+//! resource 変更の通知は提供しない。`subscribe` と `listChanged` を capability に
+//! 立てていないため protocol 上の不整合は生じず、変更の検出は read tool が返す
+//! project epoch と revision の照合で行える。
 
 pub mod describe;
 pub mod failure;

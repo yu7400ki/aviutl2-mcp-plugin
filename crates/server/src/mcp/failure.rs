@@ -90,6 +90,10 @@ pub fn with_correlation_id(error: ErrorObject, correlation_id: &str) -> ErrorObj
 }
 
 /// エラーを `structuredContent` へ載せる形へ変換する。
+///
+/// この形は tool が宣言する `outputSchema` には適合しない。成功と失敗で構造が
+/// 異なるのは MCP の tool result がそう定めているためであり、`isError` が真の
+/// ときに `outputSchema` を適用してはならない。
 pub fn structured(error: &ErrorObject) -> Value {
     serde_json::json!({
         "code": error.code.as_snake_case(),
@@ -116,6 +120,9 @@ pub fn text(error: &ErrorObject) -> String {
 }
 
 /// 接続先が返したエラーから、外部へ出してよい部分だけを残す。
+///
+/// `details` は key の断片で選別できるが、`message` は自由文のため長さを
+/// 抑えるだけで内容は選別できない。message に何を書くかは接続先の責務である。
 fn sanitize(error: ErrorObject) -> ErrorObject {
     let details = sanitize_details(&error.details, 0);
     let message = clamp_chars(&error.message, MAX_MESSAGE_CHARS);
@@ -303,6 +310,17 @@ mod tests {
         let details = sanitize_details(&serde_json::json!({ "note": "あ".repeat(1_000) }), 0);
         let note = details["note"].as_str().expect("note は文字列");
         assert!(note.chars().count() <= MAX_DETAIL_STRING_CHARS);
+    }
+
+    #[test]
+    fn long_detail_arrays_are_truncated() {
+        let items: Vec<Value> = (0..MAX_DETAIL_ARRAY_ITEMS * 3)
+            .map(|i| serde_json::json!(i))
+            .collect();
+        let details = sanitize_details(&serde_json::json!({ "items": items }), 0);
+        let truncated = details["items"].as_array().expect("items は配列");
+        assert_eq!(truncated.len(), MAX_DETAIL_ARRAY_ITEMS);
+        assert_eq!(truncated[0], serde_json::json!(0));
     }
 
     #[test]

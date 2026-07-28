@@ -185,6 +185,9 @@ pub fn available_effects(result: &ListAvailableEffectsResult) -> String {
             effect.items.len(),
         ));
     }
+    text.push_line(
+        "effect_type を指定すると種別で絞り込めます。設定項目の定義は structuredContent を参照してください",
+    );
     text.finish()
 }
 
@@ -229,9 +232,9 @@ mod tests {
     use super::*;
     use crate::mcp::summary::{MAX_TEXT_CHARS, TRUNCATION_NOTICE};
     use aviutl2_mcp_core::{
-        AvailableEffect, EffectFingerprintInput, EffectFlags, EffectInfo, EffectType, InstanceId,
-        InstanceProject, InstanceState, LayerInfo, ObjectFingerprintInput, ObjectSummary,
-        SectionRange,
+        AvailableEffect, EffectFingerprintInput, EffectFlags, EffectInfo, EffectType, FiniteF64,
+        InstanceId, InstanceProject, InstanceState, LayerInfo, ObjectFingerprintInput,
+        ObjectSummary, SceneInfo, SectionRange,
     };
 
     /// 上限を必ず超える件数。要求上限を無視した応答でも打ち切られることを確かめる。
@@ -411,6 +414,61 @@ mod tests {
             project_revision: 42,
         };
         assert_truncated_within_limit(&object_detail(&detail));
+    }
+
+    #[test]
+    fn every_text_content_guides_the_next_step() {
+        let scene = SceneInfo {
+            id: 3,
+            name: Some("本編".to_string()),
+            width: 1920,
+            height: 1080,
+            fps: FiniteF64::try_new(30.0),
+            fps_rate: 30,
+            fps_scale: 1,
+            sample_rate: 48_000,
+        };
+        let summary = ObjectSummary::new(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            ObjectFingerprintInput {
+                scene_id: 3,
+                layer: 2,
+                frame_start: 0,
+                frame_end: 10,
+                name: Some("立ち絵"),
+                alias: "alias",
+            },
+        );
+
+        let current_scene_text = current_scene(&GetCurrentSceneResult {
+            scene,
+            project_revision: 42,
+        });
+        assert!(current_scene_text.contains("expected_scene_id"));
+        assert!(current_scene_text.contains("aviutl2_list_objects"));
+
+        let objects_text = objects(&ListObjectsResult {
+            items: vec![summary.clone()],
+            page: page(1, 1),
+        });
+        assert!(objects_text.contains("aviutl2_get_object"));
+        assert!(objects_text.contains("selector"));
+
+        let object_detail_text = object_detail(&ObjectDetail {
+            summary,
+            alias: "alias".to_string(),
+            sections: Vec::new(),
+            effects: Vec::new(),
+            project_revision: 42,
+        });
+        assert!(object_detail_text.contains("structuredContent"));
+
+        let available_effects_text = available_effects(&ListAvailableEffectsResult {
+            items: Vec::new(),
+            page: page(0, 0),
+        });
+        assert!(available_effects_text.contains("effect_type"));
+        assert!(available_effects_text.contains("structuredContent"));
     }
 
     #[test]
