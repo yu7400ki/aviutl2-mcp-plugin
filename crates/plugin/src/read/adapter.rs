@@ -167,7 +167,9 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
 
         let (snapshot_revision, items) = self.read_section(move |scene| {
             let revision = project.revision();
-            let mut items = Vec::with_capacity(layer_max.saturating_add(1));
+            // 件数は編集情報由来であり事前に確保しない。ラッパーが負値を
+            // 畳んだ値がそのまま容量として渡ると確保だけで落ちる。
+            let mut items = Vec::new();
             for index in 0..=layer_max {
                 let layer = scene.layer(index)?;
                 let object_count = scene.object_count(index)?;

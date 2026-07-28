@@ -60,16 +60,16 @@ impl ReadHost for SdkReadHost {
             fps_rate: *info.fps.numer(),
             fps_scale: *info.fps.denom(),
             sample_rate: size(info.sample_rate)?,
-            cursor_frame: info.frame,
-            cursor_layer: info.layer,
-            frame_max: info.frame_max,
-            layer_max: info.layer_max,
-            display_frame_start: info.display_frame_start,
-            display_layer_start: info.display_layer_start,
-            display_frame_num: info.display_frame_num,
-            display_layer_num: info.display_layer_num,
-            select_range_start: info.select_range_start,
-            select_range_end: info.select_range_end,
+            cursor_frame: non_negative(info.frame),
+            cursor_layer: non_negative(info.layer),
+            frame_max: non_negative(info.frame_max),
+            layer_max: non_negative(info.layer_max),
+            display_frame_start: non_negative(info.display_frame_start),
+            display_layer_start: non_negative(info.display_layer_start),
+            display_frame_num: non_negative(info.display_frame_num),
+            display_layer_num: non_negative(info.display_layer_num),
+            select_range_start: info.select_range_start.map(non_negative),
+            select_range_end: info.select_range_end.map(non_negative),
         })
     }
 
@@ -160,7 +160,7 @@ impl SceneReader for SdkSceneReader<'_> {
                 .section
                 .get_object_layer_frame(handle)
                 .map_err(|_| sdk("get_object_layer_frame"))?;
-            Ok(Some((position.end, ())))
+            Ok(Some((non_negative(position.end), ())))
         })?;
         Ok(positions.len())
     }
@@ -227,9 +227,9 @@ impl SdkSceneReader<'_> {
             .get_object_alias(handle)
             .map_err(|_| sdk("get_object_alias"))?;
         Ok(HostObject {
-            layer: position.layer,
-            frame_start: position.start,
-            frame_end: position.end,
+            layer: non_negative(position.layer),
+            frame_start: non_negative(position.start),
+            frame_end: non_negative(position.end),
             name,
             alias,
         })
@@ -378,6 +378,14 @@ fn assign_effect_indices(names: &[String]) -> Vec<usize> {
             index
         })
         .collect()
+}
+
+/// ラッパーが負値を `as usize` で畳んだ値を 0 へ丸める。
+///
+/// フレーム番号・レイヤー番号は元が `i32` であり、正当な値が `i32::MAX` を
+/// 超えることはない。超えている場合は負値が巨大値へ化けたものとして扱う。
+fn non_negative(value: usize) -> usize {
+    if value > i32::MAX as usize { 0 } else { value }
 }
 
 /// トラックバーの移動情報を所有型へ写す。
@@ -585,6 +593,16 @@ mod tests {
     #[test]
     fn effect_indices_are_empty_for_no_effects() {
         assert!(assign_effect_indices(&[]).is_empty());
+    }
+
+    #[test]
+    fn negative_positions_are_folded_to_zero() {
+        // ラッパーが `-1 as usize` で畳んだ値を正当な位置として扱わない。
+        assert_eq!(non_negative(-1i32 as u32 as usize), 0);
+        assert_eq!(non_negative(i32::MAX as usize + 1), 0);
+        assert_eq!(non_negative(i32::MAX as usize), i32::MAX as usize);
+        assert_eq!(non_negative(0), 0);
+        assert_eq!(non_negative(1080), 1080);
     }
 
     #[test]
