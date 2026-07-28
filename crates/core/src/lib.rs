@@ -5,15 +5,19 @@
 
 pub mod descriptor;
 pub mod edit_info;
+pub mod effect;
 pub mod envelope;
 pub mod error;
+pub mod fingerprint;
 pub mod framing;
 pub mod handshake;
 pub mod identifier;
 pub mod item_value;
 pub mod json;
 pub mod number;
+pub mod object;
 pub mod page;
+pub mod selector;
 pub mod state;
 pub mod version;
 pub mod wire_format;
@@ -25,8 +29,16 @@ pub use descriptor::{
     AuthSecret, DescriptorProject, InstanceDescriptor, InstanceInfo, InstanceProject,
 };
 pub use edit_info::{Cursor, DisplayRange, EditInfo, Extent, FrameRange, SceneInfo, SceneRef};
+pub use effect::{
+    AvailableEffect, AvailableEffectItem, EffectFlags, EffectInfo, EffectItem, EffectItemType,
+    EffectType, TrackInfo,
+};
 pub use envelope::{RequestEnvelope, RequestKind, ResponseEnvelope, ResponseKind, ResponseResult};
 pub use error::{ErrorCode, ErrorObject};
+pub use fingerprint::{
+    Fingerprint, FingerprintAlgorithm, FingerprintFormatError, effect_fingerprint,
+    object_fingerprint,
+};
 pub use framing::{
     DecoderState, FrameDecoder, FrameError, MAX_FRAME_SIZE, encode_frame, encode_length,
 };
@@ -38,7 +50,9 @@ pub use identifier::{InstanceId, ProtocolVersion, RequestId, pipe_name_for};
 pub use item_value::ItemValue;
 pub use json::{JsonStrictError, deserialize_json, parse_json};
 pub use number::FiniteF64;
+pub use object::{LayerInfo, ObjectDetail, ObjectSummary, SectionRange};
 pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
+pub use selector::{EffectSelector, ObjectSelector};
 pub use state::InstanceState;
 pub use version::negotiate;
 pub use wire_format::{format_hwnd, format_utc_timestamp, parse_utc_timestamp};
