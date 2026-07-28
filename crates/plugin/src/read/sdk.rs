@@ -126,10 +126,10 @@ impl SceneReader for SdkSceneReader<'_> {
             .section
             .get_grid_bpm_list()
             .map_err(|_| sdk("get_grid_bpm_list"))?;
-        Ok(list
-            .into_iter()
-            .filter_map(|bpm| FiniteF64::try_new(f64::from(bpm.tempo)))
-            .collect())
+        finite_values(
+            list.into_iter().map(|bpm| f64::from(bpm.tempo)),
+            "get_grid_bpm_list",
+        )
     }
 
     fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {
@@ -317,7 +317,8 @@ impl SdkSceneReader<'_> {
                 .get_effect_track_info(effect, &definition.name)
                 .ok()
                 .flatten()
-                .map(track_info);
+                .map(track_info)
+                .transpose()?;
             items.push(EffectItem {
                 value: item_value(&item_type, raw),
                 name: definition.name,
@@ -454,15 +455,34 @@ fn non_negative(value: usize) -> usize {
     if value > i32::MAX as usize { 0 } else { value }
 }
 
+/// 浮動小数点の並びを、全要素が有限であることを確かめて写す。
+///
+/// 非有限値を落として並びを短くすると、要素数まで変わってしまう。要素数は
+/// 移動方法のパラメータ数として fingerprint の入力に含まれ、grid の並びとしても
+/// 応答に現れる。欠けた並びを完全な並びとして返せば、読み取った対象とは別の
+/// ものを正当な値として扱うことになるため、失敗として返す。
+fn finite_values(
+    values: impl IntoIterator<Item = f64>,
+    operation: &'static str,
+) -> Result<Vec<FiniteF64>, ReadError> {
+    values
+        .into_iter()
+        .map(|value| {
+            FiniteF64::try_new(value).ok_or_else(|| {
+                tracing::warn!("非有限の数値を受け取りました");
+                sdk(operation)
+            })
+        })
+        .collect()
+}
+
 /// トラックバーの移動情報を所有型へ写す。
-fn track_info(track: aviutl2::generic::TrackInfo) -> aviutl2_mcp_core::TrackInfo {
-    aviutl2_mcp_core::TrackInfo {
+fn track_info(
+    track: aviutl2::generic::TrackInfo,
+) -> Result<aviutl2_mcp_core::TrackInfo, ReadError> {
+    Ok(aviutl2_mcp_core::TrackInfo {
         mode: track.mode,
-        params: track
-            .params
-            .into_iter()
-            .filter_map(FiniteF64::try_new)
-            .collect(),
+        params: finite_values(track.params, "get_effect_track_info")?,
         accelerate: track.accelerate,
         decelerate: track.decelerate,
         twopoint: track.twopoint,
@@ -470,7 +490,7 @@ fn track_info(track: aviutl2::generic::TrackInfo) -> aviutl2_mcp_core::TrackInfo
         group_num: track.group_num,
         group_index: track.group_index,
         group_name: track.group_name,
-    }
+    })
 }
 
 /// 設定項目の種別に応じて生文字列を値へ写す。
@@ -726,6 +746,46 @@ mod tests {
         assert_eq!(non_negative(i32::MAX as usize), i32::MAX as usize);
         assert_eq!(non_negative(0), 0);
         assert_eq!(non_negative(1080), 1080);
+    }
+
+    #[test]
+    fn finite_values_keeps_every_element() {
+        let values = finite_values([120.0, -0.5, 0.0], "get_grid_bpm_list").unwrap();
+        assert_eq!(
+            values.iter().map(FiniteF64::get).collect::<Vec<_>>(),
+            vec![120.0, -0.5, 0.0]
+        );
+        assert!(finite_values([], "get_grid_bpm_list").unwrap().is_empty());
+    }
+
+    #[test]
+    fn non_finite_values_fail_instead_of_shortening_the_list() {
+        // 落として並びを短くすると要素数が変わる。要素数は応答にも
+        // fingerprint の入力にも現れるため、欠けた並びを完全な並びとして
+        // 返さない。
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let error = finite_values([1.0, value, 2.0], "get_effect_track_info")
+                .expect_err("非有限値が受理されました");
+            assert_eq!(error.error_code(), ErrorCode::SdkError);
+            assert_eq!(error.details()["sdk_operation"], "get_effect_track_info");
+        }
+    }
+
+    #[test]
+    fn track_info_fails_on_non_finite_params() {
+        let track = aviutl2::generic::TrackInfo {
+            mode: "直線移動".to_string(),
+            params: vec![0.5, f64::NAN],
+            accelerate: false,
+            decelerate: false,
+            twopoint: false,
+            timecontrol: false,
+            group_num: 1,
+            group_index: 0,
+            group_name: None,
+        };
+        let error = track_info(track).expect_err("非有限のパラメータが受理されました");
+        assert_eq!(error.error_code(), ErrorCode::SdkError);
     }
 
     #[test]
