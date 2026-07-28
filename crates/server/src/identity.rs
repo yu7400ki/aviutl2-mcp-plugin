@@ -30,19 +30,6 @@ pub enum ProcessLookup {
     Undetermined,
 }
 
-impl ProcessLookup {
-    /// 取得できた識別情報のみを返す。
-    ///
-    /// [`ProcessLookup::Absent`] と [`ProcessLookup::Undetermined`] は等しく `None`
-    /// になるため、両者の区別が必要な判断には使わないこと。
-    pub fn found(self) -> Option<ProcessIdentity> {
-        match self {
-            ProcessLookup::Found(identity) => Some(identity),
-            ProcessLookup::Absent | ProcessLookup::Undetermined => None,
-        }
-    }
-}
-
 /// 指定 PID のプロセスを照会する。
 ///
 /// 必要最小権限（`PROCESS_QUERY_LIMITED_INFORMATION`）で開く。
@@ -73,15 +60,6 @@ fn classify_open_process_error(code: HRESULT) -> ProcessLookup {
     } else {
         ProcessLookup::Undetermined
     }
-}
-
-/// 指定 PID のプロセス作成時刻を取得する。
-///
-/// プロセスが存在しない場合とアクセス不能な場合をいずれも `None` に畳み込む。
-/// 既存の呼び出し元との互換のために残している暫定 API であり、新しい呼び出し元を
-/// 作ってはならない。両者を区別する [`lookup_process`] を使うこと。
-pub fn get_process_identity(pid: u32) -> Option<ProcessIdentity> {
-    lookup_process(pid).found()
 }
 
 unsafe fn get_process_times(handle: HANDLE) -> Option<DateTime<Utc>> {

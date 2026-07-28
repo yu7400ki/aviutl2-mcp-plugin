@@ -275,9 +275,11 @@ fn temp_registry_dir() -> PathBuf {
 }
 
 fn current_process_created_at() -> String {
-    use aviutl2_mcp_server::identity::get_process_identity;
-    let identity = get_process_identity(std::process::id()).unwrap();
-    identity.created_at.to_rfc3339()
+    use aviutl2_mcp_server::identity::{ProcessLookup, lookup_process};
+    match lookup_process(std::process::id()) {
+        ProcessLookup::Found(identity) => identity.created_at.to_rfc3339(),
+        other => panic!("自身の PID は照会できる: {other:?}"),
+    }
 }
 
 #[test]
