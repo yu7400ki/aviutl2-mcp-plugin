@@ -2,6 +2,7 @@
 //!
 //! Windows API（pipe 接続・読み書き）はこの層に閉じ、上位は frame 単位で扱う。
 
+use crate::win_io::{self, WinIoError};
 use aviutl2_mcp_core::{
     AuthSecret, ClientAuth, ClientHello, InstanceId, Nonce, ProtocolVersion, RequestEnvelope,
     RequestId, ResponseEnvelope, ResponseResult, ServerAuth, compute_client_mac,
@@ -10,18 +11,21 @@ use aviutl2_mcp_core::{
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use thiserror::Error;
 use tracing::{debug, instrument, trace, warn};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE, OPEN_EXISTING, ReadFile, WriteFile,
+    CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE, OPEN_EXISTING,
 };
-use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::WaitNamedPipeW;
-use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
 use windows::core::PCWSTR;
+
+/// `WaitNamedPipeW` へ渡す待機時間の上限（ミリ秒）。
+///
+/// discovery の期限が長い場合でも 1 候補の接続待ちに引きずられないよう頭打ちにする。
+const CONNECT_WAIT_CAP_MS: u128 = 5_000;
 
 /// pipe client のエラー。
 #[derive(Debug, Error)]
@@ -55,6 +59,15 @@ pub enum PipeClientError {
     InvalidResponse,
 }
 
+impl From<WinIoError> for PipeClientError {
+    fn from(err: WinIoError) -> Self {
+        match err {
+            WinIoError::TimedOut => Self::Timeout,
+            WinIoError::Io(err) => Self::Io(err),
+        }
+    }
+}
+
 /// 認証済み named pipe 接続。
 pub struct PipeClient {
     handle: HANDLE,
@@ -75,7 +88,7 @@ impl PipeClient {
         deadline: Instant,
     ) -> Result<Self, PipeClientError> {
         let pipe_name = pipe_name_for(&descriptor_id);
-        let handle = connect_pipe(&pipe_name, duration_until(deadline))?;
+        let handle = connect_pipe(&pipe_name, deadline)?;
 
         let mut client = Self {
             handle,
@@ -102,9 +115,9 @@ impl PipeClient {
         let request_id = RequestId::new();
         let request = RequestEnvelope::ping(self.protocol_version, request_id, self.instance_id);
         let request_body = serde_json::to_vec(&request).map_err(|_| PipeClientError::Json)?;
-        self.write_frame(&request_body, duration_until(deadline))?;
+        self.write_frame(&request_body, deadline)?;
 
-        let response_body = self.read_frame(duration_until(deadline))?;
+        let response_body = self.read_frame(deadline)?;
         let response: ResponseEnvelope =
             serde_json::from_slice(&response_body).map_err(|_| PipeClientError::Json)?;
 
@@ -159,9 +172,9 @@ impl PipeClient {
             client_nonce: client_nonce.clone(),
         };
         let m1_body = serde_json::to_vec(&m1).map_err(|_| PipeClientError::Json)?;
-        self.write_frame(&m1_body, duration_until(deadline))?;
+        self.write_frame(&m1_body, deadline)?;
 
-        let m2_body = self.read_frame(duration_until(deadline))?;
+        let m2_body = self.read_frame(deadline)?;
         let m2: ServerAuth = serde_json::from_slice(&m2_body).map_err(|_| PipeClientError::Json)?;
 
         trace!("received server auth");
@@ -202,117 +215,64 @@ impl PipeClient {
             compute_client_mac(auth_secret.as_bytes(), &m2.server_nonce, &client_nonce);
         let m3 = ClientAuth { client_mac };
         let m3_body = serde_json::to_vec(&m3).map_err(|_| PipeClientError::Json)?;
-        self.write_frame(&m3_body, duration_until(deadline))?;
+        self.write_frame(&m3_body, deadline)?;
 
         debug!(protocol_version = %self.protocol_version.as_str(), "handshake succeeded");
         Ok(())
     }
 
-    fn write_frame(&self, body: &[u8], timeout: Duration) -> Result<(), PipeClientError> {
+    fn write_frame(&self, body: &[u8], deadline: Instant) -> Result<(), PipeClientError> {
         let frame = encode_frame(body).map_err(|_| PipeClientError::Framing)?;
-        self.write_all(&frame, timeout)
+        win_io::write_all(self.handle, &frame, deadline)?;
+        Ok(())
     }
 
-    fn read_frame(&self, timeout: Duration) -> Result<Vec<u8>, PipeClientError> {
+    fn read_frame(&self, deadline: Instant) -> Result<Vec<u8>, PipeClientError> {
         let mut length_buf = [0u8; 4];
-        self.read_exact(&mut length_buf, timeout)?;
+        win_io::read_exact(self.handle, &mut length_buf, deadline)?;
         let length = u32::from_le_bytes(length_buf) as usize;
         if length == 0 || length > aviutl2_mcp_core::MAX_FRAME_SIZE as usize {
             return Err(PipeClientError::Framing);
         }
         let mut body = vec![0u8; length];
-        self.read_exact(&mut body, timeout)?;
+        win_io::read_exact(self.handle, &mut body, deadline)?;
         Ok(body)
-    }
-
-    fn read_exact(&self, buf: &mut [u8], timeout: Duration) -> Result<(), PipeClientError> {
-        let mut overlapped = new_overlapped()?;
-        let mut total = 0;
-        while total < buf.len() {
-            unsafe {
-                ResetEvent(overlapped.hEvent).map_err(into_io_error)?;
-            }
-            let mut read = 0u32;
-            let slice = &mut buf[total..];
-            let result = unsafe {
-                ReadFile(
-                    self.handle,
-                    Some(slice),
-                    Some(&mut read),
-                    Some(&mut overlapped),
-                )
-            };
-            if result.is_ok() {
-                total += read as usize;
-                continue;
-            }
-            let err = result.unwrap_err();
-            if err.code() != windows::Win32::Foundation::ERROR_IO_PENDING.into() {
-                return Err(into_io_error(err).into());
-            }
-            wait_io(overlapped.hEvent, timeout)?;
-            let bytes_transferred = unsafe { get_overlapped_result(self.handle, &overlapped)? };
-            if bytes_transferred == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "pipe closed").into());
-            }
-            total += bytes_transferred as usize;
-        }
-        Ok(())
-    }
-
-    fn write_all(&self, buf: &[u8], timeout: Duration) -> Result<(), PipeClientError> {
-        let mut overlapped = new_overlapped()?;
-        let mut total = 0;
-        while total < buf.len() {
-            unsafe {
-                ResetEvent(overlapped.hEvent).map_err(into_io_error)?;
-            }
-            let mut written = 0u32;
-            let result = unsafe {
-                WriteFile(
-                    self.handle,
-                    Some(&buf[total..]),
-                    Some(&mut written),
-                    Some(&mut overlapped),
-                )
-            };
-            if result.is_ok() {
-                total += written as usize;
-                continue;
-            }
-            let err = result.unwrap_err();
-            if err.code() != windows::Win32::Foundation::ERROR_IO_PENDING.into() {
-                return Err(into_io_error(err).into());
-            }
-            wait_io(overlapped.hEvent, timeout)?;
-            let bytes_transferred = unsafe { get_overlapped_result(self.handle, &overlapped)? };
-            total += bytes_transferred as usize;
-        }
-        Ok(())
     }
 }
 
 impl Drop for PipeClient {
     fn drop(&mut self) {
+        // read/write は完了・キャンセルのいずれかを確認してから戻るため、
+        // ここに到達した時点でこのハンドルに保留中の I/O は存在しない。
+        // SAFETY: `self.handle` は本型のみが所有しており、ここでのみ閉じられる。
         unsafe {
             let _ = CloseHandle(self.handle);
         }
     }
 }
 
-/// 指定 pipe 名に接続する。
-fn connect_pipe(pipe_name: &str, timeout: Duration) -> Result<HANDLE, PipeClientError> {
+/// 指定 pipe 名に `deadline` までの範囲で接続する。
+fn connect_pipe(pipe_name: &str, deadline: Instant) -> Result<HANDLE, PipeClientError> {
     let wide: Vec<u16> = OsStr::new(pipe_name)
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
 
-    // pipe サーバーが接続可能になるまで短時間待つ。
-    unsafe {
-        let _ = WaitNamedPipeW(PCWSTR(wide.as_ptr()), timeout_ms.min(5000));
+    let remaining = win_io::remaining_until(deadline);
+    if remaining.is_zero() {
+        return Err(PipeClientError::Timeout);
     }
 
+    // pipe サーバーが接続可能になるまで短時間待つ。
+    // 第 2 引数の 0 は NMPWAIT_NOWAIT ではなく NMPWAIT_USE_DEFAULT_WAIT（pipe 既定の
+    // タイムアウト）を意味するため、残り時間が 1 ミリ秒未満でも 0 を渡さない。
+    let wait_ms = remaining.as_millis().clamp(1, CONNECT_WAIT_CAP_MS) as u32;
+    // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
+    unsafe {
+        let _ = WaitNamedPipeW(PCWSTR(wide.as_ptr()), wait_ms);
+    }
+
+    // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
     unsafe {
         let handle = CreateFileW(
             PCWSTR(wide.as_ptr()),
@@ -332,62 +292,25 @@ fn connect_pipe(pipe_name: &str, timeout: Duration) -> Result<HANDLE, PipeClient
     }
 }
 
-/// 新しい OVERLAPPED と手動リセットイベントを作成する。
-fn new_overlapped() -> io::Result<OVERLAPPED> {
-    unsafe {
-        let event = CreateEventW(None, true, false, None)?;
-        let mut overlapped = std::mem::zeroed::<OVERLAPPED>();
-        overlapped.hEvent = event;
-        Ok(overlapped)
-    }
-}
-
-/// IO 完了を指定時間待つ。
-fn wait_io(event: HANDLE, timeout: Duration) -> Result<(), PipeClientError> {
-    let ms = timeout.as_millis().min(u32::MAX as u128) as u32;
-    let result = unsafe { WaitForSingleObject(event, ms) };
-    if result.0 == windows::Win32::Foundation::WAIT_OBJECT_0.0 {
-        Ok(())
-    } else {
-        Err(PipeClientError::Timeout)
-    }
-}
-
-/// OVERLAPPED 結果を取得する。
-unsafe fn get_overlapped_result(handle: HANDLE, overlapped: &OVERLAPPED) -> io::Result<u32> {
-    let mut transferred = 0u32;
-    unsafe {
-        GetOverlappedResult(handle, overlapped, &mut transferred, false).map_err(into_io_error)?;
-    }
-    Ok(transferred)
-}
-
-/// `windows::core::Error` を `io::Error` へ変換する。
-fn into_io_error(err: windows::core::Error) -> io::Error {
-    io::Error::from_raw_os_error(err.code().0)
-}
-
-/// 現在時刻から `deadline` までの残り時間を返す。
-fn duration_until(deadline: Instant) -> Duration {
-    deadline.saturating_duration_since(Instant::now())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use aviutl2_mcp_core::InstanceId;
-
-    #[test]
-    fn timeout_duration_is_nonnegative() {
-        let now = Instant::now();
-        assert_eq!(duration_until(now), Duration::ZERO);
-        let future = now + Duration::from_secs(1);
-        assert!(!duration_until(future).is_zero());
-    }
+    use std::time::Duration;
 
     #[test]
     fn pipe_name_generation_matches_descriptor() {
         let id = InstanceId::new_v4();
         assert_eq!(pipe_name_for(&id), pipe_name_for(&id));
+    }
+
+    #[test]
+    fn connect_fails_immediately_when_deadline_passed() {
+        let id = InstanceId::new_v4();
+        let deadline = Instant::now() - Duration::from_secs(1);
+        let started = Instant::now();
+        let result = connect_pipe(&pipe_name_for(&id), deadline);
+        assert!(matches!(result, Err(PipeClientError::Timeout)));
+        assert!(started.elapsed() < Duration::from_millis(100));
     }
 }
