@@ -130,31 +130,28 @@ impl ProtectedSecurityAttributes {
 /// 保護された DACL を設定してディレクトリを作成する。
 ///
 /// 既存の場合は DACL を再設定する。
+///
+/// 失敗の説明に対象パスを含めない。失敗は上位でログへ出るため、利用者の
+/// ディレクトリ構成を残さない。どの対象で失敗したかは呼び出し元が匿名化した
+/// 形で添える。
 pub fn create_protected_directory(path: &Path) -> Result<()> {
     let wide = to_wide(path);
     if path.exists() {
-        set_protected_dacl(path).with_context(|| {
-            format!(
-                "既存ディレクトリの DACL 設定に失敗しました: {}",
-                path.display()
-            )
-        })?;
+        set_protected_dacl(path).context("既存ディレクトリの DACL 設定に失敗しました")?;
         return Ok(());
     }
 
     let sa = ProtectedSecurityAttributes::new()?;
     unsafe {
-        CreateDirectoryW(PCWSTR(wide.as_ptr()), Some(sa.as_ptr())).with_context(|| {
-            format!(
-                "保護されたディレクトリを作成できませんでした: {}",
-                path.display()
-            )
-        })?;
+        CreateDirectoryW(PCWSTR(wide.as_ptr()), Some(sa.as_ptr()))
+            .context("保護されたディレクトリを作成できませんでした")?;
     }
     Ok(())
 }
 
 /// 保護された DACL を持つ新規ファイルを作成し、書き込み用の `File` を返す。
+///
+/// 失敗の説明に対象パスを含めない理由は [`create_protected_directory`] と同じ。
 pub fn create_protected_file(path: &Path) -> Result<std::fs::File> {
     let wide = to_wide(path);
     let sa = ProtectedSecurityAttributes::new()?;
@@ -168,12 +165,7 @@ pub fn create_protected_file(path: &Path) -> Result<std::fs::File> {
             FILE_ATTRIBUTE_NORMAL,
             None,
         )
-        .with_context(|| {
-            format!(
-                "保護された一時ファイルを作成できませんでした: {}",
-                path.display()
-            )
-        })?;
+        .context("保護されたファイルを作成できませんでした")?;
 
         use std::os::windows::io::FromRawHandle;
         Ok(std::fs::File::from_raw_handle(handle.0))

@@ -2,7 +2,11 @@
 //!
 //! `%LOCALAPPDATA%\AviUtl2Mcp\instances\` 以下に descriptor JSON を
 //! 原子的に書き込み、DACL を設定する。
+//!
+//! 失敗の説明は上位でログへ出るため、絶対パスと完全な識別子を含めない。
+//! どの descriptor で失敗したかは [`crate::redact`] を通した形で添える。
 
+use crate::redact::{descriptor_file, instance_id as redact_instance_id};
 use crate::security::{create_protected_directory, create_protected_file};
 use anyhow::{Context, Result};
 use aviutl2_mcp_core::{InstanceDescriptor, InstanceId};
@@ -84,14 +88,14 @@ impl RegistryWriter {
 
         let mut file = create_protected_file(&tmp_path).with_context(|| {
             format!(
-                "一時ファイルを作成できませんでした: path={}",
-                tmp_path.display()
+                "一時ファイルを作成できませんでした: descriptor={}",
+                descriptor_file(&tmp_path)
             )
         })?;
         file.write_all(json.as_bytes()).with_context(|| {
             format!(
-                "一時ファイルへの書き込みに失敗しました: path={}",
-                tmp_path.display()
+                "一時ファイルへの書き込みに失敗しました: descriptor={}",
+                descriptor_file(&tmp_path)
             )
         })?;
 
@@ -106,7 +110,7 @@ impl RegistryWriter {
         atomic_replace(&tmp_path, &target_path).with_context(|| {
             format!(
                 "descriptor の原子的置換に失敗しました: instance_id={}",
-                descriptor.instance_id
+                redact_instance_id(&descriptor.instance_id)
             )
         })?;
 
@@ -125,7 +129,7 @@ impl RegistryWriter {
             Err(e) => Err(e).with_context(|| {
                 format!(
                     "descriptor の削除に失敗しました: instance_id={}",
-                    instance_id
+                    redact_instance_id(instance_id)
                 )
             }),
         }

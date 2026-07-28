@@ -134,7 +134,7 @@ impl Lifecycle {
         };
 
         tracing::info!(
-            instance_id = %self.instance_id,
+            instance_id = %crate::redact::instance_id(&self.instance_id),
             from = %old_state,
             to = %new_state,
             "lifecycle state を遷移しました"
@@ -177,7 +177,7 @@ impl Lifecycle {
             .remove(&self.instance_id)
             .context("descriptor の削除に失敗しました")?;
         tracing::info!(
-            instance_id = %self.instance_id,
+            instance_id = %crate::redact::instance_id(&self.instance_id),
             "descriptor を削除し gone へ移行しました"
         );
         Ok(())

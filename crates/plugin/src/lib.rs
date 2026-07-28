@@ -14,6 +14,8 @@ pub mod project;
 #[cfg(windows)]
 pub mod read;
 #[cfg(windows)]
+pub mod redact;
+#[cfg(windows)]
 pub mod registry;
 #[cfg(windows)]
 pub mod security;
@@ -160,7 +162,7 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
         };
 
         tracing::info!(
-            instance_id = %instance_id,
+            instance_id = %redact::instance_id(&instance_id),
             pid,
             "plugin を登録し named pipe server を起動しました"
         );
@@ -520,6 +522,131 @@ mod tests {
 
         drop(plugin);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// tracing イベントの出力先として使う共有バッファ。
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl LogCapture {
+        fn contents(&self) -> String {
+            let buffer = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            String::from_utf8_lossy(&buffer).into_owned()
+        }
+    }
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> aviutl2::tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// `f` の実行中に発行された tracing イベントを集めて返す。
+    ///
+    /// 出力先はこのスレッドの subscriber に限られるため、ホストのログ設定にも
+    /// 他のテストにも影響しない。
+    fn capture_logs(f: impl FnOnce()) -> String {
+        let capture = LogCapture::default();
+        let subscriber = aviutl2::tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        capture.contents()
+    }
+
+    /// ログに完全な識別子も絶対パスも現れないことを確かめる。
+    ///
+    /// 出力先はホストのログファイルであり、不具合の報告に添えて持ち出される。
+    /// ここで通すのは、状態遷移と descriptor 削除の記録に加え、descriptor の
+    /// 書き込み先を塞いだ状態での更新と終了手順である。後者は registry と
+    /// セキュリティ記述子の失敗理由が anyhow の連鎖としてログへ流れる経路で、
+    /// 直接ログへ渡している値だけを見ても漏れの有無が分からない。
+    #[test]
+    fn logs_expose_neither_full_identifiers_nor_absolute_paths() {
+        // registry ルートの名前に instance_id を含めない。含めると、絶対パスが
+        // 出ていないことの確認が完全な識別子の確認と区別できなくなる。
+        let root = std::env::temp_dir().join(format!(
+            "aviutl2-mcp-redaction-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let instance_id = aviutl2_mcp_core::InstanceId::new_v4();
+        let lifecycle = Arc::new(
+            lifecycle::Lifecycle::new(
+                instance_id,
+                aviutl2_mcp_core::AuthSecret::generate(),
+                std::process::id(),
+                "2026-01-01T00:00:00.0000000Z".to_string(),
+                Some("0x0".to_string()),
+                "2026-01-01T00:00:00.0000000Z".to_string(),
+                registry::RegistryWriter::for_dir(root.clone()),
+            )
+            .unwrap(),
+        );
+        let plugin = AviUtl2McpPlugin {
+            lifecycle: Some(lifecycle.clone()),
+            project_state: Some(Arc::new(project::ProjectState::new())),
+            pipe_server: None,
+        };
+
+        let logs = capture_logs(|| {
+            lifecycle
+                .transition_to(aviutl2_mcp_core::state::InstanceState::Ready)
+                .unwrap();
+
+            // descriptor の書き込み先をファイルで塞ぎ、以降の更新を失敗させる。
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("instances"), b"").unwrap();
+
+            plugin.sync_project(
+                Some(std::path::PathBuf::from(r"C:\projects\sample.aup2")),
+                ProjectBoundary::Retained,
+            );
+            drop(plugin);
+        });
+
+        let _ = std::fs::remove_dir_all(&root);
+
+        // パスの検査を先に行う。registry のパスには instance_id が現れないため、
+        // 順序を逆にするとパスの漏れが識別子の漏れとして報告される。
+        assert!(
+            !logs.contains(&std::env::temp_dir().display().to_string()),
+            "利用者のディレクトリがログに出ています: {logs}"
+        );
+        assert!(
+            !logs.contains(&root.display().to_string()),
+            "registry の絶対パスがログに出ています: {logs}"
+        );
+
+        let anonymized = redact::instance_id(&instance_id);
+        assert!(
+            logs.contains(&anonymized),
+            "匿名化した instance_id が記録されていません: {logs}"
+        );
+        assert!(
+            !logs.contains(&instance_id.to_string()),
+            "完全な instance_id がログに出ています: {logs}"
+        );
     }
 
     #[test]

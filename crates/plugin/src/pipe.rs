@@ -426,11 +426,10 @@ fn accept_loop(
         };
         if pipe_handle.is_invalid() {
             // 直前の API 呼び出しは `CreateNamedPipeW` のみであり、
-            // last error は当該失敗のもの。
+            // last error は当該失敗のもの。pipe 名には完全な instance_id が
+            // 含まれるため、失敗の説明には載せない。
             let reason = windows::core::Error::from_thread();
-            return Err(anyhow::anyhow!(
-                "named pipe {pipe_name} の作成に失敗しました: {reason}"
-            ));
+            return Err(anyhow::anyhow!("named pipe の作成に失敗しました: {reason}"));
         }
         let pipe = OwnedPipeHandle(pipe_handle);
 
