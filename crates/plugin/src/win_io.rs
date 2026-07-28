@@ -1,17 +1,17 @@
 //! Windows overlapped I/O の RAII ラッパー。
 //!
 //! イベントハンドルと `OVERLAPPED` の寿命を型で縛り、期限付きの read / write を
-//! 提供する。期限超過時は必ず `CancelIoEx` を発行し、カーネルが保留 I/O を完了
-//! させるまで待ってから `OVERLAPPED` を解放する。保留 I/O を残したまま
-//! `OVERLAPPED` やバッファを破棄すると、後から完了した I/O が解放済みメモリへ
-//! 書き込むため、その経路を型の外に作らない。
+//! 提供する。保留 I/O を残したまま `OVERLAPPED` やバッファを破棄すると、後から
+//! 完了した I/O が解放済みメモリへ書き込む。`OverlappedOp` は `Drop` で必ず
+//! `CancelIoEx` と完了待ちを行うため、期限超過・エラー・panic 巻き戻しの
+//! いずれの経路でも保留 I/O がゼロになる。
 
 use std::io;
 use std::time::Instant;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, ERROR_IO_PENDING, ERROR_NO_DATA,
-    ERROR_OPERATION_ABORTED, ERROR_PIPE_NOT_CONNECTED, HANDLE, WAIT_ABANDONED_0, WAIT_FAILED,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING,
+    ERROR_NO_DATA, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, ERROR_PIPE_NOT_CONNECTED, HANDLE,
+    WAIT_ABANDONED_0, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
@@ -112,23 +112,41 @@ pub(crate) fn wait_any(handles: &[HANDLE], timeout_ms: u32) -> WaitOutcome {
     classify_wait(result.0, handles.len())
 }
 
-/// 保留 I/O 1 件分の `OVERLAPPED` とイベントを束ねた RAII 型。
+/// 保留 I/O 1 件分の `OVERLAPPED`・イベント・発行対象ハンドルを束ねた RAII 型。
 ///
 /// `OVERLAPPED` をヒープに置くのは、カーネルが保留中に参照し続けるアドレスを
 /// 安定させるため。スタックに置くと早期 return でフレームが破棄され、
 /// カーネルが解放済み領域へ書き込む。
+///
+/// 保留状態を自身で追跡し、`Drop` で `CancelIoEx` と完了待ちを行う。これにより
+/// 「解放時点で保留 I/O が無い」ことが呼び出し規約ではなく型で保証される。
 pub(crate) struct OverlappedOp {
     overlapped: Box<OVERLAPPED>,
     event: EventHandle,
+    handle: HANDLE,
+    pending: bool,
 }
 
 impl OverlappedOp {
-    /// 新しい保留 I/O 用の `OVERLAPPED` を用意する。
-    pub(crate) fn new() -> io::Result<Self> {
+    /// `handle` に対する保留 I/O 用の `OVERLAPPED` を用意する。
+    ///
+    /// # Safety
+    ///
+    /// `handle` は本 `OverlappedOp` が drop されるまで有効であり続けなければ
+    /// ならない。`Drop` は `handle` に対して `CancelIoEx` と
+    /// `GetOverlappedResult` を発行する。閉じ済みハンドル値は OS が別オブジェクト
+    /// へ再割り当てし得るため、先に閉じると無関係なオブジェクトの I/O を
+    /// キャンセルすることになる。
+    pub(crate) unsafe fn new(handle: HANDLE) -> io::Result<Self> {
         let event = EventHandle::new()?;
         let mut overlapped = Box::new(OVERLAPPED::default());
         overlapped.hEvent = event.raw();
-        Ok(Self { overlapped, event })
+        Ok(Self {
+            overlapped,
+            event,
+            handle,
+            pending: false,
+        })
     }
 
     /// I/O 完了通知に使うイベントの生ハンドル。
@@ -137,52 +155,98 @@ impl OverlappedOp {
     }
 
     /// `OVERLAPPED` への可変ポインタ。ヒープ上のため呼び出し間でアドレスは不変。
-    pub(crate) fn as_mut_ptr(&mut self) -> *mut OVERLAPPED {
+    fn as_mut_ptr(&mut self) -> *mut OVERLAPPED {
         std::ptr::from_mut(self.overlapped.as_mut())
     }
 
-    /// 保留 I/O の完了を待って転送バイト数を得る。
+    /// overlapped I/O を発行する。
     ///
-    /// `wait` が true のときは完了するまでブロックする。
-    pub(crate) fn result(&mut self, handle: HANDLE, wait: bool) -> io::Result<u32> {
-        let mut transferred = 0u32;
+    /// `start` には初期化済みの `OVERLAPPED` ポインタを渡す。発行前に保留状態を
+    /// 立てるため、`start` の戻り値にかかわらず `Drop` が確実にキャンセルを試みる。
+    pub(crate) fn issue(
+        &mut self,
+        start: impl FnOnce(*mut OVERLAPPED) -> windows::core::Result<()>,
+    ) -> windows::core::Result<()> {
+        self.rearm()?;
         let overlapped = self.as_mut_ptr();
-        // SAFETY: `handle` は保留 I/O を発行したハンドルであり、`overlapped` は
-        // その I/O に紐づく生存中の `OVERLAPPED` を指す。
-        unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, wait) }
-            .map_err(to_io_error)?;
-        Ok(transferred)
+        self.pending = true;
+        start(overlapped)
+    }
+
+    /// 保留 I/O の完了を確認して転送バイト数を得る。
+    ///
+    /// `wait` が true のときは完了するまでブロックする。完了が確定した時点で
+    /// 保留状態を落とす。
+    pub(crate) fn result(&mut self, wait: bool) -> io::Result<u32> {
+        let mut transferred = 0u32;
+        let handle = self.handle;
+        let overlapped = self.as_mut_ptr();
+        // SAFETY: `handle` は本型が保持する I/O 発行対象で、`new` の前提により
+        // 生存している。`overlapped` はその I/O に紐づくヒープ上の `OVERLAPPED`。
+        let result = unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, wait) };
+        match result {
+            Ok(()) => {
+                self.pending = false;
+                Ok(transferred)
+            }
+            Err(e) => {
+                // `ERROR_IO_INCOMPLETE` のみが「まだ保留中」を意味する。
+                // 他のエラーは失敗として完了しているため保留状態を落とす。
+                if e.code() != ERROR_IO_INCOMPLETE.into() {
+                    self.pending = false;
+                }
+                Err(to_io_error(e))
+            }
+        }
     }
 
     /// 保留 I/O をキャンセルし、カーネルが完了させるまで待つ。
-    ///
-    /// これを経ずに `OVERLAPPED` を解放すると、後から完了した I/O が
-    /// 解放済みメモリへ書き込む。
-    pub(crate) fn cancel_and_drain(&mut self, handle: HANDLE) {
-        let overlapped = self.as_mut_ptr();
-        // SAFETY: `handle` は保留 I/O を発行したハンドルであり、`overlapped` は
-        // その I/O に紐づく生存中の `OVERLAPPED` を指す。
-        unsafe {
-            let _ = CancelIoEx(handle, Some(overlapped));
+    pub(crate) fn cancel_and_drain(&mut self) {
+        if !self.pending {
+            return;
         }
-        // bWait = true。キャンセル完了まで待たなければ `OVERLAPPED` を解放できない。
-        match self.result(handle, true) {
+        let handle = self.handle;
+        let overlapped = self.as_mut_ptr();
+        // SAFETY: `handle` は本型が保持する I/O 発行対象で、`new` の前提により
+        // 生存している。`overlapped` はその I/O に紐づくヒープ上の `OVERLAPPED`。
+        let cancelled = unsafe { CancelIoEx(handle, Some(overlapped)) };
+        if let Err(e) = cancelled
+            && e.code() != ERROR_NOT_FOUND.into()
+        {
+            // `ERROR_NOT_FOUND` は既に完了している場合であり正常。
+            // それ以外の失敗はキャンセルが届かなかった可能性があり、
+            // 直後の完了待ちが長引く要因になるため記録する。
+            tracing::warn!("保留 I/O のキャンセル要求に失敗しました: {e}");
+        }
+        // `ERROR_NOT_FOUND` の場合でも完了を確認しなければ `OVERLAPPED` を
+        // 解放できないため、`GetOverlappedResult` は省略しない。bWait = true。
+        match self.result(true) {
             Ok(_) => {}
             Err(e) if is_operation_aborted(&e) => {}
             Err(e) => {
                 tracing::debug!("保留 I/O のキャンセル完了確認に失敗しました: {e}");
             }
         }
+        self.pending = false;
     }
 
-    /// 次の I/O 開始に備えてイベントと `OVERLAPPED` を初期状態へ戻す。
-    fn rearm(&mut self) -> io::Result<()> {
+    /// 次の I/O 発行に備えてイベントと `OVERLAPPED` を初期状態へ戻す。
+    fn rearm(&mut self) -> windows::core::Result<()> {
         // SAFETY: `event` は本型が所有する有効なイベントハンドル。
-        unsafe { ResetEvent(self.event.raw()) }.map_err(to_io_error)?;
+        unsafe { ResetEvent(self.event.raw()) }?;
         let event = self.event.raw();
         *self.overlapped = OVERLAPPED::default();
         self.overlapped.hEvent = event;
         Ok(())
+    }
+}
+
+impl Drop for OverlappedOp {
+    fn drop(&mut self) {
+        // 期限超過・エラー・panic 巻き戻しのいずれで解放されても、
+        // カーネルが参照している `OVERLAPPED` とイベントを保留中のまま
+        // 手放さない。
+        self.cancel_and_drain();
     }
 }
 
@@ -215,7 +279,7 @@ fn to_io_error(e: windows::core::Error) -> io::Error {
 }
 
 /// `ERROR_OPERATION_ABORTED` はキャンセルの正常完了として扱う。
-pub(crate) fn is_operation_aborted(err: &io::Error) -> bool {
+fn is_operation_aborted(err: &io::Error) -> bool {
     err.raw_os_error() == Some(ERROR_OPERATION_ABORTED.0 as i32)
 }
 
@@ -255,27 +319,26 @@ enum Transfer {
 /// `start` は `OVERLAPPED` ポインタを受け取り `ReadFile` / `WriteFile` を発行する。
 /// `cancel` を渡すと、そのイベントがシグナルされた時点で I/O を打ち切る。
 fn transfer_once(
-    handle: HANDLE,
     deadline: Instant,
     cancel: Option<HANDLE>,
     op: &mut OverlappedOp,
     start: impl FnOnce(*mut OVERLAPPED) -> windows::core::Result<()>,
 ) -> Result<Transfer, IoError> {
-    op.rearm().map_err(IoError::Os)?;
+    // 同期完了が続く場合でも期限を超えて回り続けないよう、発行前に確認する。
+    if remaining_ms(deadline).is_none() {
+        return Err(IoError::TimedOut);
+    }
 
-    let overlapped = op.as_mut_ptr();
-    let started = start(overlapped);
-
-    let transferred = match started {
+    let transferred = match op.issue(start) {
         // 同期完了。転送バイト数は `GetOverlappedResult` で確定させる。
-        Ok(()) => match op.result(handle, true) {
+        Ok(()) => match op.result(true) {
             Ok(n) => n,
             Err(e) if is_disconnect(&e) => return Ok(Transfer::Eof),
             Err(e) => return Err(IoError::Os(e)),
         },
         Err(e) if e.code() == ERROR_IO_PENDING.into() => {
             let Some(timeout_ms) = remaining_ms(deadline) else {
-                op.cancel_and_drain(handle);
+                op.cancel_and_drain();
                 return Err(IoError::TimedOut);
             };
             let outcome = match cancel {
@@ -283,21 +346,21 @@ fn transfer_once(
                 None => op.event.wait(timeout_ms),
             };
             match outcome {
-                WaitOutcome::Signaled(0) => match op.result(handle, false) {
+                WaitOutcome::Signaled(0) => match op.result(false) {
                     Ok(n) => n,
                     Err(e) if is_disconnect(&e) => return Ok(Transfer::Eof),
                     Err(e) => return Err(IoError::Os(e)),
                 },
                 WaitOutcome::Signaled(_) => {
-                    op.cancel_and_drain(handle);
+                    op.cancel_and_drain();
                     return Err(IoError::Cancelled);
                 }
                 WaitOutcome::TimedOut => {
-                    op.cancel_and_drain(handle);
+                    op.cancel_and_drain();
                     return Err(IoError::TimedOut);
                 }
                 WaitOutcome::Failed(e) => {
-                    op.cancel_and_drain(handle);
+                    op.cancel_and_drain();
                     return Err(IoError::Os(e));
                 }
             }
@@ -324,20 +387,26 @@ fn transfer_once(
 ///
 /// 1 バイトも読めないまま相手が切断した場合は `Ok(false)` を返す。
 /// `cancel` がシグナルされた場合は `IoError::Cancelled` を返す。
-pub(crate) fn read_exact_deadline(
+///
+/// # Safety
+///
+/// `handle` と `cancel` は本呼び出しが戻るまで有効であり続けなければならない。
+pub(crate) unsafe fn read_exact_deadline(
     handle: HANDLE,
     buf: &mut [u8],
     deadline: Instant,
     cancel: Option<HANDLE>,
 ) -> Result<bool, IoError> {
-    let mut op = OverlappedOp::new().map_err(IoError::Os)?;
+    // SAFETY: 呼び出し元の前提により `handle` は本呼び出し中を通じて有効であり、
+    // `op` は本関数の内側で drop される。
+    let mut op = unsafe { OverlappedOp::new(handle) }.map_err(IoError::Os)?;
     let mut total = 0usize;
     while total < buf.len() {
         let chunk = &mut buf[total..];
-        let transfer = transfer_once(handle, deadline, cancel, &mut op, |overlapped| {
+        let transfer = transfer_once(deadline, cancel, &mut op, |overlapped| {
             // SAFETY: `chunk` は `buf` の生存中の部分領域、`overlapped` は
-            // `op` が保持するヒープ上の `OVERLAPPED`。いずれも I/O 完了まで
-            // 生存し、期限超過時は `cancel_and_drain` で完了を待ってから戻る。
+            // `op` が保持するヒープ上の `OVERLAPPED`。`op` の `Drop` が
+            // 保留 I/O の完了を待つため、`chunk` が先に無効化されることはない。
             unsafe { ReadFile(handle, Some(chunk), None, Some(overlapped)) }
         })?;
         match transfer {
@@ -360,20 +429,26 @@ pub(crate) fn read_exact_deadline(
 /// 期限内にバッファ全体を書き込む。
 ///
 /// `cancel` がシグナルされた場合は `IoError::Cancelled` を返す。
-pub(crate) fn write_all_deadline(
+///
+/// # Safety
+///
+/// `handle` と `cancel` は本呼び出しが戻るまで有効であり続けなければならない。
+pub(crate) unsafe fn write_all_deadline(
     handle: HANDLE,
     buf: &[u8],
     deadline: Instant,
     cancel: Option<HANDLE>,
 ) -> Result<(), IoError> {
-    let mut op = OverlappedOp::new().map_err(IoError::Os)?;
+    // SAFETY: 呼び出し元の前提により `handle` は本呼び出し中を通じて有効であり、
+    // `op` は本関数の内側で drop される。
+    let mut op = unsafe { OverlappedOp::new(handle) }.map_err(IoError::Os)?;
     let mut total = 0usize;
     while total < buf.len() {
         let chunk = &buf[total..];
-        let transfer = transfer_once(handle, deadline, cancel, &mut op, |overlapped| {
+        let transfer = transfer_once(deadline, cancel, &mut op, |overlapped| {
             // SAFETY: `chunk` は `buf` の生存中の部分領域、`overlapped` は
-            // `op` が保持するヒープ上の `OVERLAPPED`。いずれも I/O 完了まで
-            // 生存し、期限超過時は `cancel_and_drain` で完了を待ってから戻る。
+            // `op` が保持するヒープ上の `OVERLAPPED`。`op` の `Drop` が
+            // 保留 I/O の完了を待つため、`chunk` が先に無効化されることはない。
             unsafe { WriteFile(handle, Some(chunk), None, Some(overlapped)) }
         })?;
         match transfer {

@@ -155,7 +155,10 @@ impl PipeStream {
         operation: &'static str,
     ) -> Result<bool, PipeError> {
         let started = Instant::now();
-        win_io::read_exact_deadline(self.handle, buf, deadline, self.cancel_handle())
+        // SAFETY: `self.handle` は本型が所有し `Drop` でのみ閉じるため、
+        // 呼び出し中は有効。中断イベントは `Arc<StopSignal>` として本型が
+        // 保持しており、同じく呼び出し中は生存する。
+        unsafe { win_io::read_exact_deadline(self.handle, buf, deadline, self.cancel_handle()) }
             .map_err(|e| map_io_error(e, operation, started))
     }
 
@@ -167,7 +170,10 @@ impl PipeStream {
         operation: &'static str,
     ) -> Result<(), PipeError> {
         let started = Instant::now();
-        win_io::write_all_deadline(self.handle, buf, deadline, self.cancel_handle())
+        // SAFETY: `self.handle` は本型が所有し `Drop` でのみ閉じるため、
+        // 呼び出し中は有効。中断イベントは `Arc<StopSignal>` として本型が
+        // 保持しており、同じく呼び出し中は生存する。
+        unsafe { win_io::write_all_deadline(self.handle, buf, deadline, self.cancel_handle()) }
             .map_err(|e| map_io_error(e, operation, started))
     }
 
@@ -433,11 +439,15 @@ enum Connection {
 
 /// クライアントの接続を待つ。停止イベントがシグナルされたら待機を打ち切る。
 fn await_connection(pipe: &OwnedPipeHandle, stop: &StopSignal) -> Result<Connection> {
-    let mut op = OverlappedOp::new().context("接続待ち用 OVERLAPPED の作成に失敗しました")?;
-    let overlapped = op.as_mut_ptr();
-    // SAFETY: `pipe` は生存中の overlapped named pipe、`overlapped` は
-    // 接続完了まで生存する `OverlappedOp` の内部を指す。
-    let result = unsafe { ConnectNamedPipe(pipe.raw(), Some(overlapped)) };
+    // SAFETY: `pipe` は呼び出し元が所有しており、`op` は本関数の内側で
+    // drop されるため、`op` の `Drop` が動く時点で必ず生存している。
+    let mut op = unsafe { OverlappedOp::new(pipe.raw()) }
+        .context("接続待ち用 OVERLAPPED の作成に失敗しました")?;
+    let result = op.issue(|overlapped| {
+        // SAFETY: `pipe` は生存中の overlapped named pipe、`overlapped` は
+        // 接続完了まで生存する `op` の内部を指す。
+        unsafe { ConnectNamedPipe(pipe.raw(), Some(overlapped)) }
+    });
 
     // `GetLastError` の遅延読み取りは他の API 呼び出しで上書きされ得るため、
     // 戻り値そのものが持つエラーコードで分岐する。
@@ -448,7 +458,7 @@ fn await_connection(pipe: &OwnedPipeHandle, stop: &StopSignal) -> Result<Connect
         Err(e) if e.code() == ERROR_PIPE_CONNECTED.into() => Ok(Connection::Established),
         Err(e) if e.code() == ERROR_IO_PENDING.into() => {
             match win_io::wait_any(&[op.event_handle(), stop.raw()], win_io::WAIT_INFINITE) {
-                WaitOutcome::Signaled(0) => match op.result(pipe.raw(), false) {
+                WaitOutcome::Signaled(0) => match op.result(false) {
                     Ok(_) => Ok(Connection::Established),
                     Err(e) => {
                         tracing::warn!("接続完了の確認に失敗しました: {e}");
@@ -456,17 +466,11 @@ fn await_connection(pipe: &OwnedPipeHandle, stop: &StopSignal) -> Result<Connect
                     }
                 },
                 WaitOutcome::Signaled(_) => {
-                    op.cancel_and_drain(pipe.raw());
+                    op.cancel_and_drain();
                     Ok(Connection::Stopped)
                 }
-                WaitOutcome::TimedOut => {
-                    op.cancel_and_drain(pipe.raw());
-                    Ok(Connection::Retry)
-                }
-                WaitOutcome::Failed(e) => {
-                    op.cancel_and_drain(pipe.raw());
-                    Err(anyhow::anyhow!("接続待ちの待機に失敗しました: {e}"))
-                }
+                WaitOutcome::TimedOut => Ok(Connection::Retry),
+                WaitOutcome::Failed(e) => Err(anyhow::anyhow!("接続待ちの待機に失敗しました: {e}")),
             }
         }
         Err(e) => {
