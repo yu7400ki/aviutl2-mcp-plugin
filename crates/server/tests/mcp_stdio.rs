@@ -577,6 +577,82 @@ fn rejected_tool_calls_do_not_pollute_stdout() {
     let _ = std::fs::remove_dir_all(&registry_dir);
 }
 
+#[test]
+fn rejected_edit_tool_calls_take_the_same_path() {
+    // 編集 tool でも引数の復元に失敗する経路は自前の `call_tool` が捕捉する。
+    // ここを取りこぼすと、拒否の説明にクライアントが送ったキー名がそのまま
+    // 現れたまま、上限も構造化も適用されない応答が返る。
+    let registry_dir = temp_registry_dir();
+    std::fs::create_dir_all(&registry_dir).expect("registry を作れる");
+    let instance_id = InstanceId::new_v4().to_string();
+    let expected = json!({
+        "project_epoch": "78be92d1-c8c9-44c6-ae52-387548971468",
+        "project_revision": 42,
+    });
+
+    let mut requests = initialize_requests();
+    // 未知フィールド。
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_delete_object",
+            "arguments": {
+                "instance_id": instance_id,
+                "selector": {},
+                "expected": expected,
+                "future": 1,
+            },
+        },
+    }));
+    // 必須の前提条件が無い。
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_move_object",
+            "arguments": {
+                "instance_id": instance_id,
+                "selector": {},
+                "destination": { "layer": 1, "frame": 0 },
+            },
+        },
+    }));
+    // 変更内容の全省略は tool 本体の検証で落ちる。
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_set_selection",
+            "arguments": {
+                "instance_id": instance_id,
+                "expected_scene_id": 0,
+                "expected": expected,
+            },
+        },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+    for id in [2, 3, 4] {
+        let response = session.response(id);
+        assert_eq!(response["result"]["isError"], json!(true), "{response}");
+        assert_structured_invalid_argument(&response);
+    }
+    let unknown_field = session.response(2);
+    let message = unknown_field["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text がある");
+    assert!(
+        message.contains("future"),
+        "未知フィールドの拒否理由: {message}"
+    );
+
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
 /// 引数を解釈できなかった tool call へ送るキー名の長さ。
 const HUGE_ARGUMENT_KEY_CHARS: usize = 100_000;
 
@@ -1120,6 +1196,123 @@ fn instance_listing_and_tool_call_survive_overlapping() {
         json!(false),
         "競合の後に read が通りません: {}",
         after.response(3)
+    );
+
+    drop(mock);
+    let _ = std::fs::remove_dir_all(&registry_dir);
+}
+
+/// 編集が pipe を占有する時間。
+///
+/// 編集は read より長く占有するため競合の窓が広い。read の対比
+/// （[`BUSY_WHILE_READING`]）より長くし、その差が実際に効くようにする。
+const BUSY_WHILE_EDITING: std::time::Duration = std::time::Duration::from_millis(1_200);
+
+#[test]
+fn edit_tool_call_and_resource_read_survive_overlapping() {
+    let registry_dir = temp_registry_dir();
+    let outcome = json!({
+        "project_epoch": "78be92d1-c8c9-44c6-ae52-387548971468",
+        "project_revision": 43,
+        "object": null,
+        "effect": null,
+        "created": [],
+    });
+    // 編集に時間の掛かるインスタンスを演じさせ、その最中に resource を読む。
+    let mock = MockPipeServer::start_with_delayed_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        OperationResponses::from([("delete_object".to_string(), ok_result(outcome.clone()))]),
+        BUSY_WHILE_EDITING,
+    );
+    mock.write_descriptor(&registry_dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let session = run_overlapping_session(
+        &registry_dir,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "aviutl2_delete_object",
+                "arguments": {
+                    "instance_id": mock.instance_id().to_string(),
+                    "selector": {
+                        "project_epoch": "78be92d1-c8c9-44c6-ae52-387548971468",
+                        "scene_id": 3,
+                        "layer": 2,
+                        "frame": 120,
+                        "name": null,
+                        "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                        "fingerprint_algorithm": "sha256-raw-v1",
+                    },
+                    "expected": {
+                        "project_epoch": "78be92d1-c8c9-44c6-ae52-387548971468",
+                        "project_revision": 42,
+                    },
+                },
+            },
+        }),
+        CONNECT_GRACE,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "resources/read",
+            "params": { "uri": "aviutl2://instances" },
+        }),
+    );
+
+    let operations: Vec<String> = mock
+        .received_requests()
+        .iter()
+        .map(|request| request.operation.clone())
+        .collect();
+    assert_eq!(
+        operations.get(1).map(String::as_str),
+        Some("delete_object"),
+        "編集要求が先に pipe を占有していません: {operations:?}"
+    );
+
+    // 実行中の編集は割り込まれても壊れず、結果を落とさない。適用済みの変更を
+    // 隠すと、要求元は自分の変更が入ったのかを知れないままになる。
+    let call = session.response(2);
+    assert_eq!(call["result"]["isError"], json!(false), "{call}");
+    assert_eq!(call["result"]["structuredContent"], outcome);
+
+    // resource 側も応答を返す。pipe が空くのを待って生存確認できることも、
+    // 待ちきれず候補から外れることもあるが、後者でも取り直しへ誘導する
+    // retryable な失敗にとどまる。
+    let listed = session.response(3);
+    if listed["error"].is_object() {
+        assert_eq!(listed["error"]["data"]["code"], json!("instance_stale"));
+        assert_eq!(
+            listed["error"]["data"]["retryable"],
+            json!(true),
+            "{listed}"
+        );
+    } else {
+        let contents = read_resource_contents(&listed);
+        assert_eq!(contents["total_count"], json!(1), "{contents}");
+    }
+
+    // 競合はその 1 回に留まり、登録も編集経路も失われない。
+    let mut retry = initialize_requests();
+    retry.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/read",
+        "params": { "uri": "aviutl2://instances" },
+    }));
+    let after = run_session(&registry_dir, &retry);
+    let contents = read_resource_contents(&after.response(2));
+    assert_eq!(
+        contents["total_count"],
+        json!(1),
+        "競合の後にインスタンスが失われています: {contents}"
     );
 
     drop(mock);
