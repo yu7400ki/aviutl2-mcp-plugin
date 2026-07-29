@@ -1312,6 +1312,21 @@ mod tests {
     }
 
     #[test]
+    fn media_file_path_is_bounded_only_by_the_path_limit() {
+        // 作成元のパスは設定項目の値ではないため、値としての上限は掛からない。
+        let path = format!(r"C:\{}", "a".repeat(MAX_PATH_UTF16_UNITS - 3));
+        assert_eq!(path.encode_utf16().count(), MAX_PATH_UTF16_UNITS);
+        assert_eq!(
+            CreateObjectParams {
+                source: ObjectSource::MediaFile { path },
+                ..sample_create()
+            }
+            .validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn names_are_limited_in_utf16_code_units() {
         let name = "🎬".repeat(MAX_NAME_UTF16_UNITS / 2 + 1);
         assert!(matches!(

@@ -4,8 +4,8 @@ use crate::effect::{AvailableEffectItem, EffectItemType};
 use crate::error::ErrorCode;
 use crate::number::FiniteF64;
 use crate::validation::{
-    PathSyntaxError, TextSyntaxError, validate_control_free, validate_item_text,
-    validate_multiline_item_text, validate_path,
+    PathSyntaxError, TextSyntaxError, validate_item_text, validate_multiline_item_text,
+    validate_path,
 };
 use serde::{Deserialize, Serialize};
 
@@ -293,17 +293,20 @@ fn encode_multiline_text(value: &str) -> Result<String, ItemWriteError> {
 
 /// パス値をそのまま渡せる形か確認する。
 ///
-/// 長さはパス専用の上限で判定し、他の文字列値と同じ上限を重ねない。
+/// パスとしての構文に加えて、設定項目の値としての上限も課す。2 つは択一で
+/// はなく、どちらも掛かる。パスの上限は UTF-16 code unit で数えるため、
+/// どの文字集合でも設定値のバイト上限より緩い。パス側だけを見ると、単一の
+/// 項目が応答サイズを圧迫しないという上限の目的が達成されない。
 fn encode_path(path: &str) -> Result<String, ItemWriteError> {
     validate_path(path)?;
-    validate_control_free(path)?;
+    validate_item_text(path)?;
     Ok(path.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::validation::MAX_ITEM_VALUE_BYTES;
+    use crate::validation::{MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS};
 
     fn sample_values() -> Vec<ItemValue> {
         vec![
@@ -759,14 +762,39 @@ mod tests {
     }
 
     #[test]
-    fn write_accepts_paths_longer_than_the_generic_string_limit() {
-        // パスの長さはパス専用の上限で判定する。
-        let path = format!(r"C:\{}", "a".repeat(MAX_ITEM_VALUE_BYTES));
-        assert_eq!(
-            validate_item_value(&ItemValue::File { path }),
-            Ok(()),
-            "パス専用の上限が適用されていません"
-        );
+    fn write_rejects_paths_over_the_setting_value_limit() {
+        // パスの上限は UTF-16 code unit で数えるため設定値のバイト上限より
+        // 緩く、パス側だけを見ると設定値の上限が効かなくなる。両方を課す。
+        for path in [
+            // ASCII だけでも設定値の上限を超えられる。
+            format!(r"C:\{}", "a".repeat(MAX_ITEM_VALUE_BYTES)),
+            // 多バイト文字ではパス上限に達する前に大きく超える。
+            format!(r"C:\{}", "あ".repeat(MAX_ITEM_VALUE_BYTES / 3)),
+        ] {
+            let bytes = path.len();
+            assert!(path.encode_utf16().count() <= MAX_PATH_UTF16_UNITS);
+            for value in [
+                ItemValue::File { path: path.clone() },
+                ItemValue::Folder { path: path.clone() },
+            ] {
+                assert_eq!(
+                    validate_item_value(&value),
+                    Err(ItemWriteError::Text(TextSyntaxError::TooLongBytes {
+                        bytes,
+                        max: MAX_ITEM_VALUE_BYTES,
+                    })),
+                    "{} が受理されました",
+                    value.kind()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn write_accepts_paths_within_both_limits() {
+        let path = format!(r"C:\{}", "a".repeat(MAX_ITEM_VALUE_BYTES - 3));
+        assert_eq!(path.len(), MAX_ITEM_VALUE_BYTES);
+        assert_eq!(validate_item_value(&ItemValue::File { path }), Ok(()));
     }
 
     #[test]
