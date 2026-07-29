@@ -7,6 +7,10 @@
 
 use crate::api::{ListInstancesResponse, aviutl2_list_instances};
 use crate::discovery::{DiscoveryConfig, list_registered_instances, resolve_instance};
+use crate::mcp::edit_input::{
+    AddEffectInput, CreateObjectInput, DeleteEffectInput, DeleteObjectInput, MoveObjectInput,
+    SetEffectStateInput, SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
+};
 use crate::mcp::input::{
     GetObjectInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput, ListLayersInput,
     ListObjectsInput, parse_instance_id,
@@ -15,12 +19,15 @@ use crate::mcp::summary::{MAX_TEXT_CHARS, clamp_chars};
 use crate::mcp::{describe, failure};
 use crate::redact;
 use aviutl2_mcp_core::{
-    EditInfo, ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult,
+    EditInfo, EditOutcome, ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult,
     GetEditInfoParams, InstanceId, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
-    MAX_PAGE_LIMIT, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_OBJECT,
-    OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS, ObjectDetail,
+    MAX_PAGE_LIMIT, OPERATION_ADD_EFFECT, OPERATION_CREATE_OBJECT, OPERATION_DELETE_EFFECT,
+    OPERATION_DELETE_OBJECT, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
+    OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
+    OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT, OPERATION_SET_EFFECT_STATE,
+    OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail,
     RequestBudgetKind, SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET,
-    SERVER_RESOLVE_BUDGET, request_budget_kind,
+    SERVER_RESOLVE_BUDGET, SelectionState, request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -91,7 +98,7 @@ impl CallLimits {
     }
 }
 
-/// AviUtl2 の読み取りを提供する MCP サーバー。
+/// AviUtl2 の読み取りと編集を提供する MCP サーバー。
 #[derive(Debug, Clone)]
 pub struct AviUtl2McpServer {
     registry_dir: Arc<PathBuf>,
@@ -292,7 +299,7 @@ impl AviUtl2McpServer {
         let limits = self.limits;
         self.run("aviutl2_get_edit_info", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
-            let result: EditInfo = request_read(
+            let result: EditInfo = request_operation(
                 &registry_dir,
                 instance_id,
                 limits,
@@ -329,7 +336,7 @@ impl AviUtl2McpServer {
         let limits = self.limits;
         self.run("aviutl2_get_current_scene", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
-            let result: GetCurrentSceneResult = request_read(
+            let result: GetCurrentSceneResult = request_operation(
                 &registry_dir,
                 instance_id,
                 limits,
@@ -369,7 +376,7 @@ impl AviUtl2McpServer {
         self.run("aviutl2_list_layers", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
-            let result: ListLayersResult = request_read(
+            let result: ListLayersResult = request_operation(
                 &registry_dir,
                 instance_id,
                 limits,
@@ -410,7 +417,7 @@ impl AviUtl2McpServer {
         self.run("aviutl2_list_objects", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
-            let result: ListObjectsResult = request_read(
+            let result: ListObjectsResult = request_operation(
                 &registry_dir,
                 instance_id,
                 limits,
@@ -449,7 +456,7 @@ impl AviUtl2McpServer {
         self.run("aviutl2_get_object", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
-            let result: ObjectDetail = request_read(
+            let result: ObjectDetail = request_operation(
                 &registry_dir,
                 instance_id,
                 limits,
@@ -490,7 +497,7 @@ impl AviUtl2McpServer {
         self.run("aviutl2_list_available_effects", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
-            let result: ListAvailableEffectsResult = request_read(
+            let result: ListAvailableEffectsResult = request_operation(
                 &registry_dir,
                 instance_id,
                 limits,
@@ -499,6 +506,440 @@ impl AviUtl2McpServer {
             )?;
             Ok(ToolSuccess {
                 text: describe::available_effects(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// メディアファイルまたは object alias からオブジェクトを作成する。
+    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
+    /// project_revision をそのまま指定する。省略はできない。
+    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
+    /// 複数オブジェクトを含む alias は全てが作成され、created に全件、object に
+    /// その先頭が入る。長さと挿入位置はホストが自動調整し得るため、応答が返す
+    /// 位置が実際の配置である。
+    /// 同じ要求を再送すると重複して作成し得る。成功すると project_revision が
+    /// 進むため、同じ expected での再送は precondition_failed となり通常は防がれる。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// この呼び出し 1 回が 1 つの取り消し単位になる。
+    #[tool(
+        name = "aviutl2_create_object",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::create_object()
+        )
+    )]
+    pub async fn aviutl2_create_object(
+        &self,
+        Parameters(input): Parameters<CreateObjectInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits;
+        self.run("aviutl2_create_object", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: EditOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_CREATE_OBJECT,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::create_object(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// オブジェクトのレイヤーと開始フレームを変更する。
+    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
+    /// project_revision をそのまま指定する。省略はできない。
+    /// selector には応答が返した値をそのまま指定する。応答が返した selector は
+    /// 読み直さずにそのまま次の編集へ渡せる。
+    /// 宛先に既存オブジェクトがある場合は precondition_failed となる。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// この呼び出し 1 回が 1 つの取り消し単位になる。
+    #[tool(
+        name = "aviutl2_move_object",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::move_object()
+        )
+    )]
+    pub async fn aviutl2_move_object(
+        &self,
+        Parameters(input): Parameters<MoveObjectInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits;
+        self.run("aviutl2_move_object", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: EditOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_MOVE_OBJECT,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::move_object(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// オブジェクト名を変更する。name を省略するか null にすると標準名へ戻す。
+    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
+    /// project_revision をそのまま指定する。省略はできない。
+    /// selector には応答が返した値をそのまま指定する。応答が返した selector は
+    /// 読み直さずにそのまま次の編集へ渡せる。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// この呼び出し 1 回が 1 つの取り消し単位になる。
+    #[tool(
+        name = "aviutl2_set_object_name",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::set_object_name()
+        )
+    )]
+    pub async fn aviutl2_set_object_name(
+        &self,
+        Parameters(input): Parameters<SetObjectNameInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits;
+        self.run("aviutl2_set_object_name", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: EditOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_SET_OBJECT_NAME,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::set_object_name(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// effect の設定項目またはトラックバーの値を変更する。
+    /// 設定項目はいずれかの effect に属するため、対象は effect の selector で指す。
+    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
+    /// project_revision をそのまま指定する。省略はできない。
+    /// selector には aviutl2_get_object が返した effect の selector をそのまま指定する。
+    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
+    /// effect の設定を変えるとそのオブジェクトの fingerprint も変わるため、変更前の
+    /// selector で続けて編集すると precondition_failed となる。
+    /// 書き込みを公開していない設定項目種別があり、その場合は unsupported_operation
+    /// となる。種別は aviutl2_get_object の item_type で確認できる。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// この呼び出し 1 回が 1 つの取り消し単位になる。
+    #[tool(
+        name = "aviutl2_set_object_item",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::set_object_item()
+        )
+    )]
+    pub async fn aviutl2_set_object_item(
+        &self,
+        Parameters(input): Parameters<SetObjectItemInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits;
+        self.run("aviutl2_set_object_item", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: EditOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_SET_OBJECT_ITEM,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::set_object_item(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// オブジェクトへ effect を付与する。
+    /// effect_name には aviutl2_list_available_effects が返す名前を指定する。
+    /// 登録されていない名前は unsupported_operation となる。
+    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
+    /// project_revision をそのまま指定する。省略はできない。
+    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
+    /// effect を足すとそのオブジェクトの fingerprint も変わるため、変更前の
+    /// selector で続けて編集すると precondition_failed となる。
+    /// 同じ要求を再送すると重複して付与し得る。成功すると project_revision が
+    /// 進むため、同じ expected での再送は precondition_failed となり通常は防がれる。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// この呼び出し 1 回が 1 つの取り消し単位になる。
+    #[tool(
+        name = "aviutl2_add_effect",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::add_effect()
+        )
+    )]
+    pub async fn aviutl2_add_effect(
+        &self,
+        Parameters(input): Parameters<AddEffectInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits;
+        self.run("aviutl2_add_effect", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: EditOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_ADD_EFFECT,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::add_effect(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// effect の有効・無効とロック状態を変更する。
+    /// enabled と locked の両方を省略した要求は受け付けない。
+    /// 出力 item の有効化と、audio effect / 出力 item のロックは変更できず
+    /// unsupported_operation となる。
+    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
+    /// project_revision をそのまま指定する。省略はできない。
+    /// selector には aviutl2_get_object が返した effect の selector をそのまま指定する。
+    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
+    /// effect の状態を変えるとそのオブジェクトの fingerprint も変わるため、変更前の
+    /// selector で続けて編集すると precondition_failed となる。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// この呼び出し 1 回が 1 つの取り消し単位になる。
+    #[tool(
+        name = "aviutl2_set_effect_state",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::set_effect_state()
+        )
+    )]
+    pub async fn aviutl2_set_effect_state(
+        &self,
+        Parameters(input): Parameters<SetEffectStateInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits;
+        self.run("aviutl2_set_effect_state", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: EditOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_SET_EFFECT_STATE,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::set_effect_state(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// オブジェクトから effect を削除する。
+    /// 対象が既に失われている場合は not_found となり、追加の変更は起きない。
+    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
+    /// project_revision をそのまま指定する。省略はできない。
+    /// selector には aviutl2_get_object が返した effect の selector をそのまま指定する。
+    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
+    /// effect を削除するとそのオブジェクトの fingerprint も変わるため、変更前の
+    /// selector で続けて編集すると precondition_failed となる。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// この呼び出し 1 回が 1 つの取り消し単位になる。
+    #[tool(
+        name = "aviutl2_delete_effect",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::delete_effect()
+        )
+    )]
+    pub async fn aviutl2_delete_effect(
+        &self,
+        Parameters(input): Parameters<DeleteEffectInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits;
+        self.run("aviutl2_delete_effect", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: EditOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_DELETE_EFFECT,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::delete_effect(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// オブジェクトを削除する。
+    /// 対象が既に失われている場合は not_found となり、追加の変更は起きない。
+    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
+    /// project_revision をそのまま指定する。省略はできない。
+    /// selector には応答が返した値をそのまま指定する。他の編集 tool では応答が
+    /// 返した selector をそのまま次の編集へ渡せるが、削除した対象の selector は
+    /// 以後どの編集にも使えない。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// この呼び出し 1 回が 1 つの取り消し単位になる。
+    #[tool(
+        name = "aviutl2_delete_object",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::delete_object()
+        )
+    )]
+    pub async fn aviutl2_delete_object(
+        &self,
+        Parameters(input): Parameters<DeleteObjectInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits;
+        self.run("aviutl2_delete_object", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: EditOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_DELETE_OBJECT,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::delete_object(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// カーソル位置・選択範囲・フォーカス対象を変更する。
+    /// cursor と selected_range と focus の 3 つ全てを省略した要求は受け付けない。
+    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
+    /// project_revision をそのまま指定する。省略はできない。
+    /// focus の selector には応答が返した値をそのまま指定する。応答が返した
+    /// selector は読み直さずにそのまま次の編集へ渡せる。
+    /// この tool は取り消し操作で元へ戻る保証が無く、他の編集 tool と異なり
+    /// 取り消し単位を作らない。
+    /// 応答が返す反映値は編集と原子的に観測したものではなく、ホストが範囲外の値を
+    /// クランプした結果である。実際に適用できた項目は applied が示す。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    #[tool(
+        name = "aviutl2_set_selection",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::set_selection()
+        )
+    )]
+    pub async fn aviutl2_set_selection(
+        &self,
+        Parameters(input): Parameters<SetSelectionInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits;
+        self.run("aviutl2_set_selection", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: SelectionState = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_SET_SELECTION,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::selection_state(&result),
                 structured: to_structured(&result)?,
             })
         })
@@ -517,7 +958,7 @@ impl ServerHandler for AviUtl2McpServer {
         );
         info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
-            "AviUtl2 の編集内容を読み取る。aviutl2_list_instances 以外の tool は instance_id が必須である。frame 番号と layer 番号はいずれも 0 始まりである。"
+            "AviUtl2 の編集内容を読み取り、変更する。aviutl2_list_instances 以外の tool は instance_id が必須である。frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。変更する tool は expected に直前の読み取りまたは編集の応答が返した project_epoch と project_revision を必ず指定する。"
                 .to_string(),
         );
         info
@@ -631,7 +1072,7 @@ impl ServerHandler for AviUtl2McpServer {
                         fitted_instances_value(response)?
                     }
                     ResourceTarget::EditInfo(instance_id) => {
-                        let info: EditInfo = request_read(
+                        let info: EditInfo = request_operation(
                             &registry_dir,
                             instance_id,
                             limits,
@@ -752,11 +1193,15 @@ fn list_instances(
     .map_err(|e| failure::from_code(e.error_code(), e.to_string()))
 }
 
-/// 対象インスタンスへ read operation を 1 件送り、結果を型付きで受け取る。
+/// 対象インスタンスへ operation を 1 件送り、結果を型付きで受け取る。
 ///
 /// 接続は本関数の中で確立し、応答を受け取ったところで破棄する。フレーム境界を
 /// 見失った接続を持ち越さないため、接続の再利用は行わない。
-fn request_read<P, R>(
+///
+/// 要求フェーズの期限は operation 名から選ぶ（[`CallLimits::request_budget`]）。
+/// 編集は read より長くかかるため、選び違えると応答しているインスタンスを
+/// 打ち切ってしまう。
+fn request_operation<P, R>(
     registry_dir: &Path,
     instance_id: InstanceId,
     limits: CallLimits,
@@ -777,7 +1222,7 @@ where
     tracing::debug!(
         instance = %redact::instance_id(&instance_id),
         operation,
-        "sending read request",
+        "sending request",
     );
     resolved
         .client
@@ -912,9 +1357,18 @@ mod tests {
         "aviutl2_list_layers",
         "aviutl2_list_objects",
         "aviutl2_get_object",
+        "aviutl2_create_object",
+        "aviutl2_move_object",
+        "aviutl2_set_object_name",
+        "aviutl2_set_object_item",
+        "aviutl2_add_effect",
+        "aviutl2_set_effect_state",
+        "aviutl2_delete_effect",
+        "aviutl2_delete_object",
+        "aviutl2_set_selection",
     ];
 
-    /// 現在登録されている全 tool の一覧。読み取り専用の read tool のみで構成される。
+    /// 読み取り専用の tool。
     const READ_TOOLS: &[&str] = &[
         "aviutl2_list_instances",
         "aviutl2_get_edit_info",
@@ -925,6 +1379,26 @@ mod tests {
         "aviutl2_list_available_effects",
     ];
 
+    /// 編集 tool と、宣言する annotation。
+    ///
+    /// 値は `destructive_hint` / `idempotent_hint` の組である。`read_only_hint` は
+    /// 全編集 tool で偽、`open_world_hint` も全 tool で偽であるため表に持たない。
+    ///
+    /// 作成系を冪等と名乗らないのは、再送で重複して作られ得るためである。
+    /// `expected` の検証により通常は防がれるが、annotation は「再送が安全である」
+    /// と主張しない側へ倒す。
+    const EDIT_TOOL_ANNOTATIONS: &[(&str, bool, bool)] = &[
+        ("aviutl2_create_object", false, false),
+        ("aviutl2_move_object", false, true),
+        ("aviutl2_set_object_name", false, true),
+        ("aviutl2_set_object_item", false, true),
+        ("aviutl2_add_effect", false, false),
+        ("aviutl2_set_effect_state", false, true),
+        ("aviutl2_delete_effect", true, true),
+        ("aviutl2_delete_object", true, true),
+        ("aviutl2_set_selection", false, true),
+    ];
+
     fn server() -> AviUtl2McpServer {
         AviUtl2McpServer::new(PathBuf::from(r"C:\nonexistent-registry"))
     }
@@ -933,31 +1407,66 @@ mod tests {
         server().tools()
     }
 
+    fn tool_named(name: &str) -> Tool {
+        tools()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("{name} が登録されていません"))
+    }
+
     #[test]
-    fn read_tools_are_registered() {
+    fn all_tools_are_registered() {
         let names: std::collections::BTreeSet<String> =
             tools().iter().map(|tool| tool.name.to_string()).collect();
-        let expected: std::collections::BTreeSet<String> =
-            READ_TOOLS.iter().map(|name| name.to_string()).collect();
+        let expected: std::collections::BTreeSet<String> = READ_TOOLS
+            .iter()
+            .copied()
+            .chain(EDIT_TOOL_ANNOTATIONS.iter().map(|(name, _, _)| *name))
+            .map(|name| name.to_string())
+            .collect();
         assert_eq!(names, expected);
     }
 
     #[test]
     fn read_tools_are_annotated_as_read_only() {
-        for tool in tools() {
+        for name in READ_TOOLS {
+            let tool = tool_named(name);
             let annotations = tool
                 .annotations
                 .as_ref()
-                .unwrap_or_else(|| panic!("{} に annotation がありません", tool.name));
-            assert_eq!(annotations.read_only_hint, Some(true), "{}", tool.name);
-            assert_eq!(annotations.destructive_hint, Some(false), "{}", tool.name);
-            assert_eq!(annotations.idempotent_hint, Some(true), "{}", tool.name);
-            assert_eq!(annotations.open_world_hint, Some(false), "{}", tool.name);
+                .unwrap_or_else(|| panic!("{name} に annotation がありません"));
+            assert_eq!(annotations.read_only_hint, Some(true), "{name}");
+            assert_eq!(annotations.destructive_hint, Some(false), "{name}");
+            assert_eq!(annotations.idempotent_hint, Some(true), "{name}");
+            assert_eq!(annotations.open_world_hint, Some(false), "{name}");
         }
     }
 
     #[test]
-    fn read_tools_declare_output_schema() {
+    fn edit_tools_are_annotated_as_mutating() {
+        for (name, destructive, idempotent) in EDIT_TOOL_ANNOTATIONS {
+            let tool = tool_named(name);
+            let annotations = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} に annotation がありません"));
+            assert_eq!(annotations.read_only_hint, Some(false), "{name}");
+            assert_eq!(
+                annotations.destructive_hint,
+                Some(*destructive),
+                "{name} の destructiveHint"
+            );
+            assert_eq!(
+                annotations.idempotent_hint,
+                Some(*idempotent),
+                "{name} の idempotentHint"
+            );
+            assert_eq!(annotations.open_world_hint, Some(false), "{name}");
+        }
+    }
+
+    #[test]
+    fn tools_declare_output_schema() {
         for tool in tools() {
             let schema = tool
                 .output_schema
@@ -969,7 +1478,7 @@ mod tests {
     }
 
     #[test]
-    fn read_tool_descriptions_state_zero_based_numbering() {
+    fn tool_descriptions_state_zero_based_numbering() {
         for tool in tools() {
             let description = tool
                 .description
@@ -983,6 +1492,96 @@ mod tests {
                 "{} の説明に 0 始まりの明記がありません",
                 tool.name
             );
+        }
+    }
+
+    /// 説明の一部を取り出す。
+    fn description_of(name: &str) -> String {
+        tool_named(name)
+            .description
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name} に説明がありません"))
+            .to_string()
+    }
+
+    #[test]
+    fn edit_tool_descriptions_state_what_costs_the_caller_if_assumed_wrong() {
+        // いずれも誤った前提で操作すると損失が生じる事項であり、説明から
+        // 落とせない。
+        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+            let description = description_of(name);
+            for keyword in [
+                "0 始まり",
+                "UI の表示とは異なる",
+                "expected",
+                "省略はできない",
+                "selector",
+                "change_applied",
+                "unknown",
+            ] {
+                assert!(
+                    description.contains(keyword),
+                    "{name} の説明に {keyword} がありません"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn edit_tool_descriptions_state_the_undo_boundary() {
+        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+            let description = description_of(name);
+            if *name == "aviutl2_set_selection" {
+                // 取り消しで元へ戻る保証が無いことを、単位を作ると読める文言に
+                // 紛れさせない。
+                assert!(
+                    description.contains("取り消し操作で元へ戻る保証が無く"),
+                    "{name} の説明に取り消しの保証が無い旨がありません"
+                );
+                assert!(
+                    !description.contains("1 つの取り消し単位"),
+                    "{name} の説明が取り消し単位を作ると読めます"
+                );
+                continue;
+            }
+            assert!(
+                description.contains("1 つの取り消し単位"),
+                "{name} の説明に取り消し単位がありません"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_tool_descriptions_state_the_operation_specific_hazards() {
+        let hazards: &[(&str, &[&str])] = &[
+            (
+                "aviutl2_create_object",
+                &["全てが作成され", "自動調整", "重複して作成"],
+            ),
+            ("aviutl2_add_effect", &["fingerprint", "重複して付与"]),
+            (
+                "aviutl2_set_object_item",
+                &["fingerprint", "公開していない設定項目種別", "item_type"],
+            ),
+            (
+                "aviutl2_set_effect_state",
+                &["fingerprint", "出力 item", "audio effect", "両方を省略"],
+            ),
+            ("aviutl2_delete_effect", &["fingerprint", "not_found"]),
+            ("aviutl2_delete_object", &["not_found"]),
+            (
+                "aviutl2_set_selection",
+                &["原子的", "クランプ", "全てを省略"],
+            ),
+        ];
+        for (name, keywords) in hazards {
+            let description = description_of(name);
+            for keyword in *keywords {
+                assert!(
+                    description.contains(keyword),
+                    "{name} の説明に {keyword} がありません"
+                );
+            }
         }
     }
 

@@ -1,6 +1,6 @@
-//! read tool の `outputSchema`。
+//! tool の `outputSchema`。
 //!
-//! `structuredContent` として返す値は read operation の result DTO をそのまま
+//! `structuredContent` として返す値は operation の result DTO をそのまま
 //! 直列化したものであり、本モジュールの schema はその形を記述する。
 //! 応答型は将来の MINOR 追加を受け入れるため、追加プロパティは禁じない。
 
@@ -73,6 +73,87 @@ pub fn object_detail() -> Value {
 /// `aviutl2_list_available_effects` の出力。
 pub fn list_available_effects() -> Value {
     page_of(available_effect())
+}
+
+/// `aviutl2_create_object` の出力。
+///
+/// `created` に作成された全件が入り、`object` はその先頭を指す。
+pub fn create_object() -> Value {
+    edit_outcome(object_summary(), null(), array(object_summary()))
+}
+
+/// `aviutl2_move_object` の出力。
+pub fn move_object() -> Value {
+    edit_outcome(object_summary(), null(), array(object_summary()))
+}
+
+/// `aviutl2_set_object_name` の出力。
+pub fn set_object_name() -> Value {
+    edit_outcome(object_summary(), null(), array(object_summary()))
+}
+
+/// `aviutl2_delete_object` の出力。
+///
+/// 対象は消えているため `object` は必ず null になる。
+pub fn delete_object() -> Value {
+    edit_outcome(null(), null(), array(object_summary()))
+}
+
+/// `aviutl2_set_object_item` の出力。
+///
+/// `effect` には書き込み後に読み直した値が入る。
+pub fn set_object_item() -> Value {
+    edit_outcome(object_summary(), effect_info(), array(object_summary()))
+}
+
+/// `aviutl2_add_effect` の出力。
+pub fn add_effect() -> Value {
+    edit_outcome(object_summary(), effect_info(), array(object_summary()))
+}
+
+/// `aviutl2_set_effect_state` の出力。
+pub fn set_effect_state() -> Value {
+    edit_outcome(object_summary(), effect_info(), array(object_summary()))
+}
+
+/// `aviutl2_delete_effect` の出力。
+///
+/// effect は消えているため `effect` は必ず null になる。
+pub fn delete_effect() -> Value {
+    edit_outcome(object_summary(), null(), array(object_summary()))
+}
+
+/// `aviutl2_set_selection` の出力。
+pub fn set_selection() -> Value {
+    object(&[
+        ("project_epoch", string()),
+        ("project_revision", unsigned()),
+        ("cursor", cursor()),
+        ("selected_range", nullable(frame_range())),
+        ("focus", nullable(object_summary())),
+        ("applied", array(selection_field())),
+        ("observed_after_edit", boolean()),
+    ])
+}
+
+/// 構造を変更する編集の結果。
+///
+/// `object` / `effect` / `created` に何が入るかは operation ごとに決まるため、
+/// tool ごとに別の schema として宣言する。1 つへ畳むと「この tool では必ず
+/// object が入る」という情報が失われる。
+fn edit_outcome(target: Value, effect: Value, created: Value) -> Value {
+    object(&[
+        ("project_epoch", string()),
+        ("project_revision", unsigned()),
+        ("object", target),
+        ("effect", effect),
+        ("created", created),
+    ])
+}
+
+/// 選択状態のうち適用できた項目。
+fn selection_field() -> Value {
+    json!({ "type": "string", "enum": ["cursor", "selected_range", "focus"] })
 }
 
 /// 一覧応答の共通形。
@@ -369,17 +450,22 @@ fn nullable(inner: Value) -> Value {
     json!({ "anyOf": [inner, { "type": "null" }] })
 }
 
+/// null しか取らない schema。
+fn null() -> Value {
+    json!({ "type": "null" })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::ListInstancesResponse;
     use aviutl2_mcp_core::{
-        AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo,
+        AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EditOutcome,
         EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem, EffectItemType, EffectType,
         Extent, FiniteF64, FrameRange, GetCurrentSceneResult, InstanceId, InstanceInfo,
         InstanceProject, InstanceState, ItemValue, LayerInfo, ListAvailableEffectsResult,
         ListLayersResult, ListObjectsResult, ObjectDetail, ObjectFingerprintInput, ObjectSummary,
-        PageMeta, SceneInfo, SceneRef, SectionRange, TrackInfo,
+        PageMeta, SceneInfo, SceneRef, SectionRange, SelectionField, SelectionState, TrackInfo,
     };
 
     /// 値が schema に適合するかを再帰的に検査する。
@@ -759,6 +845,158 @@ mod tests {
             page: sample_page_meta(),
         };
         assert_conforms(list_available_effects(), &to_value(&result));
+    }
+
+    /// 応答へ載せる effect。全種別の設定項目を 1 つずつ含む。
+    fn sample_effect_info() -> EffectInfo {
+        let items = sample_effect_items();
+        EffectInfo::new(
+            sample_object_summary().selector,
+            EffectFingerprintInput {
+                effect_name: "動画ファイル",
+                effect_index: 0,
+                position: 0,
+                effect_count: 1,
+                enabled: true,
+                locked: false,
+                items: &items,
+            },
+        )
+    }
+
+    fn sample_selection_state() -> SelectionState {
+        SelectionState::observed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            42,
+            Cursor {
+                frame: 120,
+                layer: 2,
+            },
+            Some(FrameRange { start: 0, end: 10 }),
+            Some(sample_object_summary()),
+            vec![
+                SelectionField::Cursor,
+                SelectionField::SelectedRange,
+                SelectionField::Focus,
+            ],
+        )
+    }
+
+    #[test]
+    fn create_object_schema_matches_dto() {
+        let outcome = EditOutcome::created(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            vec![sample_object_summary(), sample_object_summary()],
+        );
+        assert_conforms(create_object(), &to_value(&outcome));
+    }
+
+    #[test]
+    fn move_object_schema_matches_dto() {
+        let outcome = EditOutcome::object_changed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            sample_object_summary(),
+        );
+        assert_conforms(move_object(), &to_value(&outcome));
+    }
+
+    #[test]
+    fn set_object_name_schema_matches_dto() {
+        let outcome = EditOutcome::object_changed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            sample_object_summary(),
+        );
+        assert_conforms(set_object_name(), &to_value(&outcome));
+    }
+
+    #[test]
+    fn delete_effect_schema_matches_dto() {
+        let outcome = EditOutcome::object_changed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            sample_object_summary(),
+        );
+        assert_conforms(delete_effect(), &to_value(&outcome));
+    }
+
+    #[test]
+    fn delete_object_schema_matches_dto() {
+        let outcome = EditOutcome::deleted("78be92d1-c8c9-44c6-ae52-387548971468", 43);
+        assert_conforms(delete_object(), &to_value(&outcome));
+    }
+
+    #[test]
+    fn effect_changing_schemas_match_dto() {
+        let outcome = EditOutcome::effect_changed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            sample_object_summary(),
+            sample_effect_info(),
+        );
+        let value = to_value(&outcome);
+        for schema in [set_object_item(), add_effect(), set_effect_state()] {
+            assert_conforms(schema, &value);
+        }
+    }
+
+    #[test]
+    fn set_selection_schema_matches_dto() {
+        assert_conforms(set_selection(), &to_value(&sample_selection_state()));
+    }
+
+    #[test]
+    fn set_selection_schema_accepts_absent_range_and_focus() {
+        let mut state = sample_selection_state();
+        state.selected_range = None;
+        state.focus = None;
+        state.applied = vec![SelectionField::Cursor];
+        assert_conforms(set_selection(), &to_value(&state));
+    }
+
+    #[test]
+    fn deleting_schemas_require_the_removed_target_to_be_null() {
+        // 「この tool では対象が消える」という情報を schema に残す。畳んで
+        // nullable にすると、削除の応答が対象を返しても検出できなくなる。
+        let outcome = EditOutcome::object_changed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            sample_object_summary(),
+        );
+        assert!(
+            check(&delete_object(), &to_value(&outcome), "$").is_err(),
+            "削除の応答に残った対象を検出できていません"
+        );
+
+        let outcome = EditOutcome::effect_changed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            sample_object_summary(),
+            sample_effect_info(),
+        );
+        assert!(
+            check(&delete_effect(), &to_value(&outcome), "$").is_err(),
+            "削除の応答に残った effect を検出できていません"
+        );
+    }
+
+    #[test]
+    fn effect_changing_schemas_require_an_effect() {
+        // effect を伴う operation で effect が欠けた応答を通さない。
+        let outcome = EditOutcome::object_changed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            sample_object_summary(),
+        );
+        let value = to_value(&outcome);
+        for schema in [set_object_item(), add_effect(), set_effect_state()] {
+            assert!(
+                check(&schema, &value, "$").is_err(),
+                "effect の欠落を検出できていません"
+            );
+        }
     }
 
     #[test]

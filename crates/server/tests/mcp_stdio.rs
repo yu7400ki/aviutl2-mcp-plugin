@@ -251,6 +251,30 @@ fn sample_edit_info() -> EditInfo {
     }
 }
 
+/// tool 名から期待する `readOnlyHint` / `destructiveHint` / `idempotentHint`。
+///
+/// 未知の tool は落とす。tool を足したときに annotation の検査から漏れないようにする。
+fn expected_annotations(name: &str) -> (bool, bool, bool) {
+    match name {
+        "aviutl2_list_instances"
+        | "aviutl2_get_edit_info"
+        | "aviutl2_get_current_scene"
+        | "aviutl2_list_layers"
+        | "aviutl2_list_objects"
+        | "aviutl2_get_object"
+        | "aviutl2_list_available_effects" => (true, false, true),
+        // 作成系は再送で重複し得るため冪等と名乗らない。
+        "aviutl2_create_object" | "aviutl2_add_effect" => (false, false, false),
+        "aviutl2_delete_object" | "aviutl2_delete_effect" => (false, true, true),
+        "aviutl2_move_object"
+        | "aviutl2_set_object_name"
+        | "aviutl2_set_object_item"
+        | "aviutl2_set_effect_state"
+        | "aviutl2_set_selection" => (false, false, true),
+        other => panic!("{other} の annotation が定義されていません"),
+    }
+}
+
 #[test]
 fn stdout_carries_only_mcp_messages() {
     let registry_dir = temp_registry_dir();
@@ -279,15 +303,26 @@ fn stdout_carries_only_mcp_messages() {
     let listed = session.response(2);
     let tools = listed["result"]["tools"].as_array().expect("tools は配列");
     assert!(!tools.is_empty());
+    let mut checked = 0;
     for tool in tools {
-        let name = tool["name"].as_str().expect("name がある");
-        assert_eq!(tool["annotations"]["readOnlyHint"], json!(true), "{name}");
+        let name = tool["name"].as_str().expect("name がある").to_string();
+        let (read_only, destructive, idempotent) = expected_annotations(&name);
+        checked += 1;
         assert_eq!(
-            tool["annotations"]["destructiveHint"],
-            json!(false),
+            tool["annotations"]["readOnlyHint"],
+            json!(read_only),
             "{name}"
         );
-        assert_eq!(tool["annotations"]["idempotentHint"], json!(true), "{name}");
+        assert_eq!(
+            tool["annotations"]["destructiveHint"],
+            json!(destructive),
+            "{name}"
+        );
+        assert_eq!(
+            tool["annotations"]["idempotentHint"],
+            json!(idempotent),
+            "{name}"
+        );
         assert_eq!(tool["annotations"]["openWorldHint"], json!(false), "{name}");
         assert!(
             tool["outputSchema"]["properties"].is_object(),
@@ -299,6 +334,7 @@ fn stdout_carries_only_mcp_messages() {
             "{name}"
         );
     }
+    assert_eq!(checked, tools.len(), "全 tool を検査していません");
 
     let call = session.response(3);
     assert_eq!(call["result"]["isError"], json!(false));

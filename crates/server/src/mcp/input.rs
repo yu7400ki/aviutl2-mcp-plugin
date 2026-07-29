@@ -28,23 +28,23 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 /// `instance_id` が満たすべき UUID の書式。
-const UUID_PATTERN: &str =
+pub(crate) const UUID_PATTERN: &str =
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
 
 /// [`UUID_PATTERN`] が定める各群の文字数。
 const UUID_GROUP_LENGTHS: [usize; 5] = [8, 4, 4, 4, 12];
 
 /// fingerprint が満たすべき書式。
-const FINGERPRINT_PATTERN: &str = r"^sha256:[0-9a-f]{64}$";
+pub(crate) const FINGERPRINT_PATTERN: &str = r"^sha256:[0-9a-f]{64}$";
 
 /// オブジェクト名・レイヤー名に許す最大文字数。
-const MAX_NAME_CHARS: u32 = 1_024;
+pub(crate) const MAX_NAME_CHARS: u32 = 1_024;
 
 /// fingerprint 算出方式名に許す最大文字数。
-const MAX_ALGORITHM_CHARS: u32 = 64;
+pub(crate) const MAX_ALGORITHM_CHARS: u32 = 64;
 
 /// プロジェクト epoch に許す最大文字数。
-const MAX_EPOCH_CHARS: u32 = 64;
+pub(crate) const MAX_EPOCH_CHARS: u32 = 64;
 
 fn default_limit() -> u32 {
     DEFAULT_PAGE_LIMIT
@@ -269,7 +269,12 @@ impl From<EffectTypeInput> for EffectType {
 /// 長さは JSON Schema の `minLength` / `maxLength` と同じく文字数で数える。
 /// 違反した値そのものは説明へ含めない。過大な入力をそのまま応答へ写すと、
 /// 入力の誤りを伝える応答自体が過大になる。
-fn ensure_length(field: &str, value: &str, min: u32, max: u32) -> Result<(), ErrorObject> {
+pub(crate) fn ensure_length(
+    field: &str,
+    value: &str,
+    min: u32,
+    max: u32,
+) -> Result<(), ErrorObject> {
     let length = value.chars().count();
     if length < min as usize || length > max as usize {
         return Err(invalid_argument(format!(
@@ -388,7 +393,7 @@ impl ObjectSelectorInput {
     }
 
     /// セレクターへ変換する。文字数と fingerprint の書式はここで検証される。
-    fn to_selector(&self) -> Result<ObjectSelector, ErrorObject> {
+    pub(crate) fn to_selector(&self) -> Result<ObjectSelector, ErrorObject> {
         self.validate()?;
         let value = serde_json::json!({
             "project_epoch": self.project_epoch,

@@ -1,17 +1,25 @@
-//! read tool の text content を組み立てる。
+//! tool の text content を組み立てる。
 //!
 //! 主要結果・ID・revision・次に必要な操作だけを短く示す。完全な機械可読値は
 //! `structuredContent` が運ぶため、ここでは列挙の全項目を書き出さない。
+//!
+//! **object alias・設定項目の値・パスを text へ載せない。** これらは利用者の
+//! 内容そのものであり、応答へ反響させない。オブジェクト名とレイヤー / フレーム
+//! 番号は対象を見分けるのに要るため載せる。
 
 use crate::api::ListInstancesResponse;
 use crate::mcp::summary::{TextBuilder, clamp_chars};
 use aviutl2_mcp_core::{
-    EditInfo, GetCurrentSceneResult, InstanceInfo, ListAvailableEffectsResult, ListLayersResult,
-    ListObjectsResult, ObjectDetail, PageMeta,
+    EditInfo, EditOutcome, GetCurrentSceneResult, InstanceInfo, ListAvailableEffectsResult,
+    ListLayersResult, ListObjectsResult, ObjectDetail, ObjectSummary, PageMeta, SelectionField,
+    SelectionState,
 };
 
 /// 名前をそのまま行に載せるときの最大文字数。
 const MAX_NAME_CHARS: usize = 60;
+
+/// 編集の応答に共通して添える次の操作の案内。
+const EDIT_NEXT_STEP: &str = "続けて編集する場合は structuredContent の selector と project_revision をそのまま使えます。前提条件が合わない場合は対象を読み直してください";
 
 /// `aviutl2_list_instances` の text content。
 pub fn instances(response: &ListInstancesResponse) -> String {
@@ -203,6 +211,163 @@ pub fn available_effects(result: &ListAvailableEffectsResult) -> String {
     text.finish()
 }
 
+/// `aviutl2_create_object` の text content。
+pub fn create_object(outcome: &EditOutcome) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(format!(
+        "オブジェクトを {} 件作成しました",
+        outcome.created.len()
+    ));
+    if let Some(object) = &outcome.object {
+        text.push_line(format!("先頭 {}", object_line(object)));
+    }
+    text.push_line(
+        "長さと挿入位置はホストが決めるため、要求した位置と異なることがあります。上の位置が実際の配置です",
+    );
+    finish_edit(text, outcome.project_revision)
+}
+
+/// `aviutl2_move_object` の text content。
+pub fn move_object(outcome: &EditOutcome) -> String {
+    changed_object("移動しました", outcome)
+}
+
+/// `aviutl2_set_object_name` の text content。
+pub fn set_object_name(outcome: &EditOutcome) -> String {
+    changed_object("名前を変更しました", outcome)
+}
+
+/// `aviutl2_set_object_item` の text content。
+pub fn set_object_item(outcome: &EditOutcome) -> String {
+    changed_effect("設定項目を変更しました", outcome)
+}
+
+/// `aviutl2_add_effect` の text content。
+pub fn add_effect(outcome: &EditOutcome) -> String {
+    changed_effect("effect を付与しました", outcome)
+}
+
+/// `aviutl2_set_effect_state` の text content。
+pub fn set_effect_state(outcome: &EditOutcome) -> String {
+    changed_effect("effect の状態を変更しました", outcome)
+}
+
+/// `aviutl2_delete_effect` の text content。
+pub fn delete_effect(outcome: &EditOutcome) -> String {
+    changed_object("effect を削除しました", outcome)
+}
+
+/// `aviutl2_delete_object` の text content。
+pub fn delete_object(outcome: &EditOutcome) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line("オブジェクトを削除しました");
+    text.push_line(format!("project_revision={}", outcome.project_revision));
+    text.push_line(
+        "削除した対象の selector は以後使えません。別の対象を編集する場合は読み直してください",
+    );
+    text.finish()
+}
+
+/// `aviutl2_set_selection` の text content。
+pub fn selection_state(state: &SelectionState) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(format!(
+        "cursor frame={} layer={}（frame / layer は 0 始まり）",
+        state.cursor.frame, state.cursor.layer,
+    ));
+    text.push_line(match &state.selected_range {
+        Some(range) => format!("選択範囲 frame {}..{}", range.start, range.end),
+        None => "選択範囲なし".to_string(),
+    });
+    text.push_line(match &state.focus {
+        Some(object) => format!("フォーカス {}", object_line(object)),
+        None => "フォーカスなし".to_string(),
+    });
+    text.push_line(format!("適用できた項目: {}", applied_label(&state.applied)));
+    text.push_line(format!("project_revision={}", state.project_revision));
+    text.push_line(
+        "上の値はホストがクランプした結果であり、編集と同時に観測したものではありません。取り消し操作で元へ戻る保証もありません",
+    );
+    text.push_line(
+        "applied に無い項目は反映されていません。確かめるには aviutl2_get_edit_info で読み直してください",
+    );
+    text.finish()
+}
+
+/// オブジェクトだけが変わった編集の text content。
+fn changed_object(action: &str, outcome: &EditOutcome) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(target_line(action, outcome.object.as_ref()));
+    finish_edit(text, outcome.project_revision)
+}
+
+/// effect を伴う編集の text content。
+fn changed_effect(action: &str, outcome: &EditOutcome) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(target_line(action, outcome.object.as_ref()));
+    if let Some(effect) = &outcome.effect {
+        text.push_line(format!(
+            "effect {}:{} enabled={} locked={} items={}",
+            clamp_chars(&effect.name, MAX_NAME_CHARS),
+            effect.index,
+            effect.enabled,
+            effect.locked,
+            effect.items.len(),
+        ));
+    }
+    text.push_line(
+        "effect の変更でオブジェクトの fingerprint も変わるため、変更前の selector は使えません",
+    );
+    finish_edit(text, outcome.project_revision)
+}
+
+/// 変更後の対象を示す 1 行。
+fn target_line(action: &str, object: Option<&ObjectSummary>) -> String {
+    match object {
+        Some(object) => format!("{action} {}", object_line(object)),
+        None => format!("{action}（対象は応答に含まれません）"),
+    }
+}
+
+/// オブジェクトの位置と名前の 1 行表現。
+fn object_line(object: &ObjectSummary) -> String {
+    format!(
+        "layer={} frame={}..{} name={}（frame / layer は 0 始まり）",
+        object.layer,
+        object.frame_start,
+        object.frame_end,
+        optional_name(object.name.as_deref()),
+    )
+}
+
+/// 適用できた項目の表示。
+fn applied_label(applied: &[SelectionField]) -> String {
+    if applied.is_empty() {
+        return "なし".to_string();
+    }
+    applied
+        .iter()
+        .map(selection_field_label)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// 選択状態の項目名。
+fn selection_field_label(field: &SelectionField) -> &'static str {
+    match field {
+        SelectionField::Cursor => "cursor",
+        SelectionField::SelectedRange => "selected_range",
+        SelectionField::Focus => "focus",
+    }
+}
+
+/// 編集の text content へ revision と次の操作を添えて仕上げる。
+fn finish_edit(mut text: TextBuilder, project_revision: u64) -> String {
+    text.push_line(format!("project_revision={project_revision}"));
+    text.push_line(EDIT_NEXT_STEP);
+    text.finish()
+}
+
 /// ページ情報の 1 行表現。
 fn page_line(page: &PageMeta) -> String {
     format!(
@@ -259,9 +424,10 @@ mod tests {
     use super::*;
     use crate::mcp::summary::{MAX_TEXT_CHARS, TRUNCATION_NOTICE};
     use aviutl2_mcp_core::{
-        AvailableEffect, EffectFingerprintInput, EffectFlags, EffectInfo, EffectType, FiniteF64,
-        InstanceId, InstanceProject, InstanceState, LayerInfo, ObjectFingerprintInput,
-        ObjectSummary, SceneInfo, SectionRange,
+        AvailableEffect, Cursor, EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem,
+        EffectItemType, EffectType, FiniteF64, FrameRange, InstanceId, InstanceProject,
+        InstanceState, ItemValue, LayerInfo, ObjectFingerprintInput, ObjectSummary, SceneInfo,
+        SectionRange,
     };
 
     /// 上限を必ず超える件数。要求上限を無視した応答でも打ち切られることを確かめる。
@@ -538,6 +704,212 @@ mod tests {
         });
         assert!(available_effects_text.contains("effect_type"));
         assert!(available_effects_text.contains("structuredContent"));
+    }
+
+    /// 秘匿すべき内容を全て含む effect。
+    fn secretive_effect(summary: &ObjectSummary) -> EffectInfo {
+        let items = vec![
+            EffectItem {
+                name: "テキスト".to_string(),
+                item_type: EffectItemType::Text,
+                value: ItemValue::Text {
+                    value: SECRET_VALUE.to_string(),
+                },
+                track: None,
+            },
+            EffectItem {
+                name: "ファイル".to_string(),
+                item_type: EffectItemType::File,
+                value: ItemValue::File {
+                    path: SECRET_PATH.to_string(),
+                },
+                track: None,
+            },
+        ];
+        EffectInfo::new(
+            summary.selector.clone(),
+            EffectFingerprintInput {
+                effect_name: "テキスト",
+                effect_index: 0,
+                position: 0,
+                effect_count: 1,
+                enabled: true,
+                locked: false,
+                items: &items,
+            },
+        )
+    }
+
+    /// text へ現れてはならない設定値。
+    const SECRET_VALUE: &str = "秘密の字幕";
+    /// text へ現れてはならないパス。
+    const SECRET_PATH: &str = r"C:\Users\tester\secret.png";
+
+    fn sample_summary() -> ObjectSummary {
+        ObjectSummary::new(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            ObjectFingerprintInput {
+                scene_id: 3,
+                layer: 2,
+                frame_start: 120,
+                frame_end: 240,
+                name: Some("立ち絵"),
+                alias: "[vo]\n_name=立ち絵\n",
+                effect_fingerprints: &[],
+            },
+        )
+    }
+
+    /// 全編集 tool の text content を、秘匿すべき内容を含む応答から組み立てる。
+    fn every_edit_text() -> Vec<(&'static str, String)> {
+        let summary = sample_summary();
+        let effect = secretive_effect(&summary);
+        let object_changed = EditOutcome::object_changed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            summary.clone(),
+        );
+        let effect_changed = EditOutcome::effect_changed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            summary.clone(),
+            effect,
+        );
+        let created = EditOutcome::created(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            vec![summary.clone(), summary.clone()],
+        );
+        let deleted = EditOutcome::deleted("78be92d1-c8c9-44c6-ae52-387548971468", 43);
+        let selection = SelectionState::observed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            Cursor {
+                frame: 120,
+                layer: 2,
+            },
+            Some(FrameRange { start: 0, end: 10 }),
+            Some(summary),
+            vec![SelectionField::Cursor],
+        );
+        vec![
+            ("aviutl2_create_object", create_object(&created)),
+            ("aviutl2_move_object", move_object(&object_changed)),
+            ("aviutl2_set_object_name", set_object_name(&object_changed)),
+            ("aviutl2_set_object_item", set_object_item(&effect_changed)),
+            ("aviutl2_add_effect", add_effect(&effect_changed)),
+            (
+                "aviutl2_set_effect_state",
+                set_effect_state(&effect_changed),
+            ),
+            ("aviutl2_delete_effect", delete_effect(&object_changed)),
+            ("aviutl2_delete_object", delete_object(&deleted)),
+            ("aviutl2_set_selection", selection_state(&selection)),
+        ]
+    }
+
+    #[test]
+    fn edit_text_states_the_change_the_revision_and_the_next_step() {
+        for (tool, text) in every_edit_text() {
+            assert!(
+                text.contains("project_revision=43"),
+                "{tool} が変更後の revision を示していません: {text}"
+            );
+            assert!(
+                text.contains("selector") || text.contains("読み直"),
+                "{tool} が次の操作を示していません: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_text_locates_the_target() {
+        for (tool, text) in every_edit_text() {
+            if tool == "aviutl2_delete_object" {
+                // 対象は消えているため位置を示さない。
+                continue;
+            }
+            assert!(
+                text.contains("layer=2") && text.contains("frame=120..240"),
+                "{tool} が対象の位置を示していません: {text}"
+            );
+            assert!(
+                text.contains("立ち絵"),
+                "{tool} が対象の名前を示していません: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_text_never_carries_aliases_values_or_paths() {
+        // 応答へ載せてよいのは対象の位置と名前だけである。alias・設定値・パスは
+        // 利用者の内容そのものであり、text へ反響させない。
+        for (tool, text) in every_edit_text() {
+            for forbidden in [SECRET_VALUE, SECRET_PATH, "[vo]", "_name="] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{tool} の text に {forbidden} が含まれています: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn edit_text_is_bounded_for_oversized_results() {
+        let summary = ObjectSummary::new(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            ObjectFingerprintInput {
+                scene_id: 3,
+                layer: 2,
+                frame_start: 0,
+                frame_end: 10,
+                name: Some(&long_name()),
+                alias: "alias",
+                effect_fingerprints: &[],
+            },
+        );
+        let created: Vec<ObjectSummary> = (0..OVERSIZED_COUNT).map(|_| summary.clone()).collect();
+        let outcome = EditOutcome::created("78be92d1-c8c9-44c6-ae52-387548971468", 43, created);
+        let text = create_object(&outcome);
+        assert!(
+            text.chars().count() <= MAX_TEXT_CHARS,
+            "上限を超えています: {}",
+            text.chars().count()
+        );
+    }
+
+    #[test]
+    fn effect_changing_text_warns_that_the_object_fingerprint_moved() {
+        let summary = sample_summary();
+        let outcome = EditOutcome::effect_changed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            summary.clone(),
+            secretive_effect(&summary),
+        );
+        for text in [
+            set_object_item(&outcome),
+            add_effect(&outcome),
+            set_effect_state(&outcome),
+        ] {
+            assert!(text.contains("fingerprint"), "{text}");
+        }
+    }
+
+    #[test]
+    fn selection_text_lists_only_the_applied_fields() {
+        let state = SelectionState::observed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            Cursor { frame: 5, layer: 1 },
+            None,
+            None,
+            Vec::new(),
+        );
+        let text = selection_state(&state);
+        assert!(text.contains("適用できた項目: なし"), "{text}");
+        assert!(text.contains("選択範囲なし"), "{text}");
+        assert!(text.contains("フォーカスなし"), "{text}");
     }
 
     #[test]
