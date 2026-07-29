@@ -9,12 +9,13 @@ use crate::read::host::{
     EditState, HostEditInfo, HostEffect, HostObject, HostObjectDetail, HostObjectPlacement,
     ReadHost, SceneReader,
 };
-use crate::read::{ProjectStatus, ReadAdapter, Snapshot};
+use crate::read::{Page, ProjectStatus, ReadAdapter, Snapshot};
 use aviutl2_mcp_core::FingerprintAlgorithm;
 use aviutl2_mcp_core::{
     AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFingerprintInput, EffectInfo,
     EffectType, Extent, FiniteF64, FrameRange, LayerInfo, ObjectDetail, ObjectFilter,
-    ObjectFingerprintInput, ObjectSelector, ObjectSummary, SceneInfo, effect_fingerprint,
+    ObjectFingerprintInput, ObjectSelector, ObjectSummary, PageError, PageRequest, SceneInfo,
+    effect_fingerprint, take_page,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -217,7 +218,8 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
         &self,
         expected_scene_id: i32,
         filter: Option<&ObjectFilter>,
-    ) -> Result<Snapshot<ObjectSummary>, ReadError> {
+        page: &PageRequest,
+    ) -> Result<Result<Page<ObjectSummary>, PageError>, ReadError> {
         self.ensure_readable()?;
         let info = self.edit_info()?;
         ensure_scene(&info, expected_scene_id)?;
@@ -226,22 +228,31 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
         let epoch = self.project.epoch();
         let epoch = epoch.as_str();
         let project = self.project.as_ref();
+        let page = *page;
 
-        let (snapshot_revision, items) = self.read_section(move |scene| {
+        self.read_section(move |scene| {
             let revision = project.revision();
-            let mut items = Vec::new();
+            // 位置と名前だけを読んで全件を並べる。総件数と並び順はここで確定し、
+            // ページのメタ情報もこの並びから組み立てる。
+            let mut placements = Vec::new();
             for layer in layers {
-                for placement in scene.object_placements(layer)? {
-                    let detail = scene.object_detail(layer, placement.frame_start)?;
-                    items.push(object_summary(epoch, scene_id, &detail.object));
-                }
+                placements.extend(scene.object_placements(layer)?);
             }
-            Ok((revision, items))
-        })?;
 
-        Ok(Snapshot {
-            items,
-            snapshot_revision,
+            let (window, meta) = match take_page(&placements, &page, revision) {
+                Ok(page) => page,
+                Err(error) => return Ok(Err(error)),
+            };
+
+            // alias と配下 effect を読むのは窓に入った対象だけにする。応答へ
+            // 載せない対象まで読むと、参照区間の保持時間が要求ページではなく
+            // プロジェクトの規模で決まってしまう。
+            let mut items = Vec::with_capacity(window.len());
+            for placement in window {
+                let detail = scene.object_detail(placement.layer, placement.frame_start)?;
+                items.push(object_summary(epoch, scene_id, &detail.object));
+            }
+            Ok(Ok(Page { items, meta }))
         })
     }
 
@@ -838,6 +849,21 @@ mod tests {
         ]
     }
 
+    impl<H: ReadHost> HostReadAdapter<H> {
+        /// 既定のページ要求でオブジェクトを列挙する。
+        ///
+        /// ページ要求は要求の復号側で検証済みのものだけが届くため、既定値を
+        /// そのまま用いる。フェイクの対象数は既定の 1 ページに収まる。
+        fn list_objects_page(
+            &self,
+            expected_scene_id: i32,
+            filter: Option<&ObjectFilter>,
+        ) -> Result<Page<ObjectSummary>, ReadError> {
+            self.list_objects(expected_scene_id, filter, &PageRequest::default())
+                .map(|page| page.expect("既定のページ要求が拒否されました"))
+        }
+    }
+
     /// adapter とプロジェクト状態を組み立てる。
     fn adapter_with(
         host: impl FnOnce(&Arc<ProjectState>) -> FakeHost,
@@ -858,7 +884,10 @@ mod tests {
             adapter.get_edit_info().err().map(|e| e.error_code()),
             adapter.get_current_scene().err().map(|e| e.error_code()),
             adapter.list_layers(0).err().map(|e| e.error_code()),
-            adapter.list_objects(0, None).err().map(|e| e.error_code()),
+            adapter
+                .list_objects_page(0, None)
+                .err()
+                .map(|e| e.error_code()),
             adapter.get_object(&selector).err().map(|e| e.error_code()),
             adapter
                 .list_available_effects(None)
@@ -1000,7 +1029,7 @@ mod tests {
                 adapter.get_edit_info().unwrap_err(),
                 adapter.get_current_scene().unwrap_err(),
                 adapter.list_layers(0).unwrap_err(),
-                adapter.list_objects(0, None).unwrap_err(),
+                adapter.list_objects_page(0, None).unwrap_err(),
                 adapter.get_object(&selector).unwrap_err(),
             ] {
                 assert_eq!(error.error_code(), ErrorCode::InternalError);
@@ -1048,7 +1077,7 @@ mod tests {
                 adapter.get_edit_info().unwrap_err(),
                 adapter.get_current_scene().unwrap_err(),
                 adapter.list_layers(0).unwrap_err(),
-                adapter.list_objects(0, None).unwrap_err(),
+                adapter.list_objects_page(0, None).unwrap_err(),
             ] {
                 assert_eq!(error.error_code(), ErrorCode::InternalError);
             }
@@ -1221,7 +1250,7 @@ mod tests {
         let adapter = adapter();
         for error in [
             adapter.list_layers(7).unwrap_err(),
-            adapter.list_objects(7, None).unwrap_err(),
+            adapter.list_objects_page(7, None).unwrap_err(),
         ] {
             assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
             assert_eq!(error.details()["expected_scene_id"], 7);
@@ -1232,7 +1261,7 @@ mod tests {
     #[test]
     fn list_objects_enumerates_every_layer_by_default() {
         let adapter = adapter();
-        let snapshot = adapter.list_objects(0, None).unwrap();
+        let snapshot = adapter.list_objects_page(0, None).unwrap();
         assert_eq!(snapshot.items.len(), 3);
         assert_eq!(snapshot.items[0].layer, 0);
         assert_eq!(snapshot.items[1].frame_start, 100);
@@ -1247,7 +1276,7 @@ mod tests {
             layer_min: Some(1),
             layer_max: Some(1),
         };
-        let snapshot = adapter.list_objects(0, Some(&filter)).unwrap();
+        let snapshot = adapter.list_objects_page(0, Some(&filter)).unwrap();
         assert_eq!(snapshot.items.len(), 2);
         assert!(snapshot.items.iter().all(|item| item.layer == 1));
     }
@@ -1260,7 +1289,11 @@ mod tests {
             layer_max: Some(999),
         };
         assert_eq!(
-            adapter.list_objects(0, Some(&filter)).unwrap().items.len(),
+            adapter
+                .list_objects_page(0, Some(&filter))
+                .unwrap()
+                .items
+                .len(),
             3
         );
     }
@@ -1276,7 +1309,7 @@ mod tests {
             layer_max: Some(1),
         };
         let snapshot = adapter
-            .list_objects(0, Some(&filter))
+            .list_objects_page(0, Some(&filter))
             .expect("検証は呼び出し側の責務であり、ここでは失敗させない");
         assert!(snapshot.items.is_empty());
     }
@@ -1284,11 +1317,122 @@ mod tests {
     #[test]
     fn list_objects_selector_can_be_resolved() {
         let adapter = adapter();
-        let snapshot = adapter.list_objects(0, None).unwrap();
+        let snapshot = adapter.list_objects_page(0, None).unwrap();
         for summary in snapshot.items {
             let detail = adapter.get_object(&summary.selector).unwrap();
             assert_eq!(detail.summary.fingerprint, summary.fingerprint);
         }
+    }
+
+    /// 参照区間の内側で詳細を読んだ回数。
+    fn detail_reads(adapter: &HostReadAdapter<FakeHost>) -> usize {
+        adapter
+            .host
+            .calls()
+            .iter()
+            .filter(|call| **call == "object_detail")
+            .count()
+    }
+
+    /// ページ窓の外にある対象の詳細を読まないことを確かめる。
+    #[test]
+    fn list_objects_reads_details_only_within_the_page() {
+        let adapter = adapter();
+        let page = adapter
+            .list_objects(
+                0,
+                None,
+                &PageRequest {
+                    offset: 1,
+                    limit: 1,
+                    snapshot_revision: None,
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+        // 総件数は列挙全体の件数であり、窓の件数ではない。並び順も変わらない。
+        assert_eq!(page.meta.total_count, 3);
+        assert_eq!(page.meta.offset, 1);
+        assert!(page.meta.has_more);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].layer, 1);
+        assert_eq!(page.items[0].frame_start, 100);
+
+        assert_eq!(
+            detail_reads(&adapter),
+            1,
+            "窓の外の対象まで詳細を読んでいます"
+        );
+    }
+
+    /// 重い読み取りの回数が、プロジェクトの規模ではなく要求ページの件数で
+    /// 決まることを確かめる。
+    #[test]
+    fn list_objects_bounds_detail_reads_by_the_page_size() {
+        const TOTAL: usize = 200;
+        const LIMIT: u32 = 5;
+
+        let adapter = adapter_with(|_| FakeHost {
+            layers: vec![FakeLayer {
+                name: None,
+                enabled: true,
+                locked: false,
+                objects: (0..TOTAL)
+                    .map(|index| object(0, index * 10, index * 10 + 5, None))
+                    .collect(),
+            }],
+            info: HostEditInfo {
+                layer_max: 0,
+                ..fake_edit_info()
+            },
+            ..FakeHost::new()
+        });
+
+        let page = adapter
+            .list_objects(
+                0,
+                None,
+                &PageRequest {
+                    offset: 0,
+                    limit: LIMIT,
+                    snapshot_revision: None,
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(page.meta.total_count, TOTAL as u32);
+        assert_eq!(page.items.len(), LIMIT as usize);
+        assert_eq!(detail_reads(&adapter), LIMIT as usize);
+    }
+
+    /// スナップショット revision が一致しない要求で、重い読み取りへ進まない
+    /// ことを確かめる。
+    #[test]
+    fn list_objects_rejects_a_stale_snapshot_revision_before_reading_details() {
+        let adapter = adapter();
+        let error = adapter
+            .list_objects(
+                0,
+                None,
+                &PageRequest {
+                    offset: 0,
+                    limit: 50,
+                    snapshot_revision: Some(99),
+                },
+            )
+            .unwrap()
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            PageError::SnapshotRevisionMismatch {
+                requested: 99,
+                current: 0,
+            }
+        );
+        assert_eq!(detail_reads(&adapter), 0);
     }
 
     #[test]
@@ -1538,7 +1682,7 @@ mod tests {
 
         let fingerprint_of = |adapter: &HostReadAdapter<FakeHost>, frame_start: usize| {
             adapter
-                .list_objects(0, None)
+                .list_objects_page(0, None)
                 .unwrap()
                 .items
                 .into_iter()
@@ -1618,7 +1762,7 @@ mod tests {
 
         let (grid_bpm, object_count) = complete_within(Duration::from_secs(10), move || {
             let info = adapter.get_edit_info().unwrap();
-            let objects = adapter.list_objects(0, None).unwrap();
+            let objects = adapter.list_objects_page(0, None).unwrap();
             (info.grid_bpm.len(), objects.items.len())
         });
 
@@ -1677,7 +1821,7 @@ mod tests {
         assert_eq!(entries(&layers), 1, "list_layers");
 
         let objects = adapter();
-        objects.list_objects(0, None).unwrap();
+        objects.list_objects_page(0, None).unwrap();
         assert_eq!(entries(&objects), 1, "list_objects");
 
         let object = adapter();
@@ -1698,7 +1842,7 @@ mod tests {
         let mut documents = vec![
             serde_json::to_string(&adapter.get_edit_info().unwrap()).unwrap(),
             serde_json::to_string(&adapter.get_object(&selector).unwrap()).unwrap(),
-            serde_json::to_string(&adapter.list_objects(0, None).unwrap().items).unwrap(),
+            serde_json::to_string(&adapter.list_objects_page(0, None).unwrap().items).unwrap(),
             serde_json::to_string(&adapter.list_layers(0).unwrap().items).unwrap(),
         ];
         documents.push(serde_json::to_string(&adapter.get_current_scene().unwrap().0).unwrap());
@@ -1717,7 +1861,7 @@ mod tests {
     #[test]
     fn object_fingerprint_matches_between_summary_and_selector() {
         let adapter = adapter();
-        for summary in adapter.list_objects(0, None).unwrap().items {
+        for summary in adapter.list_objects_page(0, None).unwrap().items {
             assert_eq!(summary.fingerprint, summary.selector.fingerprint);
             assert_eq!(
                 summary.fingerprint_algorithm,
@@ -1734,7 +1878,7 @@ mod tests {
     #[test]
     fn object_fingerprint_agrees_between_listing_and_detail() {
         let adapter = adapter();
-        let summaries = adapter.list_objects(0, None).unwrap().items;
+        let summaries = adapter.list_objects_page(0, None).unwrap().items;
         assert!(!summaries.is_empty());
 
         for summary in summaries {
@@ -1754,7 +1898,7 @@ mod tests {
     fn object_fingerprint_agrees_for_an_object_that_has_effects() {
         let adapter = adapter();
         let summary = adapter
-            .list_objects(0, None)
+            .list_objects_page(0, None)
             .unwrap()
             .items
             .into_iter()
@@ -1791,7 +1935,7 @@ mod tests {
         };
         let fingerprint_of = |path: &'static str| {
             HostReadAdapter::new(host_with(path), Arc::clone(&project))
-                .list_objects(0, None)
+                .list_objects_page(0, None)
                 .unwrap()
                 .items
                 .into_iter()
@@ -1824,7 +1968,7 @@ mod tests {
         };
         let fingerprints_of = |adapter: &HostReadAdapter<FakeHost>| {
             let summary = adapter
-                .list_objects(0, None)
+                .list_objects_page(0, None)
                 .unwrap()
                 .items
                 .into_iter()

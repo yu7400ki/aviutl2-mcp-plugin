@@ -4,8 +4,12 @@
 //! 参照区間には一切触れない。SDK 呼び出しは [`host::ReadHost`] の実装に閉じ、
 //! 差し替えることで SDK 無しでも読み取りの手順を検証できる。
 //!
-//! 応答に載せるページの切り出しはここでは行わない。列挙は 1 度の参照区間で
-//! 全件をスナップショット化し、その時点の revision を添えて返す。
+//! 列挙は 1 度の参照区間で全件をスナップショット化し、その時点の revision を
+//! 添えて返す。切り出しは応答側で行う。
+//!
+//! ただしオブジェクトの列挙だけは、ページの切り出しを参照区間の内側で行う。
+//! 1 件あたりの読み取りが alias と配下 effect を含んで重く、全件を読んでから
+//! 切り出すと参照区間の保持時間がプロジェクトの規模に比例して伸びるためである。
 
 pub mod adapter;
 pub mod error;
@@ -15,7 +19,7 @@ pub mod sdk;
 use crate::project::ProjectState;
 use aviutl2_mcp_core::{
     AvailableEffect, EditInfo, EffectType, LayerInfo, ObjectDetail, ObjectFilter, ObjectSelector,
-    ObjectSummary, SceneInfo,
+    ObjectSummary, PageError, PageMeta, PageRequest, SceneInfo,
 };
 use std::sync::Arc;
 
@@ -33,6 +37,18 @@ pub struct Snapshot<T> {
     pub items: Vec<T>,
     /// 列挙を始めた時点のプロジェクト revision。
     pub snapshot_revision: u64,
+}
+
+/// 列挙から切り出した 1 ページ。
+///
+/// 切り出しを参照区間の内側で行う列挙が返す。`meta` は [`Snapshot`] から
+/// 切り出した場合と同じ意味を持ち、`total_count` は列挙全体の件数である。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Page<T> {
+    /// このページの要素。
+    pub items: Vec<T>,
+    /// ページのメタ情報。
+    pub meta: PageMeta,
 }
 
 /// プロジェクトの状態。
@@ -70,16 +86,26 @@ pub trait ReadAdapter: Send + Sync {
     /// `expected_scene_id` が現在シーンと異なる場合は前提条件の不整合とする。
     fn list_layers(&self, expected_scene_id: i32) -> Result<Snapshot<LayerInfo>, ReadError>;
 
-    /// 現在シーンのオブジェクトを全件列挙する。
+    /// 現在シーンのオブジェクトを列挙し、要求ページを切り出して返す。
     ///
     /// `filter` は検証済みのものだけを受け取る。絞り込み条件の妥当性は要求内容
     /// だけで決まり、読み取りを受け付けられるかにも期限にも依存しないため、
-    /// 要求の復号と同じ場所で判定して不正な条件はここへ届かせない。
+    /// 要求の復号と同じ場所で判定して不正な条件はここへ届かせない。`page` も
+    /// 同じ理由で `limit` の範囲は検証済みである。
+    ///
+    /// 切り出しを呼び出し側へ委ねず、ここで行う。オブジェクト 1 件の読み取りは
+    /// alias と配下 effect を含んで重く、全件を読んでから切り出すと、応答へ
+    /// 載せない対象の読み取りにも参照区間を占有することになる。ページ窓を先に
+    /// 確定すれば、1 要求あたりの重い読み取りが要求ページの件数で上限付きになる。
+    ///
+    /// スナップショット revision の不一致は参照区間の失敗ではないため、畳まずに
+    /// 返す。
     fn list_objects(
         &self,
         expected_scene_id: i32,
         filter: Option<&ObjectFilter>,
-    ) -> Result<Snapshot<ObjectSummary>, ReadError>;
+        page: &PageRequest,
+    ) -> Result<Result<Page<ObjectSummary>, PageError>, ReadError>;
 
     /// セレクターが指すオブジェクトの詳細を取得する。
     fn get_object(&self, selector: &ObjectSelector) -> Result<ObjectDetail, ReadError>;

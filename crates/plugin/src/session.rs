@@ -642,13 +642,21 @@ fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Valu
             to_result(&ListLayersResult { items, page })
         }
         ReadRequest::ListObjects(params) => {
-            let snapshot = adapter
-                .list_objects(params.expected_scene_id, params.filter.as_ref())
-                .map_err(read_error)?;
-            let (items, page) =
-                take_page(&snapshot.items, &params.page, snapshot.snapshot_revision)
-                    .map_err(page_error)?;
-            to_result(&ListObjectsResult { items, page })
+            // オブジェクトの切り出しは読み取り口が参照区間の内側で行う。1 件の
+            // 読み取りが重く、応答へ載せない対象まで読むと参照区間の保持時間が
+            // プロジェクトの規模で決まってしまう。
+            let page = adapter
+                .list_objects(
+                    params.expected_scene_id,
+                    params.filter.as_ref(),
+                    &params.page,
+                )
+                .map_err(read_error)?
+                .map_err(page_error)?;
+            to_result(&ListObjectsResult {
+                items: page.items,
+                page: page.meta,
+            })
         }
         ReadRequest::GetObject(params) => {
             to_result(&adapter.get_object(&params.selector).map_err(read_error)?)
@@ -906,7 +914,7 @@ fn error_object(code: ErrorCode, message: impl Into<String>) -> ErrorObject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::read::Snapshot;
+    use crate::read::{Page, Snapshot};
     use aviutl2_mcp_core::{
         AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
         EffectItemType, EffectType, Extent, FiniteF64, FrameRange, LayerInfo, ObjectDetail,
@@ -1106,18 +1114,16 @@ mod tests {
             &self,
             expected_scene_id: i32,
             filter: Option<&ObjectFilter>,
-        ) -> Result<Snapshot<ObjectSummary>, ReadError> {
+            page: &PageRequest,
+        ) -> Result<Result<Page<ObjectSummary>, PageError>, ReadError> {
             self.enter("list_objects")?;
             ensure_scene(expected_scene_id)?;
             let layer_min = filter.and_then(|filter| filter.layer_min).unwrap_or(0);
-            let items = fake_objects()
+            let items: Vec<ObjectSummary> = fake_objects()
                 .into_iter()
                 .filter(|object| object.layer >= layer_min)
                 .collect();
-            Ok(Snapshot {
-                items,
-                snapshot_revision: REVISION,
-            })
+            Ok(take_page(&items, page, REVISION).map(|(items, meta)| Page { items, meta }))
         }
 
         fn get_object(&self, selector: &ObjectSelector) -> Result<ObjectDetail, ReadError> {

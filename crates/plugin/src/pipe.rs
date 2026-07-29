@@ -693,8 +693,11 @@ mod tests {
             &self,
             _expected_scene_id: i32,
             _filter: Option<&aviutl2_mcp_core::ObjectFilter>,
-        ) -> Result<crate::read::Snapshot<aviutl2_mcp_core::ObjectSummary>, crate::read::ReadError>
-        {
+            _page: &aviutl2_mcp_core::PageRequest,
+        ) -> Result<
+            Result<crate::read::Page<aviutl2_mcp_core::ObjectSummary>, aviutl2_mcp_core::PageError>,
+            crate::read::ReadError,
+        > {
             Err(crate::read::ReadError::NotReady)
         }
 
