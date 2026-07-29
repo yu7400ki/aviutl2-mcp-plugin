@@ -1380,10 +1380,14 @@ fn compare_copies(harness: &Harness, a: &Instance, b: &Instance) -> CheckResult 
 /// 編集 1 回あたり revision がいくつ進んだかの観測。
 ///
 /// plugin は変更 API の発行で 1 つ進める。ホストが plugin 発の編集に対しても
-/// 更新イベントを上げる場合、そのぶんが加わって 2 以上進む。
+/// 更新イベントを上げる場合、そのぶんが加わって 2 以上進む。進まなかった回は
+/// どちらでもない。発行時の加算か応答が返す値のどちらかが欠けており、原因も
+/// 意味も二重加算とは別であるため、まとめて数えない。
 struct RevisionAdvance {
     /// 観測した編集の回数。
     steps: usize,
+    /// 進まなかった回数。
+    stalled: usize,
     /// 進みが 1 だった回数。
     single: usize,
     /// 進みが 2 以上だった回数。
@@ -1395,6 +1399,7 @@ impl RevisionAdvance {
     fn none() -> Self {
         Self {
             steps: 0,
+            stalled: 0,
             single: 0,
             multiple: 0,
         }
@@ -1403,11 +1408,19 @@ impl RevisionAdvance {
     /// 編集 1 回の前後の revision を記録する。
     fn record(&mut self, before: u64, after: u64) {
         self.steps += 1;
-        if after.saturating_sub(before) == 1 {
-            self.single += 1;
-        } else {
-            self.multiple += 1;
+        match after.saturating_sub(before) {
+            0 => self.stalled += 1,
+            1 => self.single += 1,
+            _ => self.multiple += 1,
         }
+    }
+
+    /// 観測した内訳を 1 行で表す。
+    fn summary(&self) -> String {
+        format!(
+            "{} 回中、進まなかった {} 回 / 1 進んだ {} 回 / 2 以上進んだ {} 回",
+            self.steps, self.stalled, self.single, self.multiple
+        )
     }
 }
 
@@ -1484,10 +1497,7 @@ fn section_fingerprint_premises(
     report.observe(
         "revision_advance",
         "編集 1 回で revision はいくつ進むか",
-        format!(
-            "{} 回中、1 進んだ {} 回 / 2 以上進んだ {} 回",
-            advance.steps, advance.single, advance.multiple
-        ),
+        advance.summary(),
     );
 
     Ok(advance)
@@ -2125,8 +2135,9 @@ fn run_revision_chain(
     }
 
     Ok(vec![format!(
-        "{} 回とも 1 回の送信で成功し、revision の進みは 1 が {} 回 / 2 以上が {} 回",
-        advance.steps, advance.single, advance.multiple
+        "{} 回とも 1 回の送信で成功した。revision の進みの内訳: {}",
+        advance.steps,
+        advance.summary()
     )])
 }
 
@@ -3506,30 +3517,36 @@ fn section_revision(report: &mut Report, advance: &RevisionAdvance) {
     report.observe(
         "revision_double_increment",
         "ホストが plugin 発の編集に対しても更新イベントを上げ、revision が二重に加算されるか",
-        if advance.multiple > 0 {
-            format!(
-                "{} 回中 {} 回で revision が 2 以上進んだ（ホストの更新イベントによる加算が重なっている）",
-                advance.steps, advance.multiple
-            )
-        } else {
-            format!(
-                "{} 回とも revision の進みは 1 だった（二重加算は観測されなかった）",
-                advance.steps
-            )
-        },
+        format!(
+            "{}。{}",
+            advance.summary(),
+            if advance.multiple > 0 {
+                "2 以上進んだ回はホストの更新イベントによる加算が重なっている"
+            } else {
+                "二重加算は観測されなかった"
+            }
+        ),
     );
 
     // 二重加算そのものは合否にしない。revision を照合しない以上、要求が拒否
     // されるわけではなく、確かめたいのはホストの挙動を観測できたことである。
+    // 進まなかった回は別である。plugin は変更の発行で必ず 1 つ進めるため、
+    // 進みを観測できないのは応答が返す値が変更を伝えていないことを意味する。
+    let outcome = if advance.stalled > 0 {
+        Err(format!(
+            "{} 回で revision が進みませんでした: {}",
+            advance.stalled,
+            advance.summary()
+        ))
+    } else {
+        passed_with(advance.summary())
+    };
     report.record(
         "5.5",
         "編集 1 回あたりの revision の進み",
         "連続編集の各回で revision の進みを観測できる",
         Mode::Auto,
-        passed_with(format!(
-            "{} 回中、1 進んだ {} 回 / 2 以上進んだ {} 回",
-            advance.steps, advance.single, advance.multiple
-        )),
+        outcome,
     );
 }
 
