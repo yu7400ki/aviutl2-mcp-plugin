@@ -99,10 +99,8 @@ const PAGE_LIMIT: u32 = 200;
 const MAX_PAGES: usize = 20;
 /// fingerprint の安定性を確かめる読み取り回数。
 const STABILITY_READS: usize = 10;
-/// revision の収束を確かめる連続編集の回数。
-const CONVERGENCE_STEPS: usize = 10;
-/// revision の訂正を含めて許す試行回数。
-const MAX_ATTEMPTS: u32 = 2;
+/// 応答が返した値を次の前提へ渡す連続編集の回数。
+const REVISION_CHAIN_STEPS: usize = 10;
 
 fn main() {
     let mut report = Report::new();
@@ -129,11 +127,11 @@ fn run(report: &mut Report) -> Result<(), String> {
     // 区間の途中で続行不能になっても、残りの区間は実行する。完了条件の検証は
     // 最後に置かれており、手前の区間の環境不備でそこへ到達しないと、確かめたい
     // ことが 1 件も確かめられないまま終わる。
-    let convergence = match section_fingerprint_premises(&harness, report, &a, &context) {
-        Ok(convergence) => convergence,
+    let advance = match section_fingerprint_premises(&harness, report, &a, &context) {
+        Ok(advance) => advance,
         Err(reason) => {
             record_section_failure(report, "5.9", reason);
-            Convergence::none()
+            RevisionAdvance::none()
         }
     };
 
@@ -145,7 +143,7 @@ fn run(report: &mut Report) -> Result<(), String> {
     record_section_failure_if_any(report, "5.3", outcome);
     let outcome = section_item_round_trip(&harness, report, &a, &context);
     record_section_failure_if_any(report, "5.4", outcome);
-    section_revision(report, &convergence);
+    section_revision(report, &advance);
     let outcome = section_blocked(&harness, report, &a, &context);
     record_section_failure_if_any(report, "5.6", outcome);
     let outcome = section_target_confusion(&harness, report, &a, &b, &context);
@@ -1108,11 +1106,6 @@ fn detail_str(error: &ErrorObject, key: &str) -> Option<String> {
         .map(|value| value.to_string())
 }
 
-/// `details` の整数値を取り出す。
-fn detail_u64(error: &ErrorObject, key: &str) -> Option<u64> {
-    error.details.get(key).and_then(|value| value.as_u64())
-}
-
 /// 要求が期待どおりに拒否されたことを確かめる。
 ///
 /// 拒否されたことだけを見ると、複数あるガードのうち 1 つしか働いていない場合でも
@@ -1199,30 +1192,6 @@ fn expect_unchanged(before: &[ObjectSummary], after: &[ObjectSummary]) -> Result
         }
     }
     Ok(())
-}
-
-/// 応答が返した revision で編集し、食い違えば 1 度だけ訂正して再送する。
-///
-/// 二重加算が起きていても後続の確認が巻き添えで落ちないようにするための経路で
-/// あり、同時に「訂正すれば 2 回以内に収束するか」の測定でもある。
-fn with_revision_correction<T, F>(revision: u64, mut attempt: F) -> Result<(T, u32), ErrorObject>
-where
-    F: FnMut(u64) -> Result<T, ErrorObject>,
-{
-    match attempt(revision) {
-        Ok(value) => Ok((value, 1)),
-        Err(error) => {
-            if error.code != ErrorCode::PreconditionFailed
-                || detail_str(&error, "mismatch").as_deref() != Some("project_revision")
-            {
-                return Err(error);
-            }
-            let Some(current) = detail_u64(&error, "current_project_revision") else {
-                return Err(error);
-            };
-            attempt(current).map(|value| (value, MAX_ATTEMPTS))
-        }
-    }
 }
 
 /// 書き込みを公開している設定項目の種別。
@@ -1408,23 +1377,36 @@ fn compare_copies(harness: &Harness, a: &Instance, b: &Instance) -> CheckResult 
 // 5.9 fingerprint の前提
 // ---------------------------------------------------------------------------
 
-/// 応答が返した revision で編集を連鎖させたときの収束の様子。
-struct Convergence {
-    /// 実施した編集の回数。
+/// 編集 1 回あたり revision がいくつ進んだかの観測。
+///
+/// plugin は変更 API の発行で 1 つ進める。ホストが plugin 発の編集に対しても
+/// 更新イベントを上げる場合、そのぶんが加わって 2 以上進む。
+struct RevisionAdvance {
+    /// 観測した編集の回数。
     steps: usize,
-    /// 1 回目の送信で成功した回数。
-    first_attempt: usize,
-    /// revision を訂正した 2 回目で成功した回数。
-    corrected: usize,
+    /// 進みが 1 だった回数。
+    single: usize,
+    /// 進みが 2 以上だった回数。
+    multiple: usize,
 }
 
-impl Convergence {
+impl RevisionAdvance {
     /// 1 度も編集できなかったことを表す。
     fn none() -> Self {
         Self {
             steps: 0,
-            first_attempt: 0,
-            corrected: 0,
+            single: 0,
+            multiple: 0,
+        }
+    }
+
+    /// 編集 1 回の前後の revision を記録する。
+    fn record(&mut self, before: u64, after: u64) {
+        self.steps += 1;
+        if after.saturating_sub(before) == 1 {
+            self.single += 1;
+        } else {
+            self.multiple += 1;
         }
     }
 }
@@ -1438,7 +1420,7 @@ fn section_fingerprint_premises(
     report: &mut Report,
     instance: &Instance,
     context: &Context,
-) -> Result<Convergence, String> {
+) -> Result<RevisionAdvance, String> {
     println!();
     println!("### 5.9 fingerprint の前提");
 
@@ -1480,24 +1462,26 @@ fn section_fingerprint_premises(
         outcome,
     );
 
-    let (outcome, convergence) = check_revision_convergence(harness, instance, context);
+    let (outcome, advance) = check_revision_chain(harness, instance, context);
     report.record(
         "5.9",
-        "revision の収束",
-        format!("応答が返した revision で次の編集を行う操作を {CONVERGENCE_STEPS} 回連続し、いずれも {MAX_ATTEMPTS} 回以内で成功する"),
+        "応答が返した値による連続編集",
+        format!(
+            "応答が返した selector と project_revision をそのまま次の前提に使う編集を {REVISION_CHAIN_STEPS} 回連続し、いずれも 1 回の送信で成功する"
+        ),
         Mode::Auto,
         outcome,
     );
     report.observe(
-        "revision_convergence",
-        "応答が返した revision による連続編集は 2 回以内で収束するか",
+        "revision_advance",
+        "編集 1 回で revision はいくつ進むか",
         format!(
-            "{} 回中、1 回目で成功 {} 回 / 訂正して成功 {} 回",
-            convergence.steps, convergence.first_attempt, convergence.corrected
+            "{} 回中、1 進んだ {} 回 / 2 以上進んだ {} 回",
+            advance.steps, advance.single, advance.multiple
         ),
     );
 
-    Ok(convergence)
+    Ok(advance)
 }
 
 /// 無変更のオブジェクトを繰り返し読み、同一性の材料が揺れないことを確かめる。
@@ -1708,23 +1692,19 @@ fn check_effect_index_shift(
         .object
         .clone()
         .ok_or_else(|| "付与の応答が対象を返しませんでした".to_string())?;
-    let (second, _) = with_revision_correction(first.project_revision, |revision| {
-        harness.add_effect(
+    let second = harness
+        .add_effect(
             &instance.id,
             &object_after_first.selector,
             &context.effect_name,
-            ExpectedInput {
-                project_epoch: first.project_epoch.clone(),
-                project_revision: revision,
-            },
+            outcome_precondition(&first),
         )
-    })
-    .map_err(|error| {
-        format!(
-            "2 つ目の effect を付与できません: {}",
-            describe_error(&error)
-        )
-    })?;
+        .map_err(|error| {
+            format!(
+                "2 つ目の effect を付与できません: {}",
+                describe_error(&error)
+            )
+        })?;
 
     let object_now = second
         .object
@@ -1912,15 +1892,15 @@ fn expect_layer_locked<T>(result: Result<T, ErrorObject>) -> CheckResult {
     Ok(vec![describe_error(&error)])
 }
 
-/// 応答が返した revision で編集を連鎖させ、収束することを確かめる。
-fn check_revision_convergence(
+/// 応答が返した値だけで編集を連鎖できることを確かめ、revision の進みを測る。
+fn check_revision_chain(
     harness: &Harness,
     instance: &Instance,
     context: &Context,
-) -> (CheckResult, Convergence) {
-    let mut convergence = Convergence::none();
-    let result = run_revision_chain(harness, instance, context, &mut convergence);
-    (result, convergence)
+) -> (CheckResult, RevisionAdvance) {
+    let mut advance = RevisionAdvance::none();
+    let result = run_revision_chain(harness, instance, context, &mut advance);
+    (result, advance)
 }
 
 /// 対象を 2 つの位置の間で往復させ、そのたびに応答の revision を次へ渡す。
@@ -1928,13 +1908,14 @@ fn run_revision_chain(
     harness: &Harness,
     instance: &Instance,
     context: &Context,
-    convergence: &mut Convergence,
+    advance: &mut RevisionAdvance,
 ) -> CheckResult {
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
     let home = context.target;
     let away = context.free_slots[0];
 
     let expected = precondition(harness, instance)?;
+    let mut previous = expected.project_revision;
     let mut current = require(
         harness.move_object(
             &instance.id,
@@ -1947,44 +1928,35 @@ fn run_revision_chain(
         ),
         "対象を移動できません",
     )?;
-    convergence.steps += 1;
-    convergence.first_attempt += 1;
+    advance.record(previous, current.project_revision);
+    previous = current.project_revision;
 
     let mut at_home = false;
-    for _ in 1..CONVERGENCE_STEPS {
+    for _ in 1..REVISION_CHAIN_STEPS {
         let destination = if at_home { away } else { home };
         let selector = current
             .object
             .clone()
             .ok_or_else(|| "移動の応答が対象を返しませんでした".to_string())?
             .selector;
-        let epoch = current.project_epoch.clone();
-        let (next, attempts) = with_revision_correction(current.project_revision, |revision| {
-            harness.move_object(
+        let next = harness
+            .move_object(
                 &instance.id,
                 &selector,
                 DestinationInput {
                     layer: destination.layer as u32,
                     frame: destination.frame as u32,
                 },
-                ExpectedInput {
-                    project_epoch: epoch.clone(),
-                    project_revision: revision,
-                },
+                outcome_precondition(&current),
             )
-        })
-        .map_err(|error| {
-            format!(
-                "{MAX_ATTEMPTS} 回以内に成功しませんでした: {}",
-                describe_error(&error)
-            )
-        })?;
-        convergence.steps += 1;
-        if attempts == 1 {
-            convergence.first_attempt += 1;
-        } else {
-            convergence.corrected += 1;
-        }
+            .map_err(|error| {
+                format!(
+                    "応答が返した値での編集に失敗しました: {}",
+                    describe_error(&error)
+                )
+            })?;
+        advance.record(previous, next.project_revision);
+        previous = next.project_revision;
         current = next;
         at_home = !at_home;
     }
@@ -1996,27 +1968,22 @@ fn run_revision_chain(
             .clone()
             .ok_or_else(|| "移動の応答が対象を返しませんでした".to_string())?
             .selector;
-        let epoch = current.project_epoch.clone();
-        with_revision_correction(current.project_revision, |revision| {
-            harness.move_object(
+        harness
+            .move_object(
                 &instance.id,
                 &selector,
                 DestinationInput {
                     layer: home.layer as u32,
                     frame: home.frame as u32,
                 },
-                ExpectedInput {
-                    project_epoch: epoch.clone(),
-                    project_revision: revision,
-                },
+                outcome_precondition(&current),
             )
-        })
-        .map_err(|error| format!("元の位置へ戻せません: {}", describe_error(&error)))?;
+            .map_err(|error| format!("元の位置へ戻せません: {}", describe_error(&error)))?;
     }
 
     Ok(vec![format!(
-        "{} 回中、1 回目で成功 {} 回 / 訂正して成功 {} 回",
-        convergence.steps, convergence.first_attempt, convergence.corrected
+        "{} 回とも 1 回の送信で成功し、revision の進みは 1 が {} 回 / 2 以上が {} 回",
+        advance.steps, advance.single, advance.multiple
     )])
 }
 
@@ -2113,23 +2080,18 @@ fn check_create_from_media(
     ));
 
     // 後始末: 作成したオブジェクトを削除する。
-    let expected = outcome_precondition(&created);
-    with_revision_correction(expected.project_revision, |revision| {
-        harness.delete_object(
+    harness
+        .delete_object(
             &instance.id,
             &object.selector,
-            ExpectedInput {
-                project_epoch: expected.project_epoch.clone(),
-                project_revision: revision,
-            },
+            outcome_precondition(&created),
         )
-    })
-    .map_err(|error| {
-        format!(
-            "作成したオブジェクトを削除できません: {}",
-            describe_error(&error)
-        )
-    })?;
+        .map_err(|error| {
+            format!(
+                "作成したオブジェクトを削除できません: {}",
+                describe_error(&error)
+            )
+        })?;
 
     if leaked {
         return Err("作成の応答に指定したパスが現れました".to_string());
@@ -2323,18 +2285,16 @@ fn check_edit_chain(
 
     // オブジェクトの削除。後始末を兼ねる。
     let selector = state.object.selector.clone();
-    let epoch = state.epoch.clone();
-    with_revision_correction(state.revision, |revision| {
-        harness.delete_object(
+    harness
+        .delete_object(
             &instance.id,
             &selector,
             ExpectedInput {
-                project_epoch: epoch.clone(),
-                project_revision: revision,
+                project_epoch: state.epoch.clone(),
+                project_revision: state.revision,
             },
         )
-    })
-    .map_err(|error| format!("delete_object に失敗しました: {}", describe_error(&error)))?;
+        .map_err(|error| format!("delete_object に失敗しました: {}", describe_error(&error)))?;
     steps.push("delete_object=成功".to_string());
 
     report.observe(
@@ -2388,10 +2348,9 @@ fn chain_outcome<F>(
 where
     F: Fn(&ChainState, u64) -> Result<EditOutcome, ErrorObject>,
 {
-    let (outcome, attempts) =
-        with_revision_correction(state.revision, |revision| call(state, revision))
-            .map_err(|error| format!("{label} に失敗しました: {}", describe_error(&error)))?;
-    steps.push(format!("{label}=成功({attempts} 回目)"));
+    let outcome = call(state, state.revision)
+        .map_err(|error| format!("{label} に失敗しました: {}", describe_error(&error)))?;
+    steps.push(format!("{label}=成功"));
     Ok(outcome)
 }
 
@@ -3382,53 +3341,52 @@ fn check_track_item(
 // 5.5 revision の二重加算
 // ---------------------------------------------------------------------------
 
-/// 応答が返した revision をそのまま次の前提条件に使えるかを記録する。
-fn section_revision(report: &mut Report, convergence: &Convergence) {
+/// ホストが plugin 発の編集にも更新イベントを上げるかを記録する。
+///
+/// 二重に加算されても要求は拒否されない（revision は照合しない）。それでも
+/// 応答が返す revision の意味が変わるため、実機での挙動として観測する。
+fn section_revision(report: &mut Report, advance: &RevisionAdvance) {
     println!();
     println!("### 5.5 revision の二重加算");
 
-    if convergence.steps == 0 {
+    if advance.steps == 0 {
         report.skip(
             "5.5",
-            "応答が返した revision の扱い",
-            "応答の project_revision をそのまま expected に使って次の編集が成功する。失敗する場合は details.current_project_revision による訂正で成功する",
+            "編集 1 回あたりの revision の進み",
+            "連続編集の各回で revision の進みを観測できる",
             Mode::Auto,
             "連続編集を 1 度も実行できなかったため観測できません",
         );
         return;
     }
 
-    let doubled = convergence.corrected > 0;
     report.observe(
         "revision_double_increment",
         "ホストが plugin 発の編集に対しても更新イベントを上げ、revision が二重に加算されるか",
-        if doubled {
+        if advance.multiple > 0 {
             format!(
-                "{} 回中 {} 回で応答の revision が陳腐化し、current_project_revision による訂正で成功した",
-                convergence.steps, convergence.corrected
+                "{} 回中 {} 回で revision が 2 以上進んだ（ホストの更新イベントによる加算が重なっている）",
+                advance.steps, advance.multiple
             )
         } else {
             format!(
-                "{} 回すべて応答の revision がそのまま次の編集に使えた（二重加算は観測されなかった）",
-                convergence.steps
+                "{} 回とも revision の進みは 1 だった（二重加算は観測されなかった）",
+                advance.steps
             )
         },
     );
 
-    let outcome = if convergence.corrected == 0 {
-        passed_with(format!("{} 回とも 1 回目で成功", convergence.first_attempt))
-    } else {
-        passed_with(format!(
-            "{} 回で訂正を要したが、いずれも current_project_revision による再送で成功",
-            convergence.corrected
-        ))
-    };
+    // 二重加算そのものは合否にしない。revision を照合しない以上、要求が拒否
+    // されるわけではなく、確かめたいのはホストの挙動を観測できたことである。
     report.record(
         "5.5",
-        "応答が返した revision の扱い",
-        "応答の project_revision をそのまま expected に使って次の編集が成功する。失敗する場合は details.current_project_revision による訂正で成功する",
+        "編集 1 回あたりの revision の進み",
+        "連続編集の各回で revision の進みを観測できる",
         Mode::Auto,
-        outcome,
+        passed_with(format!(
+            "{} 回中、1 進んだ {} 回 / 2 以上進んだ {} 回",
+            advance.steps, advance.single, advance.multiple
+        )),
     );
 }
 
@@ -3567,22 +3525,17 @@ fn restore_position(
         .clone()
         .ok_or_else(|| "移動の応答が対象を返しませんでした".to_string())?
         .selector;
-    let epoch = moved.project_epoch.clone();
-    with_revision_correction(moved.project_revision, |revision| {
-        harness.move_object(
+    harness
+        .move_object(
             &instance.id,
             &selector,
             DestinationInput {
                 layer: home.layer as u32,
                 frame: home.frame as u32,
             },
-            ExpectedInput {
-                project_epoch: epoch.clone(),
-                project_revision: revision,
-            },
+            outcome_precondition(moved),
         )
-    })
-    .map_err(|error| format!("元の位置へ戻せません: {}", describe_error(&error)))?;
+        .map_err(|error| format!("元の位置へ戻せません: {}", describe_error(&error)))?;
     Ok(())
 }
 
@@ -3632,7 +3585,7 @@ fn section_target_confusion(
     report.record(
         "5.7",
         "UI で Undo / Redo を行った後の古い selector",
-        "UI で Undo / Redo を行った後、古い応答が返した expected と selector での編集が precondition_failed（mismatch=project_revision）で拒否される",
+        "UI で Undo / Redo を行い内容が元と同一へ戻った後、古い selector と前提条件での編集がどう扱われるかを観測できる",
         Mode::Operator,
         outcome,
     );
@@ -3765,23 +3718,16 @@ fn restore_default_name(
         .clone()
         .ok_or_else(|| "名前変更の応答が対象を返しませんでした".to_string())?
         .selector;
-    let epoch = applied.project_epoch.clone();
-    with_revision_correction(applied.project_revision, |revision| {
-        harness.set_object_name(
-            &instance.id,
-            &selector,
-            None,
-            ExpectedInput {
-                project_epoch: epoch.clone(),
-                project_revision: revision,
-            },
-        )
-    })
-    .map_err(|error| format!("名前を標準名へ戻せません: {}", describe_error(&error)))?;
+    harness
+        .set_object_name(&instance.id, &selector, None, outcome_precondition(applied))
+        .map_err(|error| format!("名前を標準名へ戻せません: {}", describe_error(&error)))?;
     Ok(())
 }
 
-/// Undo / Redo で内容が元へ戻った後の古い前提条件が拒否されることを確かめる。
+/// Undo / Redo で内容が元へ戻った後の古い selector がどう扱われるかを観測する。
+///
+/// 内容が同一へ戻ると fingerprint も epoch も一致する。selector が指す位置にも
+/// 対象は居る。止める手段が無いため、合否ではなく実機での挙動として記録する。
 fn check_stale_after_undo_redo(
     harness: &Harness,
     report: &mut Report,
@@ -3803,36 +3749,23 @@ fn check_stale_after_undo_redo(
         Some("取り違え確認".to_string()),
         stale_expected,
     );
-    let outcome = expect_rejection(
-        attempt,
-        ErrorCode::PreconditionFailed,
-        Some("project_revision"),
-    );
-
-    // 前提条件を読み直すと内容の差が無いため受理され得る。これは検出手段が
-    // 無いことの記録であり、合否の対象にはしない。
-    let fresh = precondition(harness, instance)?;
-    let object = resolve_object(harness, instance, context.scene_id, context.target)?;
-    let retried = harness.set_object_name(
-        &instance.id,
-        &object.selector,
-        Some("取り違え確認".to_string()),
-        fresh,
-    );
-    let applied = retried.as_ref().ok().cloned();
+    let applied = attempt.as_ref().ok().cloned();
+    let finding = match &attempt {
+        Ok(_) => {
+            "受理された（内容が同一に戻るため epoch でも fingerprint でも検出できない）".to_string()
+        }
+        Err(error) => format!("拒否された: {}", describe_error(error)),
+    };
     report.observe(
-        "undo_redo_with_fresh_expected",
-        "Undo / Redo で内容が元へ戻った後、前提条件を読み直した古い selector は受理されるか",
-        match &retried {
-            Ok(_) => "受理された（内容が同一に戻るため fingerprint では検出できない）".to_string(),
-            Err(error) => format!("拒否された: {}", describe_error(error)),
-        },
+        "undo_redo_with_stale_selector",
+        "Undo / Redo で内容が元へ戻った後、古い selector と前提条件による編集は受理されるか",
+        finding.clone(),
     );
 
     // 後始末: 名前を標準名へ戻す。
     restore_default_name(harness, instance, applied.as_ref())?;
 
-    outcome
+    Ok(vec![finding])
 }
 
 /// 同名オブジェクトのうち意図した方だけが変わることを確かめる。
@@ -3871,9 +3804,8 @@ fn check_same_name_objects(
         .ok_or_else(|| "作成の応答が対象を返しませんでした".to_string())?;
     let second_frame = first_object.frame_end + 1;
 
-    let epoch = first.project_epoch.clone();
-    let (second, _) = with_revision_correction(first.project_revision, |revision| {
-        harness.create_object(
+    let second = harness
+        .create_object(
             &instance.id,
             ObjectSourceInput::ObjectAlias {
                 alias: alias.clone(),
@@ -3883,18 +3815,14 @@ fn check_same_name_objects(
                 layer: slot.layer as u32,
                 frame: second_frame as u32,
             },
-            ExpectedInput {
-                project_epoch: epoch.clone(),
-                project_revision: revision,
-            },
+            outcome_precondition(&first),
         )
-    })
-    .map_err(|error| {
-        format!(
-            "2 つ目のオブジェクトを作成できません: {}",
-            describe_error(&error)
-        )
-    })?;
+        .map_err(|error| {
+            format!(
+                "2 つ目のオブジェクトを作成できません: {}",
+                describe_error(&error)
+            )
+        })?;
     let second_object = second
         .object
         .clone()
@@ -4104,23 +4032,17 @@ fn check_destination_occupied(
         .clone()
         .ok_or_else(|| "作成の応答が対象を返しませんでした".to_string())?;
 
-    let epoch = scratch.project_epoch.clone();
     let selector = scratch_object.selector.clone();
-    let moved = with_revision_correction(scratch.project_revision, |revision| {
-        harness.move_object(
-            &instance.id,
-            &selector,
-            DestinationInput {
-                layer: context.target.layer as u32,
-                frame: context.target.frame as u32,
-            },
-            ExpectedInput {
-                project_epoch: epoch.clone(),
-                project_revision: revision,
-            },
-        )
-    });
-    let move_note = expect_destination_occupied(moved.map(|(outcome, _)| outcome))?;
+    let moved = harness.move_object(
+        &instance.id,
+        &selector,
+        DestinationInput {
+            layer: context.target.layer as u32,
+            frame: context.target.frame as u32,
+        },
+        outcome_precondition(&scratch),
+    );
+    let move_note = expect_destination_occupied(moved)?;
 
     // 後始末: 確認用オブジェクトを削除する。
     let at = Placement {
@@ -4185,20 +4107,15 @@ fn check_wide_characters(harness: &Harness, instance: &Instance, context: &Conte
     let matched = read_back.name.as_deref() == Some(name.as_str());
 
     // 後始末: 標準名へ戻す。
-    let expected = outcome_precondition(&renamed);
     let selector = applied.selector.clone();
-    with_revision_correction(expected.project_revision, |revision| {
-        harness.set_object_name(
+    harness
+        .set_object_name(
             &instance.id,
             &selector,
             None,
-            ExpectedInput {
-                project_epoch: expected.project_epoch.clone(),
-                project_revision: revision,
-            },
+            outcome_precondition(&renamed),
         )
-    })
-    .map_err(|error| format!("名前を戻せません: {}", describe_error(&error)))?;
+        .map_err(|error| format!("名前を戻せません: {}", describe_error(&error)))?;
 
     if !matched {
         return Err(format!(
@@ -4278,24 +4195,15 @@ fn check_unc_path(
         .clone()
         .ok_or_else(|| "作成の応答が対象を返しませんでした".to_string())?;
 
-    let expected = outcome_precondition(&created);
     let selector = object.selector.clone();
-    with_revision_correction(expected.project_revision, |revision| {
-        harness.delete_object(
-            &instance.id,
-            &selector,
-            ExpectedInput {
-                project_epoch: expected.project_epoch.clone(),
-                project_revision: revision,
-            },
-        )
-    })
-    .map_err(|error| {
-        format!(
-            "作成したオブジェクトを削除できません: {}",
-            describe_error(&error)
-        )
-    })?;
+    harness
+        .delete_object(&instance.id, &selector, outcome_precondition(&created))
+        .map_err(|error| {
+            format!(
+                "作成したオブジェクトを削除できません: {}",
+                describe_error(&error)
+            )
+        })?;
 
     Ok(vec![format!(
         "layer={} frame_start={} へ作成できた",
@@ -4616,19 +4524,14 @@ fn check_client_disconnect(
         .clone()
         .ok_or_else(|| "名前変更の応答が対象を返しませんでした".to_string())?
         .selector;
-    let epoch = renamed.project_epoch.clone();
-    with_revision_correction(renamed.project_revision, |revision| {
-        harness.set_object_name(
+    harness
+        .set_object_name(
             &instance.id,
             &selector,
             None,
-            ExpectedInput {
-                project_epoch: epoch.clone(),
-                project_revision: revision,
-            },
+            outcome_precondition(&renamed),
         )
-    })
-    .map_err(|error| format!("名前を戻せません: {}", describe_error(&error)))?;
+        .map_err(|error| format!("名前を戻せません: {}", describe_error(&error)))?;
 
     if !confirm("plugin のログに、切断したクライアントへの応答送信の失敗が記録されていますか。")
     {
@@ -4643,8 +4546,8 @@ fn check_client_disconnect(
 
 /// 対象 instance だけが変更され、stale selector による変更が常に拒否されることを確かめる。
 ///
-/// 拒否されたことだけを見ると、3 つのガードのうち 1 つしか働いていなくても全手順が
-/// 合格し得る。手順ごとに `details.mismatch` の期待値まで固定する。
+/// 拒否されたことだけを見ると、2 つのガードのうち 1 つしか働いていなくても全手順が
+/// 合格し得る。手順ごとに期待するエラーコードと `details.mismatch` まで固定する。
 fn section_completion(
     harness: &Harness,
     report: &mut Report,
@@ -4653,6 +4556,8 @@ fn section_completion(
 ) -> Result<(), String> {
     println!();
     println!("### 6 完了条件の検証手順");
+    println!("  働くガードは 2 つ: project_epoch（プロジェクト境界）と fingerprint（対象の内容）");
+    println!("  project_revision は照合しない。位置が古くなった selector は対象の解決で落ちる");
 
     let scene_a = scene_id(harness, a)?;
     let scene_b = scene_id(harness, b)?;
@@ -4779,7 +4684,9 @@ fn section_completion(
         outcome,
     );
 
-    // 手順 7: 古くなった selector と前提条件を A へ渡す。revision で拒否される。
+    // 手順 7: 古くなった selector と前提条件を A へ渡す。手順 4 で対象は
+    // destination へ移っており、selector が指す layer / frame には何も無い。
+    // revision は照合しないので、拒否は対象の解決で起きる。
     let attempt = harness.move_object(
         &a.id,
         &stale_selector,
@@ -4789,15 +4696,23 @@ fn section_completion(
         },
         stale_expected,
     );
-    let outcome = expect_rejection(
-        attempt,
-        ErrorCode::PreconditionFailed,
-        Some("project_revision"),
-    );
+    let mut outcome = expect_rejection(attempt, ErrorCode::NotFound, None);
+    if outcome.is_ok() {
+        let now_a = snapshot(harness, a, scene_a)?;
+        outcome = match expect_unchanged(&after_move_a, &now_a) {
+            Ok(()) => outcome.map(|mut notes| {
+                notes.push("instance A は変化していない".to_string());
+                notes
+            }),
+            Err(reason) => Err(format!(
+                "拒否されたのに instance A が変化しました: {reason}"
+            )),
+        };
+    }
     report.record(
         "6.7",
         "古い selector の再利用",
-        "instance A に対し古くなった selector で再度編集すると precondition_failed（mismatch=project_revision）で拒否される",
+        "instance A に対し古くなった selector で再度編集すると not_found で拒否され、instance A が変更されない",
         Mode::Auto,
         outcome,
     );
