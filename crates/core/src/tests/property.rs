@@ -17,6 +17,7 @@ use crate::number::FiniteF64;
 use crate::validation::{MAX_PATH_UTF16_UNITS, PathSyntaxError, validate_path};
 use proptest::prelude::*;
 use proptest::string::string_regex;
+use proptest::test_runner::TestCaseError;
 
 // ============================================================================
 // json
@@ -529,31 +530,84 @@ fn path_fragment_strategy() -> impl Strategy<Value = String> {
     string_regex(r"[a-zA-Z0-9_. \\/あ:?]{0,64}").unwrap()
 }
 
+/// パスらしい文字列。
+///
+/// 一様乱数の文字列は拒否規則に当たる形をほとんど生成しないため、規則ごとの
+/// 接頭辞と、区切り・ドライブ・ストリーム・NUL を含む断片を組み合わせる。
+fn path_like_strategy() -> impl Strategy<Value = String> {
+    let prefix = prop_oneof![
+        Just(String::new()),
+        Just(r"C:\".to_string()),
+        Just("C:".to_string()),
+        Just(r"\".to_string()),
+        Just(r"\\".to_string()),
+        Just(r"\\.\".to_string()),
+        Just(r"\\?\".to_string()),
+        Just("//./".to_string()),
+        Just("//?/".to_string()),
+    ];
+    let segment = prop_oneof![
+        string_regex(r"[a-zA-Z0-9_.あ]{0,12}").unwrap(),
+        Just(":stream".to_string()),
+        Just("C:".to_string()),
+        Just("\0".to_string()),
+        Just("..".to_string()),
+    ];
+    (prefix, prop::collection::vec(segment, 0..4)).prop_map(|(prefix, segments)| {
+        let mut path = prefix;
+        path.push_str(&segments.join("\\"));
+        path
+    })
+}
+
+/// パス検証が規則どおりに答えることを確かめる。
+///
+/// 受理したなら拒否規則のいずれにも当たらないこと、空と NUL は理由まで
+/// 一致することを見る。拒否規則を 1 つでも通してしまう実装は必ずここで
+/// 落ちる。
+fn assert_path_validation_follows_the_rules(path: &str) -> Result<(), TestCaseError> {
+    if path.is_empty() {
+        prop_assert_eq!(validate_path(path), Err(PathSyntaxError::Empty));
+        return Ok(());
+    }
+    if path.contains('\0') {
+        prop_assert_eq!(validate_path(path), Err(PathSyntaxError::ContainsNul));
+        return Ok(());
+    }
+    if validate_path(path).is_err() {
+        return Ok(());
+    }
+    prop_assert!(!path.is_empty());
+    prop_assert!(!path.contains('\0'));
+    prop_assert!(path.encode_utf16().count() <= MAX_PATH_UTF16_UNITS);
+    let normalized = path.replace('/', "\\");
+    prop_assert!(!normalized.starts_with(r"\\.\"));
+    prop_assert!(!normalized.starts_with(r"\\?\"));
+    prop_assert!(normalized != r"\\." && normalized != r"\\?");
+    prop_assert!(normalized.matches(':').count() <= 1);
+    prop_assert!(normalized.starts_with(r"\\") || normalized.contains(r":\"));
+    Ok(())
+}
+
 proptest! {
     #[test]
-    fn path_validation_answers_for_any_string(path in ".*") {
+    fn path_validation_answers_for_any_string(
+        path in prop_oneof![".*", path_like_strategy()],
+    ) {
         // 任意の文字列に対して panic せず、可否のいずれかを返す。
-        let result = validate_path(&path);
-        if result.is_ok() {
-            // 受理した以上、拒否規則のいずれにも当たらない。
-            prop_assert!(!path.is_empty());
-            prop_assert!(!path.contains('\0'));
-            prop_assert!(path.encode_utf16().count() <= MAX_PATH_UTF16_UNITS);
-            let normalized = path.replace('/', "\\");
-            prop_assert!(!normalized.starts_with(r"\\.\"));
-            prop_assert!(!normalized.starts_with(r"\\?\"));
-            prop_assert!(normalized.matches(':').count() <= 1);
-            prop_assert!(normalized.starts_with(r"\\") || normalized.contains(r":\"));
-        }
+        assert_path_validation_follows_the_rules(&path)?;
     }
 
     #[test]
     fn path_validation_answers_for_arbitrary_bytes(
-        bytes in prop::collection::vec(any::<u8>(), 0..=512),
+        bytes in prop_oneof![
+            prop::collection::vec(any::<u8>(), 0..=512),
+            path_like_strategy().prop_map(String::into_bytes),
+        ],
     ) {
+        // 不正な UTF-8 を含む入力から作った文字列でも規則は変わらない。
         let path = String::from_utf8_lossy(&bytes);
-        let result = validate_path(&path);
-        prop_assert_eq!(result.is_ok(), validate_path(&path).is_ok());
+        assert_path_validation_follows_the_rules(&path)?;
     }
 
     #[test]
