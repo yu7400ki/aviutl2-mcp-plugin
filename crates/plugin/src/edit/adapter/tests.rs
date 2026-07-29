@@ -1379,3 +1379,79 @@ fn the_fake_scene_exposes_layers_and_objects() {
     assert_eq!(object.placement.frame_start, 100);
     assert!(!layer.locked);
 }
+
+#[test]
+fn an_added_effect_is_located_even_when_the_host_does_not_append_it() {
+    // 付与位置が末尾だと決めつけると、先頭へ挿入するホストで別の effect を
+    // 指す selector を返してしまう。
+    let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::PrependEffect)));
+    let outcome = harness
+        .edit
+        .add_effect(&AddEffectParams {
+            object: harness.selector(1, 100),
+            effect_name: "ぼかし".to_string(),
+            expected: harness.expected(),
+        })
+        .expect("effect の付与に失敗しました");
+
+    let effect = outcome.effect.expect("付与された effect");
+    assert_eq!(effect.name, "ぼかし");
+    // 先頭へ挿入されたため、同名内の順序は 0 になり既存の方が 1 へ繰り上がる。
+    assert_eq!(effect.index, 0);
+    let scene = harness.host.scene();
+    let effects = &scene.layers[1].objects[0].effects;
+    assert_eq!(effects[0].name, "ぼかし");
+    assert_eq!(effects[0].index, 0);
+}
+
+#[test]
+fn an_ambiguous_effect_difference_is_reported_instead_of_being_guessed() {
+    let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::AddTwoEffects)));
+    let error = harness
+        .edit
+        .add_effect(&AddEffectParams {
+            object: harness.selector(1, 100),
+            effect_name: "ぼかし".to_string(),
+            expected: harness.expected(),
+        })
+        .expect_err("位置を特定できないのに selector が返りました");
+
+    assert_eq!(error.error_code(), ErrorCode::SdkError);
+    assert_eq!(error.details()["sdk_operation"], json!("create_effect"));
+    assert_eq!(error.details()["mutation_issued"], json!(true));
+}
+
+#[test]
+fn the_added_position_comes_from_the_difference_in_the_name_list() {
+    let names = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+
+    // 末尾・中間・先頭のいずれへ挿入されても位置が求まる。
+    assert_eq!(
+        added_effect_position(&names(&["a", "b"]), &names(&["a", "b", "c"])),
+        Some(2)
+    );
+    assert_eq!(
+        added_effect_position(&names(&["a", "b"]), &names(&["a", "c", "b"])),
+        Some(1)
+    );
+    assert_eq!(
+        added_effect_position(&names(&["a", "b"]), &names(&["c", "a", "b"])),
+        Some(0)
+    );
+    // 同名が並んでいても件数が 1 つ増えていれば位置が定まる。
+    assert_eq!(
+        added_effect_position(&names(&["a", "a"]), &names(&["a", "a", "a"])),
+        Some(2)
+    );
+
+    // 増減が 1 件でない、あるいは並びが入れ替わった場合は位置を名乗らない。
+    assert_eq!(added_effect_position(&names(&["a"]), &names(&["a"])), None);
+    assert_eq!(
+        added_effect_position(&names(&["a"]), &names(&["a", "b", "c"])),
+        None
+    );
+    assert_eq!(
+        added_effect_position(&names(&["a", "b"]), &names(&["b", "a", "c"])),
+        None
+    );
+}

@@ -47,6 +47,10 @@ pub(crate) enum Fault {
     CreateNothing,
     /// 作成で 2 件のオブジェクトが生まれる。
     CreatePair,
+    /// effect を列の先頭へ挿入する。
+    PrependEffect,
+    /// effect の付与で 2 件が増える。
+    AddTwoEffects,
 }
 
 /// panic させる位置。
@@ -700,24 +704,30 @@ impl SceneEditor for FakeSceneEditor<'_> {
         effect_name: &str,
     ) -> Result<(), EditError> {
         self.mutation("create_effect")?;
+        let knobs = self.host.knobs();
         let id = self.object_id(object.slot())?;
         let mut scene = self.host.scene.lock().unwrap();
         let object = scene.by_id_mut(id).ok_or(EditError::Sdk {
             operation: "create_effect",
         })?;
-        // ホストは末尾へ付与する。同名の順序は列の出現順で決まる。
-        let index = object
-            .effects
-            .iter()
-            .filter(|effect| effect.name == effect_name)
-            .count();
-        object.effects.push(HostEffect {
+        let added = HostEffect {
             name: effect_name.to_string(),
-            index,
+            index: 0,
             enabled: true,
             locked: false,
             items: Vec::new(),
-        });
+        };
+        // 付与位置はホストが決める。末尾に限るとは定められていない。
+        if knobs.fault == Some(Fault::PrependEffect) {
+            object.effects.insert(0, added);
+        } else {
+            if knobs.fault == Some(Fault::AddTwoEffects) {
+                object.effects.push(added.clone());
+            }
+            object.effects.push(added);
+        }
+        // 同名の順序は列の出現順で決まる。
+        renumber(&mut object.effects);
         Ok(())
     }
 
