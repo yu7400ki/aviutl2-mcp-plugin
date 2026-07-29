@@ -180,9 +180,11 @@ impl SceneReader for SdkSceneReader<'_> {
         layer: usize,
         frame_start: usize,
     ) -> Result<HostObjectDetail, ReadError> {
-        let handle = self
-            .find_object_from(layer, frame_start)?
-            .ok_or(ReadError::ObjectNotFound)?;
+        let handle =
+            self.find_object_from(layer, frame_start)?
+                .ok_or(ReadError::ObjectNotFound {
+                    detected_by: "find_object",
+                })?;
         let object = ensure_start_frame(self.object_at(handle)?, frame_start)?;
 
         let sections = to_inclusive_sections(
@@ -262,7 +264,9 @@ impl SdkSceneReader<'_> {
                 });
                 return match decision {
                     EffectListDecision::Empty => Ok(Vec::new()),
-                    EffectListDecision::ObjectNotFound => Err(ReadError::ObjectNotFound),
+                    EffectListDecision::ObjectNotFound { detected_by } => {
+                        Err(ReadError::ObjectNotFound { detected_by })
+                    }
                     EffectListDecision::ListFailed => {
                         tracing::warn!("effect の一覧を取得できませんでした");
                         Err(sdk("get_effect_list"))
@@ -353,7 +357,10 @@ enum EffectListDecision {
     /// effect が付いていない。
     Empty,
     /// オブジェクトが存在しない。
-    ObjectNotFound,
+    ObjectNotFound {
+        /// 不在を検出した SDK 関数の名前。
+        detected_by: &'static str,
+    },
     /// 一覧の取得だけが失敗した。
     ListFailed,
 }
@@ -383,10 +390,14 @@ fn classify_effect_list(
     probe: impl FnOnce() -> Option<SectionFailure>,
 ) -> EffectListDecision {
     match list {
-        SectionFailure::ObjectMissing => EffectListDecision::ObjectNotFound,
+        SectionFailure::ObjectMissing => EffectListDecision::ObjectNotFound {
+            detected_by: "get_effect_list",
+        },
         SectionFailure::CallFailed => match probe() {
             None => EffectListDecision::ListFailed,
-            Some(SectionFailure::ObjectMissing) => EffectListDecision::ObjectNotFound,
+            Some(SectionFailure::ObjectMissing) => EffectListDecision::ObjectNotFound {
+                detected_by: "get_first_effect",
+            },
             Some(SectionFailure::CallFailed) => EffectListDecision::Empty,
         },
     }
@@ -426,7 +437,9 @@ fn ensure_start_frame(object: HostObject, frame_start: usize) -> Result<HostObje
     if object.placement.frame_start == frame_start {
         Ok(object)
     } else {
-        Err(ReadError::ObjectNotFound)
+        Err(ReadError::ObjectNotFound {
+            detected_by: "find_object",
+        })
     }
 }
 
@@ -646,7 +659,12 @@ mod tests {
             probed = true;
             Some(SectionFailure::CallFailed)
         });
-        assert_eq!(decision, EffectListDecision::ObjectNotFound);
+        assert_eq!(
+            decision,
+            EffectListDecision::ObjectNotFound {
+                detected_by: "get_effect_list"
+            }
+        );
         assert!(!probed, "不在が分かっているのに先頭 effect を引きました");
     }
 
@@ -660,11 +678,14 @@ mod tests {
             EffectListDecision::Empty
         );
         // 先頭を引く段でオブジェクトの不在が分かった場合は 0 件にしない。
+        // 不在を検出したのは先頭 effect を引く呼び出しであり、一覧ではない。
         assert_eq!(
             classify_effect_list(SectionFailure::CallFailed, || Some(
                 SectionFailure::ObjectMissing
             )),
-            EffectListDecision::ObjectNotFound
+            EffectListDecision::ObjectNotFound {
+                detected_by: "get_first_effect"
+            }
         );
     }
 
@@ -707,7 +728,7 @@ mod tests {
             assert!(
                 matches!(
                     ensure_start_frame(object(100, 200), frame),
-                    Err(ReadError::ObjectNotFound)
+                    Err(ReadError::ObjectNotFound { .. })
                 ),
                 "フレーム {frame} が開始フレームとして受理されました"
             );

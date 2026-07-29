@@ -53,7 +53,14 @@ pub enum ReadError {
     FingerprintMismatch,
     /// セレクターに一致する対象が存在しない。
     #[error("セレクターに一致するオブジェクトがありません")]
-    ObjectNotFound,
+    ObjectNotFound {
+        /// 不在を検出した SDK 関数の名前。
+        ///
+        /// 応答の補助情報には載せない。対象を 1 つも指定しない列挙では不在を
+        /// そのまま返せず、列挙の失敗へ畳む必要がある。畳んだ後も、実際に
+        /// 不在を検出した呼び出しを指せるようにここで引き継ぐ。
+        detected_by: &'static str,
+    },
     /// セレクターに一致する対象が複数ある。
     #[error("セレクターに一致するオブジェクトが複数あります")]
     AmbiguousObject {
@@ -81,7 +88,7 @@ impl ReadError {
             | ReadError::EpochMismatch
             | ReadError::FingerprintAlgorithmMismatch { .. }
             | ReadError::FingerprintMismatch => ErrorCode::PreconditionFailed,
-            ReadError::ObjectNotFound => ErrorCode::NotFound,
+            ReadError::ObjectNotFound { .. } => ErrorCode::NotFound,
             ReadError::AmbiguousObject { .. } => ErrorCode::AmbiguousSelector,
             ReadError::Sdk { .. } => ErrorCode::SdkError,
             ReadError::Panicked => ErrorCode::InternalError,
@@ -126,7 +133,7 @@ impl ReadError {
                 "supported_fingerprint_algorithm": supported,
             }),
             ReadError::FingerprintMismatch => json!({}),
-            ReadError::ObjectNotFound => json!({}),
+            ReadError::ObjectNotFound { .. } => json!({}),
             ReadError::AmbiguousObject { candidate_count } => {
                 json!({ "candidate_count": candidate_count })
             }
@@ -160,7 +167,9 @@ mod tests {
                 supported: "sha256-raw-v1".to_string(),
             },
             ReadError::FingerprintMismatch,
-            ReadError::ObjectNotFound,
+            ReadError::ObjectNotFound {
+                detected_by: "find_object",
+            },
             ReadError::AmbiguousObject { candidate_count: 2 },
             ReadError::Sdk {
                 operation: "get_object_alias",
@@ -209,7 +218,13 @@ mod tests {
             .retry_after_ms()
             .is_some()
         );
-        assert_eq!(ReadError::ObjectNotFound.retry_after_ms(), None);
+        assert_eq!(
+            ReadError::ObjectNotFound {
+                detected_by: "find_object"
+            }
+            .retry_after_ms(),
+            None
+        );
         assert_eq!(
             ReadError::Sdk {
                 operation: "find_object"

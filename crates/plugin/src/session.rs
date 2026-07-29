@@ -1133,7 +1133,9 @@ mod tests {
             self.enter("get_object")?;
             let summary = fake_object();
             if *selector != summary.selector {
-                return Err(ReadError::ObjectNotFound);
+                return Err(ReadError::ObjectNotFound {
+                    detected_by: "find_object",
+                });
             }
             Ok(ObjectDetail {
                 alias: "[1:100]".to_string(),
@@ -1861,7 +1863,9 @@ mod tests {
                 supported: "sha256-alias-v1".to_string(),
             },
             || ReadError::FingerprintMismatch,
-            || ReadError::ObjectNotFound,
+            || ReadError::ObjectNotFound {
+                detected_by: "find_object",
+            },
             || ReadError::AmbiguousObject { candidate_count: 2 },
             || ReadError::Sdk {
                 operation: "call_read_section",

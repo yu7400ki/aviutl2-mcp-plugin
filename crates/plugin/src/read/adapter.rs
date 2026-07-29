@@ -321,15 +321,16 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
 
 /// 列挙の途中で対象を読めなくなった失敗を、列挙そのものの失敗として畳む。
 ///
-/// 対象の不在は、走査で位置を得てから詳細を読むまでの間に対象が消えた場合と、
-/// 詳細の読み取りが対象の不在を検出した場合に現れる。対象を 1 つも指定しない
-/// 列挙で「対象が見つからない」を返しても、要求元は何が見つからなかったのかを
-/// 特定できず、次の行動も決められない。列挙が全件を返せなかったという事実だけを
-/// 伝える。
+/// 対象を 1 つも指定しない列挙で「対象が見つからない」を返しても、要求元は何が
+/// 見つからなかったのかを特定できず、次の行動も決められない。列挙が全件を
+/// 返せなかったという事実として伝える。
+///
+/// 不在は対象の探索でも effect 一覧の取得でも検出され得る。切り分けを誤った
+/// 系統へ誘導しないよう、実際に検出した呼び出しをそのまま引き継ぐ。
 fn enumeration_failure(error: ReadError) -> ReadError {
     match error {
-        ReadError::ObjectNotFound => ReadError::Sdk {
-            operation: "find_object",
+        ReadError::ObjectNotFound { detected_by } => ReadError::Sdk {
+            operation: detected_by,
         },
         other => other,
     }
@@ -376,7 +377,9 @@ fn resolve_candidate(
         .collect();
 
     match candidates.len() {
-        0 => Err(ReadError::ObjectNotFound),
+        0 => Err(ReadError::ObjectNotFound {
+            detected_by: "find_object",
+        }),
         1 => Ok(candidates.remove(0)),
         candidate_count => Err(ReadError::AmbiguousObject { candidate_count }),
     }
@@ -727,7 +730,11 @@ mod tests {
         ) -> Result<HostObjectDetail, ReadError> {
             self.host.record("object_detail");
             if self.host.detail_missing_at == Some(frame_start) {
-                return Err(ReadError::ObjectNotFound);
+                // 実際の SDK では effect 一覧の取得も不在を検出する。検出元が
+                // 対象の探索とは限らないことを、この経路で再現する。
+                return Err(ReadError::ObjectNotFound {
+                    detected_by: "get_effect_list",
+                });
             }
             let object = self
                 .host
@@ -738,7 +745,9 @@ mod tests {
                         .iter()
                         .find(|object| object.placement.frame_start == frame_start)
                 })
-                .ok_or(ReadError::ObjectNotFound)?;
+                .ok_or(ReadError::ObjectNotFound {
+                    detected_by: "find_object",
+                })?;
             if self.host.detail_fails_at == Some(frame_start) {
                 return Err(ReadError::Sdk {
                     operation: "get_effect_item_value",
@@ -1011,7 +1020,12 @@ mod tests {
     #[test]
     fn guard_passes_through_success_and_failure() {
         assert_eq!(guard(|| Ok(7)).unwrap(), 7);
-        let error = guard::<()>(|| Err(ReadError::ObjectNotFound)).unwrap_err();
+        let error = guard::<()>(|| {
+            Err(ReadError::ObjectNotFound {
+                detected_by: "find_object",
+            })
+        })
+        .unwrap_err();
         assert_eq!(error.error_code(), ErrorCode::NotFound);
     }
 
@@ -1449,7 +1463,9 @@ mod tests {
 
         let error = adapter.list_objects_page(0, None).unwrap_err();
         assert_eq!(error.error_code(), ErrorCode::SdkError);
-        assert_eq!(error.details()["sdk_operation"], "find_object");
+        // 畳んだ後も、実際に不在を検出した呼び出しを指す。対象の探索へ
+        // 決め打ちすると、切り分けが誤った系統へ向かう。
+        assert_eq!(error.details()["sdk_operation"], "get_effect_list");
     }
 
     /// 対象を指定する取得では、不在がそのまま不在として返ることを確かめる。
@@ -2093,7 +2109,7 @@ mod tests {
         let objects = vec![object(1, 100, 200, None).placement];
         assert!(matches!(
             resolve_candidate(objects.clone(), 150, None),
-            Err(ReadError::ObjectNotFound)
+            Err(ReadError::ObjectNotFound { .. })
         ));
         assert_eq!(
             resolve_candidate(objects, 100, None).unwrap().frame_start,
