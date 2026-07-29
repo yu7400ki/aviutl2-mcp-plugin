@@ -33,6 +33,7 @@ pub mod operation;
 pub mod page;
 pub mod selector;
 pub mod state;
+pub mod validation;
 pub mod version;
 pub mod wire_format;
 
@@ -69,7 +70,9 @@ pub use handshake::{
     verify_mac,
 };
 pub use identifier::{InstanceId, ProtocolVersion, RequestId, pipe_name_for};
-pub use item_value::ItemValue;
+pub use item_value::{
+    ItemValue, ItemWriteError, encode_item_value, prepare_item_write, validate_item_value,
+};
 pub use json::{JsonStrictError, deserialize_json, parse_json};
 pub use number::FiniteF64;
 pub use object::{LayerInfo, ObjectDetail, ObjectSummary, SectionRange};
@@ -86,5 +89,10 @@ pub use operation::{
 pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
 pub use selector::{EffectSelector, ObjectSelector};
 pub use state::InstanceState;
+pub use validation::{
+    MAX_ALIAS_BYTES, MAX_ITEM_VALUE_BYTES, MAX_NAME_UTF16_UNITS, MAX_PATH_UTF16_UNITS,
+    PathSyntaxError, TextSyntaxError, validate_alias, validate_control_free, validate_item_text,
+    validate_name, validate_path,
+};
 pub use version::negotiate;
 pub use wire_format::{format_hwnd, format_utc_timestamp, parse_utc_timestamp};

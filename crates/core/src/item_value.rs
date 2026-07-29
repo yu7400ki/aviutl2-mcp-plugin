@@ -1,6 +1,11 @@
-//! effect 設定項目の値。
+//! effect 設定項目の値と、書き込み時の検証。
 
+use crate::effect::{AvailableEffectItem, EffectItemType};
+use crate::error::ErrorCode;
 use crate::number::FiniteF64;
+use crate::validation::{
+    PathSyntaxError, TextSyntaxError, validate_control_free, validate_item_text, validate_path,
+};
 use serde::{Deserialize, Serialize};
 
 /// effect 設定項目の値。
@@ -74,9 +79,220 @@ pub enum ItemValue {
     },
 }
 
+impl ItemValue {
+    /// 値の形を表す名前を返す。JSON の判別子と同じ表記である。
+    ///
+    /// 値そのものを含まないため、エラー応答へ載せてよい。
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ItemValue::Number { .. } => "number",
+            ItemValue::Integer { .. } => "integer",
+            ItemValue::Bool { .. } => "bool",
+            ItemValue::Color { .. } => "color",
+            ItemValue::Choice { .. } => "choice",
+            ItemValue::File { .. } => "file",
+            ItemValue::Folder { .. } => "folder",
+            ItemValue::Font { .. } => "font",
+            ItemValue::Text { .. } => "text",
+            ItemValue::Unknown { .. } => "unknown",
+        }
+    }
+}
+
+/// 設定項目への書き込みの検証失敗。
+///
+/// 要求を直せば通るもの（`invalid_argument` 相当）と、対象が対応しないため
+/// 直しても通らないもの（`unsupported_operation` 相当）を別の variant で表す。
+/// 対応は [`ItemWriteError::error_code`] が持つ。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ItemWriteError {
+    /// 未対応種別の生値は書き込めない。
+    #[error("未対応種別の値は書き込めません")]
+    UnknownValue,
+    /// 指定された設定項目が対象 effect に存在しない。
+    #[error("設定項目が存在しません: {item}")]
+    ItemNotFound {
+        /// 要求された設定項目名。
+        item: String,
+    },
+    /// 設定項目の種別と値の形が対応しない。
+    #[error("種別 {item_type} の設定項目に {value_kind} の値は指定できません")]
+    ValueKindMismatch {
+        /// 設定項目の種別名。
+        item_type: String,
+        /// 与えられた値の形。
+        value_kind: &'static str,
+    },
+    /// 書き込みを公開していない種別。
+    #[error("種別 {item_type} の設定項目への書き込みには対応していません")]
+    UnsupportedItemType {
+        /// 設定項目の種別名。
+        item_type: String,
+    },
+    /// 文字列値の検証に失敗した。
+    #[error(transparent)]
+    Text(#[from] TextSyntaxError),
+    /// パス値の検証に失敗した。
+    #[error(transparent)]
+    Path(#[from] PathSyntaxError),
+}
+
+impl ItemWriteError {
+    /// 対応するエラーコードを返す。
+    pub fn error_code(&self) -> ErrorCode {
+        match self {
+            ItemWriteError::ItemNotFound { .. } => ErrorCode::NotFound,
+            ItemWriteError::UnsupportedItemType { .. } => ErrorCode::UnsupportedOperation,
+            ItemWriteError::UnknownValue
+            | ItemWriteError::ValueKindMismatch { .. }
+            | ItemWriteError::Text(_)
+            | ItemWriteError::Path(_) => ErrorCode::InvalidArgument,
+        }
+    }
+}
+
+/// 設定項目名の実在確認から書き込む文字列の組み立てまでを行う。
+///
+/// `items` は対象 effect が公開している設定項目の一覧である。判定は次の順で
+/// 行う。
+///
+/// 1. [`ItemValue::Unknown`] を拒否する
+/// 2. `item` が `items` に存在することを確認する
+/// 3. 種別への書き込みが公開されているかを確認する
+/// 4. 種別と値の形が対応するかを確認する
+/// 5. 書き込む文字列へ変換する
+pub fn prepare_item_write(
+    items: &[AvailableEffectItem],
+    item: &str,
+    value: &ItemValue,
+) -> Result<String, ItemWriteError> {
+    if matches!(value, ItemValue::Unknown { .. }) {
+        return Err(ItemWriteError::UnknownValue);
+    }
+    let entry = items
+        .iter()
+        .find(|candidate| candidate.name == item)
+        .ok_or_else(|| ItemWriteError::ItemNotFound {
+            item: item.to_string(),
+        })?;
+    encode_item_value(&entry.item_type, value)
+}
+
+/// 種別と値を照合し、書き込む文字列を組み立てる。
+///
+/// 書き込みを公開する種別かどうかを、種別と値の対応より**先に**判定する。
+/// 公開しない種別は受け付ける値の形自体を定めていないため、値の形の照合が
+/// 成立しないためである。
+pub fn encode_item_value(
+    item_type: &EffectItemType,
+    value: &ItemValue,
+) -> Result<String, ItemWriteError> {
+    if matches!(value, ItemValue::Unknown { .. }) {
+        return Err(ItemWriteError::UnknownValue);
+    }
+    if !is_writable(item_type) {
+        return Err(ItemWriteError::UnsupportedItemType {
+            item_type: item_type.kind_name(),
+        });
+    }
+    if !accepts(item_type, value) {
+        return Err(ItemWriteError::ValueKindMismatch {
+            item_type: item_type.kind_name(),
+            value_kind: value.kind(),
+        });
+    }
+    encode_value(value)
+}
+
+/// 種別を伴わずに判定できる範囲だけを検証する。
+///
+/// 対象 effect の設定項目一覧を持たない層が、要求を受け付けた時点で
+/// 呼ぶための入口である。種別との対応は [`encode_item_value`] が見る。
+pub fn validate_item_value(value: &ItemValue) -> Result<(), ItemWriteError> {
+    encode_value(value).map(|_| ())
+}
+
+/// 書き込みを公開している種別か。
+///
+/// 複合種別（`scene` / `range` / `combo` / `mask` / `figure` / `data`）と
+/// 未知種別は、値の表記が確定していないため公開しない。推測した表記で
+/// 書き込むと、検証を通ったのに意図と異なる値が入る。
+fn is_writable(item_type: &EffectItemType) -> bool {
+    matches!(
+        item_type,
+        EffectItemType::Integer
+            | EffectItemType::Number
+            | EffectItemType::Check
+            | EffectItemType::Text
+            | EffectItemType::String
+            | EffectItemType::File
+            | EffectItemType::Folder
+            | EffectItemType::Font
+            | EffectItemType::Color
+            | EffectItemType::Select
+    )
+}
+
+/// 種別が値の形を受け付けるか。
+fn accepts(item_type: &EffectItemType, value: &ItemValue) -> bool {
+    matches!(
+        (item_type, value),
+        (EffectItemType::Integer, ItemValue::Integer { .. })
+            | (EffectItemType::Number, ItemValue::Number { .. })
+            | (EffectItemType::Check, ItemValue::Bool { .. })
+            | (
+                EffectItemType::Text | EffectItemType::String,
+                ItemValue::Text { .. }
+            )
+            | (EffectItemType::File, ItemValue::File { .. })
+            | (EffectItemType::Folder, ItemValue::Folder { .. })
+            | (EffectItemType::Font, ItemValue::Font { .. })
+            | (EffectItemType::Color, ItemValue::Color { .. })
+            | (EffectItemType::Select, ItemValue::Choice { .. })
+    )
+}
+
+/// 値を書き込む文字列へ変換する。
+///
+/// 読み取りが返した値をそのまま書き戻せるよう、表記を独自に整形しない。
+/// 整数は十進整数、実数は指数表記を用いない十進小数、真偽値は `0` / `1` と
+/// する。実数は元の値へ戻せる最短の桁数で書き出す。
+///
+/// [`ItemValue::Choice`] の `index` は読み取りが付ける補助情報であり、
+/// 書き込みでは無視する。選択肢の並びはホスト側の都合で変わり得るため、
+/// index を正としない。
+fn encode_value(value: &ItemValue) -> Result<String, ItemWriteError> {
+    match value {
+        ItemValue::Unknown { .. } => Err(ItemWriteError::UnknownValue),
+        ItemValue::Integer { value } => Ok(value.to_string()),
+        ItemValue::Number { value } => Ok(value.to_string()),
+        ItemValue::Bool { value } => Ok(if *value { "1" } else { "0" }.to_string()),
+        ItemValue::Color { value } | ItemValue::Text { value } => encode_text(value),
+        ItemValue::Choice { value, .. } => encode_text(value),
+        ItemValue::Font { name } => encode_text(name),
+        ItemValue::File { path } | ItemValue::Folder { path } => encode_path(path),
+    }
+}
+
+/// 文字列値をそのまま渡せる形か確認する。
+fn encode_text(value: &str) -> Result<String, ItemWriteError> {
+    validate_item_text(value)?;
+    Ok(value.to_string())
+}
+
+/// パス値をそのまま渡せる形か確認する。
+///
+/// 長さはパス専用の上限で判定し、他の文字列値と同じ上限を重ねない。
+fn encode_path(path: &str) -> Result<String, ItemWriteError> {
+    validate_path(path)?;
+    validate_control_free(path)?;
+    Ok(path.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::MAX_ITEM_VALUE_BYTES;
 
     fn sample_values() -> Vec<ItemValue> {
         vec![
@@ -180,5 +396,439 @@ mod tests {
     fn item_value_rejects_unknown_tag() {
         let result: Result<ItemValue, _> = serde_json::from_str(r#"{"type":"vector","x":1}"#);
         assert!(result.is_err());
+    }
+
+    /// 書き込みを公開する種別と、受け付ける値の組。
+    fn writable_pairs() -> Vec<(EffectItemType, ItemValue, &'static str)> {
+        vec![
+            (
+                EffectItemType::Integer,
+                ItemValue::Integer { value: -3 },
+                "-3",
+            ),
+            (
+                EffectItemType::Number,
+                ItemValue::Number {
+                    value: FiniteF64::try_new(12.5).unwrap(),
+                },
+                "12.5",
+            ),
+            (EffectItemType::Check, ItemValue::Bool { value: true }, "1"),
+            (
+                EffectItemType::Text,
+                ItemValue::Text {
+                    value: "字幕".to_string(),
+                },
+                "字幕",
+            ),
+            (
+                EffectItemType::String,
+                ItemValue::Text {
+                    value: "文字列".to_string(),
+                },
+                "文字列",
+            ),
+            (
+                EffectItemType::File,
+                ItemValue::File {
+                    path: r"C:\movie.mp4".to_string(),
+                },
+                r"C:\movie.mp4",
+            ),
+            (
+                EffectItemType::Folder,
+                ItemValue::Folder {
+                    path: r"C:\assets".to_string(),
+                },
+                r"C:\assets",
+            ),
+            (
+                EffectItemType::Font,
+                ItemValue::Font {
+                    name: "Meiryo".to_string(),
+                },
+                "Meiryo",
+            ),
+            (
+                EffectItemType::Color,
+                ItemValue::Color {
+                    value: "#ff8800".to_string(),
+                },
+                "#ff8800",
+            ),
+            (
+                EffectItemType::Select,
+                ItemValue::Choice {
+                    value: "通常".to_string(),
+                    index: Some(2),
+                },
+                "通常",
+            ),
+        ]
+    }
+
+    /// 書き込みを公開しない種別。
+    fn non_writable_item_types() -> Vec<EffectItemType> {
+        vec![
+            EffectItemType::Scene,
+            EffectItemType::Range,
+            EffectItemType::Combo,
+            EffectItemType::Mask,
+            EffectItemType::Figure,
+            EffectItemType::Data,
+            EffectItemType::Unknown(99),
+        ]
+    }
+
+    #[test]
+    fn write_accepts_the_documented_pairs() {
+        for (item_type, value, encoded) in writable_pairs() {
+            assert_eq!(
+                encode_item_value(&item_type, &value),
+                Ok(encoded.to_string()),
+                "{item_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_rejects_unknown_value() {
+        let value = ItemValue::Unknown {
+            raw: "future=1".to_string(),
+        };
+        for item_type in writable_pairs()
+            .into_iter()
+            .map(|(item_type, _, _)| item_type)
+            .chain(non_writable_item_types())
+        {
+            assert_eq!(
+                encode_item_value(&item_type, &value),
+                Err(ItemWriteError::UnknownValue),
+                "{item_type}"
+            );
+        }
+        assert_eq!(
+            validate_item_value(&value),
+            Err(ItemWriteError::UnknownValue)
+        );
+        // 設定項目の実在確認より先に拒否する。
+        assert_eq!(
+            prepare_item_write(&[], "存在しない項目", &value),
+            Err(ItemWriteError::UnknownValue)
+        );
+    }
+
+    #[test]
+    fn write_rejects_value_kind_mismatch() {
+        let mismatched = ItemValue::Text {
+            value: "文字列".to_string(),
+        };
+        for (item_type, _, _) in writable_pairs() {
+            if matches!(item_type, EffectItemType::Text | EffectItemType::String) {
+                continue;
+            }
+            assert_eq!(
+                encode_item_value(&item_type, &mismatched),
+                Err(ItemWriteError::ValueKindMismatch {
+                    item_type: item_type.kind_name(),
+                    value_kind: "text",
+                }),
+                "{item_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_rejects_non_writable_item_types() {
+        // 複合種別と未知種別は、値の形にかかわらず未対応として拒否する。
+        let value = ItemValue::Text {
+            value: "文字列".to_string(),
+        };
+        for item_type in non_writable_item_types() {
+            assert_eq!(
+                encode_item_value(&item_type, &value),
+                Err(ItemWriteError::UnsupportedItemType {
+                    item_type: item_type.kind_name(),
+                }),
+                "{item_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_separates_invalid_argument_from_unsupported_operation() {
+        // 要求を直せば通るものと、直しても通らないものを取り違えない。
+        assert_eq!(
+            ItemWriteError::UnknownValue.error_code(),
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            ItemWriteError::ValueKindMismatch {
+                item_type: "integer".to_string(),
+                value_kind: "text",
+            }
+            .error_code(),
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            ItemWriteError::Text(TextSyntaxError::ContainsNul).error_code(),
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            ItemWriteError::Path(PathSyntaxError::NotAbsolute).error_code(),
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            ItemWriteError::UnsupportedItemType {
+                item_type: "scene".to_string(),
+            }
+            .error_code(),
+            ErrorCode::UnsupportedOperation
+        );
+        assert_eq!(
+            ItemWriteError::ItemNotFound {
+                item: "X".to_string(),
+            }
+            .error_code(),
+            ErrorCode::NotFound
+        );
+    }
+
+    #[test]
+    fn write_ignores_the_choice_index() {
+        // 選択肢の並びはホスト側の都合で変わり得るため、index を正としない。
+        let encoded: Vec<String> = [Some(0), Some(7), None]
+            .into_iter()
+            .map(|index| {
+                encode_item_value(
+                    &EffectItemType::Select,
+                    &ItemValue::Choice {
+                        value: "通常".to_string(),
+                        index,
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(encoded, vec!["通常".to_string(); 3]);
+    }
+
+    #[test]
+    fn write_rejects_nul_and_control_characters_in_strings() {
+        for value in [
+            ItemValue::Text {
+                value: "字幕\0".to_string(),
+            },
+            ItemValue::Color {
+                value: "#ff8800\0".to_string(),
+            },
+            ItemValue::Font {
+                name: "Meiryo\0".to_string(),
+            },
+            ItemValue::Choice {
+                value: "通常\0".to_string(),
+                index: None,
+            },
+        ] {
+            assert_eq!(
+                validate_item_value(&value),
+                Err(ItemWriteError::Text(TextSyntaxError::ContainsNul)),
+                "{}",
+                value.kind()
+            );
+        }
+
+        assert_eq!(
+            validate_item_value(&ItemValue::Text {
+                value: "字幕\n2 行目".to_string(),
+            }),
+            Err(ItemWriteError::Text(TextSyntaxError::ContainsControl))
+        );
+    }
+
+    #[test]
+    fn write_rejects_strings_over_the_limit() {
+        let value = "a".repeat(MAX_ITEM_VALUE_BYTES + 1);
+        assert_eq!(
+            validate_item_value(&ItemValue::Text {
+                value: value.clone()
+            }),
+            Err(ItemWriteError::Text(TextSyntaxError::TooLongBytes {
+                bytes: MAX_ITEM_VALUE_BYTES + 1,
+                max: MAX_ITEM_VALUE_BYTES,
+            }))
+        );
+        assert_eq!(
+            validate_item_value(&ItemValue::Text {
+                value: value[..MAX_ITEM_VALUE_BYTES].to_string(),
+            }),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn write_rejects_invalid_paths() {
+        for (path, expected) in [
+            ("", PathSyntaxError::Empty),
+            (r"..\movie.mp4", PathSyntaxError::NotAbsolute),
+            (r"\\.\PhysicalDrive0", PathSyntaxError::DeviceNamespace),
+            (r"C:\movie.mp4:stream", PathSyntaxError::AlternateDataStream),
+        ] {
+            for value in [
+                ItemValue::File {
+                    path: path.to_string(),
+                },
+                ItemValue::Folder {
+                    path: path.to_string(),
+                },
+            ] {
+                assert_eq!(
+                    validate_item_value(&value),
+                    Err(ItemWriteError::Path(expected)),
+                    "{path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn write_accepts_paths_longer_than_the_generic_string_limit() {
+        // パスの長さはパス専用の上限で判定する。
+        let path = format!(r"C:\{}", "a".repeat(MAX_ITEM_VALUE_BYTES));
+        assert_eq!(
+            validate_item_value(&ItemValue::File { path }),
+            Ok(()),
+            "パス専用の上限が適用されていません"
+        );
+    }
+
+    #[test]
+    fn write_encodes_numbers_without_losing_the_value() {
+        // 読み取りは十進表記を f64 として解釈する。書き込みが元の値へ戻せる
+        // 表記を出さなければ、読み取った値をそのまま書き戻せない。
+        for raw in [
+            0.0,
+            -0.0,
+            1.0,
+            0.1,
+            12.5,
+            29.97,
+            -1.0 / 3.0,
+            1e300,
+            1e-300,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+        ] {
+            let value = ItemValue::Number {
+                value: FiniteF64::try_new(raw).unwrap(),
+            };
+            let encoded = encode_item_value(&EffectItemType::Number, &value).unwrap();
+            assert!(
+                !encoded.contains('e') && !encoded.contains('E'),
+                "指数表記になりました: {encoded}"
+            );
+            assert_eq!(encoded.trim().parse::<f64>().unwrap(), raw, "{raw}");
+        }
+    }
+
+    #[test]
+    fn write_encodes_check_as_zero_or_one() {
+        assert_eq!(
+            encode_item_value(&EffectItemType::Check, &ItemValue::Bool { value: false }),
+            Ok("0".to_string())
+        );
+        assert_eq!(
+            encode_item_value(&EffectItemType::Check, &ItemValue::Bool { value: true }),
+            Ok("1".to_string())
+        );
+    }
+
+    #[test]
+    fn prepare_item_write_looks_up_the_item_type() {
+        let items = vec![
+            AvailableEffectItem {
+                name: "X".to_string(),
+                item_type: EffectItemType::Number,
+            },
+            AvailableEffectItem {
+                name: "図形".to_string(),
+                item_type: EffectItemType::Figure,
+            },
+        ];
+
+        assert_eq!(
+            prepare_item_write(
+                &items,
+                "X",
+                &ItemValue::Number {
+                    value: FiniteF64::try_new(1.5).unwrap(),
+                },
+            ),
+            Ok("1.5".to_string())
+        );
+        assert_eq!(
+            prepare_item_write(
+                &items,
+                "Y",
+                &ItemValue::Number {
+                    value: FiniteF64::try_new(1.5).unwrap(),
+                },
+            ),
+            Err(ItemWriteError::ItemNotFound {
+                item: "Y".to_string(),
+            })
+        );
+        assert_eq!(
+            prepare_item_write(
+                &items,
+                "図形",
+                &ItemValue::Text {
+                    value: "円".to_string(),
+                },
+            ),
+            Err(ItemWriteError::UnsupportedItemType {
+                item_type: "figure".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn write_errors_do_not_repeat_the_value() {
+        // 設定値そのものは応答へ反響させない。
+        let secret = "秘密の値";
+        let errors = [
+            encode_item_value(
+                &EffectItemType::Integer,
+                &ItemValue::Text {
+                    value: secret.to_string(),
+                },
+            )
+            .unwrap_err(),
+            encode_item_value(
+                &EffectItemType::Scene,
+                &ItemValue::Text {
+                    value: secret.to_string(),
+                },
+            )
+            .unwrap_err(),
+            validate_item_value(&ItemValue::Text {
+                value: format!("{secret}\0"),
+            })
+            .unwrap_err(),
+            validate_item_value(&ItemValue::File {
+                path: format!(r"..\{secret}"),
+            })
+            .unwrap_err(),
+            validate_item_value(&ItemValue::Unknown {
+                raw: secret.to_string(),
+            })
+            .unwrap_err(),
+        ];
+        for error in errors {
+            assert!(
+                !error.to_string().contains(secret),
+                "値が含まれます: {error}"
+            );
+        }
     }
 }
