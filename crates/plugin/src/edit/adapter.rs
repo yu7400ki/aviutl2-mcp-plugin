@@ -307,6 +307,10 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             ensure_layer_unlocked(editor, layer)?;
             let before = editor.reader().object_placements(layer)?;
             ensure_destination_free(&before, layer, frame, None)?;
+            // 拡張子だけの確認に留める。実際に読めるかを調べる確認はファイルを
+            // 開くため、割り込めない編集区間の内側では行えない。拡張子が通った
+            // うえでの失敗は理由を区別できないので、対応していないファイルだとは
+            // 名乗らない。
             if let ObjectSource::MediaFile { path } = &params.source
                 && !editor.supports_media_file(path)?
             {

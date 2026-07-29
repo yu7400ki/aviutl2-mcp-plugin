@@ -84,10 +84,11 @@ pub trait SceneEditor {
         effect: &ResolvedEffect<'_>,
     ) -> Result<Vec<AvailableEffectItem>, EditError>;
 
-    /// SDK がメディアファイルに対応しているか。
+    /// SDK が拡張子の上でメディアファイルに対応しているか。
     ///
-    /// 編集区間の内側から確認できるため、確認と作成の間に対象が差し替わる隙間が
-    /// 生じない。
+    /// ファイルを開かない確認に限る。編集区間はホストのメインスレッド上で走り、
+    /// 割り込む手段が無いため、区間の内側でファイル I/O を行うとその間ホストの
+    /// 操作が止まる。実際に読めるかどうかは作成そのものの成否に委ねる。
     fn supports_media_file(&self, path: &str) -> Result<bool, EditError>;
 
     /// alias からオブジェクトを作成する。

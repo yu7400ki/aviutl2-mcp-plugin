@@ -29,9 +29,15 @@ fn sdk(operation: &'static str) -> EditError {
 
 /// メディア対応の確認方法。
 ///
-/// 拡張子だけの判定では、対応しないファイルの作成が SDK 側の失敗になる。作成は
-/// 取り消し単位を伴うため、呼ぶ前に確定させる方が失敗の理由を正しく伝えられる。
-const MEDIA_SUPPORT_MODE: MediaFileSupportMode = MediaFileSupportMode::Strict;
+/// 拡張子だけを見る。厳密な確認は実際にファイルを開いて読めるかを調べるため、
+/// 編集区間の内側では使えない。区間はホストのメインスレッド上で走り、割り込む
+/// 手段が無いので、ネットワーク越しのパスや巨大なファイルを渡されると解析が
+/// 終わるまで操作が止まる。
+///
+/// 拡張子は通るが実際には読めないファイルは、作成そのものが失敗して SDK の
+/// 失敗として返る。作成の失敗は理由を伝えないため、そこから対応していない
+/// ファイルだと名乗ることはしない。
+const MEDIA_SUPPORT_MODE: MediaFileSupportMode = MediaFileSupportMode::ExtensionOnly;
 
 /// グローバルな編集ハンドルを介して SDK を呼ぶホスト。
 pub struct SdkEditHost;
