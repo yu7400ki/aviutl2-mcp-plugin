@@ -822,7 +822,12 @@ mod tests {
                 !encoded.contains('e') && !encoded.contains('E'),
                 "指数表記になりました: {encoded}"
             );
-            assert_eq!(encoded.trim().parse::<f64>().unwrap(), raw, "{raw}");
+            // 0.0 と -0.0 は等値比較では区別できないため、ビット列で比べる。
+            assert_eq!(
+                encoded.trim().parse::<f64>().unwrap().to_bits(),
+                raw.to_bits(),
+                "{raw} が {encoded} になりました"
+            );
         }
     }
 
