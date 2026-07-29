@@ -19,10 +19,10 @@ use aviutl2_mcp_core::{
     ListAvailableEffectsResult, ListLayersParams, ListLayersResult, ListObjectsParams,
     ListObjectsResult, Nonce, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
     OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
-    OPERATION_LIST_OBJECTS, ObjectFilterError, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT,
-    PLUGIN_WRITE_TIMEOUT, PageError, PageRequest, PongProject, PongResult, ProtocolVersion,
-    RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult, compute_client_mac,
-    compute_server_mac, deserialize_json, negotiate, take_page, verify_mac,
+    OPERATION_LIST_OBJECTS, ObjectFilterError, PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT,
+    PLUGIN_READ_TIMEOUT, PLUGIN_WRITE_TIMEOUT, PageError, PageRequest, PongProject, PongResult,
+    ProtocolVersion, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult,
+    compute_client_mac, compute_server_mac, deserialize_json, negotiate, take_page, verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -71,6 +71,18 @@ const WRITE_TIMEOUT: Duration = PLUGIN_WRITE_TIMEOUT;
 /// deadline までの残りと [`WRITE_TIMEOUT`] の短い方であり、読み取りに費やした
 /// 時間そのものは差し引かない。
 const READ_TIMEOUT: Duration = PLUGIN_READ_TIMEOUT;
+
+/// 編集 operation の実行に許す上限。
+///
+/// 要求が deadline を指定した場合は、この上限と deadline の短い方を採用する。
+/// 応答の送信はこの期限とは別に区切るため、編集がこの上限を使い切っても
+/// 送信の持ち時間は [`WRITE_TIMEOUT`] のまま残る。
+///
+/// この上限が効くのは編集区間へ入る前の判定に限られる。区間へ入った後は
+/// ホストのメインスレッドがコールバックを走らせるまで戻らず、割り込む手段が
+/// 無いため、超過しても待つほかない。
+#[allow(dead_code)]
+const EDIT_TIMEOUT: Duration = PLUGIN_EDIT_TIMEOUT;
 
 /// 読み取りを受け付けられない状態で案内する再試行間隔（ミリ秒）。
 ///
@@ -899,8 +911,8 @@ mod tests {
         AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
         EffectItemType, EffectType, Extent, FiniteF64, FrameRange, LayerInfo, ObjectDetail,
         ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary,
-        SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, SceneInfo, SectionRange,
-        TRANSPORT_HEADROOM,
+        SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, SceneInfo,
+        SectionRange, TRANSPORT_HEADROOM,
     };
     use std::sync::Mutex;
 
@@ -1765,6 +1777,14 @@ mod tests {
             "読み取り {READ_TIMEOUT:?} と送信 {WRITE_TIMEOUT:?} が要求フェーズ予算 {SERVER_READ_REQUEST_BUDGET:?} に収まらない"
         );
 
+        // 編集が実行の上限まで走っても、応答送信の持ち時間が編集要求フェーズ
+        // 予算の内側に残る。編集は結果を破棄しないため、この余地が無いと
+        // 応答を送り切れないまま接続が切れ得る。
+        assert!(
+            EDIT_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_EDIT_REQUEST_BUDGET,
+            "編集 {EDIT_TIMEOUT:?} と送信 {WRITE_TIMEOUT:?} が編集要求フェーズ予算 {SERVER_EDIT_REQUEST_BUDGET:?} に収まらない"
+        );
+
         // handshake が解決フェーズの予算を使い切ると、続く ping の往復に
         // 持ち時間が残らず、応答している接続が期限超過として扱われる。
         assert!(
@@ -1773,8 +1793,10 @@ mod tests {
         );
 
         // 接続を保持する上限は段の配分に属さないが、要求 1 件の処理が終わる前に
-        // 接続を畳んでしまわないだけの長さを持つ。
+        // 接続を畳んでしまわないだけの長さを持つ。read・edit いずれの要求
+        // フェーズ予算よりも長い。
         assert!(REQUEST_IDLE_TIMEOUT > SERVER_READ_REQUEST_BUDGET);
+        assert!(REQUEST_IDLE_TIMEOUT > SERVER_EDIT_REQUEST_BUDGET);
 
         // 再試行案内の設計値。変えると要求元との取り決めが変わるため、
         // 値そのものを主張する。
