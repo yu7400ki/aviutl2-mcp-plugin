@@ -216,6 +216,7 @@ pub struct MoveObjectParams {
 impl MoveObjectParams {
     /// 要求内容だけで決まる検証を行う。
     pub fn validate(&self) -> Result<(), EditInputError> {
+        validate_selector_position(&self.selector)?;
         self.destination.validate()
     }
 }
@@ -233,10 +234,10 @@ pub struct DeleteObjectParams {
 impl DeleteObjectParams {
     /// 要求内容だけで決まる検証を行う。
     ///
-    /// 対象を指す selector 以外に入力を持たないため、要求内容だけで決まる
-    /// 検証対象が無い。対象の解決と前提条件の照合は変更を適用する側が行う。
+    /// 対象の解決と前提条件の照合は変更を適用する側が行う。ここで見るのは
+    /// セレクターが持つ位置指定の範囲だけである。
     pub fn validate(&self) -> Result<(), EditInputError> {
-        Ok(())
+        validate_selector_position(&self.selector)
     }
 }
 
@@ -256,6 +257,7 @@ pub struct SetObjectNameParams {
 impl SetObjectNameParams {
     /// 要求内容だけで決まる検証を行う。
     pub fn validate(&self) -> Result<(), EditInputError> {
+        validate_selector_position(&self.selector)?;
         match &self.name {
             Some(name) => validate_name(name).map_err(|source| EditInputError::Text {
                 field: FIELD_NAME,
@@ -289,6 +291,7 @@ impl SetObjectItemParams {
     /// 設定項目の実在と種別との対応は、対象 effect の設定項目一覧を持つ層が
     /// 判定する。
     pub fn validate(&self) -> Result<(), EditInputError> {
+        validate_effect_selector_position(&self.selector)?;
         validate_name(&self.item).map_err(|source| EditInputError::Text {
             field: FIELD_ITEM,
             source,
@@ -313,6 +316,7 @@ pub struct AddEffectParams {
 impl AddEffectParams {
     /// 要求内容だけで決まる検証を行う。
     pub fn validate(&self) -> Result<(), EditInputError> {
+        validate_selector_position(&self.object)?;
         validate_name(&self.effect_name).map_err(|source| EditInputError::Text {
             field: FIELD_EFFECT_NAME,
             source,
@@ -333,9 +337,10 @@ pub struct DeleteEffectParams {
 impl DeleteEffectParams {
     /// 要求内容だけで決まる検証を行う。
     ///
-    /// 理由は [`DeleteObjectParams::validate`] と同じで、検証対象が無い。
+    /// 見るのは [`DeleteObjectParams::validate`] と同じく、セレクターが持つ
+    /// 位置指定の範囲だけである。
     pub fn validate(&self) -> Result<(), EditInputError> {
-        Ok(())
+        validate_effect_selector_position(&self.selector)
     }
 }
 
@@ -366,7 +371,7 @@ impl SetEffectStateParams {
                 fields: &[FIELD_ENABLED, FIELD_LOCKED],
             });
         }
-        Ok(())
+        validate_effect_selector_position(&self.selector)
     }
 }
 
@@ -408,6 +413,9 @@ impl SetSelectionParams {
         }
         if let Some(range) = &self.selected_range {
             range.validate()?;
+        }
+        if let Some(FocusChange::Set { object }) = &self.focus {
+            validate_selector_position(object)?;
         }
         Ok(())
     }
@@ -600,6 +608,10 @@ const FIELD_CURSOR: &str = "cursor";
 const FIELD_SELECTED_RANGE: &str = "selected_range";
 /// `focus` フィールド名。
 const FIELD_FOCUS: &str = "focus";
+/// セレクターのレイヤー番号のフィールド名。
+const FIELD_SELECTOR_LAYER: &str = "selector.layer";
+/// セレクターの開始フレーム番号のフィールド名。
+const FIELD_SELECTOR_FRAME: &str = "selector.frame";
 
 /// 要求内容だけで決まる検証の失敗。
 ///
@@ -615,6 +627,16 @@ pub enum EditInputError {
         value: u32,
         /// 許容する最大値。
         max: u32,
+    },
+    /// セレクターが持つ位置指定が受け付けられる範囲を超えている。
+    #[error("{field} は {max} 以下である必要があります: {value}")]
+    IndexOutOfRange {
+        /// 対象フィールド名。
+        field: &'static str,
+        /// 指定された値。
+        value: usize,
+        /// 許容する最大値。
+        max: usize,
     },
     /// 変更内容が 1 つも指定されていない。
     #[error("{} のいずれかを指定する必要があります", fields.join(" / "))]
@@ -651,6 +673,7 @@ impl EditInputError {
         match self {
             EditInputError::ItemValue(error) => error.error_code(),
             EditInputError::PositionOutOfRange { .. }
+            | EditInputError::IndexOutOfRange { .. }
             | EditInputError::NoChangeRequested { .. }
             | EditInputError::Text { .. }
             | EditInputError::Path { .. } => ErrorCode::InvalidArgument,
@@ -676,6 +699,32 @@ fn validate_position(field: &'static str, value: u32) -> Result<(), EditInputErr
             value,
             max: MAX_POSITION,
         });
+    }
+    Ok(())
+}
+
+/// セレクターの位置指定が受け渡せる範囲に収まることを確認する。
+///
+/// セレクターは応答が返した値をそのまま送り返す往復型であり、正常な値は必ず
+/// 範囲内に収まる。それは**信頼の前提であって検証ではない**。範囲外の値をその
+/// まま解決へ渡すと、対象の探索が整数変換で落ちて SDK の失敗として返る。範囲外は
+/// 要求の誤りであって SDK の失敗ではないうえ、呼ばれてもいない SDK 関数を
+/// 名指しする補助情報が付く。
+fn validate_selector_position(selector: &ObjectSelector) -> Result<(), EditInputError> {
+    validate_index(FIELD_SELECTOR_LAYER, selector.layer)?;
+    validate_index(FIELD_SELECTOR_FRAME, selector.frame)
+}
+
+/// effect セレクターが含む位置指定を検証する。
+fn validate_effect_selector_position(selector: &EffectSelector) -> Result<(), EditInputError> {
+    validate_selector_position(&selector.object)
+}
+
+/// 添字が受け渡せる範囲に収まることを確認する。
+fn validate_index(field: &'static str, value: usize) -> Result<(), EditInputError> {
+    let max = MAX_POSITION as usize;
+    if value > max {
+        return Err(EditInputError::IndexOutOfRange { field, value, max });
     }
     Ok(())
 }
@@ -1593,6 +1642,96 @@ mod tests {
                     "{forbidden} が応答に含まれます: {document}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_selector_position_out_of_range_is_an_invalid_argument() {
+        // 往復型だから正常な値は範囲内に収まる、というのは信頼の前提であって
+        // 検証ではない。範囲外をそのまま解決へ渡すと、対象の探索が整数変換で
+        // 落ちて SDK の失敗として返り、呼ばれてもいない関数が名指しされる。
+        let out_of_range = MAX_POSITION as usize + 1;
+
+        let mut selector = sample_object_selector();
+        selector.layer = out_of_range;
+        let error = MoveObjectParams {
+            selector: selector.clone(),
+            destination: Destination {
+                layer: 1,
+                frame: 10,
+            },
+            expected: sample_expected(),
+        }
+        .validate()
+        .expect_err("範囲外のレイヤー番号が受理されました");
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+
+        let mut selector = sample_object_selector();
+        selector.frame = out_of_range;
+        let error = DeleteObjectParams {
+            selector,
+            expected: sample_expected(),
+        }
+        .validate()
+        .expect_err("範囲外の開始フレーム番号が受理されました");
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn every_edit_input_checks_the_selectors_it_carries() {
+        // ネストしたセレクターだけが検証を免れると、そこから範囲外の値が
+        // 解決へ抜ける。
+        let out_of_range = MAX_POSITION as usize + 1;
+        let mut object = sample_object_selector();
+        object.layer = out_of_range;
+        let mut effect = sample_effect_selector();
+        effect.object.layer = out_of_range;
+
+        let failures: Vec<Result<(), EditInputError>> = vec![
+            SetObjectNameParams {
+                selector: object.clone(),
+                name: None,
+                expected: sample_expected(),
+            }
+            .validate(),
+            SetObjectItemParams {
+                selector: effect.clone(),
+                item: "範囲".to_string(),
+                value: ItemValue::Integer { value: 1 },
+                expected: sample_expected(),
+            }
+            .validate(),
+            AddEffectParams {
+                object: object.clone(),
+                effect_name: "ぼかし".to_string(),
+                expected: sample_expected(),
+            }
+            .validate(),
+            DeleteEffectParams {
+                selector: effect.clone(),
+                expected: sample_expected(),
+            }
+            .validate(),
+            SetEffectStateParams {
+                selector: effect,
+                enabled: Some(true),
+                locked: None,
+                expected: sample_expected(),
+            }
+            .validate(),
+            SetSelectionParams {
+                expected_scene_id: 0,
+                cursor: None,
+                selected_range: None,
+                focus: Some(FocusChange::Set { object }),
+                expected: sample_expected(),
+            }
+            .validate(),
+        ];
+
+        for failure in failures {
+            let error = failure.expect_err("範囲外のセレクターが受理されました");
+            assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
         }
     }
 }
