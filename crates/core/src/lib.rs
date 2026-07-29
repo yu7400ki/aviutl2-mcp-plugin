@@ -98,7 +98,8 @@ pub use selector::{EffectSelector, ObjectSelector};
 pub use state::InstanceState;
 pub use validation::{
     MAX_ALIAS_BYTES, MAX_ITEM_VALUE_BYTES, MAX_NAME_UTF16_UNITS, MAX_PATH_UTF16_UNITS,
-    PathSyntaxError, TextSyntaxError, validate_alias, validate_control_free, validate_item_text,
+    PathSyntaxError, TextSyntaxError, validate_alias, validate_control_free,
+    validate_control_free_except_layout, validate_item_text, validate_multiline_item_text,
     validate_name, validate_path,
 };
 pub use version::negotiate;

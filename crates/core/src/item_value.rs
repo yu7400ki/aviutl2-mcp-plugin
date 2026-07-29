@@ -4,7 +4,8 @@ use crate::effect::{AvailableEffectItem, EffectItemType};
 use crate::error::ErrorCode;
 use crate::number::FiniteF64;
 use crate::validation::{
-    PathSyntaxError, TextSyntaxError, validate_control_free, validate_item_text, validate_path,
+    PathSyntaxError, TextSyntaxError, validate_control_free, validate_item_text,
+    validate_multiline_item_text, validate_path,
 };
 use serde::{Deserialize, Serialize};
 
@@ -258,6 +259,10 @@ fn accepts(item_type: &EffectItemType, value: &ItemValue) -> bool {
 /// 整数は十進整数、実数は指数表記を用いない十進小数、真偽値は `0` / `1` と
 /// する。実数は元の値へ戻せる最短の桁数で書き出す。
 ///
+/// [`ItemValue::Text`] だけは改行とタブを許す。テキストは複数行を取り得る
+/// ため、これらを拒否すると読み取りが返した値を書き戻せなくなる。色・
+/// フォント名・選択肢の値に改行が現れる余地は無いため、緩和しない。
+///
 /// [`ItemValue::Choice`] の `index` は読み取りが付ける補助情報であり、
 /// 書き込みでは無視する。選択肢の並びはホスト側の都合で変わり得るため、
 /// index を正としない。
@@ -267,16 +272,22 @@ fn encode_value(value: &ItemValue) -> Result<String, ItemWriteError> {
         ItemValue::Integer { value } => Ok(value.to_string()),
         ItemValue::Number { value } => Ok(value.to_string()),
         ItemValue::Bool { value } => Ok(if *value { "1" } else { "0" }.to_string()),
-        ItemValue::Color { value } | ItemValue::Text { value } => encode_text(value),
-        ItemValue::Choice { value, .. } => encode_text(value),
+        ItemValue::Text { value } => encode_multiline_text(value),
+        ItemValue::Color { value } | ItemValue::Choice { value, .. } => encode_text(value),
         ItemValue::Font { name } => encode_text(name),
         ItemValue::File { path } | ItemValue::Folder { path } => encode_path(path),
     }
 }
 
-/// 文字列値をそのまま渡せる形か確認する。
+/// 単一行の文字列値をそのまま渡せる形か確認する。
 fn encode_text(value: &str) -> Result<String, ItemWriteError> {
     validate_item_text(value)?;
+    Ok(value.to_string())
+}
+
+/// 複数行を取り得る文字列値をそのまま渡せる形か確認する。
+fn encode_multiline_text(value: &str) -> Result<String, ItemWriteError> {
+    validate_multiline_item_text(value)?;
     Ok(value.to_string())
 }
 
@@ -629,21 +640,77 @@ mod tests {
                 value: "通常\0".to_string(),
                 index: None,
             },
+            ItemValue::File {
+                path: "C:\\movie\0.mp4".to_string(),
+            },
         ] {
             assert_eq!(
-                validate_item_value(&value),
-                Err(ItemWriteError::Text(TextSyntaxError::ContainsNul)),
+                validate_item_value(&value).unwrap_err().error_code(),
+                ErrorCode::InvalidArgument,
                 "{}",
                 value.kind()
             );
         }
 
+        // テキスト以外は改行もタブも受け付けない。
+        for value in [
+            ItemValue::Color {
+                value: "#ff8800\n".to_string(),
+            },
+            ItemValue::Font {
+                name: "Meiryo\n".to_string(),
+            },
+            ItemValue::Choice {
+                value: "通常\t".to_string(),
+                index: None,
+            },
+        ] {
+            assert_eq!(
+                validate_item_value(&value),
+                Err(ItemWriteError::Text(TextSyntaxError::ContainsControl)),
+                "{}",
+                value.kind()
+            );
+        }
+    }
+
+    #[test]
+    fn text_values_may_span_multiple_lines() {
+        // 読み取りが返した複数行のテキストをそのまま書き戻せる。
+        let value = "1 行目\r\n2 行目\n\t字下げ".to_string();
         assert_eq!(
-            validate_item_value(&ItemValue::Text {
-                value: "字幕\n2 行目".to_string(),
-            }),
-            Err(ItemWriteError::Text(TextSyntaxError::ContainsControl))
+            encode_item_value(
+                &EffectItemType::Text,
+                &ItemValue::Text {
+                    value: value.clone()
+                }
+            ),
+            Ok(value.clone())
         );
+        assert_eq!(
+            encode_item_value(
+                &EffectItemType::String,
+                &ItemValue::Text {
+                    value: value.clone()
+                }
+            ),
+            Ok(value.clone())
+        );
+        assert_eq!(validate_item_value(&ItemValue::Text { value }), Ok(()));
+    }
+
+    #[test]
+    fn text_values_still_reject_other_control_characters() {
+        // 緩和するのは行の折り返しと字下げだけで、他の制御文字は通さない。
+        for control in ['\0', '\u{1}', '\u{b}', '\u{1b}', '\u{7f}', '\u{9b}'] {
+            let value = ItemValue::Text {
+                value: format!("字幕{control}"),
+            };
+            assert!(
+                validate_item_value(&value).is_err(),
+                "{control:?} が受理されました"
+            );
+        }
     }
 
     #[test]

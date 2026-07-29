@@ -20,6 +20,11 @@ pub const MAX_ITEM_VALUE_BYTES: usize = 8 * 1024;
 /// 単位は UTF-16 code unit。
 pub const MAX_NAME_UTF16_UNITS: usize = 1024;
 
+/// 行の折り返しと字下げを表す制御文字。
+///
+/// 複数行を取る値にはこれらが現れる。
+const LAYOUT_CONTROLS: [char; 3] = ['\n', '\r', '\t'];
+
 /// 文字列の検証失敗。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TextSyntaxError {
@@ -119,11 +124,46 @@ pub fn validate_control_free(text: &str) -> Result<(), TextSyntaxError> {
     Ok(())
 }
 
-/// 設定項目の文字列値を検証する。
+/// 改行とタブだけを例外として、NUL と制御文字を含まないことを確認する。
+///
+/// 複数行を取る値のための緩和であり、[`validate_control_free`] より弱い。
+/// 単一行しか取らない値には用いない。
+pub fn validate_control_free_except_layout(text: &str) -> Result<(), TextSyntaxError> {
+    if text.contains('\0') {
+        return Err(TextSyntaxError::ContainsNul);
+    }
+    if text
+        .chars()
+        .any(|c| c.is_control() && !LAYOUT_CONTROLS.contains(&c))
+    {
+        return Err(TextSyntaxError::ContainsControl);
+    }
+    Ok(())
+}
+
+/// 複数行を取り得ない設定項目の文字列値を検証する。
 ///
 /// NUL と制御文字を拒否し、[`MAX_ITEM_VALUE_BYTES`] を上限とする。
 pub fn validate_item_text(value: &str) -> Result<(), TextSyntaxError> {
     validate_control_free(value)?;
+    limit_bytes(value, MAX_ITEM_VALUE_BYTES)
+}
+
+/// 複数行を取り得る設定項目の文字列値を検証する。
+///
+/// 改行とタブを許すほかは [`validate_item_text`] と同じである。
+///
+/// 読み取りが返した値をそのまま書き戻せることを保つための緩和である。
+/// 複数行のテキストを持つ設定項目では、読み取りが改行を含む値を返し得る。
+/// これを拒否すると、読める値が書き戻せないという非対称が生じ、複数行の
+/// テキストを設定する経路が丸ごと失われる。
+///
+/// 値の中で改行が実際の改行として現れるか、エスケープされた表記として
+/// 現れるかは経路によって異なり得る。エスケープ表記なら本緩和は何も
+/// 変えず、実際の改行なら本緩和が無ければ書き戻せない。**どちらであっても
+/// 許す側が安全である。**
+pub fn validate_multiline_item_text(value: &str) -> Result<(), TextSyntaxError> {
+    validate_control_free_except_layout(value)?;
     limit_bytes(value, MAX_ITEM_VALUE_BYTES)
 }
 
@@ -353,6 +393,41 @@ mod tests {
             );
         }
         assert_eq!(validate_item_text("字幕 テキスト"), Ok(()));
+    }
+
+    #[test]
+    fn multiline_item_text_allows_line_breaks_and_tabs() {
+        assert_eq!(
+            validate_multiline_item_text("1 行目\r\n2 行目\n\t字下げ"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn multiline_item_text_rejects_other_control_characters() {
+        assert_eq!(
+            validate_multiline_item_text("字幕\0"),
+            Err(TextSyntaxError::ContainsNul)
+        );
+        for control in ['\u{1}', '\u{b}', '\u{c}', '\u{1b}', '\u{7f}', '\u{9b}'] {
+            assert_eq!(
+                validate_multiline_item_text(&format!("字幕{control}")),
+                Err(TextSyntaxError::ContainsControl),
+                "{control:?} が受理されました"
+            );
+        }
+    }
+
+    #[test]
+    fn multiline_item_text_keeps_the_byte_limit() {
+        let value = "\n".repeat(MAX_ITEM_VALUE_BYTES + 1);
+        assert_eq!(
+            validate_multiline_item_text(&value),
+            Err(TextSyntaxError::TooLongBytes {
+                bytes: MAX_ITEM_VALUE_BYTES + 1,
+                max: MAX_ITEM_VALUE_BYTES,
+            })
+        );
     }
 
     #[test]
