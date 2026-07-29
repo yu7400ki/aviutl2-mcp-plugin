@@ -9,19 +9,23 @@
 //! 直列化される。同時実行数を数える仕組みも実行待ちのキューも持たないので、
 //! 受付から実行までの間に要求を取り消す余地は無く、飽和による滞留も生じない。
 
+use crate::edit::{EditAdapter, EditError};
 use crate::lifecycle::Lifecycle;
 use crate::pipe::PipeStream;
 use crate::read::{ReadAdapter, ReadError};
 use anyhow::{Context, Result};
 use aviutl2_mcp_core::{
-    ClientAuth, ClientHello, ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult,
-    GetEditInfoParams, GetObjectParams, InstanceId, InstanceState, ListAvailableEffectsParams,
-    ListAvailableEffectsResult, ListLayersParams, ListLayersResult, ListObjectsParams,
-    ListObjectsResult, Nonce, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
-    OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
-    OPERATION_LIST_OBJECTS, ObjectFilterError, PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT,
-    PLUGIN_READ_TIMEOUT, PLUGIN_WRITE_TIMEOUT, PageError, PageRequest, PongProject, PongResult,
-    ProtocolVersion, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult,
+    AddEffectParams, ClientAuth, ClientHello, CreateObjectParams, DeleteEffectParams,
+    DeleteObjectParams, EditInputError, EditOperation, ErrorCode, ErrorObject,
+    GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GetObjectParams, InstanceId,
+    InstanceState, ListAvailableEffectsParams, ListAvailableEffectsResult, ListLayersParams,
+    ListLayersResult, ListObjectsParams, ListObjectsResult, MoveObjectParams, Nonce,
+    OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_OBJECT,
+    OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS,
+    ObjectFilterError, PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT,
+    PLUGIN_WRITE_TIMEOUT, PageError, PageRequest, PongProject, PongResult, ProtocolVersion,
+    RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult,
+    SetEffectStateParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
     compute_client_mac, compute_server_mac, deserialize_json, negotiate, take_page, verify_mac,
 };
 use chrono::Utc;
@@ -81,7 +85,6 @@ const READ_TIMEOUT: Duration = PLUGIN_READ_TIMEOUT;
 /// この上限が効くのは編集区間へ入る前の判定に限られる。区間へ入った後は
 /// ホストのメインスレッドがコールバックを走らせるまで戻らず、割り込む手段が
 /// 無いため、超過しても待つほかない。
-#[allow(dead_code)]
 const EDIT_TIMEOUT: Duration = PLUGIN_EDIT_TIMEOUT;
 
 /// 読み取りを受け付けられない状態で案内する再試行間隔（ミリ秒）。
@@ -97,9 +100,15 @@ pub fn handle_connection(
     stream: PipeStream,
     lifecycle: Arc<Lifecycle>,
     read_adapter: Arc<dyn ReadAdapter>,
+    edit_adapter: Arc<dyn EditAdapter>,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if let Err(e) = run_connection(&stream, &lifecycle, read_adapter.as_ref()) {
+        if let Err(e) = run_connection(
+            &stream,
+            &lifecycle,
+            read_adapter.as_ref(),
+            edit_adapter.as_ref(),
+        ) {
             tracing::warn!("接続処理を終了しました: {e:?}");
         }
     }));
@@ -113,9 +122,16 @@ fn run_connection(
     stream: &PipeStream,
     lifecycle: &Lifecycle,
     read_adapter: &dyn ReadAdapter,
+    edit_adapter: &dyn EditAdapter,
 ) -> Result<()> {
     let negotiated_version = perform_handshake(stream, lifecycle)?;
-    run_request_loop(stream, lifecycle, read_adapter, negotiated_version)
+    run_request_loop(
+        stream,
+        lifecycle,
+        read_adapter,
+        edit_adapter,
+        negotiated_version,
+    )
 }
 
 /// handshake を実行し、採用プロトコルバージョンを返す。
@@ -184,6 +200,7 @@ fn run_request_loop(
     stream: &PipeStream,
     lifecycle: &Lifecycle,
     read_adapter: &dyn ReadAdapter,
+    edit_adapter: &dyn EditAdapter,
     negotiated_version: ProtocolVersion,
 ) -> Result<()> {
     loop {
@@ -349,6 +366,44 @@ fn run_request_loop(
                 );
                 send_response(stream, &response, read_response.deadline)?;
             }
+            Operation::Edit(operation) => {
+                let edit_deadline = resolve_request_deadline(
+                    Instant::now(),
+                    Utc::now().timestamp_millis(),
+                    EDIT_TIMEOUT,
+                    request.deadline_unix_ms,
+                );
+                let outcome = execute_edit(
+                    edit_adapter,
+                    &lifecycle.state(),
+                    operation,
+                    &request.params,
+                    edit_deadline,
+                );
+
+                if let Err(error) = &outcome {
+                    tracing::debug!(
+                        request_id = ?request.request_id,
+                        operation = %request.operation,
+                        code = %error.code,
+                        "編集要求を失敗として返します"
+                    );
+                }
+
+                // 期限を過ぎていても結果は捨てず、送信を試みる。
+                let deadline = edit_send_deadline(
+                    Instant::now(),
+                    Utc::now().timestamp_millis(),
+                    request.deadline_unix_ms,
+                );
+                let response = response_envelope(
+                    negotiated_version,
+                    request.request_id,
+                    lifecycle.instance_id(),
+                    outcome,
+                );
+                send_response(stream, &response, deadline)?;
+            }
         }
     }
 
@@ -383,6 +438,8 @@ enum Operation {
     Ping,
     /// 読み取り。受け付けられるライフサイクル状態でのみ実行する。
     Read(ReadOperation),
+    /// 編集。受け付けられるライフサイクル状態でのみ実行する。
+    Edit(EditOperation),
 }
 
 /// 読み取り operation。
@@ -397,6 +454,9 @@ enum ReadOperation {
 }
 
 /// operation 名を処理経路へ対応付ける。
+///
+/// 編集 operation の一覧は [`EditOperation`] から導く。名前の一覧をここへ書き
+/// 写すと、operation を増やしたときに片方だけへ足し忘れても検出できない。
 fn classify_operation(name: &str) -> Result<Operation, ErrorObject> {
     let operation = match name {
         "ping" => return Ok(Operation::Ping),
@@ -407,10 +467,11 @@ fn classify_operation(name: &str) -> Result<Operation, ErrorObject> {
         OPERATION_GET_OBJECT => ReadOperation::GetObject,
         OPERATION_LIST_AVAILABLE_EFFECTS => ReadOperation::ListAvailableEffects,
         _ => {
-            return Err(error_object(
-                ErrorCode::UnsupportedOperation,
-                "未対応の operation です",
-            ));
+            return EditOperation::from_operation_name(name)
+                .map(Operation::Edit)
+                .ok_or_else(|| {
+                    error_object(ErrorCode::UnsupportedOperation, "未対応の operation です")
+                });
         }
     };
     Ok(Operation::Read(operation))
@@ -440,12 +501,53 @@ fn execute_read(
     dispatch_read(adapter, request)
 }
 
+/// params の復号・受付判定・期限判定を通してから編集を実行する。
+///
+/// 手順は読み取りと同じで、params の復号を最初に行う。要求内容の誤りは
+/// ライフサイクル状態にも期限にも依存せず、状態由来の再試行可能なエラーで返すと
+/// 要求元に解消しない再試行を促してしまう。
+///
+/// 期限を判定できるのは編集区間へ入る前だけである。区間へ入るとホストの
+/// メインスレッドがコールバックを走らせるまで戻らず、割り込む手段が無い。
+fn execute_edit(
+    adapter: &dyn EditAdapter,
+    state: &InstanceState,
+    operation: EditOperation,
+    params: &Value,
+    deadline: RequestDeadline,
+) -> Result<Value, ErrorObject> {
+    let request = decode_edit_request(operation, params)?;
+    admit_read(state)?;
+    if deadline == RequestDeadline::Exceeded {
+        // 未実行のまま中止する。副作用が無いため変更は起きていない。
+        return Err(edit_timeout_before_execution());
+    }
+    dispatch_edit(adapter, request)
+}
+
 /// 実行前に期限を超過していた要求へ返すエラー。
 fn timeout_before_execution() -> ErrorObject {
     error_object(
         ErrorCode::Timeout,
         "要求の deadline を超過したため処理しません",
     )
+}
+
+/// 実行前に期限を超過していた編集要求へ返すエラー。
+///
+/// 変更の有無を機械可読で添える。要求元が観測する `timeout` には、応答を待つ
+/// 間に予算が尽きた場合や接続が切れた場合も含まれ、それらでは変更が入ったか
+/// どうか分からない。判別できる経路だけが「変更は行われていない」と名乗る。
+fn edit_timeout_before_execution() -> ErrorObject {
+    error_object(
+        ErrorCode::Timeout,
+        "要求の deadline を超過したため処理しません",
+    )
+    .with_details(json!({
+        "change_applied": "no",
+        "mutation_origin": "plugin",
+        "retry_requires": "resend",
+    }))
 }
 
 /// 実行後に期限を超過し、結果を捨てた要求へ返すエラー。
@@ -535,6 +637,27 @@ fn resolve_read_response(
                 discarded: false,
             },
         },
+    }
+}
+
+/// 編集を終えた時点で、応答送信の期限を決める。
+///
+/// **編集の結果は破棄しない。** 編集が完了していればプロジェクトは変わり、
+/// 取り消し単位にも登録されている。結果を破棄すると、適用された変更が要求元
+/// からは失敗または無応答として観測される。要求元は自然に再送し、作成は冪等で
+/// ないため重複し得る。破棄で節約できるのは高々送信上限の 1 秒であり、適用済み
+/// の変更を隠すことと釣り合わない。
+///
+/// 読み取りが結果を破棄してよいのは「読み取りは編集を伴わないため捨てても
+/// 中途半端な状態が残らない」からであり、編集ではその前提が成り立たない。
+/// 読み取りの破棄経路を編集へ再利用しない。
+///
+/// 期限を過ぎていた場合は送信上限だけで送る。当の期限で打ち切ると、要求元は
+/// 結果も理由も得られないまま切断だけを観測する。
+fn edit_send_deadline(now: Instant, now_unix_ms: i64, deadline_unix_ms: Option<u64>) -> Instant {
+    match resolve_request_deadline(now, now_unix_ms, WRITE_TIMEOUT, deadline_unix_ms) {
+        RequestDeadline::Within(deadline) => deadline,
+        RequestDeadline::Exceeded => now + WRITE_TIMEOUT,
     }
 }
 
@@ -697,6 +820,96 @@ fn catalog_page_request(page: &PageRequest) -> PageRequest {
     }
 }
 
+/// 復号と検証を終えた編集要求。
+///
+/// この型を作れた時点で、要求内容だけで判定できる誤りは残っていない。
+#[derive(Debug, Clone, PartialEq)]
+enum EditRequest {
+    CreateObject(Box<CreateObjectParams>),
+    MoveObject(Box<MoveObjectParams>),
+    DeleteObject(Box<DeleteObjectParams>),
+    SetObjectName(Box<SetObjectNameParams>),
+    SetObjectItem(Box<SetObjectItemParams>),
+    AddEffect(Box<AddEffectParams>),
+    DeleteEffect(Box<DeleteEffectParams>),
+    SetEffectState(Box<SetEffectStateParams>),
+    SetSelection(Box<SetSelectionParams>),
+}
+
+/// operation 別の params を復号し、要求内容だけで決まる検証を済ませる。
+///
+/// 値の種別整合・パス構文・文字列長・変更内容の全省略はいずれも要求内容だけで
+/// 決まり、ライフサイクル状態にも期限にも編集口の応答にも依存しない。検証の
+/// 実体は core と共有し、server と plugin が同じ判定を行う。
+fn decode_edit_request(
+    operation: EditOperation,
+    params: &Value,
+) -> Result<EditRequest, ErrorObject> {
+    /// 復号と検証を済ませて要求を組み立てる。
+    macro_rules! decoded {
+        ($ty:ty, $variant:path) => {{
+            let params: $ty = decode_params(params)?;
+            params.validate().map_err(edit_input_error)?;
+            $variant(Box::new(params))
+        }};
+    }
+    Ok(match operation {
+        EditOperation::CreateObject => {
+            decoded!(CreateObjectParams, EditRequest::CreateObject)
+        }
+        EditOperation::MoveObject => decoded!(MoveObjectParams, EditRequest::MoveObject),
+        EditOperation::DeleteObject => decoded!(DeleteObjectParams, EditRequest::DeleteObject),
+        EditOperation::SetObjectName => {
+            decoded!(SetObjectNameParams, EditRequest::SetObjectName)
+        }
+        EditOperation::SetObjectItem => {
+            decoded!(SetObjectItemParams, EditRequest::SetObjectItem)
+        }
+        EditOperation::AddEffect => decoded!(AddEffectParams, EditRequest::AddEffect),
+        EditOperation::DeleteEffect => decoded!(DeleteEffectParams, EditRequest::DeleteEffect),
+        EditOperation::SetEffectState => {
+            decoded!(SetEffectStateParams, EditRequest::SetEffectState)
+        }
+        EditOperation::SetSelection => decoded!(SetSelectionParams, EditRequest::SetSelection),
+    })
+}
+
+/// 編集を実行し、応答へ載せる result を組み立てる。
+///
+/// 編集口は SDK の編集区間を抜けてから所有型の DTO を返す。JSON への変換は
+/// その外側で行い、区間の内側には持ち込まない。
+fn dispatch_edit(adapter: &dyn EditAdapter, request: EditRequest) -> Result<Value, ErrorObject> {
+    match request {
+        EditRequest::CreateObject(params) => {
+            to_result(&adapter.create_object(&params).map_err(edit_error)?)
+        }
+        EditRequest::MoveObject(params) => {
+            to_result(&adapter.move_object(&params).map_err(edit_error)?)
+        }
+        EditRequest::DeleteObject(params) => {
+            to_result(&adapter.delete_object(&params).map_err(edit_error)?)
+        }
+        EditRequest::SetObjectName(params) => {
+            to_result(&adapter.set_object_name(&params).map_err(edit_error)?)
+        }
+        EditRequest::SetObjectItem(params) => {
+            to_result(&adapter.set_object_item(&params).map_err(edit_error)?)
+        }
+        EditRequest::AddEffect(params) => {
+            to_result(&adapter.add_effect(&params).map_err(edit_error)?)
+        }
+        EditRequest::DeleteEffect(params) => {
+            to_result(&adapter.delete_effect(&params).map_err(edit_error)?)
+        }
+        EditRequest::SetEffectState(params) => {
+            to_result(&adapter.set_effect_state(&params).map_err(edit_error)?)
+        }
+        EditRequest::SetSelection(params) => {
+            to_result(&adapter.set_selection(&params).map_err(edit_error)?)
+        }
+    }
+}
+
 /// operation 別の params へ復号する。
 ///
 /// 失敗の説明には、不足したフィールド名や受理できないフィールド名が含まれる。
@@ -730,6 +943,20 @@ fn to_result<T: Serialize>(value: &T) -> Result<Value, ErrorObject> {
 fn read_error(error: ReadError) -> ErrorObject {
     ErrorObject::new(error.error_code(), error.to_string(), error.retryable())
         .with_details(error.details())
+}
+
+/// 編集の失敗を応答用のエラーへ変換する。
+fn edit_error(error: EditError) -> ErrorObject {
+    ErrorObject::new(error.error_code(), error.to_string(), error.retryable())
+        .with_details(error.details())
+}
+
+/// 要求内容だけで決まる検証の失敗を応答用のエラーへ変換する。
+///
+/// 失敗の説明には対象フィールド名と規則の上限だけが現れる。設定値・alias・
+/// パスそのものは含まない。
+fn edit_input_error(error: EditInputError) -> ErrorObject {
+    error_object(error.error_code(), error.to_string())
 }
 
 /// ページ指定の失敗を応答用のエラーへ変換する。
@@ -1339,7 +1566,7 @@ mod tests {
 
     #[test]
     fn unknown_operation_is_unsupported() {
-        for name in ["", "Ping", "create_object", "list_layer"] {
+        for name in ["", "Ping", "apply_batch", "list_layer"] {
             let error = classify_operation(name).unwrap_err();
             assert_eq!(
                 error.code,
