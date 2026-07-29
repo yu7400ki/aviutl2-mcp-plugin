@@ -20,6 +20,7 @@ use aviutl2::generic::{
 };
 use aviutl2_mcp_core::{AvailableEffect, AvailableEffectItem, Cursor, EffectItemType, FrameRange};
 use std::cell::RefCell;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// SDK 呼び出しの失敗を、失敗した関数名つきの型付きエラーにする。
 fn sdk(operation: &'static str) -> EditError {
@@ -78,14 +79,24 @@ impl EditHost for SdkEditHost {
         T: Send + 'static,
         F: FnOnce(&dyn SceneEditor) -> T + Send,
     {
-        // クロージャを保持する領域は呼び出しごとに解放されないため、
-        // 捕らえるのは `f` だけに留める。
-        EDIT_HANDLE
+        // 編集区間のコールバックは C の関数ポインタから呼ばれる。ここから
+        // 巻き戻しが漏れるとホストのプロセスごと落ちるため、区間へ渡すものは
+        // 全体を捕捉層で包む。呼び出し側のクロージャだけを包むと、区間の入口で
+        // 行う編集情報の複製が保護から外れる。
+        //
+        // クロージャを保持する領域は呼び出しごとに解放されないため、捕らえるのは
+        // `f` だけに留める。捕らえた巻き戻しの内容もここで捨て、区間の外へ
+        // 持ち出さない。
+        let outcome = EDIT_HANDLE
             .call_edit_section(move |section| {
-                let editor = SdkSceneEditor::new(section);
-                f(&editor)
+                catch_unwind(AssertUnwindSafe(|| {
+                    let editor = SdkSceneEditor::new(section);
+                    f(&editor)
+                }))
+                .map_err(|_| ())
             })
-            .map_err(|_| sdk("call_edit_section"))
+            .map_err(|_| sdk("call_edit_section"))?;
+        outcome.map_err(|()| EditError::Panicked)
     }
 }
 

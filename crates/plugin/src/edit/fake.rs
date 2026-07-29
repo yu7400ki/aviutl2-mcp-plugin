@@ -60,9 +60,19 @@ pub(crate) enum PanicPoint {
     IsReady,
     /// 編集区間へ入る呼び出しそのもの。クロージャは呼ばれない。
     EnterSection,
-    /// 編集区間の内側。
-    InSection,
+    /// クロージャの内側。区間内の読み取りで落ちる。
+    ///
+    /// 実際の SDK では、ここから漏れた巻き戻しは C の関数ポインタ境界で
+    /// プロセスごと abort させる。フェイクは abort できないため、漏れたことを
+    /// [`CLOSURE_ESCAPED`] として記録して伝える。
+    InClosure,
 }
+
+/// クロージャから巻き戻しが漏れたことを表す記録。
+///
+/// 実機ではこの位置でホストのプロセスが落ちる。記録が残る経路は、捕捉が
+/// クロージャの内側に無いことを意味する。
+pub(crate) const CLOSURE_ESCAPED: &str = "panic_escaped_the_callback";
 
 /// フェイクが保持するオブジェクト。
 ///
@@ -342,17 +352,21 @@ impl EditHost for FakeEditHost {
             // ここで止まる。
             let _ = project.epoch();
         }
-        assert_ne!(
-            knobs.panic_at,
-            Some(PanicPoint::InSection),
-            "編集区間の内側で panic させます"
-        );
         let editor = FakeSceneEditor {
             host: self,
             objects: RefCell::new(Vec::new()),
             effects: RefCell::new(Vec::new()),
         };
-        Ok(f(&editor))
+        // クロージャから漏れた巻き戻しを記録してから伝え直す。実際の SDK では
+        // ここが C の関数ポインタ境界であり、漏れた時点でプロセスが落ちる。
+        // 記録が残るかどうかで、捕捉がクロージャの内側にあるかを判別できる。
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&editor))) {
+            Ok(value) => Ok(value),
+            Err(payload) => {
+                self.record(CLOSURE_ESCAPED);
+                std::panic::resume_unwind(payload)
+            }
+        }
     }
 }
 
@@ -558,6 +572,14 @@ impl SceneEditor for FakeSceneEditor<'_> {
     }
 
     fn entry_edit_info(&self) -> &HostEditInfo {
+        // クロージャの内側で落ちる。区間内の処理は算術や添字でも落ち得るため、
+        // 捕捉がクロージャの内側に無ければ実機ではプロセスごと落ちる。全ての
+        // operation が区間の先頭でここを通る。
+        assert_ne!(
+            self.host.knobs().panic_at,
+            Some(PanicPoint::InClosure),
+            "編集区間の内側で panic させます"
+        );
         &self.host.info
     }
 

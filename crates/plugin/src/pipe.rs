@@ -1777,8 +1777,15 @@ mod tests {
         PipeServer::start(lifecycle.clone(), read_adapter, edit_adapter).unwrap()
     }
 
-    /// 編集区間の内側で panic する編集口と、その前提を作る。
-    fn panicking_edit_adapter() -> (Arc<dyn EditAdapter>, String) {
+    /// 編集区間のクロージャの内側で panic する編集口と、その前提を作る。
+    ///
+    /// 差し込んだホストも返す。巻き戻しがクロージャの外へ漏れなかったことを
+    /// 呼び出し側が確かめられるようにするためである。
+    fn panicking_edit_adapter() -> (
+        Arc<dyn EditAdapter>,
+        Arc<crate::edit::fake::FakeEditHost>,
+        String,
+    ) {
         use crate::edit::fake::{FakeEditHost, PanicPoint};
 
         let project = Arc::new(ProjectState::new());
@@ -1786,9 +1793,10 @@ mod tests {
         let mut host = FakeEditHost::new();
         host.project = Some(project.clone());
         let host = Arc::new(host);
-        host.arm(|knobs| knobs.panic_at = Some(PanicPoint::InSection));
+        host.arm(|knobs| knobs.panic_at = Some(PanicPoint::InClosure));
         (
-            Arc::new(crate::edit::HostEditAdapter::new(host, project)),
+            Arc::new(crate::edit::HostEditAdapter::new(host.clone(), project)),
+            host,
             epoch,
         )
     }
@@ -1840,7 +1848,7 @@ mod tests {
     #[test]
     fn panicking_edit_receives_an_internal_error_without_closing_the_connection() {
         let (lifecycle, dir) = temp_lifecycle();
-        let (edit_adapter, epoch) = panicking_edit_adapter();
+        let (edit_adapter, edit_host, epoch) = panicking_edit_adapter();
         let server =
             start_server_with_adapters(&lifecycle, Arc::new(StubReadAdapter), edit_adapter);
         let id = lifecycle.instance_id();
@@ -1864,6 +1872,12 @@ mod tests {
         });
         assert_eq!(error.code, aviutl2_mcp_core::ErrorCode::InternalError);
         assert!(!error.retryable);
+        assert!(
+            !edit_host
+                .calls()
+                .contains(&crate::edit::fake::CLOSURE_ESCAPED),
+            "巻き戻しがクロージャの外へ漏れました。実機ではホストが落ちます"
+        );
 
         // 応答を返した後も接続は生きており、続く要求を処理できる。
         exchange_ping(&client, id, version);

@@ -6,8 +6,8 @@
 
 use super::*;
 use crate::edit::fake::{
-    CREATE_FRAME_SHIFT, FakeEditHost, FakeLayer, FakeObject, FakeReadHost, Fault, Knobs, MAX_FRAME,
-    MAX_ITEM_VALUE, MAX_LAYER, MUTATIONS, PanicPoint, SCENE_ID,
+    CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, FakeEditHost, FakeLayer, FakeObject, FakeReadHost, Fault,
+    Knobs, MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER, MUTATIONS, PanicPoint, SCENE_ID,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
@@ -1235,10 +1235,15 @@ fn each_operation_fills_the_outcome_it_is_defined_to_fill() {
 
 // -------------------------------------------------------------- panic の境界
 
+/// クロージャの内側の panic が、クロージャから漏れずに失敗へ変わることを確かめる。
+///
+/// 漏れた巻き戻しは実機では C の関数ポインタ境界でプロセスごと abort させる。
+/// 応答のコードだけを見ると、クロージャの外側で捕捉しても同じ結果になるため、
+/// **漏れなかったこと**まで確かめないと捕捉の位置を固定できない。
 #[test]
-fn a_panic_inside_the_section_becomes_an_internal_error() {
+fn a_panic_inside_the_closure_never_escapes_it() {
     let harness =
-        Harness::with(|host| host.arm(|knobs| knobs.panic_at = Some(PanicPoint::InSection)));
+        Harness::with(|host| host.arm(|knobs| knobs.panic_at = Some(PanicPoint::InClosure)));
     let params = move_params(&harness);
     let error = with_silent_panic_hook(|| {
         harness
@@ -1248,6 +1253,10 @@ fn a_panic_inside_the_section_becomes_an_internal_error() {
     });
 
     assert_eq!(error.error_code(), ErrorCode::InternalError);
+    assert!(
+        !harness.host.calls().contains(&CLOSURE_ESCAPED),
+        "巻き戻しがクロージャの外へ漏れました。実機ではホストが落ちます"
+    );
 }
 
 #[test]
