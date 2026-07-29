@@ -1465,15 +1465,47 @@ mod tests {
         }
     }
 
+    /// tool 名から、その tool が返す result の schema を返す。
+    ///
+    /// 未知の tool 名で落とす。tool を足したときに結線の検査から漏れない。
+    fn expected_output_schema(name: &str) -> Value {
+        use crate::mcp::output_schema as schema;
+        match name {
+            "aviutl2_list_instances" => schema::list_instances(),
+            "aviutl2_get_edit_info" => schema::edit_info(),
+            "aviutl2_get_current_scene" => schema::current_scene(),
+            "aviutl2_list_layers" => schema::list_layers(),
+            "aviutl2_list_objects" => schema::list_objects(),
+            "aviutl2_get_object" => schema::object_detail(),
+            "aviutl2_list_available_effects" => schema::list_available_effects(),
+            "aviutl2_create_object" => schema::create_object(),
+            "aviutl2_move_object" => schema::move_object(),
+            "aviutl2_set_object_name" => schema::set_object_name(),
+            "aviutl2_set_object_item" => schema::set_object_item(),
+            "aviutl2_add_effect" => schema::add_effect(),
+            "aviutl2_set_effect_state" => schema::set_effect_state(),
+            "aviutl2_delete_effect" => schema::delete_effect(),
+            "aviutl2_delete_object" => schema::delete_object(),
+            "aviutl2_set_selection" => schema::set_selection(),
+            other => panic!("{other} の outputSchema が定義されていません"),
+        }
+    }
+
     #[test]
-    fn tools_declare_output_schema() {
+    fn tools_declare_the_output_schema_of_their_own_result() {
+        // schema そのものが DTO と一致していても、tool へ別の result の schema を
+        // 結んでしまえば正常な応答が自分の宣言に適合しなくなる。結線まで固定する。
         for tool in tools() {
-            let schema = tool
+            let declared = tool
                 .output_schema
                 .as_ref()
                 .unwrap_or_else(|| panic!("{} に outputSchema がありません", tool.name));
-            assert_eq!(schema["type"], serde_json::json!("object"), "{}", tool.name);
-            assert!(schema.contains_key("properties"), "{}", tool.name);
+            assert_eq!(
+                Value::Object(declared.as_ref().clone()),
+                expected_output_schema(&tool.name),
+                "{} が別の result の schema を宣言しています",
+                tool.name
+            );
         }
     }
 
