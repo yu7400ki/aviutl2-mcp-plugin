@@ -1,5 +1,9 @@
 //! property-based テスト。
 
+use crate::edit::{
+    AddEffectParams, CreateObjectParams, DeleteEffectParams, DeleteObjectParams, MoveObjectParams,
+    SetEffectStateParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+};
 use crate::effect::{EffectItem, EffectItemType, TrackInfo};
 use crate::fingerprint::{
     EffectFingerprintInput, Fingerprint, ObjectFingerprintInput, effect_fingerprint,
@@ -7,9 +11,10 @@ use crate::fingerprint::{
 };
 use crate::handshake::{Mac, Nonce, compute_client_mac, compute_server_mac, verify_mac};
 use crate::identifier::{InstanceId, ProtocolVersion};
-use crate::item_value::ItemValue;
+use crate::item_value::{ItemValue, ItemWriteError, encode_item_value, validate_item_value};
 use crate::json::{JsonStrictError, parse_json};
 use crate::number::FiniteF64;
+use crate::validation::{MAX_PATH_UTF16_UNITS, PathSyntaxError, validate_path};
 use proptest::prelude::*;
 use proptest::string::string_regex;
 
@@ -512,5 +517,159 @@ proptest! {
         if a != b {
             prop_assert_ne!(a.compute(), b.compute());
         }
+    }
+}
+
+// ============================================================================
+// 編集入力の検証
+// ============================================================================
+
+/// パスの構成要素に使う文字。区切り・ドライブ・拡張子・多バイト文字を含む。
+fn path_fragment_strategy() -> impl Strategy<Value = String> {
+    string_regex(r"[a-zA-Z0-9_. \\/あ:?]{0,64}").unwrap()
+}
+
+proptest! {
+    #[test]
+    fn path_validation_answers_for_any_string(path in ".*") {
+        // 任意の文字列に対して panic せず、可否のいずれかを返す。
+        let result = validate_path(&path);
+        if result.is_ok() {
+            // 受理した以上、拒否規則のいずれにも当たらない。
+            prop_assert!(!path.is_empty());
+            prop_assert!(!path.contains('\0'));
+            prop_assert!(path.encode_utf16().count() <= MAX_PATH_UTF16_UNITS);
+            let normalized = path.replace('/', "\\");
+            prop_assert!(!normalized.starts_with(r"\\.\"));
+            prop_assert!(!normalized.starts_with(r"\\?\"));
+            prop_assert!(normalized.matches(':').count() <= 1);
+            prop_assert!(normalized.starts_with(r"\\") || normalized.contains(r":\"));
+        }
+    }
+
+    #[test]
+    fn path_validation_answers_for_arbitrary_bytes(
+        bytes in prop::collection::vec(any::<u8>(), 0..=512),
+    ) {
+        let path = String::from_utf8_lossy(&bytes);
+        let result = validate_path(&path);
+        prop_assert_eq!(result.is_ok(), validate_path(&path).is_ok());
+    }
+
+    #[test]
+    fn device_namespace_is_always_rejected(
+        (prefix, rest) in (
+            prop_oneof![Just(r"\\.\"), Just(r"\\?\"), Just("//./"), Just("//?/")],
+            path_fragment_strategy(),
+        ),
+    ) {
+        let path = format!("{prefix}{rest}");
+        prop_assert_eq!(validate_path(&path), Err(PathSyntaxError::DeviceNamespace));
+    }
+
+    #[test]
+    fn alternate_data_stream_is_always_rejected(
+        (name, stream) in (
+            string_regex(r"[a-zA-Z0-9_.]{1,32}").unwrap(),
+            string_regex(r"[a-zA-Z0-9_.$]{0,32}").unwrap(),
+        ),
+    ) {
+        let path = format!(r"C:\{name}:{stream}");
+        prop_assert_eq!(
+            validate_path(&path),
+            Err(PathSyntaxError::AlternateDataStream)
+        );
+    }
+
+    #[test]
+    fn nul_and_oversized_paths_are_always_rejected(
+        (head, tail) in (path_fragment_strategy(), path_fragment_strategy()),
+    ) {
+        prop_assert_eq!(
+            validate_path(&format!("{head}\0{tail}")),
+            Err(PathSyntaxError::ContainsNul)
+        );
+
+        let path = format!(r"C:\{}{head}", "a".repeat(MAX_PATH_UTF16_UNITS));
+        prop_assert_eq!(
+            validate_path(&path),
+            Err(PathSyntaxError::TooLong { units: path.encode_utf16().count() })
+        );
+    }
+
+    #[test]
+    fn item_value_write_answers_for_any_value(
+        (value, raw) in (item_value_strategy(), -1..=17i32),
+    ) {
+        // 種別と値のどの組み合わせでも panic せず、可否を返す。
+        let item_type = EffectItemType::from_raw(raw);
+        let encoded = encode_item_value(&item_type, &value);
+        match &value {
+            // 未対応種別の生値は種別によらず必ず拒否する。
+            ItemValue::Unknown { .. } => {
+                prop_assert_eq!(encoded, Err(ItemWriteError::UnknownValue));
+                prop_assert_eq!(validate_item_value(&value), Err(ItemWriteError::UnknownValue));
+            }
+            _ => {
+                if let Ok(encoded) = encoded {
+                    // 書き込む文字列に NUL と制御文字は残らない。
+                    prop_assert!(!encoded.contains('\0'));
+                    prop_assert!(!encoded.chars().any(char::is_control));
+                    prop_assert!(validate_item_value(&value).is_ok());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn edit_params_decoders_answer_for_arbitrary_bytes(
+        bytes in prop::collection::vec(any::<u8>(), 0..=512),
+    ) {
+        // 任意の byte 列に対して panic せず、型付きの decode error になる。
+        macro_rules! assert_decodes_or_errors {
+            ($type:ty) => {{
+                match serde_json::from_slice::<$type>(&bytes) {
+                    // 受理できた場合も、要求内容の検証まで panic せずに進む。
+                    Ok(params) => {
+                        let _ = params.validate();
+                    }
+                    Err(error) => {
+                        prop_assert!(!error.to_string().is_empty());
+                    }
+                }
+            }};
+        }
+
+        assert_decodes_or_errors!(CreateObjectParams);
+        assert_decodes_or_errors!(MoveObjectParams);
+        assert_decodes_or_errors!(DeleteObjectParams);
+        assert_decodes_or_errors!(SetObjectNameParams);
+        assert_decodes_or_errors!(SetObjectItemParams);
+        assert_decodes_or_errors!(AddEffectParams);
+        assert_decodes_or_errors!(DeleteEffectParams);
+        assert_decodes_or_errors!(SetEffectStateParams);
+        assert_decodes_or_errors!(SetSelectionParams);
+    }
+
+    #[test]
+    fn edit_params_decoders_answer_for_arbitrary_json(value in json_value_strategy()) {
+        let bytes = serde_json::to_vec(&value).unwrap();
+        macro_rules! assert_decodes_or_errors {
+            ($type:ty) => {{
+                if let Ok(params) = serde_json::from_slice::<$type>(&bytes) {
+                    let _ = params.validate();
+                }
+            }};
+        }
+
+        assert_decodes_or_errors!(CreateObjectParams);
+        assert_decodes_or_errors!(MoveObjectParams);
+        assert_decodes_or_errors!(DeleteObjectParams);
+        assert_decodes_or_errors!(SetObjectNameParams);
+        assert_decodes_or_errors!(SetObjectItemParams);
+        assert_decodes_or_errors!(AddEffectParams);
+        assert_decodes_or_errors!(DeleteEffectParams);
+        assert_decodes_or_errors!(SetEffectStateParams);
+        assert_decodes_or_errors!(SetSelectionParams);
     }
 }
