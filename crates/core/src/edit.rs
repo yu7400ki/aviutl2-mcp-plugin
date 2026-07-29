@@ -696,6 +696,7 @@ mod tests {
                 frame_end: 240,
                 name: Some("立ち絵"),
                 alias: "alias",
+                effect_fingerprints: &[],
             },
         )
     }
@@ -710,6 +711,8 @@ mod tests {
             EffectFingerprintInput {
                 effect_name: "動画ファイル",
                 effect_index: 0,
+                position: 0,
+                effect_count: 1,
                 enabled: true,
                 locked: false,
                 items: &[],
