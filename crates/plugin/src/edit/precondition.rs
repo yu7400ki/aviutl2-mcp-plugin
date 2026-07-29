@@ -74,7 +74,7 @@ impl EditKind {
 /// epoch と revision は 1 度の取得でまとめて読む。別々に読むと、プロジェクトの
 /// ロードによる「epoch 差し替え → revision リセット」の途中を観測し得る。応答は
 /// 両方を返すため、食い違った組を返すと要求元は存在しない世代を手にする。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 struct ProjectBoundary {
     epoch: String,
     revision: u64,
