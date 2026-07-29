@@ -83,14 +83,29 @@ impl<H: EditHost> HostEditAdapter<H> {
         T: Send + 'static,
         F: FnOnce(&dyn SceneEditor) -> Result<T, EditError> + Send,
     {
+        // panic を捕捉すると、発行の記録を持つ許可ごと巻き戻る。区間の前後で
+        // revision が動いたかを見て、変更が入った可能性を応答へ載せ直す。載せ
+        // なければ、revision は進んでいるのに要求元は「変更は入っていない恒久
+        // 失敗」と読む。ホストのイベント由来の加算を拾って過大に報告すること
+        // はあるが、取りこぼすより害が小さい。
+        let before = self.project.revision();
         let entered = catch(|| {
             self.host
                 .enter_edit_section(move |editor| guard(|| f(editor)))
         })?;
         match entered {
-            Ok(result) => result,
+            Ok(result) => result.map_err(|error| self.attribute_panic(error, before)),
             Err(error) => Err(self.classify_section_failure(error)),
         }
+    }
+
+    /// 捕捉した panic を、変更が入った可能性つきの失敗へ写す。
+    fn attribute_panic(&self, error: EditError, revision_before: u64) -> EditError {
+        let current = self.project.revision();
+        if matches!(error, EditError::Panicked) && current != revision_before {
+            return error.after_mutation(current);
+        }
+        error
     }
 
     /// 編集区間へ入れなかった失敗を、現在の編集状態で分類し直す。

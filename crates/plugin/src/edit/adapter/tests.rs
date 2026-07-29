@@ -1663,3 +1663,46 @@ fn every_requested_selection_field_appears_in_exactly_one_list() {
         );
     }
 }
+
+#[test]
+fn a_panic_after_a_mutation_still_reports_that_the_change_may_be_in() {
+    // panic の捕捉は発行の記録を持つ許可ごと巻き戻す。変更が入った可能性を
+    // 応答へ載せないと、revision は進んでいるのに要求元は「変更は入っていない
+    // 恒久失敗」と読む。
+    let harness =
+        Harness::with(|host| host.arm(|knobs| knobs.panic_at = Some(PanicPoint::AfterMutation)));
+    let params = move_params(&harness);
+    let error = with_silent_panic_hook(|| {
+        harness
+            .edit
+            .move_object(&params)
+            .expect_err("panic が伝播しました")
+    });
+
+    assert_eq!(error.error_code(), ErrorCode::InternalError);
+    assert_eq!(error.details()["mutation_issued"], json!(true));
+    assert_eq!(error.details()["current_project_revision"], json!(1));
+    assert_eq!(error.details()["retry_requires"], json!("refetch"));
+    assert!(
+        !harness.host.calls().contains(&CLOSURE_ESCAPED),
+        "巻き戻しがクロージャの外へ漏れました"
+    );
+}
+
+#[test]
+fn a_panic_before_any_mutation_is_not_reported_as_a_possible_change() {
+    let harness =
+        Harness::with(|host| host.arm(|knobs| knobs.panic_at = Some(PanicPoint::InClosure)));
+    let params = move_params(&harness);
+    let error = with_silent_panic_hook(|| {
+        harness
+            .edit
+            .move_object(&params)
+            .expect_err("panic が伝播しました")
+    });
+
+    assert!(
+        error.details().get("mutation_issued").is_none(),
+        "何も変更していないのに変更が入った可能性として報告されました"
+    );
+}

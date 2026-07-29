@@ -73,6 +73,8 @@ pub(crate) enum PanicPoint {
     /// プロセスごと abort させる。フェイクは abort できないため、漏れたことを
     /// [`CLOSURE_ESCAPED`] として記録して伝える。
     InClosure,
+    /// クロージャの内側。変更を発行した後の読み直しで落ちる。
+    AfterMutation,
 }
 
 /// クロージャから巻き戻しが漏れたことを表す記録。
@@ -537,6 +539,13 @@ impl SceneReader for FakeSceneEditor<'_> {
         frame_start: usize,
     ) -> Result<HostObjectDetail, ReadError> {
         self.host.record("object_detail");
+        if self.host.mutated() {
+            assert_ne!(
+                self.host.knobs().panic_at,
+                Some(PanicPoint::AfterMutation),
+                "変更を発行した後の読み直しで panic させます"
+            );
+        }
         // 対象の解決と変更の間に境界が変わる状況は 1 度だけ再現する。仕込みを
         // 消費しておかないと、後続の読み直しでも繰り返し働いてしまう。
         let mut armed = Knobs::default();
