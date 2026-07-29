@@ -312,6 +312,7 @@ struct OwnedObjectInput {
     frame_end: usize,
     name: Option<String>,
     alias: String,
+    effect_fingerprints: Vec<Fingerprint>,
 }
 
 impl OwnedObjectInput {
@@ -323,6 +324,7 @@ impl OwnedObjectInput {
             frame_end: self.frame_end,
             name: self.name.as_deref(),
             alias: &self.alias,
+            effect_fingerprints: &self.effect_fingerprints,
         })
     }
 }
@@ -335,15 +337,17 @@ fn object_input_strategy() -> impl Strategy<Value = OwnedObjectInput> {
         0..1_000_000usize,
         prop::option::of(".*"),
         ".*",
+        prop::collection::vec(effect_input_strategy(), 0..3),
     )
         .prop_map(
-            |(scene_id, layer, frame_start, frame_end, name, alias)| OwnedObjectInput {
+            |(scene_id, layer, frame_start, frame_end, name, alias, effects)| OwnedObjectInput {
                 scene_id,
                 layer,
                 frame_start,
                 frame_end,
                 name,
                 alias,
+                effect_fingerprints: effects.iter().map(OwnedEffectInput::compute).collect(),
             },
         )
 }
@@ -553,6 +557,38 @@ proptest! {
             let shifted = OwnedEffectInput { effect_count, ..input.clone() };
             prop_assert_ne!(input.compute(), shifted.compute());
         }
+    }
+
+    /// 配下 effect の fingerprint 列だけが違うオブジェクトは別物である。
+    #[test]
+    fn object_fingerprint_depends_on_the_effects(
+        (input, effects) in (
+            object_input_strategy(),
+            prop::collection::vec(effect_input_strategy(), 0..3),
+        ),
+    ) {
+        let effect_fingerprints: Vec<Fingerprint> =
+            effects.iter().map(OwnedEffectInput::compute).collect();
+        if input.effect_fingerprints != effect_fingerprints {
+            let changed = OwnedObjectInput { effect_fingerprints, ..input.clone() };
+            prop_assert_ne!(input.compute(), changed.compute());
+        }
+    }
+
+    /// 配下 effect が 0 件のオブジェクトは、1 件持つオブジェクトと区別される。
+    #[test]
+    fn object_fingerprint_distinguishes_no_effect_from_one(
+        (input, effect) in (object_input_strategy(), effect_input_strategy()),
+    ) {
+        let none = OwnedObjectInput {
+            effect_fingerprints: Vec::new(),
+            ..input.clone()
+        };
+        let one = OwnedObjectInput {
+            effect_fingerprints: vec![effect.compute()],
+            ..input
+        };
+        prop_assert_ne!(none.compute(), one.compute());
     }
 }
 

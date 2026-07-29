@@ -1225,6 +1225,7 @@ mod tests {
                 frame_end: 200,
                 name: Some("立ち絵"),
                 alias: "[1:100]",
+                effect_fingerprints: &[],
             },
         )
     }
@@ -1240,6 +1241,7 @@ mod tests {
                     frame_end: 99,
                     name: None,
                     alias: "[0:0]",
+                    effect_fingerprints: &[],
                 },
             ),
             fake_object(),

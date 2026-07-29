@@ -191,11 +191,7 @@ impl SceneReader for SdkSceneReader<'_> {
                 .map_err(|_| sdk("get_object_section_frame"))?,
         );
 
-        Ok(HostObjectDetail {
-            object,
-            sections,
-            effects: self.effects_of(handle)?,
-        })
+        Ok(HostObjectDetail { object, sections })
     }
 }
 
@@ -212,6 +208,9 @@ impl SdkSceneReader<'_> {
     }
 
     /// ハンドルが指すオブジェクトを所有型へ写す。
+    ///
+    /// 一覧も詳細もこの 1 か所を通す。同一性の材料をここで揃えることが、
+    /// どちらの経路から算出しても同じ fingerprint になることを保証する。
     fn object_at(&self, handle: ObjectHandle) -> Result<HostObject, ReadError> {
         let position = self
             .section
@@ -232,6 +231,7 @@ impl SdkSceneReader<'_> {
             frame_end: non_negative(position.end),
             name,
             alias,
+            effects: self.effects_of(handle)?,
         })
     }
 
@@ -551,6 +551,7 @@ mod tests {
             frame_end,
             name: None,
             alias: format!("[{frame_start}]"),
+            effects: Vec::new(),
         }
     }
 

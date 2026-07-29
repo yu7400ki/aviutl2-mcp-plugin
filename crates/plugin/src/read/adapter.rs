@@ -13,7 +13,7 @@ use aviutl2_mcp_core::FingerprintAlgorithm;
 use aviutl2_mcp_core::{
     AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFingerprintInput, EffectInfo,
     EffectType, Extent, FiniteF64, FrameRange, LayerInfo, ObjectDetail, ObjectFilter,
-    ObjectFingerprintInput, ObjectSelector, ObjectSummary, SceneInfo,
+    ObjectFingerprintInput, ObjectSelector, ObjectSummary, SceneInfo, effect_fingerprint,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -356,41 +356,10 @@ fn matches_name(required_name: Option<&str>, object: &HostObject) -> bool {
     }
 }
 
-/// fingerprint の入力を組み立てる。
-fn fingerprint_input<'a>(scene_id: i32, object: &'a HostObject) -> ObjectFingerprintInput<'a> {
-    ObjectFingerprintInput {
-        scene_id,
-        layer: object.layer,
-        frame_start: object.frame_start,
-        frame_end: object.frame_end,
-        name: object.name.as_deref(),
-        alias: &object.alias,
-    }
-}
-
-/// オブジェクトの概要を組み立てる。
-fn object_summary(epoch: &str, scene_id: i32, object: &HostObject) -> ObjectSummary {
-    ObjectSummary::new(epoch, fingerprint_input(scene_id, object))
-}
-
-/// オブジェクトの詳細を、算出済みの概要と組み合わせて組み立てる。
-fn object_detail(summary: ObjectSummary, revision: u64, detail: HostObjectDetail) -> ObjectDetail {
-    let alias = detail.object.alias;
-    let effects = effect_fingerprint_inputs(&detail.effects)
-        .map(|input| EffectInfo::new(summary.selector.clone(), input))
-        .collect();
-    ObjectDetail {
-        summary,
-        alias,
-        sections: detail.sections,
-        effects,
-        project_revision: revision,
-    }
-}
-
 /// effect 列の各要素について fingerprint の入力を組み立てる。
 ///
 /// 列の絶対位置と総数も材料に含めるため、要素を単独では組み立てられない。
+/// 一覧と詳細で同じ列から同じ入力が得られるよう、組み立てはここへ集約する。
 fn effect_fingerprint_inputs(
     effects: &[HostEffect],
 ) -> impl Iterator<Item = EffectFingerprintInput<'_>> {
@@ -407,6 +376,43 @@ fn effect_fingerprint_inputs(
             locked: effect.locked,
             items: &effect.items,
         })
+}
+
+/// オブジェクトの概要を組み立てる。
+///
+/// 配下 effect の fingerprint 列もオブジェクトの材料であるため、ここで
+/// 併せて算出する。一覧も詳細もこの関数を通すことで、同じオブジェクトに
+/// 対して同じ fingerprint が返る。
+fn object_summary(epoch: &str, scene_id: i32, object: &HostObject) -> ObjectSummary {
+    let effect_fingerprints: Vec<_> = effect_fingerprint_inputs(&object.effects)
+        .map(effect_fingerprint)
+        .collect();
+    ObjectSummary::new(
+        epoch,
+        ObjectFingerprintInput {
+            scene_id,
+            layer: object.layer,
+            frame_start: object.frame_start,
+            frame_end: object.frame_end,
+            name: object.name.as_deref(),
+            alias: &object.alias,
+            effect_fingerprints: &effect_fingerprints,
+        },
+    )
+}
+
+/// オブジェクトの詳細を、算出済みの概要と組み合わせて組み立てる。
+fn object_detail(summary: ObjectSummary, revision: u64, detail: HostObjectDetail) -> ObjectDetail {
+    let effects = effect_fingerprint_inputs(&detail.object.effects)
+        .map(|input| EffectInfo::new(summary.selector.clone(), input))
+        .collect();
+    ObjectDetail {
+        alias: detail.object.alias,
+        summary,
+        sections: detail.sections,
+        effects,
+        project_revision: revision,
+    }
 }
 
 /// シーン情報を組み立てる。
@@ -490,7 +496,6 @@ mod tests {
         scene_name: Option<String>,
         grid_bpm: Vec<FiniteF64>,
         layers: Vec<FakeLayer>,
-        effects: Vec<HostEffect>,
         catalog: Vec<AvailableEffect>,
         panic_at: Option<PanicPoint>,
         /// 参照区間の確保そのものを失敗させる。
@@ -517,7 +522,6 @@ mod tests {
                 scene_name: Some("Scene 1".to_string()),
                 grid_bpm: vec![FiniteF64::try_new(120.0).unwrap()],
                 layers: fake_layers(),
-                effects: fake_effects(),
                 catalog: fake_catalog(),
                 panic_at: None,
                 section_fails: false,
@@ -681,13 +685,14 @@ mod tests {
                         .find(|object| object.frame_start == frame_start)
                 })
                 .ok_or(ReadError::ObjectNotFound)?;
+            // 一覧と同じ値をそのまま返す。実際の SDK も 1 つの読み取り口を
+            // 通して両方を組み立てる。
             Ok(HostObjectDetail {
                 object: object.clone(),
                 sections: vec![SectionRange {
                     start: object.frame_start,
                     end: object.frame_end,
                 }],
-                effects: self.host.effects.clone(),
             })
         }
     }
@@ -725,6 +730,21 @@ mod tests {
             frame_end,
             name: name.map(str::to_string),
             alias: format!("[{layer}:{frame_start}]"),
+            effects: Vec::new(),
+        }
+    }
+
+    /// 配下 effect を持つオブジェクト。
+    fn object_with_effects(
+        layer: usize,
+        frame_start: usize,
+        frame_end: usize,
+        name: Option<&str>,
+        effects: Vec<HostEffect>,
+    ) -> HostObject {
+        HostObject {
+            effects,
+            ..object(layer, frame_start, frame_end, name)
         }
     }
 
@@ -741,7 +761,7 @@ mod tests {
                 enabled: true,
                 locked: true,
                 objects: vec![
-                    object(1, 100, 200, Some("立ち絵")),
+                    object_with_effects(1, 100, 200, Some("立ち絵"), fake_effects()),
                     object(1, 300, 400, Some("字幕")),
                 ],
             },
@@ -754,21 +774,26 @@ mod tests {
         ]
     }
 
-    fn fake_effects() -> Vec<HostEffect> {
-        vec![HostEffect {
-            name: "動画ファイル".to_string(),
-            index: 0,
+    /// ファイルの設定項目を 1 つ持つ effect。
+    fn file_effect(name: &str, index: usize, path: &str) -> HostEffect {
+        HostEffect {
+            name: name.to_string(),
+            index,
             enabled: true,
             locked: false,
             items: vec![EffectItem {
                 name: "ファイル".to_string(),
                 item_type: EffectItemType::File,
                 value: ItemValue::File {
-                    path: r"C:\movie.mp4".to_string(),
+                    path: path.to_string(),
                 },
                 track: None,
             }],
-        }]
+        }
+    }
+
+    fn fake_effects() -> Vec<HostEffect> {
+        vec![file_effect("動画ファイル", 0, r"C:\movie.mp4")]
     }
 
     fn fake_catalog() -> Vec<AvailableEffect> {
@@ -824,8 +849,11 @@ mod tests {
     }
 
     /// レイヤー 1・フレーム 100 のオブジェクトを指すセレクター。
+    ///
+    /// 材料はホストが保持する値から採る。配下 effect も fingerprint の材料で
+    /// あるため、位置と名前だけを写した複製からは正しい値を組み立てられない。
     fn sample_selector(adapter: &HostReadAdapter<FakeHost>) -> ObjectSelector {
-        let object = object(1, 100, 200, Some("立ち絵"));
+        let object = fake_layers()[1].objects[0].clone();
         object_summary(&adapter.project.epoch(), 0, &object).selector
     }
 

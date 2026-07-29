@@ -94,7 +94,12 @@ pub struct HostLayer {
 }
 
 /// オブジェクトの位置と同一性の材料。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// 配下 effect も同一性の材料であるため、この型が併せて保持する。オブジェクトの
+/// fingerprint は配下 effect の fingerprint 列を含むので、effect を伴わない読み
+/// 取り結果からは算出できない。一覧と詳細で材料が食い違うと、一覧が返した
+/// セレクターで詳細を引けなくなる。
+#[derive(Debug, Clone, PartialEq)]
 pub struct HostObject {
     /// 0 始まりのレイヤー番号。
     pub layer: usize,
@@ -106,6 +111,8 @@ pub struct HostObject {
     pub name: Option<String>,
     /// 正規化前の alias。
     pub alias: String,
+    /// 付与された effect を、付与された順に並べた列。
+    pub effects: Vec<HostEffect>,
 }
 
 /// オブジェクトの詳細。
@@ -115,8 +122,6 @@ pub struct HostObjectDetail {
     pub object: HostObject,
     /// 中間点で区切られた区間。
     pub sections: Vec<SectionRange>,
-    /// 付与された effect の列。
-    pub effects: Vec<HostEffect>,
 }
 
 /// オブジェクトに付与された effect。
@@ -156,9 +161,15 @@ pub trait SceneReader {
     /// レイヤー内のオブジェクトを開始フレームの昇順で全件返す。
     ///
     /// 途中で走査を打ち切った不完全な一覧は返さない。全件を返せない場合は失敗する。
+    ///
+    /// 各オブジェクトは配下 effect まで含めて返す。同一性の材料が欠けた
+    /// オブジェクトを返すと、一覧が算出する fingerprint と詳細が算出する
+    /// fingerprint が食い違う。
     fn objects_in_layer(&self, layer: usize) -> Result<Vec<HostObject>, ReadError>;
 
     /// 開始フレームが完全一致するオブジェクトの詳細を返す。
+    ///
+    /// 返すオブジェクトは [`Self::objects_in_layer`] が返すものと同じ材料を持つ。
     ///
     /// 一致する対象が無い場合は [`ReadError::ObjectNotFound`] を返す。
     fn object_detail(

@@ -415,6 +415,7 @@ mod tests {
                         frame_end: 10,
                         name: Some(&long_name()),
                         alias: "alias",
+                        effect_fingerprints: &[],
                     },
                 )
             })
@@ -454,6 +455,7 @@ mod tests {
                 frame_end: 10,
                 name: Some(&long_name()),
                 alias: "alias",
+                effect_fingerprints: &[],
             },
         );
         let effects: Vec<EffectInfo> = (0..OVERSIZED_COUNT)
@@ -503,6 +505,7 @@ mod tests {
                 frame_end: 10,
                 name: Some("立ち絵"),
                 alias: "alias",
+                effect_fingerprints: &[],
             },
         );
 

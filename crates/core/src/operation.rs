@@ -276,6 +276,7 @@ mod tests {
                 frame_end: 240,
                 name: Some("立ち絵"),
                 alias: "alias",
+                effect_fingerprints: &[],
             },
         )
     }
