@@ -9,7 +9,7 @@
 //! - 対象の再指定: opaque handle を公開しないセレクターと同一性検証の
 //!   fingerprint
 //! - 一覧取得: ページ要求・応答メタと切り出し規則
-//! - 読み取り operation の名前と params / result
+//! - read operation の名前と params / result、編集 operation の名前
 //! - IPC 1 往復の期限配分
 //!
 //! SDK や Windows API には依存しない。所有型のみを定義し、SDK からの変換は
@@ -40,8 +40,9 @@ pub mod wire_format;
 mod tests;
 
 pub use budget::{
-    PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT, PLUGIN_WRITE_TIMEOUT, SERVER_CONNECT_WAIT_CAP,
-    SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, TRANSPORT_HEADROOM,
+    PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT, PLUGIN_WRITE_TIMEOUT,
+    RequestBudgetKind, SERVER_CONNECT_WAIT_CAP, SERVER_EDIT_REQUEST_BUDGET,
+    SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, TRANSPORT_HEADROOM, request_budget_kind,
 };
 pub use descriptor::{
     AuthSecret, DescriptorProject, InstanceDescriptor, InstanceInfo, InstanceProject,
@@ -73,11 +74,14 @@ pub use json::{JsonStrictError, deserialize_json, parse_json};
 pub use number::FiniteF64;
 pub use object::{LayerInfo, ObjectDetail, ObjectSummary, SectionRange};
 pub use operation::{
-    GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GetObjectParams,
-    ListAvailableEffectsParams, ListAvailableEffectsResult, ListLayersParams, ListLayersResult,
-    ListObjectsParams, ListObjectsResult, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
-    OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
-    OPERATION_LIST_OBJECTS, ObjectFilter, ObjectFilterError,
+    EditOperation, GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams,
+    GetObjectParams, ListAvailableEffectsParams, ListAvailableEffectsResult, ListLayersParams,
+    ListLayersResult, ListObjectsParams, ListObjectsResult, OPERATION_ADD_EFFECT,
+    OPERATION_CREATE_OBJECT, OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT,
+    OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_OBJECT,
+    OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS,
+    OPERATION_MOVE_OBJECT, OPERATION_SET_EFFECT_STATE, OPERATION_SET_OBJECT_ITEM,
+    OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectFilter, ObjectFilterError,
 };
 pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
 pub use selector::{EffectSelector, ObjectSelector};

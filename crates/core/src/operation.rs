@@ -1,4 +1,6 @@
-//! 読み取り operation の名前と params / result。
+//! read operation の名前と params / result、および編集 operation の名前。
+//!
+//! 編集 operation の params / result 型は本モジュールでは定義しない。
 
 use crate::edit_info::SceneInfo;
 use crate::effect::{AvailableEffect, EffectType};
@@ -24,6 +26,106 @@ pub const OPERATION_GET_OBJECT: &str = "get_object";
 
 /// 利用可能な effect を列挙する operation 名。
 pub const OPERATION_LIST_AVAILABLE_EFFECTS: &str = "list_available_effects";
+
+/// media file / alias からオブジェクトを作成する operation 名。
+pub const OPERATION_CREATE_OBJECT: &str = "create_object";
+
+/// オブジェクトのレイヤーと開始フレームを変更する operation 名。
+pub const OPERATION_MOVE_OBJECT: &str = "move_object";
+
+/// オブジェクトを削除する operation 名。
+pub const OPERATION_DELETE_OBJECT: &str = "delete_object";
+
+/// オブジェクト名を変更する operation 名。
+pub const OPERATION_SET_OBJECT_NAME: &str = "set_object_name";
+
+/// オブジェクトの設定項目・track 値を変更する operation 名。
+pub const OPERATION_SET_OBJECT_ITEM: &str = "set_object_item";
+
+/// オブジェクトへ effect を付与する operation 名。
+pub const OPERATION_ADD_EFFECT: &str = "add_effect";
+
+/// オブジェクトから effect を削除する operation 名。
+pub const OPERATION_DELETE_EFFECT: &str = "delete_effect";
+
+/// effect の有効・ロック状態を変更する operation 名。
+pub const OPERATION_SET_EFFECT_STATE: &str = "set_effect_state";
+
+/// カーソル・選択範囲・フォーカスを変更する operation 名。
+pub const OPERATION_SET_SELECTION: &str = "set_selection";
+
+/// 編集 operation の種別。
+///
+/// 編集 operation の名前一覧はこの型へ一本化する。文字列表現は
+/// [`EditOperation::as_str`]、名前からの解決は
+/// [`EditOperation::from_operation_name`]、全 variant は [`EditOperation::ALL`]
+/// で得られる。read/edit を分岐する必要がある処理（要求予算の選択、
+/// operation の dispatch など）は、operation 名の一覧を個別に持たず、この型を
+/// 経由して判定する。そうすることで、新しい編集 operation を追加する際に
+/// 一部の判定処理だけへ足し忘れても、他の判定処理は追加前のまま動き続けて
+/// しまう、という食い違いを構造的に防ぐ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditOperation {
+    /// [`OPERATION_CREATE_OBJECT`]。
+    CreateObject,
+    /// [`OPERATION_MOVE_OBJECT`]。
+    MoveObject,
+    /// [`OPERATION_DELETE_OBJECT`]。
+    DeleteObject,
+    /// [`OPERATION_SET_OBJECT_NAME`]。
+    SetObjectName,
+    /// [`OPERATION_SET_OBJECT_ITEM`]。
+    SetObjectItem,
+    /// [`OPERATION_ADD_EFFECT`]。
+    AddEffect,
+    /// [`OPERATION_DELETE_EFFECT`]。
+    DeleteEffect,
+    /// [`OPERATION_SET_EFFECT_STATE`]。
+    SetEffectState,
+    /// [`OPERATION_SET_SELECTION`]。
+    SetSelection,
+}
+
+impl EditOperation {
+    /// 全 variant。
+    ///
+    /// 要素数と内容は `edit_operation_all_is_exhaustive` テストで固定する。
+    pub const ALL: [EditOperation; 9] = [
+        EditOperation::CreateObject,
+        EditOperation::MoveObject,
+        EditOperation::DeleteObject,
+        EditOperation::SetObjectName,
+        EditOperation::SetObjectItem,
+        EditOperation::AddEffect,
+        EditOperation::DeleteEffect,
+        EditOperation::SetEffectState,
+        EditOperation::SetSelection,
+    ];
+
+    /// operation 名の文字列表現を返す。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            EditOperation::CreateObject => OPERATION_CREATE_OBJECT,
+            EditOperation::MoveObject => OPERATION_MOVE_OBJECT,
+            EditOperation::DeleteObject => OPERATION_DELETE_OBJECT,
+            EditOperation::SetObjectName => OPERATION_SET_OBJECT_NAME,
+            EditOperation::SetObjectItem => OPERATION_SET_OBJECT_ITEM,
+            EditOperation::AddEffect => OPERATION_ADD_EFFECT,
+            EditOperation::DeleteEffect => OPERATION_DELETE_EFFECT,
+            EditOperation::SetEffectState => OPERATION_SET_EFFECT_STATE,
+            EditOperation::SetSelection => OPERATION_SET_SELECTION,
+        }
+    }
+
+    /// operation 名から variant を引く。編集 operation でなければ `None`。
+    ///
+    /// [`EditOperation::ALL`] を線形探索するだけであり、一覧を別に持たない。
+    pub fn from_operation_name(name: &str) -> Option<Self> {
+        EditOperation::ALL
+            .into_iter()
+            .find(|op| op.as_str() == name)
+    }
+}
 
 /// `get_edit_info` の params。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -201,6 +303,103 @@ mod tests {
         assert_eq!(OPERATION_LIST_OBJECTS, "list_objects");
         assert_eq!(OPERATION_GET_OBJECT, "get_object");
         assert_eq!(OPERATION_LIST_AVAILABLE_EFFECTS, "list_available_effects");
+    }
+
+    #[test]
+    fn edit_operation_names_are_snake_case() {
+        assert_eq!(OPERATION_CREATE_OBJECT, "create_object");
+        assert_eq!(OPERATION_MOVE_OBJECT, "move_object");
+        assert_eq!(OPERATION_DELETE_OBJECT, "delete_object");
+        assert_eq!(OPERATION_SET_OBJECT_NAME, "set_object_name");
+        assert_eq!(OPERATION_SET_OBJECT_ITEM, "set_object_item");
+        assert_eq!(OPERATION_ADD_EFFECT, "add_effect");
+        assert_eq!(OPERATION_DELETE_EFFECT, "delete_effect");
+        assert_eq!(OPERATION_SET_EFFECT_STATE, "set_effect_state");
+        assert_eq!(OPERATION_SET_SELECTION, "set_selection");
+    }
+
+    #[test]
+    fn edit_operation_as_str_matches_the_operation_constants() {
+        assert_eq!(
+            EditOperation::CreateObject.as_str(),
+            OPERATION_CREATE_OBJECT
+        );
+        assert_eq!(EditOperation::MoveObject.as_str(), OPERATION_MOVE_OBJECT);
+        assert_eq!(
+            EditOperation::DeleteObject.as_str(),
+            OPERATION_DELETE_OBJECT
+        );
+        assert_eq!(
+            EditOperation::SetObjectName.as_str(),
+            OPERATION_SET_OBJECT_NAME
+        );
+        assert_eq!(
+            EditOperation::SetObjectItem.as_str(),
+            OPERATION_SET_OBJECT_ITEM
+        );
+        assert_eq!(EditOperation::AddEffect.as_str(), OPERATION_ADD_EFFECT);
+        assert_eq!(
+            EditOperation::DeleteEffect.as_str(),
+            OPERATION_DELETE_EFFECT
+        );
+        assert_eq!(
+            EditOperation::SetEffectState.as_str(),
+            OPERATION_SET_EFFECT_STATE
+        );
+        assert_eq!(
+            EditOperation::SetSelection.as_str(),
+            OPERATION_SET_SELECTION
+        );
+    }
+
+    #[test]
+    fn edit_operation_from_operation_name_round_trips_through_all() {
+        for op in EditOperation::ALL {
+            assert_eq!(EditOperation::from_operation_name(op.as_str()), Some(op));
+        }
+        for name in ["", "ping", OPERATION_GET_EDIT_INFO, "future_operation"] {
+            assert_eq!(EditOperation::from_operation_name(name), None);
+        }
+    }
+
+    /// [`EditOperation::ALL`] が全 variant を含むことを固定する。
+    ///
+    /// `assert_listed` の中身は網羅 match であり、`EditOperation` へ variant を
+    /// 追加すると腕が足りずコンパイルが落ちる。腕を追加した際に対応する
+    /// `assert_listed(...)` 呼び出しを下の一覧へ足し忘れると、その variant は
+    /// `ALL` に含まれるかを確認されないまま残る。呼び出し一覧と `ALL` は
+    /// どちらも本テストの中でだけ手で書く 2 つの独立した表現であり、
+    /// 一方だけを更新すると `assert!` が実行時に落ちて食い違いが分かる。
+    #[test]
+    fn edit_operation_all_is_exhaustive() {
+        fn assert_listed(op: EditOperation) {
+            match op {
+                EditOperation::CreateObject
+                | EditOperation::MoveObject
+                | EditOperation::DeleteObject
+                | EditOperation::SetObjectName
+                | EditOperation::SetObjectItem
+                | EditOperation::AddEffect
+                | EditOperation::DeleteEffect
+                | EditOperation::SetEffectState
+                | EditOperation::SetSelection => {}
+            }
+            assert!(
+                EditOperation::ALL.contains(&op),
+                "{op:?} が EditOperation::ALL に含まれていません"
+            );
+        }
+
+        assert_listed(EditOperation::CreateObject);
+        assert_listed(EditOperation::MoveObject);
+        assert_listed(EditOperation::DeleteObject);
+        assert_listed(EditOperation::SetObjectName);
+        assert_listed(EditOperation::SetObjectItem);
+        assert_listed(EditOperation::AddEffect);
+        assert_listed(EditOperation::DeleteEffect);
+        assert_listed(EditOperation::SetEffectState);
+        assert_listed(EditOperation::SetSelection);
+        assert_eq!(EditOperation::ALL.len(), 9);
     }
 
     #[test]
