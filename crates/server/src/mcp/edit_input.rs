@@ -1089,6 +1089,36 @@ mod tests {
     }
 
     #[test]
+    fn item_and_effect_names_over_the_limit_are_rejected() {
+        let too_long = "a".repeat(MAX_NAME_CHARS as usize + 1);
+
+        let item: SetObjectItemInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "selector": effect_selector_json(),
+            "item": too_long,
+            "value": { "type": "integer", "value": 1 },
+            "expected": expected_json(),
+        }))
+        .expect("入力型としては受理される");
+        assert_eq!(
+            item.to_params().expect_err("上限超過は拒否される").code,
+            ErrorCode::InvalidArgument
+        );
+
+        let effect: AddEffectInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "object": object_selector_json(),
+            "effect_name": too_long,
+            "expected": expected_json(),
+        }))
+        .expect("入力型としては受理される");
+        assert_eq!(
+            effect.to_params().expect_err("上限超過は拒否される").code,
+            ErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
     fn object_name_over_the_limit_is_rejected() {
         let input: SetObjectNameInput = serde_json::from_value(json!({
             "instance_id": SAMPLE_ID,

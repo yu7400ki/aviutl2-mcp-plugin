@@ -700,6 +700,30 @@ async fn invalid_edit_input_is_rejected_before_any_ipc() {
 }
 
 #[tokio::test]
+async fn malformed_instance_id_never_reaches_an_edit_operation() {
+    let harness = Harness::start(responses("set_selection", selection_state()));
+
+    let result = harness
+        .server
+        .aviutl2_set_selection(Parameters(SetSelectionInput {
+            instance_id: "not-a-uuid".to_string(),
+            expected_scene_id: SCENE_ID,
+            cursor: Some(CursorPositionInput { layer: 0, frame: 0 }),
+            selected_range: None,
+            focus: None,
+            expected: expected_input(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["code"], json!("invalid_argument"));
+    assert!(
+        harness.mock.received_requests().is_empty(),
+        "検証前に IPC を発生させない"
+    );
+}
+
+#[tokio::test]
 async fn precondition_failure_reaches_the_tool_result_with_the_current_revision() {
     let error = ErrorObject::new(
         ErrorCode::PreconditionFailed,
