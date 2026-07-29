@@ -1,8 +1,10 @@
 //! 編集 tool の入力型。
 //!
-//! selector 以外は未知フィールドを拒否する。[`ObjectSelectorInput`] と
-//! [`EffectSelectorInput`] は応答が返した値をそのまま送り返す往復型であり、
-//! 応答へ optional field が増えたときに往復が壊れるため拒否しない。
+//! 往復型以外は未知フィールドを拒否する。[`ObjectSelectorInput`] /
+//! [`EffectSelectorInput`] / [`ItemValueInput`] は応答が返した値をそのまま
+//! 送り返す往復型であり、応答へ optional field が増えたときに往復が壊れる
+//! ため拒否しない。読み取りが返した値をそのまま書き戻せることは設定項目の
+//! 契約であり、入口で拒否すると読める値が書けなくなる。
 //!
 //! schema の制約は宣言であり、要求がそれを満たすかどうかは検証されない。
 //! 宣言した制約は接続前に実際へ確かめ、違反を `invalid_argument` として返す。
@@ -281,8 +283,11 @@ impl FocusChangeInput {
 /// 設定項目へ書き込む値。
 ///
 /// 読み取りが返す値と同じ形で受け取り、そのまま書き戻せるようにする。
+/// selector と同じ往復型であるため、未知フィールドを拒否しない。応答へ
+/// optional field が増えたとき、読み取りが返した値を書き戻せなくなる非対称を
+/// 作らないためである。必須フィールドの欠落と型不一致は従来どおり拒否する。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ItemValueInput {
     /// 実数。有限値のみ。
     Number {
@@ -986,42 +991,91 @@ mod tests {
         assert!(input.to_params().is_ok());
     }
 
-    #[test]
-    fn item_value_input_round_trips_every_read_value() {
-        // 読み取りが返す値の形と入力型がずれると、読めた値を書き戻せなくなる。
-        let values = [
-            ItemValue::Number {
-                value: FiniteF64::try_new(1.5).expect("有限値"),
-            },
-            ItemValue::Integer { value: -3 },
-            ItemValue::Bool { value: true },
-            ItemValue::Color {
+    /// 読み取りが返す設定値の標本を、種別を 1 つずつ辿って組み立てる。
+    ///
+    /// 次の種別は [`following`] の網羅 `match` が決める。手で並べた配列では、
+    /// 種別が増えたときに更新しなくても通ってしまい、増えた種別が書き戻せない
+    /// ことに気づけない。
+    fn every_item_value() -> Vec<ItemValue> {
+        let mut values = vec![ItemValue::Number {
+            value: FiniteF64::try_new(1.5).expect("有限値"),
+        }];
+        while let Some(next) = following(values.last().expect("先頭がある")) {
+            assert!(
+                !values.iter().any(|value| value.kind() == next.kind()),
+                "種別 {} を二度辿っています",
+                next.kind()
+            );
+            values.push(next);
+        }
+        values
+    }
+
+    /// 標本で `previous` の次に置く値を返す。末尾では `None`。
+    ///
+    /// `_` を使わない網羅 `match` であるため、設定値へ種別が増えるとここが
+    /// コンパイルエラーになる。腕を足すには増えた種別を標本の連なりへ繋ぐ
+    /// 必要があり、書き戻せるかを確かめないまま通過できない。
+    fn following(previous: &ItemValue) -> Option<ItemValue> {
+        Some(match previous {
+            ItemValue::Number { .. } => ItemValue::Integer { value: -3 },
+            ItemValue::Integer { .. } => ItemValue::Bool { value: true },
+            ItemValue::Bool { .. } => ItemValue::Color {
                 value: "#ff8800".to_string(),
             },
-            ItemValue::Choice {
+            ItemValue::Color { .. } => ItemValue::Choice {
                 value: "通常".to_string(),
                 index: Some(2),
             },
-            ItemValue::Choice {
-                value: "通常".to_string(),
-                index: None,
-            },
-            ItemValue::File {
+            ItemValue::Choice { .. } => ItemValue::File {
                 path: r"C:\movie.mp4".to_string(),
             },
-            ItemValue::Folder {
+            ItemValue::File { .. } => ItemValue::Folder {
                 path: r"C:\assets".to_string(),
             },
-            ItemValue::Font {
+            ItemValue::Folder { .. } => ItemValue::Font {
                 name: "Meiryo".to_string(),
             },
-            ItemValue::Text {
+            ItemValue::Font { .. } => ItemValue::Text {
                 value: "字幕".to_string(),
             },
-            ItemValue::Unknown {
+            ItemValue::Text { .. } => ItemValue::Unknown {
                 raw: "future=1".to_string(),
             },
-        ];
+            ItemValue::Unknown { .. } => return None,
+        })
+    }
+
+    /// 入力 schema が受け付ける種別名。
+    fn declared_item_value_kinds() -> std::collections::BTreeSet<String> {
+        let schema = serde_json::to_value(schemars::schema_for!(ItemValueInput))
+            .expect("schema は直列化できる");
+        schema["oneOf"]
+            .as_array()
+            .expect("種別ごとの分岐がある")
+            .iter()
+            .map(|branch| {
+                branch["properties"]["type"]["const"]
+                    .as_str()
+                    .expect("判別子がある")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_read_item_value_round_trips_through_the_input_type() {
+        // 読み取りが返す値の形と入力型がずれると、読めた値を書き戻せなくなる。
+        let values = every_item_value();
+
+        // 標本が入力 schema の全分岐を覆っていること。覆えていない種別は、
+        // 読み取りが返しても書き戻せないまま素通りする。
+        let covered: std::collections::BTreeSet<String> = values
+            .iter()
+            .map(|value| value.kind().to_string())
+            .collect();
+        assert_eq!(covered, declared_item_value_kinds());
+
         for value in values {
             let encoded = serde_json::to_value(&value).expect("直列化できる");
             let input: ItemValueInput =
@@ -1033,13 +1087,42 @@ mod tests {
     }
 
     #[test]
-    fn item_value_input_rejects_unknown_fields() {
-        assert!(
-            serde_json::from_value::<ItemValueInput>(
-                json!({ "type": "integer", "value": 1, "future": 2 })
-            )
-            .is_err()
+    fn item_value_input_accepts_unknown_fields() {
+        // 設定値も selector と同じ往復型である。応答へ optional field が増えた
+        // とき、読み取りが返した値をそのまま書き戻せなくなる非対称を作らない。
+        let input: SetObjectItemInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "selector": effect_selector_json(),
+            "item": "種類",
+            "value": { "type": "choice", "value": "通常", "index": 2, "future": 1 },
+            "expected": expected_json(),
+        }))
+        .expect("未知フィールドを含む設定値を受理する");
+
+        let params = input.to_params().expect("params へ変換できる");
+        assert_eq!(
+            params.value,
+            ItemValue::Choice {
+                value: "通常".to_string(),
+                index: Some(2),
+            },
+            "既知フィールドが失われています"
         );
+    }
+
+    #[test]
+    fn item_value_input_still_rejects_missing_fields_and_type_mismatch() {
+        // 寛容にするのは余分な field だけである。
+        for value in [
+            json!({ "type": "integer" }),
+            json!({ "type": "integer", "value": "1" }),
+            json!({ "type": "vector", "x": 1 }),
+        ] {
+            assert!(
+                serde_json::from_value::<ItemValueInput>(value.clone()).is_err(),
+                "{value} が受理されました"
+            );
+        }
     }
 
     #[test]
