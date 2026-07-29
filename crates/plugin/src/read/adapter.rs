@@ -1667,6 +1667,134 @@ mod tests {
         }
     }
 
+    /// 一覧から算出した fingerprint と、詳細から算出した fingerprint が一致する
+    /// ことを確かめる。
+    ///
+    /// 食い違えば、一覧が返したセレクターで詳細を引けなくなり、対象が事実上
+    /// 到達不能になる。
+    #[test]
+    fn object_fingerprint_agrees_between_listing_and_detail() {
+        let adapter = adapter();
+        let summaries = adapter.list_objects(0, None).unwrap().items;
+        assert!(!summaries.is_empty());
+
+        for summary in summaries {
+            let detail = adapter
+                .get_object(&summary.selector)
+                .expect("一覧が返したセレクターで詳細を引けません");
+            assert_eq!(detail.summary.fingerprint, summary.fingerprint);
+            assert_eq!(detail.summary.selector, summary.selector);
+        }
+    }
+
+    /// 配下 effect を持つ対象でも両経路が一致することを確かめる。
+    ///
+    /// effect が 0 件の対象だけで検証すると、effect を材料に含めていない実装
+    /// でも通ってしまう。
+    #[test]
+    fn object_fingerprint_agrees_for_an_object_that_has_effects() {
+        let adapter = adapter();
+        let summary = adapter
+            .list_objects(0, None)
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.layer == 1 && item.frame_start == 100)
+            .expect("配下 effect を持つ対象がありません");
+
+        let detail = adapter.get_object(&summary.selector).unwrap();
+        assert!(!detail.effects.is_empty());
+        assert_eq!(detail.summary.fingerprint, summary.fingerprint);
+    }
+
+    /// effect の設定を変えると、そのオブジェクトの fingerprint も変わることを
+    /// 確かめる。
+    ///
+    /// 変わらなければ、effect を書き換えた後も変更前のセレクターが一致し続け、
+    /// 古いセレクターでの変更を拒否できない。epoch を揃えるためプロジェクト
+    /// 状態は共用し、差分を effect の設定だけにする。
+    #[test]
+    fn object_fingerprint_changes_when_an_effect_setting_changes() {
+        let project = Arc::new(ProjectState::new());
+        let host_with = |path: &'static str| {
+            let mut layers = fake_layers();
+            layers[1].objects[0] = object_with_effects(
+                1,
+                100,
+                200,
+                Some("立ち絵"),
+                vec![file_effect("動画ファイル", 0, path)],
+            );
+            FakeHost {
+                layers,
+                ..FakeHost::new()
+            }
+        };
+        let fingerprint_of = |path: &'static str| {
+            HostReadAdapter::new(host_with(path), Arc::clone(&project))
+                .list_objects(0, None)
+                .unwrap()
+                .items
+                .into_iter()
+                .find(|item| item.layer == 1 && item.frame_start == 100)
+                .expect("対象がありません")
+                .fingerprint
+        };
+
+        assert_ne!(
+            fingerprint_of(r"C:\movie.mp4"),
+            fingerprint_of(r"C:\another.mp4"),
+            "effect の設定を変えても fingerprint が変わりません"
+        );
+    }
+
+    /// 同名 effect が繰り上がった場合に、残った effect が別物として扱われる
+    /// ことを確かめる。
+    ///
+    /// 名前と同名内の番号だけを材料にすると、繰り上がった側が取り除く前の
+    /// 先頭と同じ fingerprint になり、別のインスタンスへ変更が当たる。
+    #[test]
+    fn effect_fingerprint_changes_when_the_preceding_effect_is_removed() {
+        let adapter_for = |effects: Vec<HostEffect>| {
+            let mut layers = fake_layers();
+            layers[1].objects[0] = object_with_effects(1, 100, 200, Some("立ち絵"), effects);
+            adapter_with(|_| FakeHost {
+                layers,
+                ..FakeHost::new()
+            })
+        };
+        let fingerprints_of = |adapter: &HostReadAdapter<FakeHost>| {
+            let summary = adapter
+                .list_objects(0, None)
+                .unwrap()
+                .items
+                .into_iter()
+                .find(|item| item.layer == 1 && item.frame_start == 100)
+                .expect("対象がありません");
+            adapter
+                .get_object(&summary.selector)
+                .unwrap()
+                .effects
+                .into_iter()
+                .map(|effect| effect.fingerprint)
+                .collect::<Vec<_>>()
+        };
+
+        // 同じ設定の同名 effect が 2 つ並ぶ。
+        let before = adapter_for(vec![
+            file_effect("ぼかし", 0, r"C:\a.png"),
+            file_effect("ぼかし", 1, r"C:\a.png"),
+        ]);
+        // 前方の 1 つが取り除かれ、残った側の番号が 0 へ繰り上がる。
+        let after = adapter_for(vec![file_effect("ぼかし", 0, r"C:\a.png")]);
+
+        assert_ne!(
+            fingerprints_of(&before)[0],
+            fingerprints_of(&after)[0],
+            "繰り上がった effect が取り除く前の先頭と同じ値になりました"
+        );
+    }
+
     #[test]
     fn resolve_candidate_requires_exact_start_frame() {
         let objects = vec![object(1, 100, 200, None)];
