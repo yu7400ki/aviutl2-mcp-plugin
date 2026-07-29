@@ -303,11 +303,11 @@ fn stdout_carries_only_mcp_messages() {
     let listed = session.response(2);
     let tools = listed["result"]["tools"].as_array().expect("tools は配列");
     assert!(!tools.is_empty());
-    let mut checked = 0;
     for tool in tools {
         let name = tool["name"].as_str().expect("name がある").to_string();
+        // 未知の tool 名は [`expected_annotations`] が落とす。tool を足したときに
+        // この検査から漏れない。
         let (read_only, destructive, idempotent) = expected_annotations(&name);
-        checked += 1;
         assert_eq!(
             tool["annotations"]["readOnlyHint"],
             json!(read_only),
@@ -334,7 +334,6 @@ fn stdout_carries_only_mcp_messages() {
             "{name}"
         );
     }
-    assert_eq!(checked, tools.len(), "全 tool を検査していません");
 
     let call = session.response(3);
     assert_eq!(call["result"]["isError"], json!(false));
@@ -1234,6 +1233,16 @@ fn instance_listing_and_tool_call_survive_overlapping() {
 /// 編集は read より長く占有するため競合の窓が広い。read の対比
 /// （[`BUSY_WHILE_READING`]）より長くし、その差が実際に効くようにする。
 const BUSY_WHILE_EDITING: std::time::Duration = std::time::Duration::from_millis(1_200);
+
+/// 競合の窓が read より広いという関係を、コンパイル時に固定する。
+///
+/// 片方だけを縮めると、編集の競合を read と同じ長さでしか試さなくなる。
+const _: () = assert!(BUSY_WHILE_EDITING.as_millis() > BUSY_WHILE_READING.as_millis());
+
+/// どちらの遅延も、接続が確立するまでの待ちより十分長いこと。
+///
+/// 短いと後続の要求が届く前に pipe が空き、競合そのものが起きない。
+const _: () = assert!(BUSY_WHILE_READING.as_millis() > CONNECT_GRACE.as_millis() * 2);
 
 #[test]
 fn edit_tool_call_and_resource_read_survive_overlapping() {
