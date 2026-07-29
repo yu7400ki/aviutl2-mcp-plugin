@@ -190,15 +190,13 @@ fn ensure_layer_unlocked(editor: &dyn SceneEditor, layer: usize) -> Result<(), E
 /// 重なり得る。SDK の失敗だけでも足りない——失敗は理由を区別しないため、何が
 /// 起きたのかを要求元へ伝えられない。
 fn ensure_destination_free(
-    editor: &dyn SceneEditor,
+    occupants: &[HostObjectPlacement],
     layer: usize,
     frame: usize,
     moving_from: Option<usize>,
 ) -> Result<(), EditError> {
-    let occupied = editor
-        .reader()
-        .object_placements(layer)?
-        .into_iter()
+    let occupied = occupants
+        .iter()
         .filter(|placement| Some(placement.frame_start) != moving_from)
         .any(|placement| placement.frame_start <= frame && frame <= placement.frame_end);
     if occupied {
@@ -308,7 +306,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             )?;
             ensure_layer_unlocked(editor, layer)?;
             let before = editor.reader().object_placements(layer)?;
-            ensure_destination_free(editor, layer, frame, None)?;
+            ensure_destination_free(&before, layer, frame, None)?;
             if let ObjectSource::MediaFile { path } = &params.source
                 && !editor.supports_media_file(path)?
             {
@@ -377,7 +375,8 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             ensure_layer_unlocked(editor, object.layer())?;
             ensure_layer_unlocked(editor, layer)?;
             let moving_from = (layer == object.layer()).then(|| object.frame_start());
-            ensure_destination_free(editor, layer, frame, moving_from)?;
+            let occupants = editor.reader().object_placements(layer)?;
+            ensure_destination_free(&occupants, layer, frame, moving_from)?;
 
             let permit = boundary.revalidate(project)?;
             let issued = editor.move_object(permit.ticket(), &object, layer, frame);
