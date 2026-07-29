@@ -1106,6 +1106,17 @@ fn detail_str(error: &ErrorObject, key: &str) -> Option<String> {
         .map(|value| value.to_string())
 }
 
+/// 拒否が名乗る `details.mismatch` に何を期待するか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpectedMismatch<'a> {
+    /// 指定した前提条件の食い違いを名乗る。
+    Named(&'a str),
+    /// 前提条件の食い違いを名乗らない。対象の解決など、照合より後で落ちた拒否。
+    Absent,
+    /// どの前提条件が働いたかを問わない。
+    Any,
+}
+
 /// 要求が期待どおりに拒否されたことを確かめる。
 ///
 /// 拒否されたことだけを見ると、複数あるガードのうち 1 つしか働いていない場合でも
@@ -1113,7 +1124,7 @@ fn detail_str(error: &ErrorObject, key: &str) -> Option<String> {
 fn expect_rejection<T>(
     result: Result<T, ErrorObject>,
     code: ErrorCode,
-    mismatch: Option<&str>,
+    mismatch: ExpectedMismatch<'_>,
 ) -> CheckResult {
     let error = match result {
         Ok(_) => return Err("拒否されず成功しました".to_string()),
@@ -1127,13 +1138,20 @@ fn expect_rejection<T>(
         ));
     }
     let observed = detail_str(&error, "mismatch");
-    if let Some(expected) = mismatch
-        && observed.as_deref() != Some(expected)
-    {
-        return Err(format!(
-            "mismatch={expected} を期待しましたが {}",
-            describe_error(&error)
-        ));
+    match mismatch {
+        ExpectedMismatch::Named(expected) if observed.as_deref() != Some(expected) => {
+            return Err(format!(
+                "mismatch={expected} を期待しましたが {}",
+                describe_error(&error)
+            ));
+        }
+        ExpectedMismatch::Absent if observed.is_some() => {
+            return Err(format!(
+                "前提条件の食い違いを名乗らない拒否を期待しましたが {}",
+                describe_error(&error)
+            ));
+        }
+        _ => {}
     }
     Ok(vec![describe_error(&error)])
 }
@@ -1768,7 +1786,11 @@ fn check_effect_index_shift(
     };
     let expected = precondition(harness, instance)?;
     let attempt = harness.set_effect_state(&instance.id, &stale, Some(false), None, expected);
-    let outcome = expect_rejection(attempt, ErrorCode::PreconditionFailed, None);
+    let outcome = expect_rejection(
+        attempt,
+        ErrorCode::PreconditionFailed,
+        ExpectedMismatch::Any,
+    );
     report.observe(
         "effect_index_shift",
         "同名 effect の前方を削除した後、削除前の selector は拒否されるか",
@@ -3787,7 +3809,7 @@ fn check_cross_instance_selector(
     let mut outcome = expect_rejection(
         attempt,
         ErrorCode::PreconditionFailed,
-        Some("project_epoch"),
+        ExpectedMismatch::Named("project_epoch"),
     );
     if outcome.is_ok() {
         let after = snapshot(harness, other, other_scene)?;
@@ -3827,7 +3849,11 @@ fn check_stale_after_ui_item_change(
         expected,
     );
     let applied = attempt.as_ref().ok().cloned();
-    let outcome = expect_rejection(attempt, ErrorCode::PreconditionFailed, Some("fingerprint"));
+    let outcome = expect_rejection(
+        attempt,
+        ErrorCode::PreconditionFailed,
+        ExpectedMismatch::Named("fingerprint"),
+    );
     restore_default_name(harness, instance, applied.as_ref())?;
 
     prompt("UI で行った設定値の変更を取り消してから Enter を押してください。");
@@ -3855,7 +3881,7 @@ fn check_stale_after_ui_move(
         expected,
     );
     let applied = attempt.as_ref().ok().cloned();
-    let outcome = expect_rejection(attempt, ErrorCode::NotFound, None);
+    let outcome = expect_rejection(attempt, ErrorCode::NotFound, ExpectedMismatch::Absent);
     restore_default_name(harness, instance, applied.as_ref())?;
 
     prompt("UI で行った移動を取り消し、元の位置へ戻してから Enter を押してください。");
@@ -4621,7 +4647,11 @@ fn section_scene_switch(
         expected,
     );
     let applied = attempt.as_ref().ok().cloned();
-    let outcome = expect_rejection(attempt, ErrorCode::PreconditionFailed, Some("scene_id"));
+    let outcome = expect_rejection(
+        attempt,
+        ErrorCode::PreconditionFailed,
+        ExpectedMismatch::Named("scene_id"),
+    );
     restore_default_name(harness, instance, applied.as_ref())?;
     report.record(
         "5.8",
@@ -4641,7 +4671,11 @@ fn section_scene_switch(
         },
         expected,
     );
-    let outcome = expect_rejection(attempt, ErrorCode::PreconditionFailed, Some("scene_id"));
+    let outcome = expect_rejection(
+        attempt,
+        ErrorCode::PreconditionFailed,
+        ExpectedMismatch::Named("scene_id"),
+    );
     report.record(
         "5.8",
         "シーン切替後の選択状態の変更",
@@ -4707,7 +4741,8 @@ fn check_client_disconnect(
 /// 対象 instance だけが変更され、stale selector による変更が常に拒否されることを確かめる。
 ///
 /// 拒否されたことだけを見ると、2 つのガードのうち 1 つしか働いていなくても全手順が
-/// 合格し得る。手順ごとに期待するエラーコードと `details.mismatch` まで固定する。
+/// 合格し得る。手順ごとに期待するエラーコードと `details.mismatch` を、どのガードも
+/// 名乗らないことまで含めて固定する。
 fn section_completion(
     harness: &Harness,
     report: &mut Report,
@@ -4822,7 +4857,7 @@ fn section_completion(
     let mut outcome = expect_rejection(
         attempt,
         ErrorCode::PreconditionFailed,
-        Some("project_epoch"),
+        ExpectedMismatch::Named("project_epoch"),
     );
     if outcome.is_ok() {
         let now_b = snapshot(harness, b, scene_b)?;
@@ -4846,7 +4881,8 @@ fn section_completion(
 
     // 手順 7: 古くなった selector と前提条件を A へ渡す。手順 4 で対象は
     // destination へ移っており、selector が指す layer / frame には何も無い。
-    // revision は照合しないので、拒否は対象の解決で起きる。
+    // revision は照合しないので、拒否は対象の解決で起きる。どのガードも働いて
+    // いないことを、前提条件の食い違いを名乗らないことで固定する。
     let attempt = harness.move_object(
         &a.id,
         &stale_selector,
@@ -4856,7 +4892,7 @@ fn section_completion(
         },
         stale_expected,
     );
-    let mut outcome = expect_rejection(attempt, ErrorCode::NotFound, None);
+    let mut outcome = expect_rejection(attempt, ErrorCode::NotFound, ExpectedMismatch::Absent);
     if outcome.is_ok() {
         let now_a = snapshot(harness, a, scene_a)?;
         outcome = match expect_unchanged(&after_move_a, &now_a) {
@@ -4872,7 +4908,7 @@ fn section_completion(
     report.record(
         "6.7",
         "古い selector の再利用",
-        "instance A に対し古くなった selector で再度編集すると not_found で拒否され、instance A が変更されない",
+        "instance A に対し古くなった selector で再度編集すると、前提条件の食い違いを名乗らない not_found で拒否され、instance A が変更されない",
         Mode::Auto,
         outcome,
     );
@@ -4893,7 +4929,11 @@ fn section_completion(
         },
         expected,
     );
-    let outcome = expect_rejection(attempt, ErrorCode::PreconditionFailed, Some("fingerprint"));
+    let outcome = expect_rejection(
+        attempt,
+        ErrorCode::PreconditionFailed,
+        ExpectedMismatch::Named("fingerprint"),
+    );
     report.record(
         "6.8",
         "UI 編集後の selector",
