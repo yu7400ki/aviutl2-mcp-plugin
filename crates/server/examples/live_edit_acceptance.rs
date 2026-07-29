@@ -1453,6 +1453,15 @@ fn section_fingerprint_premises(
         outcome,
     );
 
+    let outcome = check_unrelated_edit_keeps_the_precondition(harness, report, instance, context);
+    report.record(
+        "5.9",
+        "他の対象の編集を挟んだ前提の再利用",
+        "対象を読んだ後に別の対象を編集しても、読んだ時点の expected のままその対象を編集できる",
+        Mode::Auto,
+        outcome,
+    );
+
     let outcome = check_layer_lock(harness, report, instance, context);
     report.record(
         "5.9",
@@ -1800,6 +1809,140 @@ fn count_effects(
         .iter()
         .filter(|effect| effect.name == name)
         .count())
+}
+
+/// 別の対象を編集しても、先に読んだ前提のまま元の対象を編集できることを確かめる。
+///
+/// project_revision はプロジェクト全体で 1 つのカウンタであり、どの対象を編集しても
+/// 進む。前提として照合していれば、対象と無関係な編集が挟まっただけで拒否される。
+fn check_unrelated_edit_keeps_the_precondition(
+    harness: &Harness,
+    report: &mut Report,
+    instance: &Instance,
+    context: &Context,
+) -> CheckResult {
+    let target = resolve_object(harness, instance, context.scene_id, context.target)?;
+    let original_name = target.name.clone();
+    // 対象を読んだ時点の前提。以降 revision は進むが、この値を使い続ける。
+    let stale = precondition(harness, instance)?;
+
+    let detail = require(
+        harness.object(&instance.id, &target.selector),
+        "別対象の作成元となる alias を取得できません",
+    )?;
+    let slot = context.free_slots[1];
+    let expected = precondition(harness, instance)?;
+    let created = require(
+        harness.create_object(
+            &instance.id,
+            ObjectSourceInput::ObjectAlias {
+                alias: detail.alias.clone(),
+            },
+            PlacementInput {
+                scene_id: context.scene_id,
+                layer: slot.layer as u32,
+                frame: slot.frame as u32,
+            },
+            expected,
+        ),
+        "別対象を作成できません",
+    )?;
+
+    let probed = probe_stale_precondition(harness, report, instance, &target, &created, &stale);
+    let cleaned = cleanup_unrelated_edit(harness, instance, context, slot, &original_name);
+    match (probed, cleaned) {
+        (Ok(notes), Ok(())) => Ok(notes),
+        (Ok(_), Err(reason)) => Err(format!("後始末に失敗しました: {reason}")),
+        (Err(reason), _) => Err(reason),
+    }
+}
+
+/// 別対象を編集したうえで、古くなった前提のまま元の対象を編集する。
+fn probe_stale_precondition(
+    harness: &Harness,
+    report: &mut Report,
+    instance: &Instance,
+    target: &ObjectSummary,
+    created: &EditOutcome,
+    stale: &ExpectedInput,
+) -> CheckResult {
+    let other = created
+        .object
+        .clone()
+        .ok_or_else(|| "作成の応答が対象を返しませんでした".to_string())?;
+    let renamed = require(
+        harness.set_object_name(
+            &instance.id,
+            &other.selector,
+            Some("別対象の編集".to_string()),
+            outcome_precondition(created),
+        ),
+        "別対象を編集できません",
+    )?;
+
+    // 元の対象の内容は変えていないため、selector も読んだ時点のまま使う。
+    // 変わったのは revision だけであり、拒否されればそれを照合していることになる。
+    let applied = harness
+        .set_object_name(
+            &instance.id,
+            &target.selector,
+            Some("旧前提での編集".to_string()),
+            stale.clone(),
+        )
+        .map_err(|error| {
+            format!(
+                "別対象の編集で古びた前提が拒否されました: {}",
+                describe_error(&error)
+            )
+        })?;
+
+    report.observe(
+        "unrelated_edit_invalidates_the_precondition",
+        "別の対象を編集した後、読んだ時点の project_revision のままで編集できるか",
+        format!(
+            "revision は {} から {} へ進んだが、{} を前提にした編集が成功した",
+            stale.project_revision, renamed.project_revision, stale.project_revision
+        ),
+    );
+    Ok(vec![format!(
+        "別対象の編集で revision が {} 進んだ後も、revision={} の前提で編集でき、編集後は revision={}",
+        renamed
+            .project_revision
+            .saturating_sub(stale.project_revision),
+        stale.project_revision,
+        applied.project_revision
+    )])
+}
+
+/// 元の対象の名前を戻し、作成した別対象を削除する。
+fn cleanup_unrelated_edit(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    slot: Placement,
+    original_name: &Option<String>,
+) -> Result<(), String> {
+    let target = resolve_object(harness, instance, context.scene_id, context.target)?;
+    if &target.name != original_name {
+        let expected = precondition(harness, instance)?;
+        require(
+            harness.set_object_name(
+                &instance.id,
+                &target.selector,
+                original_name.clone(),
+                expected,
+            ),
+            "元の対象の名前を戻せません",
+        )?;
+    }
+
+    let other = resolve_object(harness, instance, context.scene_id, slot)?;
+    let expected = precondition(harness, instance)?;
+    require(
+        harness.delete_object(&instance.id, &other.selector, expected),
+        "作成した別対象を削除できません",
+    )?;
+    Ok(())
 }
 
 /// ロックしたレイヤー上の対象が守られることを確かめる。
