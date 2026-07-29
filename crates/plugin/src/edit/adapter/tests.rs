@@ -114,6 +114,23 @@ impl Harness {
             .selector
     }
 
+    /// 対象の指定を差し替えた effect のセレクターを得る。
+    ///
+    /// effect 自体は与えられた指定が指す位置から読み直し、そのうえで所属
+    /// オブジェクトの指定だけを与えられた値へ差し替える。食い違わせた指定の
+    /// まま読むと、要求を組み立てる段で先に落ちて編集の判定を試せない。
+    fn effect_selector_of(
+        &self,
+        object: ObjectSelector,
+        effect_name: &str,
+        effect_index: usize,
+    ) -> EffectSelector {
+        let mut selector =
+            self.effect_selector(object.layer, object.frame, effect_name, effect_index);
+        selector.object = object;
+        selector
+    }
+
     /// 変更 API が 1 度も呼ばれていないことを確かめる。
     fn assert_untouched(&self) {
         assert!(
@@ -1709,8 +1726,13 @@ fn a_panic_before_any_mutation_is_not_reported_as_a_possible_change() {
 
 // ------------------------------------- 内容を変える operation の共通の約束
 
-/// 内容を変える operation を 1 つ実行する。
-type ContentEdit = fn(&Harness, Expected) -> Result<EditOutcome, EditError>;
+/// 内容を変える operation を 1 つ、指す対象を差し替えて実行する。
+///
+/// 第 3 引数は「この要求はどのプロジェクトのどのシーンの、どの対象を指すか」の
+/// 表明である。対象を持つ operation はこれをそのまま selector として渡し、対象
+/// を持たない作成は epoch を前提へ、シーンを配置先へ写す。どちらも同じ表明で
+/// あり、食い違わせたときに拒否されることを同じ形で確かめられる。
+type ContentEdit = fn(&Harness, Expected, ObjectSelector) -> Result<EditOutcome, EditError>;
 
 /// operation を 1 つ実行する手続きを引く。
 ///
@@ -1722,22 +1744,30 @@ type ContentEdit = fn(&Harness, Expected) -> Result<EditOutcome, EditError>;
 /// revision の扱いが変わるので、その区別もこの 1 か所に置く。
 fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
     Some(match operation {
-        EditOperation::CreateObject => |harness: &Harness, expected| {
+        EditOperation::CreateObject => |harness: &Harness, expected: Expected, target| {
+            let ObjectSelector {
+                project_epoch,
+                scene_id,
+                ..
+            } = target;
             harness.edit.create_object(&CreateObjectParams {
                 source: ObjectSource::ObjectAlias {
                     alias: "[obj]".to_string(),
                 },
                 placement: Placement {
-                    scene_id: SCENE_ID,
+                    scene_id,
                     layer: 1,
                     frame: 600,
                 },
-                expected,
+                expected: Expected {
+                    project_epoch,
+                    ..expected
+                },
             })
         },
-        EditOperation::MoveObject => |harness: &Harness, expected| {
+        EditOperation::MoveObject => |harness: &Harness, expected, target| {
             harness.edit.move_object(&MoveObjectParams {
-                selector: harness.selector(1, 100),
+                selector: target,
                 destination: Destination {
                     layer: 1,
                     frame: 500,
@@ -1745,43 +1775,43 @@ fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
                 expected,
             })
         },
-        EditOperation::DeleteObject => |harness: &Harness, expected| {
+        EditOperation::DeleteObject => |harness: &Harness, expected, target| {
             harness.edit.delete_object(&DeleteObjectParams {
-                selector: harness.selector(1, 100),
+                selector: target,
                 expected,
             })
         },
-        EditOperation::SetObjectName => |harness: &Harness, expected| {
+        EditOperation::SetObjectName => |harness: &Harness, expected, target| {
             harness.edit.set_object_name(&SetObjectNameParams {
-                selector: harness.selector(1, 100),
+                selector: target,
                 name: Some("名前".to_string()),
                 expected,
             })
         },
-        EditOperation::SetObjectItem => |harness: &Harness, expected| {
+        EditOperation::SetObjectItem => |harness: &Harness, expected, target| {
             harness.edit.set_object_item(&SetObjectItemParams {
-                selector: harness.effect_selector(1, 100, "ぼかし", 0),
+                selector: harness.effect_selector_of(target, "ぼかし", 0),
                 item: "範囲".to_string(),
                 value: ItemValue::Integer { value: 30 },
                 expected,
             })
         },
-        EditOperation::AddEffect => |harness: &Harness, expected| {
+        EditOperation::AddEffect => |harness: &Harness, expected, target| {
             harness.edit.add_effect(&AddEffectParams {
-                object: harness.selector(1, 100),
+                object: target,
                 effect_name: "ぼかし".to_string(),
                 expected,
             })
         },
-        EditOperation::DeleteEffect => |harness: &Harness, expected| {
+        EditOperation::DeleteEffect => |harness: &Harness, expected, target| {
             harness.edit.delete_effect(&DeleteEffectParams {
-                selector: harness.effect_selector(1, 100, "ぼかし", 0),
+                selector: harness.effect_selector_of(target, "ぼかし", 0),
                 expected,
             })
         },
-        EditOperation::SetEffectState => |harness: &Harness, expected| {
+        EditOperation::SetEffectState => |harness: &Harness, expected, target| {
             harness.edit.set_effect_state(&SetEffectStateParams {
-                selector: harness.effect_selector(1, 100, "ぼかし", 0),
+                selector: harness.effect_selector_of(target, "ぼかし", 0),
                 enabled: Some(false),
                 locked: None,
                 expected,
@@ -1821,10 +1851,11 @@ fn every_content_edit_checks_the_revision() {
     for (name, run) in content_edits() {
         let harness = Harness::new();
         let stale = harness.expected();
+        let target = harness.selector(1, 100);
         // 対象は変えずに revision だけを進める。fingerprint は一致したままである。
         harness.project.on_object_updated();
 
-        let Err(error) = run(&harness, stale) else {
+        let Err(error) = run(&harness, stale, target) else {
             panic!("{name} が古い revision の前提を受理しました");
         };
         assert_eq!(
@@ -1849,7 +1880,8 @@ fn every_content_edit_advances_the_revision_once() {
     for (name, run) in content_edits() {
         let harness = Harness::new();
         let expected = harness.expected();
-        let outcome = run(&harness, expected).unwrap_or_else(|error| {
+        let target = harness.selector(1, 100);
+        let outcome = run(&harness, expected, target).unwrap_or_else(|error| {
             panic!("{name} が失敗しました: {error}");
         });
 
@@ -1876,10 +1908,11 @@ fn every_content_edit_refuses_a_locked_layer() {
     for (name, run) in content_edits() {
         let harness = Harness::new();
         let expected = harness.expected();
+        let target = harness.selector(1, 100);
         // 対象と作成先を含むレイヤーをロックする。
         harness.host.lock_layer(1, true);
 
-        let Err(error) = run(&harness, expected) else {
+        let Err(error) = run(&harness, expected, target) else {
             panic!("{name} がロックされたレイヤーを書き換えました");
         };
         assert_eq!(
@@ -1890,6 +1923,58 @@ fn every_content_edit_refuses_a_locked_layer() {
         assert_eq!(error.details()["reason"], json!("layer_locked"), "{name}");
         assert!(!harness.host.mutated(), "{name} が変更 API を呼びました");
         assert_eq!(harness.project.revision(), 0, "{name}");
+    }
+}
+
+#[test]
+fn every_content_edit_refuses_a_target_from_another_project() {
+    // fingerprint の材料に project_epoch は含まれない。同じプロジェクトを複製
+    // した 2 つのインスタンスでは fingerprint も revision も一致し得るため、
+    // 対象が名乗る epoch の照合だけが、別インスタンス向けに作った要求を止める。
+    for (name, run) in content_edits() {
+        let harness = Harness::new();
+        let expected = harness.expected();
+        let mut target = harness.selector(1, 100);
+        target.project_epoch = "別のプロジェクト".to_string();
+
+        let Err(error) = run(&harness, expected, target) else {
+            panic!("{name} が別プロジェクトの対象を受理しました");
+        };
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::PreconditionFailed,
+            "{name} が epoch の食い違いを前提条件として扱いません"
+        );
+        assert_eq!(
+            error.details()["mismatch"],
+            json!("project_epoch"),
+            "{name}"
+        );
+        harness.assert_untouched();
+    }
+}
+
+#[test]
+fn every_content_edit_refuses_a_target_from_another_scene() {
+    // シーン切替のイベントは非同期であり、配送前の窓では revision が一致した
+    // まま現在シーンだけが変わる。対象が名乗るシーンとの照合が抜けると、別の
+    // シーンの同じ位置へ適用される。
+    for (name, run) in content_edits() {
+        let harness = Harness::new();
+        let expected = harness.expected();
+        let mut target = harness.selector(1, 100);
+        target.scene_id = SCENE_ID + 7;
+
+        let Err(error) = run(&harness, expected, target) else {
+            panic!("{name} が別シーンの対象を受理しました");
+        };
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::PreconditionFailed,
+            "{name} がシーンの食い違いを前提条件として扱いません"
+        );
+        assert_eq!(error.details()["mismatch"], json!("scene_id"), "{name}");
+        harness.assert_untouched();
     }
 }
 
