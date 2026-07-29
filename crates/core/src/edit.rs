@@ -33,8 +33,17 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct Expected {
     /// 応答が返したプロジェクトの epoch。
+    ///
+    /// 現在の epoch と照合し、食い違えば編集を拒否する。
     pub project_epoch: String,
     /// 応答が返したプロジェクトの revision。
+    ///
+    /// **現在は現在値と照合しない。** 応答が返した値をそのまま渡してよく、
+    /// 古くなっていても編集は拒否されない。revision はプロジェクト全体で
+    /// 1 つのカウンタであり、どの対象を編集しても UI 上の操作でも進むため、
+    /// 人が編集しているプロジェクトでは要求を組み立てている間にほぼ確実に
+    /// ずれる。対象が変化したことは fingerprint が、プロジェクトが変わった
+    /// ことは epoch が、それぞれ独立に捕まえる。
     pub project_revision: u64,
 }
 

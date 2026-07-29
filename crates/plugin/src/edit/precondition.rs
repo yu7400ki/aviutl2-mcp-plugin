@@ -5,19 +5,41 @@
 //!
 //! 1. 前提の `project_epoch` が現在の epoch と一致するか
 //! 2. セレクターの `project_epoch` が同じく一致するか
-//! 3. 前提の `project_revision` が現在の revision と一致するか（選択状態の
-//!    変更を除く）
-//! 4. シーンの guard が区間へ入った時点の現在シーンと一致するか
-//! 5. セレクターの fingerprint 算出方式が現在生成できる方式と一致するか
-//! 6. セレクターが指す対象を解決できるか
-//! 7. 解決した対象の fingerprint がセレクターの値と一致するか
-//! 8. operation 固有の事前条件
+//! 3. シーンの guard が区間へ入った時点の現在シーンと一致するか
+//! 4. セレクターの fingerprint 算出方式が現在生成できる方式と一致するか
+//! 5. セレクターが指す対象を解決できるか
+//! 6. 解決した対象の fingerprint がセレクターの値と一致するか
+//! 7. operation 固有の事前条件
 //!
-//! 1〜5 は [`verify_boundary`] が要求全体へ適用し、6〜7 は解決処理が行う。
+//! 1〜4 は [`verify_boundary`] が要求全体へ適用し、5〜6 は解決処理が行う。
 //! 判定を飛ばして変更へ進む経路が作れないよう、変更 API は
 //! [`MutationTicket`] を要求する。権利を作れるのは [`MutationPermit::issue`] だけ、
 //! permit を作れるのは [`Boundary::revalidate`] だけ、[`Boundary`] を作れるのは
 //! [`verify_boundary`] だけ、という連鎖で順序を型が強制する。
+//!
+//! # `project_revision` を照合しない
+//!
+//! 要求は [`Expected::project_revision`] を必須で受け取るが、**現在の revision と
+//! 比べない。** 照合を書き忘れているのではなく、意図して行っていない。
+//!
+//! revision はプロジェクト全体で 1 つのカウンタであり、どのオブジェクトを
+//! 編集しても、UI 上の操作でも進む。利用者が UI で編集しながら要求を送る使い方
+//! では、対象を読んでから要求が届くまでの間にほぼ確実にずれる。訂正して送り
+//! 直す間にもまた進むため、人が手を動かしている限り収束しない。
+//!
+//! 一方で revision だけが捕まえるものは狭い。対象の内容が変わったことは
+//! fingerprint が、別のプロジェクトであることは epoch が、同名 effect の位置の
+//! 繰り上がりは effect fingerprint の材料（列の絶対位置と総数）が、それぞれ
+//! 独立に捕まえる。revision だけが残るのは「内容が完全に同一の状態へ戻った」
+//! 場合に限られ、しかもホスト由来の変更は非同期に届くため、その検出も確実では
+//! ない。
+//!
+//! 同じ要求を二度発行してしまうことも revision には依存していない。effect の
+//! 付与は対象オブジェクトの fingerprint を変え、オブジェクトの作成は宛先の
+//! 重複を区間内で事前確認するため、いずれも再送はそこで止まる。
+//!
+//! 発行による revision の加算と、応答が返す revision は残す。要求元へ変更が
+//! 入ったことを伝える値であり、前提条件の照合とは別の役割を持つ。
 
 use crate::edit::error::EditError;
 use crate::project::ProjectState;
@@ -30,21 +52,19 @@ use std::marker::PhantomData;
 
 /// 編集がプロジェクトの内容を変えるか。
 ///
-/// 内容を変えない操作に内容の世代一致を要求すると、UI が動いているプロジェクト
-/// では revision が絶えず進むため、カーソルを動かすだけの要求が恒常的に失敗する。
-/// 読まないものは進めもしない。照合と加算をこの 1 つの区別へ束ねることで、
-/// 片方だけを取り違えられないようにしている。
+/// カーソル・選択範囲・フォーカスはプロジェクトの内容ではない。内容を変えない
+/// 操作で revision を進めると、要求元は未保存の変更が生まれたと受け取る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EditKind {
-    /// プロジェクトの内容を変える。revision を照合し、変更の発行で進める。
+    /// プロジェクトの内容を変える。変更の発行で revision を進める。
     Content,
-    /// 選択状態だけを変える。revision を照合せず、進めもしない。
+    /// 選択状態だけを変える。revision を進めない。
     Selection,
 }
 
 impl EditKind {
-    /// revision を照合し、変更の発行で進めるか。
-    fn tracks_revision(self) -> bool {
+    /// 変更の発行で revision を進めるか。
+    fn advances_revision(self) -> bool {
         matches!(self, EditKind::Content)
     }
 }
@@ -52,8 +72,8 @@ impl EditKind {
 /// プロジェクト境界と revision をまとめて読み取った結果。
 ///
 /// epoch と revision は 1 度の取得でまとめて読む。別々に読むと、プロジェクトの
-/// ロードによる「epoch 差し替え → revision リセット」の途中を観測し得る。古い
-/// epoch と新しい revision の組で判定すると、どちらの照合も通ってしまう。
+/// ロードによる「epoch 差し替え → revision リセット」の途中を観測し得る。応答は
+/// 両方を返すため、食い違った組を返すと要求元は存在しない世代を手にする。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectBoundary {
     epoch: String,
@@ -74,7 +94,7 @@ impl ProjectBoundary {
     }
 }
 
-/// 判定 1〜5 を通した編集区間の前提。
+/// 判定 1〜4 を通した編集区間の前提。
 ///
 /// この型を作れるのは [`verify_boundary`] だけである。
 #[derive(Debug)]
@@ -105,10 +125,10 @@ impl Boundary {
         self.scene_id
     }
 
-    /// 変更 API を発行する直前に epoch と revision を再検証する。
+    /// 変更 API を発行する直前にプロジェクト境界を再検証する。
     ///
-    /// 判定 1〜3 と実際の変更の間には、対象の解決と fingerprint の再計算が挟まる。
-    /// 大きなレイヤーでは相応の時間がかかり、その間にプロジェクト境界が変わり
+    /// 判定 1〜2 と実際の変更の間には、対象の解決と fingerprint の再計算が挟まる。
+    /// 大きなレイヤーでは相応の時間がかかり、その間に別のプロジェクトが開かれ
     /// 得る。ここで不一致なら SDK を呼ばずに中断する。まだ何も変更していない
     /// ため中断は安全であり、変更の発行も記録されない。
     ///
@@ -125,14 +145,9 @@ impl Boundary {
         if current.epoch != self.observed.epoch {
             return Err(ReadError::EpochMismatch.into());
         }
-        if self.kind.tracks_revision() && current.revision != self.observed.revision {
-            return Err(EditError::RevisionMismatch {
-                current: current.revision,
-            });
-        }
         Ok(MutationPermit {
             project,
-            records_revision: self.kind.tracks_revision(),
+            records_revision: self.kind.advances_revision(),
             issued: Cell::new(None),
         })
     }
@@ -216,7 +231,7 @@ pub struct MutationTicket<'a> {
     _permit: PhantomData<&'a ()>,
 }
 
-/// 判定 1〜5 を要求全体へ適用する。
+/// 判定 1〜4 を要求全体へ適用する。
 ///
 /// `guards` には要求が持つ全てのシーン guard を、`selectors` には要求が含む
 /// 全ての [`ObjectSelector`] をネストも含めて渡す。判定を段ごとに全対象へ
@@ -242,13 +257,7 @@ pub(crate) fn verify_boundary(
             return Err(ReadError::EpochMismatch.into());
         }
     }
-    // 3. 前提の revision。fingerprint が一致していても拒否する。
-    if kind.tracks_revision() && expected.project_revision != observed.revision {
-        return Err(EditError::RevisionMismatch {
-            current: observed.revision,
-        });
-    }
-    // 4. シーンの guard。区間へ入った時点の編集情報と照合する。
+    // 3. シーンの guard。区間へ入った時点の編集情報と照合する。
     let scene_id = entry_info.scene_id;
     for guard in guards {
         ensure_scene(*guard, scene_id)?;
@@ -256,7 +265,7 @@ pub(crate) fn verify_boundary(
     for selector in selectors {
         ensure_scene(selector.scene_id, scene_id)?;
     }
-    // 5. fingerprint の算出方式。
+    // 4. fingerprint の算出方式。
     for selector in selectors {
         ensure_fingerprint_algorithm(&selector.fingerprint_algorithm)?;
     }
@@ -393,11 +402,27 @@ mod tests {
     }
 
     #[test]
-    fn revision_is_checked_after_both_epochs_and_before_the_scene() {
+    fn a_stale_revision_does_not_reject_a_content_edit() {
         let project = state();
         project.on_object_updated();
         let epoch = project.epoch();
-        // revision と scene の双方が食い違う要求は revision で落ちる。
+        verify_boundary(
+            &project,
+            &edit_info(0),
+            &expected(&epoch, 0),
+            EditKind::Content,
+            &[0],
+            &[&selector(&epoch)],
+        )
+        .expect("古い revision の前提が拒否されました");
+    }
+
+    #[test]
+    fn a_stale_revision_does_not_hide_the_scene_check() {
+        // revision を見なくなっても、後続の判定はそのまま働く。
+        let project = state();
+        project.on_object_updated();
+        let epoch = project.epoch();
         let error = verify_boundary(
             &project,
             &edit_info(7),
@@ -406,13 +431,12 @@ mod tests {
             &[0],
             &[&selector(&epoch)],
         )
-        .expect_err("revision 不一致が受理されました");
-        assert_eq!(error.details()["mismatch"], json!("project_revision"));
-        assert_eq!(error.details()["current_project_revision"], json!(1));
+        .expect_err("シーンの食い違いが受理されました");
+        assert_eq!(error.details()["mismatch"], json!("scene_id"));
     }
 
     #[test]
-    fn selection_edits_skip_the_revision_check() {
+    fn a_stale_revision_does_not_reject_a_selection_edit() {
         let project = state();
         project.on_object_updated();
         let epoch = project.epoch();
@@ -424,7 +448,7 @@ mod tests {
             &[0],
             &[],
         )
-        .expect("選択状態の変更が revision の照合で拒否されました");
+        .expect("選択状態の変更が古い revision で拒否されました");
     }
 
     #[test]
@@ -489,7 +513,9 @@ mod tests {
     }
 
     #[test]
-    fn revalidation_rejects_a_revision_change() {
+    fn revalidation_ignores_a_revision_change() {
+        // 再検証が見るのはプロジェクト境界だけである。解決中に他所の変更が
+        // 入っても、対象の内容が変わっていなければ変更を止めない。
         let project = state();
         let epoch = project.epoch();
         let boundary = verify_boundary(
@@ -502,11 +528,9 @@ mod tests {
         )
         .unwrap();
         project.on_object_updated();
-        let error = boundary
+        boundary
             .revalidate(&project)
-            .err()
-            .expect("revision の変化後に変更が許可されました");
-        assert_eq!(error.details()["mismatch"], json!("project_revision"));
+            .expect("revision の変化で変更が拒否されました");
     }
 
     #[test]

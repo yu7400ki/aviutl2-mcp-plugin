@@ -116,8 +116,6 @@ impl std::fmt::Display for NotIssuedReason {
 pub enum Mismatch {
     /// プロジェクトの epoch。
     ProjectEpoch,
-    /// プロジェクトの revision。
-    ProjectRevision,
     /// 現在シーンの ID。
     SceneId,
     /// fingerprint の算出方式。
@@ -131,7 +129,6 @@ impl Mismatch {
     fn as_str(self) -> &'static str {
         match self {
             Mismatch::ProjectEpoch => "project_epoch",
-            Mismatch::ProjectRevision => "project_revision",
             Mismatch::SceneId => "scene_id",
             Mismatch::FingerprintAlgorithm => "fingerprint_algorithm",
             Mismatch::Fingerprint => "fingerprint",
@@ -152,12 +149,6 @@ pub enum EditError {
     /// 層が要り、対応の取り違えを招く。
     #[error(transparent)]
     Read(#[from] ReadError),
-    /// プロジェクトの revision が要求の前提と異なる。
-    #[error("プロジェクトの revision が要求の前提と一致しません")]
-    RevisionMismatch {
-        /// 現在の revision。
-        current: u64,
-    },
     /// 作成・移動の宛先に既存オブジェクトがある。
     #[error("宛先に既存のオブジェクトがあります")]
     DestinationOccupied {
@@ -249,9 +240,9 @@ impl EditError {
     pub fn error_code(&self) -> ErrorCode {
         match self {
             EditError::Read(error) => error.error_code(),
-            EditError::RevisionMismatch { .. }
-            | EditError::DestinationOccupied { .. }
-            | EditError::LayerLocked { .. } => ErrorCode::PreconditionFailed,
+            EditError::DestinationOccupied { .. } | EditError::LayerLocked { .. } => {
+                ErrorCode::PreconditionFailed
+            }
             EditError::EffectNotFound { .. } => ErrorCode::NotFound,
             EditError::ItemWrite(error) => error.error_code(),
             EditError::UnsupportedTarget { .. } => ErrorCode::UnsupportedOperation,
@@ -279,7 +270,6 @@ impl EditError {
                 Some(Mismatch::FingerprintAlgorithm)
             }
             EditError::Read(ReadError::FingerprintMismatch) => Some(Mismatch::Fingerprint),
-            EditError::RevisionMismatch { .. } => Some(Mismatch::ProjectRevision),
             EditError::AfterMutation { source, .. } => source.mismatch(),
             _ => None,
         }
@@ -292,9 +282,9 @@ impl EditError {
             EditError::AfterMutation { .. } => RetryRequires::Refetch,
             EditError::Read(ReadError::NotReady)
             | EditError::Read(ReadError::EditBlocked { .. }) => RetryRequires::Resend,
-            EditError::RevisionMismatch { .. }
-            | EditError::DestinationOccupied { .. }
-            | EditError::LayerLocked { .. } => RetryRequires::Refetch,
+            EditError::DestinationOccupied { .. } | EditError::LayerLocked { .. } => {
+                RetryRequires::Refetch
+            }
             other => match other.error_code() {
                 ErrorCode::PreconditionFailed => RetryRequires::Refetch,
                 _ => RetryRequires::None,
@@ -323,9 +313,6 @@ impl EditError {
     fn fill_details(&self, details: &mut Map<String, Value>) {
         match self {
             EditError::Read(error) => merge(details, error.details()),
-            EditError::RevisionMismatch { current } => {
-                details.insert("current_project_revision".to_string(), json!(current));
-            }
             EditError::DestinationOccupied { layer, frame } => {
                 details.insert("reason".to_string(), json!("destination_occupied"));
                 details.insert("layer".to_string(), json!(layer));
@@ -430,7 +417,6 @@ mod tests {
                 operation: "get_object_alias",
             }),
             EditError::Read(ReadError::Panicked),
-            EditError::RevisionMismatch { current: 43 },
             EditError::DestinationOccupied {
                 layer: 3,
                 frame: 240,
@@ -491,7 +477,6 @@ mod tests {
     fn variant_name(error: &EditError) -> &'static str {
         match error {
             EditError::Read(_) => "Read",
-            EditError::RevisionMismatch { .. } => "RevisionMismatch",
             EditError::DestinationOccupied { .. } => "DestinationOccupied",
             EditError::LayerLocked { .. } => "LayerLocked",
             EditError::EffectNotFound { .. } => "EffectNotFound",
@@ -511,7 +496,6 @@ mod tests {
         // 落ちたものは応答コードも再試行の案内も許可キーも守られない。
         const VARIANTS: &[&str] = &[
             "Read",
-            "RevisionMismatch",
             "DestinationOccupied",
             "LayerLocked",
             "EffectNotFound",
@@ -600,7 +584,6 @@ mod tests {
                 ErrorCode::InternalError,
                 ErrorCode::PreconditionFailed,
                 ErrorCode::PreconditionFailed,
-                ErrorCode::PreconditionFailed,
                 ErrorCode::NotFound,
                 ErrorCode::NotFound,
                 ErrorCode::UnsupportedOperation,
@@ -671,10 +654,6 @@ mod tests {
         let expected = [
             (EditError::Read(ReadError::EpochMismatch), "project_epoch"),
             (
-                EditError::RevisionMismatch { current: 1 },
-                "project_revision",
-            ),
-            (
                 EditError::Read(ReadError::SceneMismatch {
                     expected: 0,
                     current: 1,
@@ -695,6 +674,19 @@ mod tests {
         ];
         for (error, mismatch) in expected {
             assert_eq!(error.details()["mismatch"], json!(mismatch), "{error}");
+        }
+    }
+
+    #[test]
+    fn no_failure_names_the_revision_as_the_failing_check() {
+        // revision は照合しない。食い違いとして名乗る失敗が現れれば、照合が
+        // 戻ったか、要求元へ訂正できない再送を促していることになる。
+        for error in all_errors() {
+            assert_ne!(
+                error.details().get("mismatch"),
+                Some(&json!("project_revision")),
+                "{error} が revision の食い違いを名乗りました"
+            );
         }
     }
 

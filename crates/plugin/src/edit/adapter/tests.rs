@@ -263,11 +263,11 @@ fn the_expected_epoch_is_checked_first() {
 }
 
 #[test]
-fn the_selector_epoch_is_checked_before_the_revision() {
+fn the_selector_epoch_is_checked_even_with_a_current_revision() {
     let harness = Harness::new();
     harness.project.on_object_updated();
     let mut params = move_params(&harness);
-    params.expected.project_revision = 0;
+    params.expected.project_revision = harness.project.revision();
     params.selector.project_epoch = "別のプロジェクト".to_string();
 
     let error = harness
@@ -279,20 +279,17 @@ fn the_selector_epoch_is_checked_before_the_revision() {
 }
 
 #[test]
-fn a_revision_mismatch_is_rejected_even_when_the_fingerprint_matches() {
+fn a_stale_revision_is_accepted_when_the_fingerprint_matches() {
     let harness = Harness::new();
     let params = move_params(&harness);
     // 対象は変えずに revision だけを進める。fingerprint は一致したままである。
     harness.project.on_object_updated();
 
-    let error = harness
+    harness
         .edit
         .move_object(&params)
-        .expect_err("revision 不一致が受理されました");
-    assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
-    assert_eq!(error.details()["mismatch"], json!("project_revision"));
-    assert_eq!(error.details()["current_project_revision"], json!(1));
-    assert!(!harness.host.mutated());
+        .expect("古い revision の前提が拒否されました");
+    assert!(harness.host.mutated());
 }
 
 #[test]
@@ -389,24 +386,17 @@ fn a_fingerprint_mismatch_is_checked_before_the_operation_preconditions() {
 }
 
 #[test]
-fn the_boundary_is_revalidated_just_before_the_mutation() {
+fn a_revision_change_during_the_resolution_does_not_stop_the_mutation() {
     // 対象の解決と fingerprint の再計算の間に revision が進む状況を作る。
+    // 対象の内容は変わっていないので、変更はそのまま発行される。
     let harness = Harness::with(|host| host.arm(|knobs| knobs.bump_on_detail = 1));
     let params = move_params(&harness);
 
-    let error = harness
+    harness
         .edit
         .move_object(&params)
-        .expect_err("解決中の変化が見過ごされました");
-    assert_eq!(error.details()["mismatch"], json!("project_revision"));
-    assert!(
-        !harness.host.mutated(),
-        "再検証を通らずに変更 API が呼ばれました"
-    );
-    assert!(
-        error.details().get("mutation_issued").is_none(),
-        "何も変更していないのに変更発行として報告されました"
-    );
+        .expect("解決中の revision の変化で変更が止まりました");
+    assert!(harness.host.mutated());
 }
 
 #[test]
@@ -1737,8 +1727,9 @@ type ContentEdit = fn(&Harness, Expected, ObjectSelector) -> Result<EditOutcome,
 /// operation を 1 つ実行する手続きを引く。
 ///
 /// **網羅 match で書く。** operation を足すとここがコンパイルエラーになるため、
-/// revision の照合・加算・ロックの拒否を確かめる一連のテストから漏れることが
-/// ない。手書きの一覧にしておくと、足し忘れても全て緑のまま通ってしまう。
+/// 古い revision の受理・revision の加算・ロックの拒否を確かめる一連のテスト
+/// から漏れることがない。手書きの一覧にしておくと、足し忘れても全て緑のまま
+/// 通ってしまう。
 ///
 /// 選択状態の変更だけは内容を変えないため `None` を返す。含めるかどうかで
 /// revision の扱いが変わるので、その区別もこの 1 か所に置く。
@@ -1817,7 +1808,7 @@ fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
                 expected,
             })
         },
-        // 選択状態はプロジェクトの内容ではない。revision を照合も加算もしない。
+        // 選択状態はプロジェクトの内容ではない。revision を進めない。
         EditOperation::SetSelection => return None,
     })
 }
@@ -1845,9 +1836,12 @@ fn only_the_selection_change_is_left_out_of_the_content_edits() {
 }
 
 #[test]
-fn every_content_edit_checks_the_revision() {
-    // 内容を変える operation から revision の照合が外れると、同じ前提での
-    // 再送が通り、削除に対して残る唯一のガードが失われる。
+fn every_content_edit_accepts_a_stale_revision() {
+    // revision はプロジェクト全体で 1 つのカウンタであり、どの対象を編集しても
+    // UI 上の操作でも進む。照合すると、人が編集しているプロジェクトでは要求を
+    // 組み立てている間に必ず古くなり、訂正して送り直す間にまた進むため収束
+    // しない。対象が変化していないことは fingerprint が、プロジェクトが同じで
+    // あることは epoch が保証する。
     for (name, run) in content_edits() {
         let harness = Harness::new();
         let stale = harness.expected();
@@ -1855,22 +1849,11 @@ fn every_content_edit_checks_the_revision() {
         // 対象は変えずに revision だけを進める。fingerprint は一致したままである。
         harness.project.on_object_updated();
 
-        let Err(error) = run(&harness, stale, target) else {
-            panic!("{name} が古い revision の前提を受理しました");
-        };
-        assert_eq!(
-            error.error_code(),
-            ErrorCode::PreconditionFailed,
-            "{name} の revision 不一致が前提条件の不整合になりません"
-        );
-        assert_eq!(
-            error.details()["mismatch"],
-            json!("project_revision"),
-            "{name}"
-        );
+        run(&harness, stale, target)
+            .unwrap_or_else(|error| panic!("{name} が古い revision の前提を拒否しました: {error}"));
         assert!(
-            !harness.host.mutated(),
-            "{name} が判定を通らずに変更 API を呼びました"
+            harness.host.mutated(),
+            "{name} が変更 API を呼びませんでした"
         );
     }
 }

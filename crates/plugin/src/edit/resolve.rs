@@ -80,12 +80,11 @@ impl ResolvedEffect<'_> {
     }
 }
 
-/// セレクターが指すオブジェクトを解決する（判定 6〜7）。
+/// セレクターが指すオブジェクトを解決する（判定 5〜6）。
 ///
 /// 候補の探索と fingerprint の照合は読み取り経路と同一の実装を用いる。判定
-/// 1〜5（epoch・revision・シーン・算出方式）は呼び出し側が
-/// [`Boundary`] を得た時点で済んでおり、その [`Boundary`] を要求することで
-/// 順序を型として要求している。
+/// 1〜4（epoch・シーン・算出方式）は呼び出し側が [`Boundary`] を得た時点で
+/// 済んでおり、その [`Boundary`] を要求することで順序を型として要求している。
 pub(crate) fn resolve_object<'sec>(
     editor: &'sec dyn SceneEditor,
     boundary: &Boundary,
@@ -106,7 +105,7 @@ pub(crate) fn resolve_object<'sec>(
     })
 }
 
-/// セレクターが指す effect を解決する（判定 6〜7）。
+/// セレクターが指す effect を解決する（判定 5〜6）。
 ///
 /// オブジェクトと effect の**両方**の fingerprint を照合する。片方だけでは、
 /// 別オブジェクトの同名 effect へ適用する誤りを防げない。
