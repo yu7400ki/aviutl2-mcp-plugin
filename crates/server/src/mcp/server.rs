@@ -19,7 +19,8 @@ use aviutl2_mcp_core::{
     GetEditInfoParams, InstanceId, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
     MAX_PAGE_LIMIT, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_OBJECT,
     OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS, ObjectDetail,
-    SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET,
+    RequestBudgetKind, SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET,
+    SERVER_RESOLVE_BUDGET, request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -53,12 +54,17 @@ const RESOURCE_MIME_TYPE: &str = "application/json";
 /// 既定値は接続先と共有する配分から取る。接続先は自身の各段の上限をこの予算の
 /// 内側に収めるため、既定値を延ばす分には安全だが、縮めると接続先が上限まで
 /// 使った段の途中で予算が尽きる。
+///
+/// 要求フェーズの予算は read と edit で異なる。どちらを使うかは
+/// [`request_budget`](CallLimits::request_budget) が operation 名から選ぶ。
 #[derive(Debug, Clone, Copy)]
 pub struct CallLimits {
     /// インスタンス解決（接続・handshake・ping）の期限。
     pub resolve: Duration,
     /// read operation 1 件の期限。
     pub request: Duration,
+    /// 編集 operation 1 件の期限。
+    pub edit_request: Duration,
 }
 
 impl Default for CallLimits {
@@ -66,6 +72,21 @@ impl Default for CallLimits {
         Self {
             resolve: SERVER_RESOLVE_BUDGET,
             request: SERVER_READ_REQUEST_BUDGET,
+            edit_request: SERVER_EDIT_REQUEST_BUDGET,
+        }
+    }
+}
+
+impl CallLimits {
+    /// operation 名に応じた要求フェーズの期限を返す。
+    ///
+    /// read か edit かの判定は core の選択規則（[`request_budget_kind`]）に
+    /// 委ねる。判定基準を server が独自に持たないことで、片方だけ取り違えた
+    /// ときに検出できない状態を避ける。
+    pub fn request_budget(&self, operation: &str) -> Duration {
+        match request_budget_kind(operation) {
+            RequestBudgetKind::Read => self.request,
+            RequestBudgetKind::Edit => self.edit_request,
         }
     }
 }
@@ -752,7 +773,7 @@ where
     let resolved = resolve_instance(registry_dir, instance_id, config)
         .map_err(|e| failure::from_resolve_error(&e))?;
 
-    let deadline = Instant::now() + limits.request;
+    let deadline = Instant::now() + limits.request_budget(operation);
     tracing::debug!(
         instance = %redact::instance_id(&instance_id),
         operation,
@@ -1254,6 +1275,7 @@ mod tests {
         let limits = CallLimits::default();
         assert_eq!(limits.resolve, SERVER_RESOLVE_BUDGET);
         assert_eq!(limits.request, SERVER_READ_REQUEST_BUDGET);
+        assert_eq!(limits.edit_request, SERVER_EDIT_REQUEST_BUDGET);
         assert_eq!(
             DiscoveryConfig::default().per_candidate_deadline,
             SERVER_RESOLVE_BUDGET
@@ -1265,10 +1287,46 @@ mod tests {
         let limits = CallLimits {
             resolve: Duration::from_millis(120),
             request: Duration::from_millis(340),
+            edit_request: Duration::from_millis(560),
         };
         let server = AviUtl2McpServer::with_limits(PathBuf::from("registry"), limits);
         assert_eq!(server.limits.resolve, Duration::from_millis(120));
         assert_eq!(server.limits.request, Duration::from_millis(340));
+        assert_eq!(server.limits.edit_request, Duration::from_millis(560));
+    }
+
+    #[test]
+    fn request_budget_selects_the_limit_matching_the_operation_kind() {
+        let limits = CallLimits {
+            resolve: Duration::from_millis(1),
+            request: Duration::from_millis(2),
+            edit_request: Duration::from_millis(3),
+        };
+
+        for name in [
+            OPERATION_GET_EDIT_INFO,
+            OPERATION_GET_CURRENT_SCENE,
+            OPERATION_LIST_LAYERS,
+            OPERATION_LIST_OBJECTS,
+            OPERATION_GET_OBJECT,
+            OPERATION_LIST_AVAILABLE_EFFECTS,
+            "ping",
+            "future_operation",
+        ] {
+            assert_eq!(
+                limits.request_budget(name),
+                limits.request,
+                "{name} が read 予算を使っていません"
+            );
+        }
+
+        for op in aviutl2_mcp_core::EditOperation::ALL {
+            assert_eq!(
+                limits.request_budget(op.as_str()),
+                limits.edit_request,
+                "{op:?} が edit 予算を使っていません"
+            );
+        }
     }
 
     #[test]
