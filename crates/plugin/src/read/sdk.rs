@@ -111,8 +111,12 @@ impl ReadHost for SdkReadHost {
 }
 
 /// 参照区間の内側で SDK を呼ぶ読み取り口。
-struct SdkSceneReader<'a> {
-    section: &'a ReadSection,
+///
+/// 編集区間からも用いる。SDK の編集区間は参照区間へ Deref するため、読み取りは
+/// 同じ実装で行える。読み取りを別に書くと、読み取りが返す fingerprint と編集が
+/// 照合する fingerprint が別の材料から算出され得る。
+pub(crate) struct SdkSceneReader<'a> {
+    pub(crate) section: &'a ReadSection,
 }
 
 impl SceneReader for SdkSceneReader<'_> {
@@ -472,7 +476,7 @@ fn assign_effect_indices(names: &[String]) -> Vec<usize> {
 ///
 /// フレーム番号・レイヤー番号は元が `i32` であり、正当な値が `i32::MAX` を
 /// 超えることはない。超えている場合は負値が巨大値へ化けたものとして扱う。
-fn non_negative(value: usize) -> usize {
+pub(crate) fn non_negative(value: usize) -> usize {
     if value > i32::MAX as usize { 0 } else { value }
 }
 

@@ -4,6 +4,8 @@
 //! MCP server からの要求を受け付ける。
 
 #[cfg(windows)]
+pub mod edit;
+#[cfg(windows)]
 pub mod identity;
 #[cfg(windows)]
 pub mod lifecycle;

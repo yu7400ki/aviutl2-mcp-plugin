@@ -277,6 +277,23 @@ impl ProjectState {
         self.notifier.record(ChangeKind::ProjectRevision);
     }
 
+    /// plugin が SDK の変更 API を発行したことを反映する。加算後の値を返す。
+    ///
+    /// 引き金は「要求全体の成功」ではなく「変更 API を 1 回でも発行したこと」で
+    /// ある。逆にすると、変更は入ったのに revision が据え置かれ、同じ前提での
+    /// 再送が前提条件を通ってしまい二重に適用される。未保存の変更が無いという
+    /// 誤った主張が残るのも、それを信じて閉じれば変更が失われるため許容できない。
+    ///
+    /// 加算後の値を返すのは、応答へ載せる値を確定させるためである。加算した後に
+    /// 改めて読み直すと、その間にイベントスレッドが対象更新を配送した場合に別の
+    /// 値を読み、返す値が非決定になる。
+    pub(crate) fn on_edit_issued(&self) -> u64 {
+        let next = self.revision.fetch_add(1, Ordering::Relaxed) + 1;
+        self.modified.store(true, Ordering::Relaxed);
+        self.notifier.record(ChangeKind::ProjectRevision);
+        next
+    }
+
     /// シーン変更イベントを反映する。
     ///
     /// このイベントはシーンの切り替えとシーン情報の更新の双方で発生し、
