@@ -183,6 +183,10 @@ pub(crate) struct Knobs {
     pub(crate) bump_on_detail: u64,
     /// 次の詳細の読み取りでプロジェクト境界を更新するか。1 度だけ働く。
     pub(crate) renew_on_detail: bool,
+    /// 変更を発行した直後に進めるプロジェクト revision の回数。
+    ///
+    /// ホストが plugin 発の編集にも対象更新を配送する状況を作る。
+    pub(crate) bump_after_mutation: u64,
     /// 区間の内側でプロジェクト境界のロックを試みるか。
     ///
     /// 境界は再入できないロックで守られている。編集が区間を跨いでそれを保持
@@ -200,6 +204,7 @@ impl Default for Knobs {
             panic_at: None,
             bump_on_detail: 0,
             renew_on_detail: false,
+            bump_after_mutation: 0,
             probe_lock_in_section: false,
         }
     }
@@ -264,6 +269,11 @@ impl FakeEditHost {
     /// 変更 API が 1 度でも呼ばれたか。
     pub(crate) fn mutated(&self) -> bool {
         self.calls().iter().any(|call| MUTATIONS.contains(call))
+    }
+
+    /// レイヤーのロック状態を切り替える。
+    pub(crate) fn lock_layer(&self, layer: usize, locked: bool) {
+        self.scene.lock().unwrap().layers[layer].locked = locked;
     }
 
     /// フェイクが保持する状態を読む。
@@ -476,7 +486,8 @@ impl FakeSceneEditor<'_> {
     /// 変更 API の失敗を差し込む。
     fn mutation(&self, call: &'static str) -> Result<(), EditError> {
         self.host.record(call);
-        match self.host.knobs().fault {
+        let knobs = self.host.knobs();
+        match knobs.fault {
             Some(Fault::Mutation) => Err(EditError::Sdk { operation: call }),
             Some(Fault::TargetGone) => Err(EditError::NotIssued {
                 reason: NotIssuedReason::TargetMissing,
@@ -545,6 +556,19 @@ impl SceneReader for FakeSceneEditor<'_> {
                 Some(PanicPoint::AfterMutation),
                 "変更を発行した後の読み直しで panic させます"
             );
+            // ホストが plugin 発の編集にも対象更新を配送する状況を作る。応答の
+            // revision を加算時点の値ではなく読み直した値で組み立てていれば、
+            // ここで進めた分だけ食い違う。1 度だけ働かせる。
+            let mut bumps = 0;
+            self.host.arm(|knobs| {
+                bumps = knobs.bump_after_mutation;
+                knobs.bump_after_mutation = 0;
+            });
+            if let Some(project) = &self.host.project {
+                for _ in 0..bumps {
+                    project.on_object_updated();
+                }
+            }
         }
         // 対象の解決と変更の間に境界が変わる状況は 1 度だけ再現する。仕込みを
         // 消費しておかないと、後続の読み直しでも繰り返し働いてしまう。

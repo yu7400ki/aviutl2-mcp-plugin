@@ -390,12 +390,8 @@ fn run_request_loop(
                     );
                 }
 
-                // 期限を過ぎていても結果は捨てず、送信を試みる。
-                let deadline = edit_send_deadline(
-                    Instant::now(),
-                    Utc::now().timestamp_millis(),
-                    request.deadline_unix_ms,
-                );
+                // 期限を過ぎていても結果は捨てず、送信の持ち時間を丸ごと充てる。
+                let deadline = edit_send_deadline(Instant::now());
                 let response = response_envelope(
                     negotiated_version,
                     request.request_id,
@@ -493,7 +489,7 @@ fn execute_read(
     deadline: RequestDeadline,
 ) -> Result<Value, ErrorObject> {
     let request = decode_request(operation, params)?;
-    admit_read(state)?;
+    admit_request(state)?;
     if deadline == RequestDeadline::Exceeded {
         // 未開始の要求は中止する。副作用が無いため再試行可能として返す。
         return Err(timeout_before_execution());
@@ -517,7 +513,7 @@ fn execute_edit(
     deadline: RequestDeadline,
 ) -> Result<Value, ErrorObject> {
     let request = decode_edit_request(operation, params)?;
-    admit_read(state)?;
+    admit_request(state)?;
     if deadline == RequestDeadline::Exceeded {
         // 未実行のまま中止する。副作用が無いため変更は起きていない。
         return Err(edit_timeout_before_execution());
@@ -652,26 +648,32 @@ fn resolve_read_response(
 /// 中途半端な状態が残らない」からであり、編集ではその前提が成り立たない。
 /// 読み取りの破棄経路を編集へ再利用しない。
 ///
-/// 期限を過ぎていた場合は送信上限だけで送る。当の期限で打ち切ると、要求元は
-/// 結果も理由も得られないまま切断だけを観測する。
-fn edit_send_deadline(now: Instant, now_unix_ms: i64, deadline_unix_ms: Option<u64>) -> Instant {
-    match resolve_request_deadline(now, now_unix_ms, WRITE_TIMEOUT, deadline_unix_ms) {
-        RequestDeadline::Within(deadline) => deadline,
-        RequestDeadline::Exceeded => now + WRITE_TIMEOUT,
-    }
+/// **送信には常に送信上限をそのまま充てる。要求の期限で縮めない。** 予算配分は
+/// 送信の持ち時間を実行とは別枠で確保しており、要求の期限で縮めると、実行が
+/// 期限際まで掛かった編集の送信に数ミリ秒しか残らない。送信に失敗すれば適用
+/// 済みの変更が要求元からは無応答に見え、結果を破棄しないことで防ごうとした
+/// 状況がそのまま起きる。
+///
+/// **これは読み取りと異なる規則である。** 読み取りは要求の残り時間と送信上限の
+/// 短い方を採る。捨ててよい結果と、捨ててはいけない結果の差がここに出る。
+fn edit_send_deadline(now: Instant) -> Instant {
+    now + WRITE_TIMEOUT
 }
 
-/// ライフサイクル状態が読み取りを受け付けられるかを判定する。
+/// ライフサイクル状態が読み取り・編集を受け付けられるかを判定する。
 ///
-/// 起動処理中は編集ハンドルが読み取り API を受け付けられず、呼ぶこと自体が
-/// 許されない。終了処理中は新規要求を受け付けない。いずれも要求内容の誤りでは
-/// ないため、間隔を空けた再試行を案内する。再生・出力中の判別は編集状態を
-/// 確かめられる読み取り口の責務であり、`busy` はここでは通す。
-fn admit_read(state: &InstanceState) -> Result<(), ErrorObject> {
+/// 起動処理中は編集ハンドルが読み取り API も編集 API も受け付けられず、呼ぶこと
+/// 自体が許されない。終了処理中は新規要求を受け付けない。いずれも要求内容の
+/// 誤りではないため、間隔を空けた再試行を案内する。再生・出力中の判別は編集
+/// 状態を確かめられる読み取り口・編集口の責務であり、`busy` はここでは通す。
+///
+/// 判定は読み取りと編集で同一であるため 1 つの関数に置く。説明も両方を指す
+/// 文言に揃える。読み取りだけを名指しすると、編集の要求元へ誤った説明が返る。
+fn admit_request(state: &InstanceState) -> Result<(), ErrorObject> {
     match state {
         InstanceState::Ready | InstanceState::Busy => Ok(()),
-        InstanceState::Starting => Err(host_busy("起動処理中のため読み取りを受け付けられません")),
-        InstanceState::Draining => Err(host_busy("終了処理中のため読み取りを受け付けられません")),
+        InstanceState::Starting => Err(host_busy("起動処理中のため要求を受け付けられません")),
+        InstanceState::Draining => Err(host_busy("終了処理中のため要求を受け付けられません")),
         // 接続済みの経路では観測されない。この状態へ移る際は descriptor の削除と
         // pipe の切断が先立ち、要求元は接続の失敗として先に検出する。同じ
         // インスタンスが戻ることはないため再試行の間隔を案内せず、インスタンスを
@@ -680,11 +682,11 @@ fn admit_read(state: &InstanceState) -> Result<(), ErrorObject> {
             ErrorCode::InstanceStale,
             "インスタンスは既に終了しています",
         )),
-        InstanceState::Unknown(_) => Err(host_busy("読み取りを受け付けられない状態です")),
+        InstanceState::Unknown(_) => Err(host_busy("要求を受け付けられない状態です")),
     }
 }
 
-/// 一時的に読み取りを受け付けられないことを、再試行の案内つきで返す。
+/// 一時的に要求を受け付けられないことを、再試行の案内つきで返す。
 fn host_busy(message: &str) -> ErrorObject {
     error_object(ErrorCode::HostBusy, message)
         .with_details(json!({ "retry_after_ms": HOST_BUSY_RETRY_AFTER_MS }))
@@ -2044,9 +2046,9 @@ mod tests {
     }
 
     #[test]
-    fn admit_read_accepts_only_serviceable_states() {
+    fn admit_request_accepts_only_serviceable_states() {
         for state in [InstanceState::Ready, InstanceState::Busy] {
-            assert_eq!(admit_read(&state), Ok(()), "{state} が拒否されました");
+            assert_eq!(admit_request(&state), Ok(()), "{state} が拒否されました");
         }
 
         for state in [
@@ -2054,7 +2056,7 @@ mod tests {
             InstanceState::Draining,
             InstanceState::Unknown("future".to_string()),
         ] {
-            let error = admit_read(&state).unwrap_err();
+            let error = admit_request(&state).unwrap_err();
             assert_eq!(error.code, ErrorCode::HostBusy, "{state} が受理されました");
             assert!(error.retryable);
             assert_eq!(error.details["retry_after_ms"], 500);
@@ -2065,7 +2067,7 @@ mod tests {
     fn gone_instance_is_not_advised_to_retry() {
         // 終了済みのインスタンスは同じ相手として戻らない。再試行の間隔を案内すると
         // 待てば復活するかのように読める。
-        let error = admit_read(&InstanceState::Gone).unwrap_err();
+        let error = admit_request(&InstanceState::Gone).unwrap_err();
         assert_eq!(error.code, ErrorCode::InstanceStale);
         assert_eq!(error.details.get("retry_after_ms"), None);
     }
@@ -2549,16 +2551,23 @@ mod edit_tests {
     }
 
     #[test]
-    fn the_send_deadline_survives_an_expired_request_deadline() {
-        // 編集は結果を破棄しない。期限を過ぎていても送信の持ち時間を確保する。
+    fn the_send_budget_is_never_shortened_by_the_request_deadline() {
+        // 編集は結果を破棄しないため、送信には常に送信上限をそのまま充てる。
+        // 期限際まで掛かった編集の送信に数ミリ秒しか残らないと、適用済みの
+        // 変更が要求元からは無応答に見える。
         let now = Instant::now();
+        assert_eq!(edit_send_deadline(now), now + WRITE_TIMEOUT);
+
+        // 読み取りは要求の残り時間で縮める。捨ててよい結果と捨ててはいけない
+        // 結果の差がここに出る。
         assert_eq!(
-            edit_send_deadline(now, NOW_UNIX_MS, Some((NOW_UNIX_MS - 1) as u64)),
-            now + WRITE_TIMEOUT
-        );
-        assert_eq!(
-            edit_send_deadline(now, NOW_UNIX_MS, Some((NOW_UNIX_MS + 200) as u64)),
-            now + Duration::from_millis(200)
+            resolve_request_deadline(
+                now,
+                NOW_UNIX_MS,
+                WRITE_TIMEOUT,
+                Some((NOW_UNIX_MS + 200) as u64)
+            ),
+            RequestDeadline::Within(now + Duration::from_millis(200))
         );
     }
 

@@ -1706,3 +1706,210 @@ fn a_panic_before_any_mutation_is_not_reported_as_a_possible_change() {
         "何も変更していないのに変更が入った可能性として報告されました"
     );
 }
+
+// ------------------------------------- 内容を変える operation の共通の約束
+
+/// 内容を変える operation を 1 つ実行する。
+type ContentEdit = fn(&Harness, Expected) -> Result<EditOutcome, EditError>;
+
+/// 内容を変える 8 つの operation を 1 つずつ実行する。
+///
+/// 選択状態の変更だけは内容を変えないため含めない。含めるかどうかで
+/// revision の扱いが変わるので、一覧はここへ 1 つだけ置く。
+fn content_edits() -> Vec<(&'static str, ContentEdit)> {
+    vec![
+        ("create_object", |harness, expected| {
+            harness.edit.create_object(&CreateObjectParams {
+                source: ObjectSource::ObjectAlias {
+                    alias: "[obj]".to_string(),
+                },
+                placement: Placement {
+                    scene_id: SCENE_ID,
+                    layer: 1,
+                    frame: 600,
+                },
+                expected,
+            })
+        }),
+        ("move_object", |harness, expected| {
+            harness.edit.move_object(&MoveObjectParams {
+                selector: harness.selector(1, 100),
+                destination: Destination {
+                    layer: 1,
+                    frame: 500,
+                },
+                expected,
+            })
+        }),
+        ("delete_object", |harness, expected| {
+            harness.edit.delete_object(&DeleteObjectParams {
+                selector: harness.selector(1, 100),
+                expected,
+            })
+        }),
+        ("set_object_name", |harness, expected| {
+            harness.edit.set_object_name(&SetObjectNameParams {
+                selector: harness.selector(1, 100),
+                name: Some("名前".to_string()),
+                expected,
+            })
+        }),
+        ("set_object_item", |harness, expected| {
+            harness.edit.set_object_item(&SetObjectItemParams {
+                selector: harness.effect_selector(1, 100, "ぼかし", 0),
+                item: "範囲".to_string(),
+                value: ItemValue::Integer { value: 30 },
+                expected,
+            })
+        }),
+        ("add_effect", |harness, expected| {
+            harness.edit.add_effect(&AddEffectParams {
+                object: harness.selector(1, 100),
+                effect_name: "ぼかし".to_string(),
+                expected,
+            })
+        }),
+        ("delete_effect", |harness, expected| {
+            harness.edit.delete_effect(&DeleteEffectParams {
+                selector: harness.effect_selector(1, 100, "ぼかし", 0),
+                expected,
+            })
+        }),
+        ("set_effect_state", |harness, expected| {
+            harness.edit.set_effect_state(&SetEffectStateParams {
+                selector: harness.effect_selector(1, 100, "ぼかし", 0),
+                enabled: Some(false),
+                locked: None,
+                expected,
+            })
+        }),
+    ]
+}
+
+#[test]
+fn every_content_edit_checks_the_revision() {
+    // 内容を変える operation から revision の照合が外れると、同じ前提での
+    // 再送が通り、削除に対して残る唯一のガードが失われる。
+    for (name, run) in content_edits() {
+        let harness = Harness::new();
+        let stale = harness.expected();
+        // 対象は変えずに revision だけを進める。fingerprint は一致したままである。
+        harness.project.on_object_updated();
+
+        let Err(error) = run(&harness, stale) else {
+            panic!("{name} が古い revision の前提を受理しました");
+        };
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::PreconditionFailed,
+            "{name} の revision 不一致が前提条件の不整合になりません"
+        );
+        assert_eq!(
+            error.details()["mismatch"],
+            json!("project_revision"),
+            "{name}"
+        );
+        assert!(
+            !harness.host.mutated(),
+            "{name} が判定を通らずに変更 API を呼びました"
+        );
+    }
+}
+
+#[test]
+fn every_content_edit_advances_the_revision_once() {
+    for (name, run) in content_edits() {
+        let harness = Harness::new();
+        let expected = harness.expected();
+        let outcome = run(&harness, expected).unwrap_or_else(|error| {
+            panic!("{name} が失敗しました: {error}");
+        });
+
+        assert_eq!(
+            harness.project.revision(),
+            1,
+            "{name} が revision を進めていません"
+        );
+        assert_eq!(
+            outcome.project_revision, 1,
+            "{name} の応答が加算後の revision を返していません"
+        );
+        assert!(
+            harness.project.modified(),
+            "{name} が未保存の変更を記録していません"
+        );
+    }
+}
+
+#[test]
+fn every_content_edit_refuses_a_locked_layer() {
+    // ロックの確認が一部の経路にしか無いと、残りの経路から無言で書き換えられる。
+    // 利用者が明示的にロックした対象への書き換えは削除と同格の破壊である。
+    for (name, run) in content_edits() {
+        let harness = Harness::new();
+        let expected = harness.expected();
+        // 対象と作成先を含むレイヤーをロックする。
+        harness.host.lock_layer(1, true);
+
+        let Err(error) = run(&harness, expected) else {
+            panic!("{name} がロックされたレイヤーを書き換えました");
+        };
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::PreconditionFailed,
+            "{name} がロックを前提条件として扱いません"
+        );
+        assert_eq!(error.details()["reason"], json!("layer_locked"), "{name}");
+        assert!(!harness.host.mutated(), "{name} が変更 API を呼びました");
+        assert_eq!(harness.project.revision(), 0, "{name}");
+    }
+}
+
+#[test]
+fn creation_checks_the_scene_guard_of_its_placement() {
+    // 作成は対象を指すセレクターを持たないため、配置先の guard だけが別シーンへの
+    // 適用を防ぐ。シーン切替のイベントは非同期であり、配送前の窓では revision が
+    // 一致したまま別シーンになり得る。
+    let harness = Harness::new();
+    let error = harness
+        .edit
+        .create_object(&CreateObjectParams {
+            source: ObjectSource::ObjectAlias {
+                alias: "[obj]".to_string(),
+            },
+            placement: Placement {
+                scene_id: SCENE_ID + 7,
+                layer: 1,
+                frame: 600,
+            },
+            expected: harness.expected(),
+        })
+        .expect_err("別シーン向けの作成が受理されました");
+
+    assert_eq!(error.details()["mismatch"], json!("scene_id"));
+    assert_eq!(error.details()["expected_scene_id"], json!(SCENE_ID + 7));
+    harness.assert_untouched();
+}
+
+#[test]
+fn the_response_revision_comes_from_the_increment_not_from_a_reread() {
+    // ホストが plugin 発の編集にも対象更新を配送する環境では、加算のあとに
+    // 読み直すと別の値を読む。応答が返す revision が非決定になり、要求元の
+    // 次の編集が確率的に前提条件で落ちる。
+    let harness = Harness::with(|host| host.arm(|knobs| knobs.bump_after_mutation = 3));
+    let params = move_params(&harness);
+    let outcome = harness
+        .edit
+        .move_object(&params)
+        .expect("移動に失敗しました");
+
+    assert_eq!(
+        outcome.project_revision, 1,
+        "応答が加算時点の値ではなく読み直した値を返しています"
+    );
+    assert_eq!(
+        harness.project.revision(),
+        4,
+        "読み直せば別の値になる状況が作れていません"
+    );
+}
