@@ -9,8 +9,8 @@
 use crate::EDIT_HANDLE;
 use crate::read::error::ReadError;
 use crate::read::host::{
-    EditState, HostEditInfo, HostEffect, HostLayer, HostObject, HostObjectDetail, ReadHost,
-    SceneReader,
+    EditState, HostEditInfo, HostEffect, HostLayer, HostObject, HostObjectDetail,
+    HostObjectPlacement, ReadHost, SceneReader,
 };
 use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection};
 use aviutl2_mcp_core::{
@@ -165,13 +165,13 @@ impl SceneReader for SdkSceneReader<'_> {
         Ok(positions.len())
     }
 
-    fn objects_in_layer(&self, layer: usize) -> Result<Vec<HostObject>, ReadError> {
+    fn object_placements(&self, layer: usize) -> Result<Vec<HostObjectPlacement>, ReadError> {
         scan_layer(|frame| {
             let Some(handle) = self.find_object_from(layer, frame)? else {
                 return Ok(None);
             };
-            let object = self.object_at(handle)?;
-            Ok(Some((object.frame_end, object)))
+            let placement = self.placement_at(handle)?;
+            Ok(Some((placement.frame_end, placement)))
         })
     }
 
@@ -207,11 +207,8 @@ impl SdkSceneReader<'_> {
             .map_err(|_| sdk("find_object"))
     }
 
-    /// ハンドルが指すオブジェクトを所有型へ写す。
-    ///
-    /// 一覧も詳細もこの 1 か所を通す。同一性の材料をここで揃えることが、
-    /// どちらの経路から算出しても同じ fingerprint になることを保証する。
-    fn object_at(&self, handle: ObjectHandle) -> Result<HostObject, ReadError> {
+    /// ハンドルが指すオブジェクトの位置と名前を所有型へ写す。
+    fn placement_at(&self, handle: ObjectHandle) -> Result<HostObjectPlacement, ReadError> {
         let position = self
             .section
             .get_object_layer_frame(handle)
@@ -221,15 +218,26 @@ impl SdkSceneReader<'_> {
             .section
             .get_object_name(handle)
             .map_err(|_| sdk("get_object_name"))?;
+        Ok(HostObjectPlacement {
+            layer: non_negative(position.layer),
+            frame_start: non_negative(position.start),
+            frame_end: non_negative(position.end),
+            name,
+        })
+    }
+
+    /// ハンドルが指すオブジェクトを、同一性の材料まで含めて所有型へ写す。
+    ///
+    /// alias と effect を読むのはこの 1 か所だけであり、fingerprint の材料は
+    /// 必ずここで揃う。
+    fn object_at(&self, handle: ObjectHandle) -> Result<HostObject, ReadError> {
+        let placement = self.placement_at(handle)?;
         let alias = self
             .section
             .get_object_alias(handle)
             .map_err(|_| sdk("get_object_alias"))?;
         Ok(HostObject {
-            layer: non_negative(position.layer),
-            frame_start: non_negative(position.start),
-            frame_end: non_negative(position.end),
-            name,
+            placement,
             alias,
             effects: self.effects_of(handle)?,
         })
@@ -415,7 +423,7 @@ fn scan_layer<T>(
 /// 探索は「指定フレーム以降」であり、途中フレームを指定すると後続の対象が
 /// 返る。開始フレームで一致する対象だけを受け入れる。
 fn ensure_start_frame(object: HostObject, frame_start: usize) -> Result<HostObject, ReadError> {
-    if object.frame_start == frame_start {
+    if object.placement.frame_start == frame_start {
         Ok(object)
     } else {
         Err(ReadError::ObjectNotFound)
@@ -544,12 +552,18 @@ mod tests {
     use super::*;
     use aviutl2_mcp_core::ErrorCode;
 
-    fn object(frame_start: usize, frame_end: usize) -> HostObject {
-        HostObject {
+    fn placement(frame_start: usize, frame_end: usize) -> HostObjectPlacement {
+        HostObjectPlacement {
             layer: 1,
             frame_start,
             frame_end,
             name: None,
+        }
+    }
+
+    fn object(frame_start: usize, frame_end: usize) -> HostObject {
+        HostObject {
+            placement: placement(frame_start, frame_end),
             alias: format!("[{frame_start}]"),
             effects: Vec::new(),
         }
@@ -561,12 +575,12 @@ mod tests {
     /// と同じく、途中フレームを指定してもその対象が返る。
     fn layer_scan(
         placements: Vec<(usize, usize)>,
-    ) -> impl FnMut(usize) -> Result<Option<(usize, HostObject)>, ReadError> {
+    ) -> impl FnMut(usize) -> Result<Option<(usize, HostObjectPlacement)>, ReadError> {
         move |frame| {
             Ok(placements
                 .iter()
                 .find(|(_, end)| *end >= frame)
-                .map(|(start, end)| (*end, object(*start, *end))))
+                .map(|(start, end)| (*end, placement(*start, *end))))
         }
     }
 
@@ -685,6 +699,7 @@ mod tests {
         assert_eq!(
             ensure_start_frame(object(100, 200), 100)
                 .unwrap()
+                .placement
                 .frame_start,
             100
         );

@@ -802,10 +802,10 @@ mod tests {
             panic!("参照区間の内側で panic させます")
         }
 
-        fn objects_in_layer(
+        fn object_placements(
             &self,
             _layer: usize,
-        ) -> Result<Vec<crate::read::host::HostObject>, crate::read::ReadError> {
+        ) -> Result<Vec<crate::read::host::HostObjectPlacement>, crate::read::ReadError> {
             panic!("参照区間の内側で panic させます")
         }
 

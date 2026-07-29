@@ -93,14 +93,14 @@ pub struct HostLayer {
     pub locked: bool,
 }
 
-/// オブジェクトの位置と同一性の材料。
+/// オブジェクトの位置と名前。
 ///
-/// 配下 effect も同一性の材料であるため、この型が併せて保持する。オブジェクトの
-/// fingerprint は配下 effect の fingerprint 列を含むので、effect を伴わない読み
-/// 取り結果からは算出できない。一覧と詳細で材料が食い違うと、一覧が返した
-/// セレクターで詳細を引けなくなる。
-#[derive(Debug, Clone, PartialEq)]
-pub struct HostObject {
+/// 対象の絞り込みと並び順の決定に必要な最小限の材料であり、alias も effect も
+/// 含まない。走査のたびにレイヤー内の全オブジェクトの alias と effect を読むと、
+/// 参照区間の保持時間がプロジェクトの規模に比例して伸び、無関係な対象の
+/// 読み取り失敗が走査全体を巻き込む。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostObjectPlacement {
     /// 0 始まりのレイヤー番号。
     pub layer: usize,
     /// 0 始まりの開始フレーム番号。
@@ -109,6 +109,17 @@ pub struct HostObject {
     pub frame_end: usize,
     /// オブジェクト名。標準名のままなら `None`。
     pub name: Option<String>,
+}
+
+/// オブジェクトの位置と同一性の材料。
+///
+/// 配下 effect も同一性の材料であるため、この型が併せて保持する。オブジェクトの
+/// fingerprint は配下 effect の fingerprint 列を含むので、effect を伴わない読み
+/// 取り結果からは算出できない。
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostObject {
+    /// 位置と名前。
+    pub placement: HostObjectPlacement,
     /// 正規化前の alias。
     pub alias: String,
     /// 付与された effect を、付与された順に並べた列。
@@ -158,18 +169,18 @@ pub trait SceneReader {
     /// 別のメソッドにしてある。
     fn object_count(&self, layer: usize) -> Result<usize, ReadError>;
 
-    /// レイヤー内のオブジェクトを開始フレームの昇順で全件返す。
+    /// レイヤー内のオブジェクトの位置と名前を開始フレームの昇順で全件返す。
+    ///
+    /// alias も effect も読まない。対象の絞り込みと並び順の決定はこの結果だけで
+    /// 行い、同一性の材料は対象が確定してから [`Self::object_detail`] で読む。
     ///
     /// 途中で走査を打ち切った不完全な一覧は返さない。全件を返せない場合は失敗する。
-    ///
-    /// 各オブジェクトは配下 effect まで含めて返す。同一性の材料が欠けた
-    /// オブジェクトを返すと、一覧が算出する fingerprint と詳細が算出する
-    /// fingerprint が食い違う。
-    fn objects_in_layer(&self, layer: usize) -> Result<Vec<HostObject>, ReadError>;
+    fn object_placements(&self, layer: usize) -> Result<Vec<HostObjectPlacement>, ReadError>;
 
     /// 開始フレームが完全一致するオブジェクトの詳細を返す。
     ///
-    /// 返すオブジェクトは [`Self::objects_in_layer`] が返すものと同じ材料を持つ。
+    /// alias と配下 effect を含む同一性の材料は、この経路だけが返す。fingerprint は
+    /// 必ずここから算出する。
     ///
     /// 一致する対象が無い場合は [`ReadError::ObjectNotFound`] を返す。
     fn object_detail(
