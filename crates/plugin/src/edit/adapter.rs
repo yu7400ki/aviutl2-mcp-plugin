@@ -320,15 +320,14 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             }
 
             let permit = boundary.revalidate(project)?;
-            let issued = match &params.source {
+            permit.issue(&boundary, |ticket| match &params.source {
                 ObjectSource::MediaFile { path } => {
-                    editor.create_object_from_media_file(permit.ticket(), path, layer, frame)
+                    editor.create_object_from_media_file(ticket, path, layer, frame)
                 }
                 ObjectSource::ObjectAlias { alias } => {
-                    editor.create_object_from_alias(permit.ticket(), alias, layer, frame)
+                    editor.create_object_from_alias(ticket, alias, layer, frame)
                 }
-            };
-            attribute(&permit, &boundary, issued)?;
+            })?;
 
             let after = attribute(&permit, &boundary, editor.reader().object_placements(layer))?;
             let created = created_frame_starts(&before, after);
@@ -383,8 +382,9 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             ensure_destination_free(&occupants, layer, frame, moving_from)?;
 
             let permit = boundary.revalidate(project)?;
-            let issued = editor.move_object(permit.ticket(), &object, layer, frame);
-            attribute(&permit, &boundary, issued)?;
+            permit.issue(&boundary, |ticket| {
+                editor.move_object(ticket, &object, layer, frame)
+            })?;
 
             let (summary, _) =
                 attribute(&permit, &boundary, reread(editor, &boundary, layer, frame))?;
@@ -413,8 +413,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             ensure_layer_unlocked(editor, object.layer())?;
 
             let permit = boundary.revalidate(project)?;
-            let issued = editor.delete_object(permit.ticket(), &object);
-            attribute(&permit, &boundary, issued)?;
+            permit.issue(&boundary, |ticket| editor.delete_object(ticket, &object))?;
 
             // 削除は戻り値を持たない。同一区間内で解決し直し、不在を確かめる。
             match editor
@@ -454,8 +453,9 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             ensure_layer_unlocked(editor, object.layer())?;
 
             let permit = boundary.revalidate(project)?;
-            let issued = editor.set_object_name(permit.ticket(), &object, name);
-            attribute(&permit, &boundary, issued)?;
+            permit.issue(&boundary, |ticket| {
+                editor.set_object_name(ticket, &object, name)
+            })?;
 
             // 名前の設定は戻り値を持たない。読み直して反映を確かめる。
             let (summary, _) = attribute(
@@ -502,8 +502,9 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 .map_err(EditError::ItemWrite)?;
 
             let permit = boundary.revalidate(project)?;
-            let issued = editor.set_effect_item(permit.ticket(), &effect, &params.item, &value);
-            attribute(&permit, &boundary, issued)?;
+            permit.issue(&boundary, |ticket| {
+                editor.set_effect_item(ticket, &effect, &params.item, &value)
+            })?;
 
             // 読み直した値は成否の判定に使わない。ホスト側で正規化され得るため、
             // 書いた文字列との一致を求めると正常な正規化を失敗と誤診断する。
@@ -541,8 +542,9 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let before = effect_names(object.effects());
 
             let permit = boundary.revalidate(project)?;
-            let issued = editor.create_effect(permit.ticket(), &object, &params.effect_name);
-            attribute(&permit, &boundary, issued)?;
+            permit.issue(&boundary, |ticket| {
+                editor.create_effect(ticket, &object, &params.effect_name)
+            })?;
 
             let (summary, effects) = attribute(
                 &permit,
@@ -592,8 +594,9 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             ensure_layer_unlocked(editor, object.layer())?;
 
             let permit = boundary.revalidate(project)?;
-            let issued = editor.delete_effect(permit.ticket(), &object, &effect);
-            attribute(&permit, &boundary, issued)?;
+            permit.issue(&boundary, |ticket| {
+                editor.delete_effect(ticket, &object, &effect)
+            })?;
 
             let (summary, _) = attribute(
                 &permit,
@@ -627,12 +630,14 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
 
             let permit = boundary.revalidate(project)?;
             if let Some(enabled) = params.enabled {
-                let issued = editor.set_effect_enabled(permit.ticket(), &effect, enabled);
-                attribute(&permit, &boundary, issued)?;
+                permit.issue(&boundary, |ticket| {
+                    editor.set_effect_enabled(ticket, &effect, enabled)
+                })?;
             }
             if let Some(locked) = params.locked {
-                let issued = editor.set_effect_locked(permit.ticket(), &effect, locked);
-                attribute(&permit, &boundary, issued)?;
+                permit.issue(&boundary, |ticket| {
+                    editor.set_effect_locked(ticket, &effect, locked)
+                })?;
             }
 
             // 有効・ロックの設定は戻り値を持たず、対象によっては無言で無視される。
@@ -665,7 +670,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
         self.ensure_editable()?;
         let project = self.project.as_ref();
 
-        let (epoch, revision, applied) = self.edit_section(move |editor| {
+        let (epoch, revision, outcome) = self.edit_section(move |editor| {
             let focus_selector = match &params.focus {
                 Some(FocusChange::Set { object }) => Some(object),
                 _ => None,
@@ -686,11 +691,11 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 .transpose()?;
 
             let permit = boundary.revalidate(project)?;
-            let applied = apply_selection(editor, &permit, params, focus.as_ref())?;
+            let outcome = apply_selection(editor, &permit, &boundary, params, focus.as_ref());
             Ok((
                 boundary.epoch().to_string(),
                 permit.project_revision(&boundary),
-                applied,
+                outcome,
             ))
         })?;
 
@@ -698,7 +703,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
         // あり、フォーカスは区間の処理が終わってから適用されるため、区間内では
         // 観測できない。観測が編集と原子的でないことは応答で伝える。
         let observed = guard(|| self.host.observed_selection())?;
-        Ok(selection_state(epoch, revision, observed, applied))
+        Ok(selection_state(epoch, revision, observed, outcome))
     }
 }
 
@@ -711,69 +716,90 @@ fn attribute<T>(
     result.map_err(|error| permit.attribute(boundary, error.into()))
 }
 
+/// 適用を試みた結果。
+///
+/// 要求された項目は必ず `applied` か `not_applied` のどちらかに現れる。
+struct SelectionOutcome {
+    /// 実際に適用できた項目。
+    applied: Vec<SelectionField>,
+    /// 要求されたが適用できなかった項目。
+    not_applied: Vec<SelectionField>,
+}
+
 /// カーソル・選択範囲・フォーカスを固定の順序で適用する。
 ///
 /// 順序を固定するのは、途中で失敗したときの状態を一意にするためである。
 /// フォーカスはどのみち区間の処理の最後に適用されるため、この順序は SDK の
 /// 挙動とも整合する。
 ///
-/// 途中で失敗しても先に適用した分は巻き戻さない。ひとつも適用できなかった場合
-/// だけ失敗として返す。1 つでも適用できていれば、応答が適用できた項目を列挙
-/// することで欠けた項目まで含めて要求元へ伝わる。全て失敗したときにまで成功を
-/// 返すと、何も起きていない要求を成功として報告することになる。
+/// 途中で失敗しても先に適用した分は巻き戻さず、以降も試みない。適用の可否は
+/// **常に成功応答の 2 つの一覧で伝える**。失敗として返すと、どこまで適用された
+/// かを載せる場所が無くなる（失敗の補助情報に項目の一覧を置く余地は無い）。
+/// 一方で「何件適用できたか」で成功と失敗を分けると、同じ失敗が同時に何を
+/// 要求したかによって成功にも失敗にもなり、要求元から予測できない。
 fn apply_selection(
     editor: &dyn SceneEditor,
     permit: &MutationPermit<'_>,
+    boundary: &Boundary,
     params: &SetSelectionParams,
     focus: Option<&ResolvedObject<'_>>,
-) -> Result<Vec<SelectionField>, EditError> {
+) -> SelectionOutcome {
+    let mut requested = Vec::new();
     let mut applied = Vec::new();
     let mut failure = None;
 
     if let Some(cursor) = &params.cursor {
-        match editor.set_cursor(permit.ticket(), index(cursor.layer), index(cursor.frame)) {
+        requested.push(SelectionField::Cursor);
+        let layer = index(cursor.layer);
+        let frame = index(cursor.frame);
+        match permit.issue(boundary, |ticket| editor.set_cursor(ticket, layer, frame)) {
             Ok(()) => applied.push(SelectionField::Cursor),
             Err(error) => failure = Some(error),
         }
     }
-    if failure.is_none()
-        && let Some(range) = &params.selected_range
-    {
-        let range = match range {
+    if let Some(change) = &params.selected_range {
+        requested.push(SelectionField::SelectedRange);
+        let range = match change {
             RangeChange::Set { start, end } => Some(FrameRange {
                 start: index(*start),
                 end: index(*end),
             }),
             RangeChange::Clear {} => None,
         };
-        match editor.set_select_range(permit.ticket(), range) {
-            Ok(()) => applied.push(SelectionField::SelectedRange),
-            Err(error) => failure = Some(error),
+        if failure.is_none() {
+            match permit.issue(boundary, |ticket| editor.set_select_range(ticket, range)) {
+                Ok(()) => applied.push(SelectionField::SelectedRange),
+                Err(error) => failure = Some(error),
+            }
         }
     }
-    if failure.is_none()
-        && let Some(change) = &params.focus
-    {
+    if let Some(change) = &params.focus {
+        requested.push(SelectionField::Focus);
         let target = match change {
             FocusChange::Set { .. } => focus,
             FocusChange::Clear {} => None,
         };
-        match editor.set_focus_object(permit.ticket(), target) {
-            Ok(()) => applied.push(SelectionField::Focus),
-            Err(error) => failure = Some(error),
+        if failure.is_none() {
+            match permit.issue(boundary, |ticket| editor.set_focus_object(ticket, target)) {
+                Ok(()) => applied.push(SelectionField::Focus),
+                Err(error) => failure = Some(error),
+            }
         }
     }
 
-    match failure {
-        Some(error) if applied.is_empty() => Err(error),
-        Some(error) => {
-            tracing::warn!(
-                code = %error.error_code().as_snake_case(),
-                "選択状態の一部を適用できませんでした"
-            );
-            Ok(applied)
-        }
-        None => Ok(applied),
+    if let Some(error) = failure {
+        tracing::warn!(
+            code = %error.error_code().as_snake_case(),
+            "選択状態の一部を適用できませんでした"
+        );
+    }
+    let not_applied = requested
+        .into_iter()
+        .filter(|field| !applied.contains(field))
+        .collect();
+    SelectionOutcome {
+        applied,
+        not_applied,
     }
 }
 
@@ -782,7 +808,7 @@ fn selection_state(
     epoch: String,
     revision: u64,
     observed: HostSelection,
-    applied: Vec<SelectionField>,
+    outcome: SelectionOutcome,
 ) -> SelectionState {
     let focus = observed
         .focus
@@ -797,7 +823,8 @@ fn selection_state(
         },
         observed.selected_range,
         focus,
-        applied,
+        outcome.applied,
+        outcome.not_applied,
     )
 }
 

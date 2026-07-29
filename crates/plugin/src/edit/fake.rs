@@ -7,7 +7,7 @@
 //! fingerprint と編集が照合する fingerprint が同じ材料から算出されることを、
 //! 同一のフェイク状態に対して確かめられる。
 
-use crate::edit::error::EditError;
+use crate::edit::error::{EditError, NotIssuedReason};
 use crate::edit::host::{EditHost, EffectSlot, HostSelection, ObjectSlot, SceneEditor};
 use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
@@ -51,6 +51,13 @@ pub(crate) enum Fault {
     PrependEffect,
     /// effect の付与で 2 件が増える。
     AddTwoEffects,
+    /// 変更 API が SDK へ届かずに失敗する。
+    ///
+    /// ラッパーは対象の存在確認を呼び出しの入口で行い、そこで落ちた要求は
+    /// SDK を呼ばずに戻る。プロジェクトは一切変わっていない。
+    TargetGone,
+    /// フォーカスの設定だけが SDK へ届かずに失敗する。
+    FocusGone,
 }
 
 /// panic させる位置。
@@ -467,10 +474,13 @@ impl FakeSceneEditor<'_> {
     /// 変更 API の失敗を差し込む。
     fn mutation(&self, call: &'static str) -> Result<(), EditError> {
         self.host.record(call);
-        if self.host.knobs().fault == Some(Fault::Mutation) {
-            return Err(EditError::Sdk { operation: call });
+        match self.host.knobs().fault {
+            Some(Fault::Mutation) => Err(EditError::Sdk { operation: call }),
+            Some(Fault::TargetGone) => Err(EditError::NotIssued {
+                reason: NotIssuedReason::TargetMissing,
+            }),
+            _ => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -847,6 +857,11 @@ impl SceneEditor for FakeSceneEditor<'_> {
         object: Option<&ResolvedObject<'_>>,
     ) -> Result<(), EditError> {
         self.mutation("set_focus_object")?;
+        if self.host.knobs().fault == Some(Fault::FocusGone) {
+            return Err(EditError::NotIssued {
+                reason: NotIssuedReason::TargetMissing,
+            });
+        }
         let id = object
             .map(|object| self.object_id(object.slot()))
             .transpose()?;

@@ -284,12 +284,18 @@ pub fn selection_state(state: &SelectionState) -> String {
         None => "フォーカスなし".to_string(),
     });
     text.push_line(format!("適用できた項目: {}", applied_label(&state.applied)));
+    if !state.not_applied.is_empty() {
+        text.push_line(format!(
+            "適用できなかった項目: {}",
+            applied_label(&state.not_applied)
+        ));
+    }
     text.push_line(format!("project_revision={}", state.project_revision));
     text.push_line(
         "上の値はホストがクランプした結果であり、編集と同時に観測したものではありません。取り消し操作で元へ戻る保証もありません",
     );
     text.push_line(
-        "applied に無い項目は反映されていません。確かめるには aviutl2_get_edit_info で読み直してください",
+        "not_applied の項目は反映されていません。確かめるには aviutl2_get_edit_info で読み直してください",
     );
     text.finish()
 }
@@ -791,6 +797,7 @@ mod tests {
             Some(FrameRange { start: 0, end: 10 }),
             Some(summary),
             vec![SelectionField::Cursor],
+            vec![SelectionField::SelectedRange, SelectionField::Focus],
         );
         vec![
             ("aviutl2_create_object", create_object(&created)),
@@ -897,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_text_lists_only_the_applied_fields() {
+    fn selection_text_separates_the_applied_and_the_not_applied_fields() {
         let state = SelectionState::observed(
             "78be92d1-c8c9-44c6-ae52-387548971468",
             43,
@@ -905,9 +912,11 @@ mod tests {
             None,
             None,
             Vec::new(),
+            vec![SelectionField::Cursor],
         );
         let text = selection_state(&state);
         assert!(text.contains("適用できた項目: なし"), "{text}");
+        assert!(text.contains("適用できなかった項目: cursor"), "{text}");
         assert!(text.contains("選択範囲なし"), "{text}");
         assert!(text.contains("フォーカスなし"), "{text}");
     }

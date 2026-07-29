@@ -134,6 +134,7 @@ pub fn set_selection() -> Value {
         ("selected_range", nullable(frame_range())),
         ("focus", nullable(object_summary())),
         ("applied", array(selection_field())),
+        ("not_applied", array(selection_field())),
         ("observed_after_edit", boolean()),
     ])
 }
@@ -898,6 +899,7 @@ mod tests {
                 SelectionField::SelectedRange,
                 SelectionField::Focus,
             ],
+            Vec::new(),
         )
     }
 

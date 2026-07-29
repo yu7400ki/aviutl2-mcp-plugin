@@ -519,6 +519,14 @@ pub struct SelectionState {
     pub focus: Option<ObjectSummary>,
     /// 実際に適用できた項目。部分適用を伝える唯一の手段である。
     pub applied: Vec<SelectionField>,
+    /// 要求されたが適用できなかった項目。
+    ///
+    /// `applied` の補集合をクライアントに求めない。補集合は自身が送った要求と
+    /// 突き合わせなければ出せず、突き合わせを誤れば「反映されたと思い込んだ
+    /// まま次の編集を組み立てる」ことになる。適用の可否は必ずこの 2 つで
+    /// 完結して伝える。
+    #[serde(default)]
+    pub not_applied: Vec<SelectionField>,
     /// 反映値が編集と原子的に観測されたものではないことを示す。
     ///
     /// 常に `true` である。反映値は編集の区間を抜けたあとの読み取りで得る
@@ -537,6 +545,7 @@ impl SelectionState {
         selected_range: Option<FrameRange>,
         focus: Option<ObjectSummary>,
         applied: Vec<SelectionField>,
+        not_applied: Vec<SelectionField>,
     ) -> Self {
         Self {
             project_epoch: project_epoch.into(),
@@ -545,6 +554,7 @@ impl SelectionState {
             selected_range,
             focus,
             applied,
+            not_applied,
             observed_after_edit: true,
         }
     }
@@ -1510,6 +1520,7 @@ mod tests {
             Some(FrameRange { start: 10, end: 20 }),
             Some(sample_summary()),
             vec![SelectionField::Cursor, SelectionField::Focus],
+            Vec::new(),
         );
         let s = serde_json::to_string(&state).unwrap();
         assert_eq!(serde_json::from_str::<SelectionState>(&s).unwrap(), state);
@@ -1529,6 +1540,7 @@ mod tests {
             None,
             None,
             Vec::new(),
+            Vec::new(),
         );
         let restored: SelectionState = serde_json::from_value(with_unknown_field(&state)).unwrap();
         assert_eq!(restored, state);
@@ -1543,6 +1555,7 @@ mod tests {
             None,
             None,
             vec![SelectionField::Cursor],
+            Vec::new(),
         );
         assert!(state.observed_after_edit);
     }
@@ -1567,6 +1580,7 @@ mod tests {
                 Some(FrameRange { start: 0, end: 1 }),
                 Some(sample_summary()),
                 vec![SelectionField::Focus],
+                Vec::new(),
             ))
             .unwrap(),
         ];

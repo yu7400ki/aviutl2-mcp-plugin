@@ -208,6 +208,7 @@ fn selection_state() -> Value {
         Some(FrameRange { start: 0, end: 10 }),
         Some(sample_summary()),
         vec![SelectionField::Cursor, SelectionField::Focus],
+        vec![SelectionField::SelectedRange],
     ))
     .expect("直列化できる")
 }

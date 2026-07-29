@@ -2431,6 +2431,7 @@ mod edit_tests {
                 None,
                 None,
                 vec![SelectionField::Cursor],
+                Vec::new(),
             ))
         }
     }

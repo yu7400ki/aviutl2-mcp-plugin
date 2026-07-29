@@ -78,6 +78,39 @@ impl std::fmt::Display for UnsupportedReason {
     }
 }
 
+/// 変更 API が SDK へ届かずに失敗した理由。
+///
+/// SDK ラッパーは対象の存在確認・整数変換・NUL 検査を呼び出しの入口で行い、
+/// これらに引っ掛かった要求は SDK を呼ばずに戻る。プロジェクトは一切変わって
+/// いないため、変更の発行として記録してはならない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotIssuedReason {
+    /// 対象がホスト側に存在しない。
+    TargetMissing,
+    /// 引数を SDK の型へ写せない。
+    ArgumentNotRepresentable,
+}
+
+impl NotIssuedReason {
+    /// 応答へ載せる機械可読な名前。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NotIssuedReason::TargetMissing => "target_missing",
+            NotIssuedReason::ArgumentNotRepresentable => "argument_not_representable",
+        }
+    }
+}
+
+impl std::fmt::Display for NotIssuedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            NotIssuedReason::TargetMissing => "変更の対象が存在しません",
+            NotIssuedReason::ArgumentNotRepresentable => "指定された値を受け渡せません",
+        };
+        f.write_str(text)
+    }
+}
+
 /// 前提条件のうち、どれが食い違ったか。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mismatch {
@@ -162,6 +195,16 @@ pub enum EditError {
         /// 失敗した SDK 関数の名前。
         operation: &'static str,
     },
+    /// 変更 API が SDK へ届く前に失敗した。
+    ///
+    /// プロジェクトは変わっていないため、変更の発行として記録しない。失敗した
+    /// SDK 関数名も載せない。呼ばれていない関数を名指しすると、要求元にも
+    /// 運用者にも誤った手掛かりを与える。
+    #[error("{reason}")]
+    NotIssued {
+        /// 届かなかった理由。
+        reason: NotIssuedReason,
+    },
     /// 編集区間の処理で panic を捕捉した。
     #[error("編集処理で panic を捕捉しました")]
     Panicked,
@@ -206,6 +249,10 @@ impl EditError {
             EditError::ItemWrite(error) => error.error_code(),
             EditError::UnsupportedTarget { .. } => ErrorCode::UnsupportedOperation,
             EditError::Sdk { .. } => ErrorCode::SdkError,
+            EditError::NotIssued { reason } => match reason {
+                NotIssuedReason::TargetMissing => ErrorCode::NotFound,
+                NotIssuedReason::ArgumentNotRepresentable => ErrorCode::InvalidArgument,
+            },
             EditError::Panicked => ErrorCode::InternalError,
             EditError::AfterMutation { source, .. } => source.error_code(),
         }
@@ -294,6 +341,9 @@ impl EditError {
             }
             EditError::Sdk { operation } => {
                 details.insert("sdk_operation".to_string(), json!(operation));
+            }
+            EditError::NotIssued { reason } => {
+                details.insert("reason".to_string(), json!(reason.as_str()));
             }
             EditError::Panicked => {}
             EditError::AfterMutation {

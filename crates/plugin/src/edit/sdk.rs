@@ -8,7 +8,7 @@
 //! ハンドルの `Debug` は生ポインタを出力するため、書式化に用いない。
 
 use crate::EDIT_HANDLE;
-use crate::edit::error::EditError;
+use crate::edit::error::{EditError, NotIssuedReason};
 use crate::edit::host::{EditHost, EffectSlot, HostSelection, ObjectSlot, SceneEditor};
 use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
@@ -16,7 +16,7 @@ use crate::read::ReadError;
 use crate::read::host::{EditState, HostEditInfo, HostObject, ReadHost, SceneReader};
 use crate::read::sdk::{SdkReadHost, SdkSceneReader, non_negative};
 use aviutl2::generic::{
-    EditSection, EffectHandle, MediaFileSupportMode, ObjectHandle, ReadSection,
+    EditSection, EditSectionError, EffectHandle, MediaFileSupportMode, ObjectHandle, ReadSection,
 };
 use aviutl2_mcp_core::{AvailableEffect, AvailableEffectItem, Cursor, EffectItemType, FrameRange};
 use std::cell::RefCell;
@@ -25,6 +25,28 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 /// SDK 呼び出しの失敗を、失敗した関数名つきの型付きエラーにする。
 fn sdk(operation: &'static str) -> EditError {
     EditError::Sdk { operation }
+}
+
+/// 変更 API の失敗を、SDK へ届いたかどうかで分けて写す。
+///
+/// ラッパーは対象の存在確認・整数変換・NUL 検査を呼び出しの入口で行い、これらに
+/// 引っ掛かった要求は SDK を呼ばずに専用の理由で戻る。SDK が実際に失敗を返した
+/// 場合と区別できるため、区別したまま伝える。届いていない失敗を SDK の失敗と
+/// して扱うと、プロジェクトが一切変わっていないのに変更を発行したことになる。
+fn mutation_failure(operation: &'static str, error: &EditSectionError) -> EditError {
+    match error {
+        EditSectionError::ObjectDoesNotExist | EditSectionError::EffectDoesNotExist => {
+            EditError::NotIssued {
+                reason: NotIssuedReason::TargetMissing,
+            }
+        }
+        EditSectionError::ValueOutOfRange(_)
+        | EditSectionError::InputCstrContainsNull(_)
+        | EditSectionError::InputCwstrContainsNull(_) => EditError::NotIssued {
+            reason: NotIssuedReason::ArgumentNotRepresentable,
+        },
+        _ => sdk(operation),
+    }
 }
 
 /// メディア対応の確認方法。
@@ -283,7 +305,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
         self.section
             .create_object_from_alias(alias, layer, frame, 0)
             .map(|_| ())
-            .map_err(|_| sdk("create_object_from_alias"))
+            .map_err(|error| mutation_failure("create_object_from_alias", &error))
     }
 
     fn create_object_from_media_file(
@@ -296,7 +318,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
         self.section
             .create_object_from_media_file(path, layer, frame, None)
             .map(|_| ())
-            .map_err(|_| sdk("create_object_from_media_file"))
+            .map_err(|error| mutation_failure("create_object_from_media_file", &error))
     }
 
     fn move_object(
@@ -308,7 +330,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
     ) -> Result<(), EditError> {
         self.section
             .move_object(self.object(object.slot())?, layer, frame)
-            .map_err(|_| sdk("move_object"))
+            .map_err(|error| mutation_failure("move_object", &error))
     }
 
     fn delete_object(
@@ -318,7 +340,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
     ) -> Result<(), EditError> {
         self.section
             .delete_object(self.object(object.slot())?)
-            .map_err(|_| sdk("delete_object"))
+            .map_err(|error| mutation_failure("delete_object", &error))
     }
 
     fn set_object_name(
@@ -329,7 +351,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
     ) -> Result<(), EditError> {
         self.section
             .set_object_name(self.object(object.slot())?, name)
-            .map_err(|_| sdk("set_object_name"))
+            .map_err(|error| mutation_failure("set_object_name", &error))
     }
 
     fn create_effect(
@@ -341,7 +363,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
         self.section
             .create_effect(self.object(object.slot())?, effect_name)
             .map(|_| ())
-            .map_err(|_| sdk("create_effect"))
+            .map_err(|error| mutation_failure("create_effect", &error))
     }
 
     fn delete_effect(
@@ -352,7 +374,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
     ) -> Result<(), EditError> {
         self.section
             .delete_effect(self.object(object.slot())?, self.effect(effect.slot())?)
-            .map_err(|_| sdk("delete_effect"))
+            .map_err(|error| mutation_failure("delete_effect", &error))
     }
 
     fn set_effect_enabled(
@@ -363,7 +385,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
     ) -> Result<(), EditError> {
         self.section
             .set_effect_enable(self.effect(effect.slot())?, enabled)
-            .map_err(|_| sdk("set_effect_enable"))
+            .map_err(|error| mutation_failure("set_effect_enable", &error))
     }
 
     fn set_effect_locked(
@@ -374,7 +396,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
     ) -> Result<(), EditError> {
         self.section
             .set_effect_lock(self.effect(effect.slot())?, locked)
-            .map_err(|_| sdk("set_effect_lock"))
+            .map_err(|error| mutation_failure("set_effect_lock", &error))
     }
 
     fn set_effect_item(
@@ -388,7 +410,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
         // 表記が解決するかを確定できない。
         self.section
             .set_effect_item_value(self.effect(effect.slot())?, item, value)
-            .map_err(|_| sdk("set_effect_item_value"))
+            .map_err(|error| mutation_failure("set_effect_item_value", &error))
     }
 
     fn set_cursor(
@@ -399,7 +421,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
     ) -> Result<(), EditError> {
         self.section
             .set_cursor_layer_frame(layer, frame)
-            .map_err(|_| sdk("set_cursor_layer_frame"))
+            .map_err(|error| mutation_failure("set_cursor_layer_frame", &error))
     }
 
     fn set_select_range(
@@ -411,7 +433,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
             Some(range) => self.section.set_select_range(range.start, range.end),
             None => self.section.clear_select_range(),
         }
-        .map_err(|_| sdk("set_select_range"))
+        .map_err(|error| mutation_failure("set_select_range", &error))
     }
 
     fn set_focus_object(
@@ -424,7 +446,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
             .transpose()?;
         self.section
             .set_focus_object(handle)
-            .map_err(|_| sdk("set_focus_object"))
+            .map_err(|error| mutation_failure("set_focus_object", &error))
     }
 }
 

@@ -1512,3 +1512,154 @@ fn every_nested_selector_is_checked_including_the_ones_inside_other_inputs() {
     assert_eq!(error.details()["mismatch"], json!("project_epoch"));
     assert!(!harness.host.mutated());
 }
+
+// -------------------------------------------- SDK へ届かなかった変更の扱い
+
+#[test]
+fn a_failure_that_never_reached_the_sdk_is_not_recorded_as_a_mutation() {
+    // 対象の存在確認は呼び出しの入口で行われ、そこで落ちた要求は SDK を
+    // 呼ばずに戻る。プロジェクトは一切変わっていないため、変更を発行したと
+    // 記録すると「何も変わっていないのに未保存の変更あり」が残り、要求元にも
+    // 無意味な読み直しを強いる。
+    let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::TargetGone)));
+    let params = move_params(&harness);
+    let error = harness
+        .edit
+        .move_object(&params)
+        .expect_err("届かなかった変更が成功として返りました");
+
+    assert_eq!(error.error_code(), ErrorCode::NotFound);
+    assert_eq!(error.details()["reason"], json!("target_missing"));
+    assert!(
+        error.details().get("mutation_issued").is_none(),
+        "届いていない変更が発行として報告されました"
+    );
+    assert!(
+        error.details().get("sdk_operation").is_none(),
+        "呼ばれていない SDK 関数が名指しされました"
+    );
+    assert_eq!(
+        harness.project.revision(),
+        0,
+        "何も変わっていないのに revision が進みました"
+    );
+    assert!(
+        !harness.project.modified(),
+        "何も変わっていないのに未保存の変更として記録されました"
+    );
+}
+
+#[test]
+fn a_failure_that_reached_the_sdk_is_still_recorded_as_a_mutation() {
+    // 届いた呼び出しは、適用されたかどうかを戻り値から判断できない。
+    // 判断できない場合は変更が入った側へ倒す。
+    let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::Mutation)));
+    let params = move_params(&harness);
+    let error = harness
+        .edit
+        .move_object(&params)
+        .expect_err("変更 API の失敗");
+
+    assert_eq!(error.details()["mutation_issued"], json!(true));
+    assert_eq!(harness.project.revision(), 1);
+}
+
+// ------------------------------------------------------ 選択状態の部分適用
+
+#[test]
+fn a_partially_applied_selection_reports_both_lists() {
+    // フォーカスだけが失敗する状況を作る。
+    let harness = Harness::new();
+    let focus = harness.selector(1, 100);
+    harness
+        .host
+        .arm(|knobs| knobs.fault = Some(Fault::FocusGone));
+
+    let state = harness
+        .edit
+        .set_selection(&SetSelectionParams {
+            expected_scene_id: SCENE_ID,
+            cursor: None,
+            selected_range: None,
+            focus: Some(FocusChange::Set { object: focus }),
+            expected: harness.expected(),
+        })
+        .expect("適用できた項目を伝える手段が失われました");
+
+    assert!(state.applied.is_empty());
+    assert_eq!(state.not_applied, vec![SelectionField::Focus]);
+}
+
+#[test]
+fn the_same_selection_failure_does_not_change_success_by_what_else_was_requested() {
+    // 同じ失敗が、同時に何を要求したかで成功にも失敗にも分かれてはならない。
+    // 要求元から予測できなくなる。
+    let harness = Harness::new();
+    let focus = harness.selector(1, 100);
+    harness
+        .host
+        .arm(|knobs| knobs.fault = Some(Fault::FocusGone));
+
+    let alone = harness
+        .edit
+        .set_selection(&SetSelectionParams {
+            expected_scene_id: SCENE_ID,
+            cursor: None,
+            selected_range: None,
+            focus: Some(FocusChange::Set {
+                object: focus.clone(),
+            }),
+            expected: harness.expected(),
+        })
+        .expect("フォーカスだけの要求");
+
+    let harness = Harness::new();
+    let focus = harness.selector(1, 100);
+    harness
+        .host
+        .arm(|knobs| knobs.fault = Some(Fault::FocusGone));
+    let combined = harness
+        .edit
+        .set_selection(&SetSelectionParams {
+            expected_scene_id: SCENE_ID,
+            cursor: Some(CursorPosition { layer: 0, frame: 1 }),
+            selected_range: None,
+            focus: Some(FocusChange::Set { object: focus }),
+            expected: harness.expected(),
+        })
+        .expect("カーソルを併せた要求");
+
+    assert_eq!(alone.not_applied, vec![SelectionField::Focus]);
+    assert_eq!(combined.not_applied, vec![SelectionField::Focus]);
+}
+
+#[test]
+fn every_requested_selection_field_appears_in_exactly_one_list() {
+    let harness = Harness::new();
+    let state = harness
+        .edit
+        .set_selection(&SetSelectionParams {
+            expected_scene_id: SCENE_ID,
+            cursor: Some(CursorPosition { layer: 1, frame: 5 }),
+            selected_range: Some(RangeChange::Clear {}),
+            focus: Some(FocusChange::Clear {}),
+            expected: harness.expected(),
+        })
+        .expect("選択状態の変更");
+
+    assert_eq!(
+        state.applied,
+        vec![
+            SelectionField::Cursor,
+            SelectionField::SelectedRange,
+            SelectionField::Focus
+        ]
+    );
+    assert!(state.not_applied.is_empty());
+    for field in &state.applied {
+        assert!(
+            !state.not_applied.contains(field),
+            "{field:?} が両方に現れました"
+        );
+    }
+}

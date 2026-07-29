@@ -1764,6 +1764,7 @@ mod tests {
                 None,
                 None,
                 vec![aviutl2_mcp_core::SelectionField::Cursor],
+                Vec::new(),
             ))
         }
     }

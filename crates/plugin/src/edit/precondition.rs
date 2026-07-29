@@ -15,7 +15,8 @@
 //!
 //! 1〜5 は [`verify_boundary`] が要求全体へ適用し、6〜7 は解決処理が行う。
 //! 判定を飛ばして変更へ進む経路が作れないよう、変更 API は
-//! [`MutationTicket`] を要求する。権利を取れるのは [`MutationPermit`] だけ、
+//! [`MutationTicket`] を要求する。権利を作れるのは [`MutationPermit::issue`]
+//! だけ、
 //! permit を作れるのは [`Boundary::revalidate`] だけ、[`Boundary`] を作れるのは
 //! [`verify_boundary`] だけ、という連鎖で順序を型が強制する。
 
@@ -146,16 +147,28 @@ pub(crate) struct MutationPermit<'a> {
 }
 
 impl MutationPermit<'_> {
-    /// 変更 API を 1 回発行する権利を取り出す。
+    /// 変更 API を 1 回発行する。
     ///
-    /// 取り出した時点で発行を記録する。呼び出しの結果に関わらず記録するのは、
-    /// SDK へ要求を渡した時点で適用されたかどうかを戻り値からは判断できない
-    /// ためである。判断できない場合は変更が入った側へ倒す。
-    pub(crate) fn ticket(&self) -> MutationTicket<'_> {
-        self.record_issue();
-        MutationTicket {
+    /// 権利を作れるのはここだけであり、変更 API は権利を値で要求する。したがって
+    /// 記録を伴わずに変更を発行する経路が無い。
+    ///
+    /// 記録するのは呼び出しが SDK へ届いた場合に限る。届いていれば、適用された
+    /// かどうかは戻り値からは判断できないため変更が入った側へ倒す。届いて
+    /// いない失敗（対象の不在・引数を写せない）はプロジェクトを一切変えて
+    /// いないので、記録すると「何も変わっていないのに未保存の変更あり」を残し、
+    /// 要求元に無意味な読み直しを強いる。
+    pub(crate) fn issue<T>(
+        &self,
+        boundary: &Boundary,
+        call: impl FnOnce(MutationTicket<'_>) -> Result<T, EditError>,
+    ) -> Result<T, EditError> {
+        let result = call(MutationTicket {
             _permit: PhantomData,
+        });
+        if !matches!(result, Err(EditError::NotIssued { .. })) {
+            self.record_issue();
         }
+        result.map_err(|error| self.attribute(boundary, error))
     }
 
     /// 変更 API の発行を記録する。
@@ -187,7 +200,7 @@ impl MutationPermit<'_> {
 /// 変更 API を 1 回発行する権利。
 ///
 /// SDK の変更 API はこの型を値で受け取る。複製できないため 1 つの権利で 2 回
-/// 発行することはできず、取得は [`MutationPermit::ticket`] に限られるので、
+/// 発行することはできず、生成は [`MutationPermit::issue`] に限られるので、
 /// 発行の記録を伴わずに変更へ進む経路が無い。
 pub struct MutationTicket<'a> {
     _permit: PhantomData<&'a ()>,
@@ -501,8 +514,8 @@ mod tests {
         let permit = boundary.revalidate(&project).unwrap();
         assert_eq!(permit.project_revision(&boundary), 0);
 
-        let _ = permit.ticket();
-        let _ = permit.ticket();
+        let _ = permit.issue(&boundary, |_ticket| Ok(()));
+        let _ = permit.issue(&boundary, |_ticket| Ok(()));
 
         assert_eq!(permit.project_revision(&boundary), 1);
         assert_eq!(project.revision(), 1);
@@ -523,7 +536,7 @@ mod tests {
         )
         .unwrap();
         let permit = boundary.revalidate(&project).unwrap();
-        let _ = permit.ticket();
+        let _ = permit.issue(&boundary, |_ticket| Ok(()));
         assert_eq!(project.revision(), 0);
         assert!(!project.modified());
     }
@@ -545,7 +558,7 @@ mod tests {
         let error = permit.attribute(&boundary, EditError::Panicked);
         assert!(error.details().get("mutation_issued").is_none());
 
-        let _ = permit.ticket();
+        let _ = permit.issue(&boundary, |_ticket| Ok(()));
         let error = permit.attribute(&boundary, EditError::Panicked);
         assert_eq!(error.details()["mutation_issued"], json!(true));
         assert_eq!(error.details()["current_project_revision"], json!(1));
