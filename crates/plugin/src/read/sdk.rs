@@ -48,29 +48,7 @@ impl ReadHost for SdkReadHost {
         //
         // この呼び出しはフレームレートを有理数へ畳む際、分母が 0 だと panic
         // する。呼び出し側が捕捉層で包むことを前提にしている。
-        let info = EDIT_HANDLE.get_edit_info();
-        let size = |value: usize| u32::try_from(value).map_err(|_| sdk("get_edit_info"));
-        Ok(HostEditInfo {
-            scene_id: info.scene_id,
-            width: size(info.width)?,
-            height: size(info.height)?,
-            // 有理数へ畳まれた後の分子・分母であり、ホストが保持する生の
-            // rate/scale は約分によって失われている。分母は有理数を構築できた
-            // 時点で 0 にならない。
-            fps_rate: *info.fps.numer(),
-            fps_scale: *info.fps.denom(),
-            sample_rate: size(info.sample_rate)?,
-            cursor_frame: non_negative(info.frame),
-            cursor_layer: non_negative(info.layer),
-            frame_max: non_negative(info.frame_max),
-            layer_max: non_negative(info.layer_max),
-            display_frame_start: non_negative(info.display_frame_start),
-            display_layer_start: non_negative(info.display_layer_start),
-            display_frame_num: non_negative(info.display_frame_num),
-            display_layer_num: non_negative(info.display_layer_num),
-            select_range_start: info.select_range_start.map(non_negative),
-            select_range_end: info.select_range_end.map(non_negative),
-        })
+        host_edit_info(&EDIT_HANDLE.get_edit_info())
     }
 
     fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError> {
@@ -470,6 +448,39 @@ fn assign_effect_indices(names: &[String]) -> Vec<usize> {
             index
         })
         .collect()
+}
+
+/// SDK の編集情報を所有型へ写す。
+///
+/// 読み取りと編集区間の入口はどちらもこの 1 か所を通る。同じ規約を 2 通りに
+/// 実装すると、同じホストの同じ値を層ごとに別の値として読むことになる。
+///
+/// 負値を `as usize` で畳んだ巨大値は 0 へ丸め、u32 へ写せない大きさは SDK の
+/// 失敗として扱う。畳まれた値をそのまま返すと、位置や範囲として使ったときに
+/// 実在しない座標を指す。
+pub(crate) fn host_edit_info(info: &aviutl2::generic::EditInfo) -> Result<HostEditInfo, ReadError> {
+    let size = |value: usize| u32::try_from(value).map_err(|_| sdk("get_edit_info"));
+    Ok(HostEditInfo {
+        scene_id: info.scene_id,
+        width: size(info.width)?,
+        height: size(info.height)?,
+        // 有理数へ畳まれた後の分子・分母であり、ホストが保持する生の
+        // rate/scale は約分によって失われている。分母は有理数を構築できた
+        // 時点で 0 にならない。
+        fps_rate: *info.fps.numer(),
+        fps_scale: *info.fps.denom(),
+        sample_rate: size(info.sample_rate)?,
+        cursor_frame: non_negative(info.frame),
+        cursor_layer: non_negative(info.layer),
+        frame_max: non_negative(info.frame_max),
+        layer_max: non_negative(info.layer_max),
+        display_frame_start: non_negative(info.display_frame_start),
+        display_layer_start: non_negative(info.display_layer_start),
+        display_frame_num: non_negative(info.display_frame_num),
+        display_layer_num: non_negative(info.display_layer_num),
+        select_range_start: info.select_range_start.map(non_negative),
+        select_range_end: info.select_range_end.map(non_negative),
+    })
 }
 
 /// ラッパーが負値を `as usize` で畳んだ値を 0 へ丸める。

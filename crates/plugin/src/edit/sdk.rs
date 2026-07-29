@@ -14,7 +14,7 @@ use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
 use crate::read::ReadError;
 use crate::read::host::{EditState, HostEditInfo, HostObject, ReadHost, SceneReader};
-use crate::read::sdk::{SdkReadHost, SdkSceneReader, non_negative};
+use crate::read::sdk::{SdkReadHost, SdkSceneReader, host_edit_info, non_negative};
 use aviutl2::generic::{
     EditSection, EditSectionError, EffectHandle, MediaFileSupportMode, ObjectHandle, ReadSection,
 };
@@ -125,13 +125,12 @@ impl EditHost for SdkEditHost {
         let outcome = EDIT_HANDLE
             .call_edit_section(move |section| {
                 catch_unwind(AssertUnwindSafe(|| {
-                    let editor = SdkSceneEditor::new(section);
-                    f(&editor)
+                    SdkSceneEditor::new(section).map(|editor| f(&editor))
                 }))
                 .map_err(|_| ())
             })
             .map_err(|_| sdk("call_edit_section"))?;
-        outcome.map_err(|()| EditError::Panicked)
+        outcome.map_err(|()| EditError::Panicked)?
     }
 }
 
@@ -169,17 +168,17 @@ struct SdkSceneEditor<'a> {
 
 impl<'a> SdkSceneEditor<'a> {
     /// 編集区間から編集口を作る。
-    fn new(section: &'a EditSection) -> Self {
+    fn new(section: &'a EditSection) -> Result<Self, EditError> {
         let read_section: &ReadSection = section;
-        Self {
+        Ok(Self {
             section,
             reader: SdkSceneReader {
                 section: read_section,
             },
-            info: entry_edit_info(section),
+            info: entry_edit_info(section)?,
             objects: RefCell::new(Vec::new()),
             effects: RefCell::new(Vec::new()),
-        }
+        })
     }
 
     /// 添字からオブジェクトのハンドルを引く。
@@ -205,27 +204,12 @@ impl<'a> SdkSceneEditor<'a> {
 ///
 /// 区間内で変更を適用した後は古くなるが、シーンの guard は入口の値と照合する
 /// ため、この複製で足りる。
-fn entry_edit_info(section: &EditSection) -> HostEditInfo {
-    let info = &section.info;
-    let size = |value: usize| u32::try_from(value).unwrap_or(0);
-    HostEditInfo {
-        scene_id: info.scene_id,
-        width: size(info.width),
-        height: size(info.height),
-        fps_rate: *info.fps.numer(),
-        fps_scale: *info.fps.denom(),
-        sample_rate: size(info.sample_rate),
-        cursor_frame: info.frame,
-        cursor_layer: info.layer,
-        frame_max: info.frame_max,
-        layer_max: info.layer_max,
-        display_frame_start: info.display_frame_start,
-        display_layer_start: info.display_layer_start,
-        display_frame_num: info.display_frame_num,
-        display_layer_num: info.display_layer_num,
-        select_range_start: info.select_range_start,
-        select_range_end: info.select_range_end,
-    }
+///
+/// 写し方は読み取り経路と共有する。同じホストの同じ値を層ごとに別の規約で
+/// 写すと、シーン以外のフィールドを使い始めた時点で読み取りと編集が別の値を
+/// 見ることになる。
+fn entry_edit_info(section: &EditSection) -> Result<HostEditInfo, EditError> {
+    Ok(host_edit_info(&section.info)?)
 }
 
 impl SceneEditor for SdkSceneEditor<'_> {
