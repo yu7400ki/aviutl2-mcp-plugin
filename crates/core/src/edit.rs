@@ -232,6 +232,9 @@ pub struct DeleteObjectParams {
 
 impl DeleteObjectParams {
     /// 要求内容だけで決まる検証を行う。
+    ///
+    /// 対象を指す selector 以外に入力を持たないため、要求内容だけで決まる
+    /// 検証対象が無い。対象の解決と前提条件の照合は変更を適用する側が行う。
     pub fn validate(&self) -> Result<(), EditInputError> {
         Ok(())
     }
@@ -329,6 +332,8 @@ pub struct DeleteEffectParams {
 
 impl DeleteEffectParams {
     /// 要求内容だけで決まる検証を行う。
+    ///
+    /// 理由は [`DeleteObjectParams::validate`] と同じで、検証対象が無い。
     pub fn validate(&self) -> Result<(), EditInputError> {
         Ok(())
     }
@@ -1394,6 +1399,12 @@ mod tests {
         assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
     }
 
+    /// 各コンストラクタが埋めるフィールドの組み合わせを固定する。
+    ///
+    /// 固定するのは**コンストラクタの契約だけ**である。どの operation が
+    /// どのコンストラクタを呼ぶかは応答を組み立てる側にあり、ここでは
+    /// 検証できない。表の operation 名は、どの契約がどの用途に対応するかを
+    /// 読み手へ示すための注記である。
     #[test]
     fn edit_outcome_matches_the_operation_table() {
         let created = vec![sample_summary(), sample_summary()];
