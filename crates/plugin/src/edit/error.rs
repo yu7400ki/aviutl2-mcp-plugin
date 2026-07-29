@@ -514,6 +514,14 @@ mod tests {
                 "{variant} の代表値が一覧にありません"
             );
         }
+        // 逆向きも見る。variant を消したときに VARIANTS だけが取り残されると、
+        // 一覧は無くなった variant を数え続け、残りの網羅を主張できなくなる。
+        for variant in &covered {
+            assert!(
+                VARIANTS.contains(variant),
+                "{variant} が網羅すべき variant の一覧にありません"
+            );
+        }
     }
 
     #[test]
