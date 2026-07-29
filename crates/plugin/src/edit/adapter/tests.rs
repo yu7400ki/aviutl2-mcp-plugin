@@ -1913,3 +1913,45 @@ fn the_response_revision_comes_from_the_increment_not_from_a_reread() {
         "読み直せば別の値になる状況が作れていません"
     );
 }
+
+#[test]
+fn an_audio_only_effect_refuses_a_lock_change_before_the_section() {
+    // 音声だけを扱う effect はロックを変更できない。SDK を呼んでしまえば、
+    // 届いた以上は変更が入った側へ倒すほかなく、何も変わっていないのに
+    // revision が進む。呼ぶ前に分かる対象は呼ばずに弾く。
+    let harness = Harness::with(|host| {
+        let mut scene = host.scene.lock().unwrap();
+        scene.layers[1].objects[0].effects[1].name = "音声フェード".to_string();
+        drop(scene);
+    });
+    let error = harness
+        .edit
+        .set_effect_state(&SetEffectStateParams {
+            selector: harness.effect_selector(1, 100, "音声フェード", 0),
+            enabled: None,
+            locked: Some(true),
+            expected: harness.expected(),
+        })
+        .expect_err("音声 effect のロックが変更できました");
+
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(error.details()["reason"], json!("effect_state_immutable"));
+    assert_eq!(harness.host.enter_calls(), 0);
+    harness.assert_untouched();
+}
+
+#[test]
+fn an_effect_that_handles_video_as_well_is_not_refused_by_the_flags_alone() {
+    // フラグは画像と音声が同時に立ち得る。音声のフラグだけを見て弾くと、
+    // 変更できる対象まで拒否する。
+    let harness = Harness::new();
+    harness
+        .edit
+        .set_effect_state(&SetEffectStateParams {
+            selector: harness.effect_selector(1, 100, "動画ファイル", 0),
+            enabled: None,
+            locked: Some(true),
+            expected: harness.expected(),
+        })
+        .expect("画像も扱う effect のロック変更が拒否されました");
+}

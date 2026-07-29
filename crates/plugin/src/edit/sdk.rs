@@ -460,4 +460,44 @@ mod tests {
         // 編集区間へ入る経路は準備前の呼び出しで落ちるため、ここを通らない。
         assert!(!SdkEditHost.is_ready());
     }
+
+    #[test]
+    fn media_support_is_checked_without_opening_the_file() {
+        // 厳密な確認は実際にファイルを開いて読めるかを調べる。編集区間は
+        // ホストのメインスレッド上で走り割り込めないため、区間の内側で行うと
+        // 解析が終わるまで操作が止まる。
+        assert!(matches!(
+            MEDIA_SUPPORT_MODE,
+            MediaFileSupportMode::ExtensionOnly
+        ));
+    }
+
+    #[test]
+    fn a_failure_before_the_sdk_call_is_told_apart_from_an_sdk_failure() {
+        // 届いていない失敗を SDK の失敗として扱うと、プロジェクトが一切
+        // 変わっていないのに変更を発行したことになる。
+        for error in [
+            EditSectionError::ObjectDoesNotExist,
+            EditSectionError::EffectDoesNotExist,
+        ] {
+            assert!(
+                matches!(
+                    mutation_failure("move_object", &error),
+                    EditError::NotIssued {
+                        reason: NotIssuedReason::TargetMissing
+                    }
+                ),
+                "{error} が SDK の失敗として扱われました"
+            );
+        }
+        assert!(
+            matches!(
+                mutation_failure("move_object", &EditSectionError::ApiCallFailed),
+                EditError::Sdk {
+                    operation: "move_object"
+                }
+            ),
+            "SDK の失敗が届かなかった扱いになりました"
+        );
+    }
 }

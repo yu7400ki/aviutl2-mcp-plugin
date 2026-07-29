@@ -1122,6 +1122,13 @@ pub(crate) fn fake_catalog() -> Vec<AvailableEffect> {
             items: Vec::new(),
         },
         AvailableEffect {
+            name: "音声フェード".to_string(),
+            effect_type: EffectType::Filter,
+            // 音声だけを扱う。画像のフラグは立たない。
+            flags: EffectFlags::from_raw(2),
+            items: Vec::new(),
+        },
+        AvailableEffect {
             name: "標準描画".to_string(),
             effect_type: EffectType::Output,
             flags: EffectFlags::from_raw(1),
