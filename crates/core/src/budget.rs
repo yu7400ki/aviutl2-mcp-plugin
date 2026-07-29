@@ -21,7 +21,7 @@ pub const SERVER_RESOLVE_BUDGET: Duration = Duration::from_secs(5);
 ///
 /// 要求の送信・plugin 側の実行・応答の受信をこの 1 つの期限で束ね、
 /// 同じ期限を要求の `deadline_unix_ms` として plugin へ伝える。
-pub const SERVER_REQUEST_BUDGET: Duration = Duration::from_secs(5);
+pub const SERVER_READ_REQUEST_BUDGET: Duration = Duration::from_secs(5);
 
 /// server が 1 候補の pipe 接続待ちに許す上限。
 ///
@@ -62,7 +62,7 @@ mod tests {
     #[test]
     fn budget_values_are_fixed() {
         assert_eq!(SERVER_RESOLVE_BUDGET, Duration::from_secs(5));
-        assert_eq!(SERVER_REQUEST_BUDGET, Duration::from_secs(5));
+        assert_eq!(SERVER_READ_REQUEST_BUDGET, Duration::from_secs(5));
         assert_eq!(SERVER_CONNECT_WAIT_CAP, Duration::from_secs(1));
         assert_eq!(PLUGIN_HANDSHAKE_TIMEOUT, Duration::from_secs(2));
         assert_eq!(PLUGIN_READ_TIMEOUT, Duration::from_secs(3));
@@ -74,11 +74,11 @@ mod tests {
     fn plugin_request_stages_fit_within_the_server_request_budget() {
         let stages = PLUGIN_READ_TIMEOUT + PLUGIN_WRITE_TIMEOUT;
         assert!(
-            stages < SERVER_REQUEST_BUDGET,
-            "読み取り {stages:?} が要求フェーズ予算 {SERVER_REQUEST_BUDGET:?} を残さない"
+            stages < SERVER_READ_REQUEST_BUDGET,
+            "読み取り {stages:?} が要求フェーズ予算 {SERVER_READ_REQUEST_BUDGET:?} を残さない"
         );
         assert!(
-            stages + TRANSPORT_HEADROOM <= SERVER_REQUEST_BUDGET,
+            stages + TRANSPORT_HEADROOM <= SERVER_READ_REQUEST_BUDGET,
             "要求フェーズに余白 {TRANSPORT_HEADROOM:?} が残らない"
         );
     }
@@ -104,7 +104,7 @@ mod tests {
     fn write_budget_survives_a_full_length_read() {
         // 読み取りが上限まで走った後に応答送信を始めても、要求フェーズ予算の
         // 内側に収まる。読み取りの結果を送れない窓を作らないための関係。
-        let remaining = SERVER_REQUEST_BUDGET - PLUGIN_READ_TIMEOUT;
+        let remaining = SERVER_READ_REQUEST_BUDGET - PLUGIN_READ_TIMEOUT;
         assert!(
             PLUGIN_WRITE_TIMEOUT < remaining,
             "読み取りが上限まで走ると応答送信 {PLUGIN_WRITE_TIMEOUT:?} が残り {remaining:?} に収まらない"

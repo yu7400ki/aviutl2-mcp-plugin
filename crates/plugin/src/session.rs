@@ -898,8 +898,9 @@ mod tests {
     use aviutl2_mcp_core::{
         AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
         EffectItemType, EffectType, Extent, FiniteF64, FrameRange, LayerInfo, ObjectDetail,
-        ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary, SERVER_REQUEST_BUDGET,
-        SERVER_RESOLVE_BUDGET, SceneInfo, SectionRange, TRANSPORT_HEADROOM,
+        ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary,
+        SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, SceneInfo, SectionRange,
+        TRANSPORT_HEADROOM,
     };
     use std::sync::Mutex;
 
@@ -1760,8 +1761,8 @@ mod tests {
         // 要求フェーズ予算の内側に残る。ここが崩れると、完了した読み取りを
         // 誰も待っていない窓へ送ることになる。
         assert!(
-            READ_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_REQUEST_BUDGET,
-            "読み取り {READ_TIMEOUT:?} と送信 {WRITE_TIMEOUT:?} が要求フェーズ予算 {SERVER_REQUEST_BUDGET:?} に収まらない"
+            READ_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_READ_REQUEST_BUDGET,
+            "読み取り {READ_TIMEOUT:?} と送信 {WRITE_TIMEOUT:?} が要求フェーズ予算 {SERVER_READ_REQUEST_BUDGET:?} に収まらない"
         );
 
         // handshake が解決フェーズの予算を使い切ると、続く ping の往復に
@@ -1773,7 +1774,7 @@ mod tests {
 
         // 接続を保持する上限は段の配分に属さないが、要求 1 件の処理が終わる前に
         // 接続を畳んでしまわないだけの長さを持つ。
-        assert!(REQUEST_IDLE_TIMEOUT > SERVER_REQUEST_BUDGET);
+        assert!(REQUEST_IDLE_TIMEOUT > SERVER_READ_REQUEST_BUDGET);
 
         // 再試行案内の設計値。変えると要求元との取り決めが変わるため、
         // 値そのものを主張する。

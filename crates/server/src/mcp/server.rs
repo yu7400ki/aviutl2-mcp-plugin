@@ -19,7 +19,7 @@ use aviutl2_mcp_core::{
     GetEditInfoParams, InstanceId, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
     MAX_PAGE_LIMIT, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_OBJECT,
     OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS, ObjectDetail,
-    SERVER_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET,
+    SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -65,7 +65,7 @@ impl Default for CallLimits {
     fn default() -> Self {
         Self {
             resolve: SERVER_RESOLVE_BUDGET,
-            request: SERVER_REQUEST_BUDGET,
+            request: SERVER_READ_REQUEST_BUDGET,
         }
     }
 }
@@ -1253,7 +1253,7 @@ mod tests {
         // 段の途中で予算が尽き、応答しているインスタンスが期限超過になる。
         let limits = CallLimits::default();
         assert_eq!(limits.resolve, SERVER_RESOLVE_BUDGET);
-        assert_eq!(limits.request, SERVER_REQUEST_BUDGET);
+        assert_eq!(limits.request, SERVER_READ_REQUEST_BUDGET);
         assert_eq!(
             DiscoveryConfig::default().per_candidate_deadline,
             SERVER_RESOLVE_BUDGET
