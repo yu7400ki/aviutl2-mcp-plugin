@@ -267,36 +267,15 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
         if epoch != selector.project_epoch {
             return Err(ReadError::EpochMismatch);
         }
-        if selector.fingerprint_algorithm != FingerprintAlgorithm::GENERATED {
-            return Err(ReadError::FingerprintAlgorithmMismatch {
-                requested: selector.fingerprint_algorithm.to_string(),
-                supported: FingerprintAlgorithm::GENERATED.to_string(),
-            });
-        }
+        ensure_fingerprint_algorithm(&selector.fingerprint_algorithm)?;
 
         let scene_id = info.scene_id;
-        let layer = selector.layer;
-        let frame = selector.frame;
-        let required_name = selector.name.as_deref();
-        let expected_fingerprint = &selector.fingerprint;
         let epoch = epoch.as_str();
         let project = self.project.as_ref();
 
         self.read_section(move |scene| {
             let revision = project.revision();
-            // 候補の絞り込みは位置と名前だけで決まる。ここでレイヤー内の全対象の
-            // alias と effect まで読むと、無関係な対象の読み取り失敗が要求全体を
-            // 巻き込み、対象自体は健全なのに取得できなくなる。
-            let candidate =
-                resolve_candidate(scene.object_placements(layer)?, frame, required_name)?;
-            // 詳細を読み、その内容から fingerprint を組み立てて照合する。
-            // 照合した対象と応答へ載せる対象が同じ読み取りに由来することが、
-            // これで構造として保証される。
-            let detail = scene.object_detail(layer, candidate.frame_start)?;
-            let summary = object_summary(epoch, scene_id, &detail.object);
-            if summary.fingerprint != *expected_fingerprint {
-                return Err(ReadError::FingerprintMismatch);
-            }
+            let (summary, detail) = resolve_selected_object(scene, epoch, scene_id, selector)?;
             Ok(object_detail(summary, revision, detail))
         })
     }
@@ -362,6 +341,53 @@ fn layer_range(filter: Option<&ObjectFilter>, layer_max: usize) -> RangeInclusiv
     min..=max
 }
 
+/// セレクターが指す対象を、候補の絞り込みと fingerprint の照合まで済ませて返す。
+///
+/// 読み取りと編集はこの 1 つの実装を共有する。別々に実装すると、読み取りが
+/// 返した fingerprint と編集が照合する fingerprint がずれ、一致するはずの対象を
+/// 拒む経路が生まれる。
+///
+/// ここで判定するのは候補の探索と fingerprint の照合だけである。epoch・算出方式・
+/// シーンの照合は呼び出し側が済ませておく。読み取りは参照区間の外で、編集は
+/// 編集区間の内側で判定するため、判定の場所を共有できない。
+///
+/// 詳細の読み取りと fingerprint の算出を同じ呼び出しの中で行うので、照合した
+/// 対象と返す対象が同じ読み取りに由来することが構造として保証される。
+pub(crate) fn resolve_selected_object(
+    scene: &dyn SceneReader,
+    epoch: &str,
+    scene_id: i32,
+    selector: &ObjectSelector,
+) -> Result<(ObjectSummary, HostObjectDetail), ReadError> {
+    // 候補の絞り込みは位置と名前だけで決まる。ここでレイヤー内の全対象の
+    // alias と effect まで読むと、無関係な対象の読み取り失敗が要求全体を
+    // 巻き込み、対象自体は健全なのに取得できなくなる。
+    let candidate = resolve_candidate(
+        scene.object_placements(selector.layer)?,
+        selector.frame,
+        selector.name.as_deref(),
+    )?;
+    let detail = scene.object_detail(selector.layer, candidate.frame_start)?;
+    let summary = object_summary(epoch, scene_id, &detail.object);
+    if summary.fingerprint != selector.fingerprint {
+        return Err(ReadError::FingerprintMismatch);
+    }
+    Ok((summary, detail))
+}
+
+/// セレクターの算出方式が現在生成できる方式と一致することを確かめる。
+pub(crate) fn ensure_fingerprint_algorithm(
+    requested: &FingerprintAlgorithm,
+) -> Result<(), ReadError> {
+    if *requested == FingerprintAlgorithm::GENERATED {
+        return Ok(());
+    }
+    Err(ReadError::FingerprintAlgorithmMismatch {
+        requested: requested.to_string(),
+        supported: FingerprintAlgorithm::GENERATED.to_string(),
+    })
+}
+
 /// 開始フレームの完全一致と名前の一致で候補を 1 件へ絞る。
 ///
 /// 「指定フレーム以降」の探索結果をそのまま候補にしない。セレクターの `frame` は
@@ -397,7 +423,7 @@ fn matches_name(required_name: Option<&str>, object: &HostObjectPlacement) -> bo
 ///
 /// 列の絶対位置と総数も材料に含めるため、要素を単独では組み立てられない。
 /// 一覧と詳細で同じ列から同じ入力が得られるよう、組み立てはここへ集約する。
-fn effect_fingerprint_inputs(
+pub(crate) fn effect_fingerprint_inputs(
     effects: &[HostEffect],
 ) -> impl Iterator<Item = EffectFingerprintInput<'_>> {
     let effect_count = effects.len();
@@ -420,7 +446,7 @@ fn effect_fingerprint_inputs(
 /// 配下 effect の fingerprint 列もオブジェクトの材料であるため、ここで
 /// 併せて算出する。入力になる [`HostObject`] は詳細の読み取りだけが返すため、
 /// 一覧も詳細も同じ材料から同じ fingerprint を得る。
-fn object_summary(epoch: &str, scene_id: i32, object: &HostObject) -> ObjectSummary {
+pub(crate) fn object_summary(epoch: &str, scene_id: i32, object: &HostObject) -> ObjectSummary {
     let effect_fingerprints: Vec<_> = effect_fingerprint_inputs(&object.effects)
         .map(effect_fingerprint)
         .collect();
