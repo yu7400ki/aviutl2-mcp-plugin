@@ -2336,3 +2336,231 @@ mod tests {
         assert_eq!(response.deadline, now + Duration::from_millis(500));
     }
 }
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+    use aviutl2_mcp_core::{
+        EditOutcome, ObjectFingerprintInput, ObjectSummary, SelectionField, SelectionState,
+    };
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    const EPOCH: &str = "9d0a5f4e-2f47-4a13-9a5e-1e2f3a4b5c6d";
+    const SCENE_ID: i32 = 0;
+
+    /// 編集口の代わりに定型データを返す実装。
+    ///
+    /// 呼ばれた operation を記録するため、受付判定や params の検証で弾かれた
+    /// 要求が編集へ進んでいないことを確かめられる。
+    struct FakeEditAdapter {
+        calls: Mutex<Vec<&'static str>>,
+    }
+
+    impl FakeEditAdapter {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn enter(&self, call: &'static str) -> EditOutcome {
+            self.calls.lock().unwrap().push(call);
+            EditOutcome::object_changed(EPOCH, 1, fake_summary())
+        }
+    }
+
+    fn fake_summary() -> ObjectSummary {
+        ObjectSummary::new(
+            EPOCH,
+            ObjectFingerprintInput {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame_start: 100,
+                frame_end: 200,
+                name: None,
+                alias: "[1:100]",
+                effect_fingerprints: &[],
+            },
+        )
+    }
+
+    impl EditAdapter for FakeEditAdapter {
+        fn create_object(&self, _: &CreateObjectParams) -> Result<EditOutcome, EditError> {
+            Ok(self.enter("create_object"))
+        }
+
+        fn move_object(&self, _: &MoveObjectParams) -> Result<EditOutcome, EditError> {
+            Ok(self.enter("move_object"))
+        }
+
+        fn delete_object(&self, _: &DeleteObjectParams) -> Result<EditOutcome, EditError> {
+            Ok(self.enter("delete_object"))
+        }
+
+        fn set_object_name(&self, _: &SetObjectNameParams) -> Result<EditOutcome, EditError> {
+            Ok(self.enter("set_object_name"))
+        }
+
+        fn set_object_item(&self, _: &SetObjectItemParams) -> Result<EditOutcome, EditError> {
+            Ok(self.enter("set_object_item"))
+        }
+
+        fn add_effect(&self, _: &AddEffectParams) -> Result<EditOutcome, EditError> {
+            Ok(self.enter("add_effect"))
+        }
+
+        fn delete_effect(&self, _: &DeleteEffectParams) -> Result<EditOutcome, EditError> {
+            Ok(self.enter("delete_effect"))
+        }
+
+        fn set_effect_state(&self, _: &SetEffectStateParams) -> Result<EditOutcome, EditError> {
+            Ok(self.enter("set_effect_state"))
+        }
+
+        fn set_selection(&self, _: &SetSelectionParams) -> Result<SelectionState, EditError> {
+            self.calls.lock().unwrap().push("set_selection");
+            Ok(SelectionState::observed(
+                EPOCH,
+                1,
+                aviutl2_mcp_core::Cursor { frame: 0, layer: 0 },
+                None,
+                None,
+                vec![SelectionField::Cursor],
+            ))
+        }
+    }
+
+    /// 有効な選択状態の変更 params。
+    fn selection_params() -> Value {
+        json!({
+            "expected_scene_id": SCENE_ID,
+            "cursor": { "layer": 0, "frame": 0 },
+            "expected": { "project_epoch": EPOCH, "project_revision": 0 },
+        })
+    }
+
+    #[test]
+    fn every_edit_operation_is_routed_from_its_name() {
+        for operation in EditOperation::ALL {
+            assert_eq!(
+                classify_operation(operation.as_str()).unwrap(),
+                Operation::Edit(operation),
+                "{} が編集へ振り分けられていません",
+                operation.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn params_are_decoded_before_the_lifecycle_state_is_checked() {
+        // 起動処理中でも、要求内容の誤りは要求の誤りとして返す。状態由来の
+        // 再試行可能なエラーで返すと、解消しない再試行を促してしまう。
+        let adapter = FakeEditAdapter::new();
+        let error = execute_edit(
+            &adapter,
+            &InstanceState::Starting,
+            EditOperation::SetSelection,
+            &json!({ "expected_scene_id": SCENE_ID }),
+            RequestDeadline::Within(Instant::now() + Duration::from_secs(1)),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(adapter.calls().is_empty());
+    }
+
+    #[test]
+    fn a_request_that_changes_nothing_is_an_invalid_argument() {
+        let adapter = FakeEditAdapter::new();
+        let error = execute_edit(
+            &adapter,
+            &InstanceState::Ready,
+            EditOperation::SetSelection,
+            &json!({
+                "expected_scene_id": SCENE_ID,
+                "expected": { "project_epoch": EPOCH, "project_revision": 0 },
+            }),
+            RequestDeadline::Within(Instant::now() + Duration::from_secs(1)),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(adapter.calls().is_empty());
+    }
+
+    #[test]
+    fn a_starting_instance_rejects_a_well_formed_edit() {
+        let adapter = FakeEditAdapter::new();
+        let error = execute_edit(
+            &adapter,
+            &InstanceState::Starting,
+            EditOperation::SetSelection,
+            &selection_params(),
+            RequestDeadline::Within(Instant::now() + Duration::from_secs(1)),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::HostBusy);
+        assert!(adapter.calls().is_empty());
+    }
+
+    #[test]
+    fn an_expired_deadline_stops_the_edit_before_it_starts() {
+        let adapter = FakeEditAdapter::new();
+        let error = execute_edit(
+            &adapter,
+            &InstanceState::Ready,
+            EditOperation::SetSelection,
+            &selection_params(),
+            RequestDeadline::Exceeded,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert!(error.retryable);
+        let details = error.details;
+        // 実行前に返す timeout だけが「変更は行われていない」と名乗れる。
+        assert_eq!(details["change_applied"], json!("no"));
+        assert_eq!(details["mutation_origin"], json!("plugin"));
+        assert_eq!(details["retry_requires"], json!("resend"));
+        assert!(adapter.calls().is_empty(), "SDK を呼ばずに中止していません");
+    }
+
+    #[test]
+    fn an_edit_within_the_deadline_reaches_the_adapter() {
+        let adapter = FakeEditAdapter::new();
+        let result = execute_edit(
+            &adapter,
+            &InstanceState::Ready,
+            EditOperation::SetSelection,
+            &selection_params(),
+            RequestDeadline::Within(Instant::now() + Duration::from_secs(1)),
+        )
+        .expect("期限内の編集が拒否されました");
+
+        assert_eq!(adapter.calls(), vec!["set_selection"]);
+        assert_eq!(result["applied"], json!(["cursor"]));
+    }
+
+    #[test]
+    fn the_send_deadline_survives_an_expired_request_deadline() {
+        // 編集は結果を破棄しない。期限を過ぎていても送信の持ち時間を確保する。
+        let now = Instant::now();
+        assert_eq!(
+            edit_send_deadline(now, NOW_UNIX_MS, Some((NOW_UNIX_MS - 1) as u64)),
+            now + WRITE_TIMEOUT
+        );
+        assert_eq!(
+            edit_send_deadline(now, NOW_UNIX_MS, Some((NOW_UNIX_MS + 200) as u64)),
+            now + Duration::from_millis(200)
+        );
+    }
+
+    /// 期限判定の基準時刻。読み取り側のテストと同じ値を用いる。
+    const NOW_UNIX_MS: i64 = 1_785_144_000_000;
+}

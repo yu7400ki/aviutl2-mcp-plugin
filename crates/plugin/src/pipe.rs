@@ -1621,4 +1621,333 @@ mod tests {
         drop(silent);
         cleanup(dir);
     }
+
+    /// 応答が要求の期限を確実に超えるまで待つ時間。
+    const SLOW_WORK: Duration = Duration::from_millis(300);
+
+    /// 要求が指定する期限。[`SLOW_WORK`] より短く採る。
+    const SLOW_DEADLINE_MS: i64 = 50;
+
+    /// 期限を超えてから結果を返す読み取り口。
+    struct SlowReadAdapter;
+
+    impl ReadAdapter for SlowReadAdapter {
+        fn project_status(&self) -> crate::read::ProjectStatus {
+            StubReadAdapter.project_status()
+        }
+
+        fn get_edit_info(&self) -> Result<aviutl2_mcp_core::EditInfo, crate::read::ReadError> {
+            std::thread::sleep(SLOW_WORK);
+            StubReadAdapter.get_edit_info()
+        }
+
+        fn get_current_scene(
+            &self,
+        ) -> Result<(aviutl2_mcp_core::SceneInfo, u64), crate::read::ReadError> {
+            StubReadAdapter.get_current_scene()
+        }
+
+        fn list_layers(
+            &self,
+            expected_scene_id: i32,
+        ) -> Result<crate::read::Snapshot<aviutl2_mcp_core::LayerInfo>, crate::read::ReadError>
+        {
+            StubReadAdapter.list_layers(expected_scene_id)
+        }
+
+        fn list_objects(
+            &self,
+            expected_scene_id: i32,
+            filter: Option<&aviutl2_mcp_core::ObjectFilter>,
+            page: &aviutl2_mcp_core::PageRequest,
+        ) -> Result<
+            Result<crate::read::Page<aviutl2_mcp_core::ObjectSummary>, aviutl2_mcp_core::PageError>,
+            crate::read::ReadError,
+        > {
+            StubReadAdapter.list_objects(expected_scene_id, filter, page)
+        }
+
+        fn get_object(
+            &self,
+            selector: &aviutl2_mcp_core::ObjectSelector,
+        ) -> Result<aviutl2_mcp_core::ObjectDetail, crate::read::ReadError> {
+            StubReadAdapter.get_object(selector)
+        }
+
+        fn list_available_effects(
+            &self,
+            effect_type: Option<&aviutl2_mcp_core::EffectType>,
+        ) -> Result<crate::read::Snapshot<aviutl2_mcp_core::AvailableEffect>, crate::read::ReadError>
+        {
+            StubReadAdapter.list_available_effects(effect_type)
+        }
+    }
+
+    /// 期限を超えてから結果を返す編集口。
+    ///
+    /// 用いるのは選択状態の変更だけである。他の編集は呼ばれないが、呼ばれても
+    /// 接続が落ちないよう受付前と同じ失敗を返す。
+    struct SlowEditAdapter;
+
+    impl SlowEditAdapter {
+        fn unavailable() -> crate::edit::EditError {
+            crate::read::ReadError::NotReady.into()
+        }
+    }
+
+    impl EditAdapter for SlowEditAdapter {
+        fn create_object(
+            &self,
+            _: &aviutl2_mcp_core::CreateObjectParams,
+        ) -> Result<aviutl2_mcp_core::EditOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
+        fn move_object(
+            &self,
+            _: &aviutl2_mcp_core::MoveObjectParams,
+        ) -> Result<aviutl2_mcp_core::EditOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
+        fn delete_object(
+            &self,
+            _: &aviutl2_mcp_core::DeleteObjectParams,
+        ) -> Result<aviutl2_mcp_core::EditOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
+        fn set_object_name(
+            &self,
+            _: &aviutl2_mcp_core::SetObjectNameParams,
+        ) -> Result<aviutl2_mcp_core::EditOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
+        fn set_object_item(
+            &self,
+            _: &aviutl2_mcp_core::SetObjectItemParams,
+        ) -> Result<aviutl2_mcp_core::EditOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
+        fn add_effect(
+            &self,
+            _: &aviutl2_mcp_core::AddEffectParams,
+        ) -> Result<aviutl2_mcp_core::EditOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
+        fn delete_effect(
+            &self,
+            _: &aviutl2_mcp_core::DeleteEffectParams,
+        ) -> Result<aviutl2_mcp_core::EditOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
+        fn set_effect_state(
+            &self,
+            _: &aviutl2_mcp_core::SetEffectStateParams,
+        ) -> Result<aviutl2_mcp_core::EditOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
+        fn set_selection(
+            &self,
+            _: &aviutl2_mcp_core::SetSelectionParams,
+        ) -> Result<aviutl2_mcp_core::SelectionState, crate::edit::EditError> {
+            std::thread::sleep(SLOW_WORK);
+            Ok(aviutl2_mcp_core::SelectionState::observed(
+                STUB_EPOCH,
+                STUB_REVISION,
+                aviutl2_mcp_core::Cursor { frame: 0, layer: 0 },
+                None,
+                None,
+                vec![aviutl2_mcp_core::SelectionField::Cursor],
+            ))
+        }
+    }
+
+    /// 指定した読み取り口と編集口を添えて server を起動する。
+    fn start_server_with_adapters(
+        lifecycle: &Arc<Lifecycle>,
+        read_adapter: Arc<dyn ReadAdapter>,
+        edit_adapter: Arc<dyn EditAdapter>,
+    ) -> PipeServer {
+        PipeServer::start(lifecycle.clone(), read_adapter, edit_adapter).unwrap()
+    }
+
+    /// 編集区間の内側で panic する編集口と、その前提を作る。
+    fn panicking_edit_adapter() -> (Arc<dyn EditAdapter>, String) {
+        use crate::edit::fake::{FakeEditHost, PanicPoint};
+
+        let project = Arc::new(ProjectState::new());
+        let epoch = project.epoch();
+        let mut host = FakeEditHost::new();
+        host.project = Some(project.clone());
+        let host = Arc::new(host);
+        host.arm(|knobs| knobs.panic_at = Some(PanicPoint::InSection));
+        (
+            Arc::new(crate::edit::HostEditAdapter::new(host, project)),
+            epoch,
+        )
+    }
+
+    /// 選択状態の変更要求を組み立てる。対象を指すセレクターを持たないため、
+    /// 前提の epoch だけで組める。
+    fn selection_params(epoch: &str) -> serde_json::Value {
+        serde_json::json!({
+            "expected_scene_id": 0,
+            "cursor": { "layer": 0, "frame": 0 },
+            "expected": { "project_epoch": epoch, "project_revision": 0 },
+        })
+    }
+
+    /// params つきで要求を 1 往復する。
+    fn exchange_with_params(
+        client: &PipeStream,
+        id: InstanceId,
+        version: ProtocolVersion,
+        operation: &str,
+        params: serde_json::Value,
+        deadline_unix_ms: Option<u64>,
+    ) -> aviutl2_mcp_core::ResponseEnvelope {
+        let request_id = aviutl2_mcp_core::RequestId::new();
+        let body = serde_json::to_vec(&aviutl2_mcp_core::RequestEnvelope {
+            kind: aviutl2_mcp_core::RequestKind::Request,
+            protocol_version: version,
+            request_id,
+            instance_id: id,
+            deadline_unix_ms,
+            operation: operation.to_string(),
+            params,
+        })
+        .unwrap();
+        send(client, &body, operation);
+        let response =
+            recv(client, operation).unwrap_or_else(|| panic!("{operation} の応答がありません"));
+        let response: aviutl2_mcp_core::ResponseEnvelope =
+            serde_json::from_slice(&response).unwrap();
+        assert_eq!(response.request_id, request_id);
+        response
+    }
+
+    /// 編集区間の内側の panic が、切断ではなく応答として要求元へ届くことを確かめる。
+    ///
+    /// panic の変換は編集口の内側で完結し、要求処理側には捕捉層が無い。変換が
+    /// 失われると接続の境界まで巻き戻り、要求元は応答ではなく切断を観測する。
+    /// 両者は要求元にとって全く異なるため、層を繋いだ経路で確かめる。
+    #[test]
+    fn panicking_edit_receives_an_internal_error_without_closing_the_connection() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let (edit_adapter, epoch) = panicking_edit_adapter();
+        let server =
+            start_server_with_adapters(&lifecycle, Arc::new(StubReadAdapter), edit_adapter);
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+
+        let error = with_silent_panic_hook(|| {
+            expect_error(
+                exchange_with_params(
+                    &client,
+                    id,
+                    version,
+                    "set_selection",
+                    selection_params(&epoch),
+                    None,
+                ),
+                "panic した編集",
+            )
+        });
+        assert_eq!(error.code, aviutl2_mcp_core::ErrorCode::InternalError);
+        assert!(!error.retryable);
+
+        // 応答を返した後も接続は生きており、続く要求を処理できる。
+        exchange_ping(&client, id, version);
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    /// 期限を過ぎた読み取りの結果は破棄される。
+    ///
+    /// 直後の編集のテストと対にしてある。破棄の規則を取り違えると、どちらか
+    /// 一方が必ず落ちる。
+    #[test]
+    fn a_read_that_outlives_its_deadline_is_discarded() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = start_server_with_adapters(
+            &lifecycle,
+            Arc::new(SlowReadAdapter),
+            Arc::new(SlowEditAdapter),
+        );
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+
+        let deadline = (chrono::Utc::now().timestamp_millis() + SLOW_DEADLINE_MS) as u64;
+        let error = expect_error(
+            exchange_with_params(
+                &client,
+                id,
+                version,
+                "get_edit_info",
+                serde_json::json!({}),
+                Some(deadline),
+            ),
+            "期限を過ぎた読み取り",
+        );
+        assert_eq!(error.code, aviutl2_mcp_core::ErrorCode::Timeout);
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    /// 期限を過ぎても編集の結果は破棄されない。
+    ///
+    /// 編集が完了していればプロジェクトは変わり、取り消し単位にも登録されて
+    /// いる。破棄すると、適用済みの変更が要求元からは失敗として観測される。
+    #[test]
+    fn an_edit_that_outlives_its_deadline_still_delivers_its_result() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = start_server_with_adapters(
+            &lifecycle,
+            Arc::new(SlowReadAdapter),
+            Arc::new(SlowEditAdapter),
+        );
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+
+        let deadline = (chrono::Utc::now().timestamp_millis() + SLOW_DEADLINE_MS) as u64;
+        let response = exchange_with_params(
+            &client,
+            id,
+            version,
+            "set_selection",
+            selection_params(STUB_EPOCH),
+            Some(deadline),
+        );
+        match response.result {
+            aviutl2_mcp_core::ResponseResult::Ok { result } => {
+                assert_eq!(result["applied"], serde_json::json!(["cursor"]));
+            }
+            aviutl2_mcp_core::ResponseResult::Err { error } => {
+                panic!("適用済みの編集結果が破棄されました: {error:?}")
+            }
+        }
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
 }
