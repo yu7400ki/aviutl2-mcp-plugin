@@ -634,9 +634,24 @@ fn rejected_edit_tool_calls_take_the_same_path() {
             },
         },
     }));
+    // 型を取り違えた値。復元に失敗した理由へ値そのものが現れる経路である。
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_create_object",
+            "arguments": {
+                "instance_id": instance_id,
+                "source": { "type": "object_alias", "alias": "[vo]" },
+                "placement": { "scene_id": 0, "layer": SECRET_ARGUMENT, "frame": 0 },
+                "expected": expected,
+            },
+        },
+    }));
 
     let session = run_session(&registry_dir, &requests);
-    for id in [2, 3, 4] {
+    for id in [2, 3, 4, 5] {
         let response = session.response(id);
         assert_eq!(response["result"]["isError"], json!(true), "{response}");
         assert_structured_invalid_argument(&response);
@@ -650,8 +665,20 @@ fn rejected_edit_tool_calls_take_the_same_path() {
         "未知フィールドの拒否理由: {message}"
     );
 
+    // 受け取った値そのものは応答へ反響させない。編集 tool の引数は alias・
+    // パス・設定値であり、Phase 2 の read tool より漏れたときの損失が大きい。
+    let type_mismatch = session.response(5);
+    let echoed = serde_json::to_string(&type_mismatch).expect("直列化できる");
+    assert!(
+        !echoed.contains(SECRET_ARGUMENT),
+        "受け取った値が応答に含まれています: {echoed}"
+    );
+
     let _ = std::fs::remove_dir_all(&registry_dir);
 }
+
+/// 型を取り違えて送られた、応答へ反響してはならない値。
+const SECRET_ARGUMENT: &str = "秘密のレイヤー値";
 
 /// 引数を解釈できなかった tool call へ送るキー名の長さ。
 const HUGE_ARGUMENT_KEY_CHARS: usize = 100_000;

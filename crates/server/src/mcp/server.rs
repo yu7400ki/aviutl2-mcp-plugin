@@ -1276,7 +1276,8 @@ fn normalize_tool_result(tool: &str, mut result: CallToolResult) -> CallToolResu
 /// 引数を解釈できなかった旨の説明を組み立てる。
 ///
 /// router が付けた説明はどのフィールドが不正かを示すため残す価値があるが、
-/// 内容にはクライアントが送った key がそのまま現れる。長さを抑えて載せる。
+/// 受け取った値そのものも含む。値は alias・パス・設定値になり得るため、
+/// [`redact_quoted_values`] で伏せたうえで長さを抑えて載せる。
 fn argument_error_message(result: &CallToolResult) -> String {
     let detail: String = result
         .content
@@ -1285,12 +1286,51 @@ fn argument_error_message(result: &CallToolResult) -> String {
         .map(|text| text.text.as_str())
         .collect::<Vec<_>>()
         .join(" ");
+    let detail = redact_quoted_values(detail.trim());
     let detail = clamp_chars(detail.trim(), MAX_ARGUMENT_ERROR_DETAIL_CHARS);
     if detail.is_empty() {
         "引数を解釈できませんでした".to_string()
     } else {
         format!("引数を解釈できませんでした: {detail}")
     }
+}
+
+/// 伏せた値の位置を示す表記。
+const REDACTED_VALUE: &str = "\"…\"";
+
+/// 二重引用符で囲まれた部分を伏せる。
+///
+/// 引数を解釈できなかった理由には、どのフィールドが不正かを示す名前と、
+/// 受け取った値そのものの両方が現れる。名前は要求を訂正するのに要るが、
+/// 値は利用者の内容そのものであり、alias・パス・設定値をそのまま応答へ
+/// 反響させることになる。値は二重引用符、フィールド名はバッククォートで
+/// 囲まれるため、二重引用符の中だけを落として名前は残す。
+///
+/// 引用符が閉じない入力では、開いた位置から末尾までを落とす。読める説明が
+/// 短くなるだけで、値が漏れる側へは倒れない。
+fn redact_quoted_values(detail: &str) -> String {
+    let mut redacted = String::with_capacity(detail.len());
+    let mut inside = false;
+    let mut escaped = false;
+    for c in detail.chars() {
+        if inside {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                inside = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            redacted.push_str(REDACTED_VALUE);
+            inside = true;
+            continue;
+        }
+        redacted.push(c);
+    }
+    redacted
 }
 
 /// tool result の text content を [`MAX_TEXT_CHARS`] 以内へ収める。
@@ -1811,6 +1851,65 @@ mod tests {
         );
         // どのフィールドが不正かは残す。
         assert!(text_of(&result).contains("future"), "{}", text_of(&result));
+    }
+
+    #[test]
+    fn argument_decoding_failure_does_not_echo_the_value() {
+        // 引数の復元に失敗した理由には受け取った値がそのまま現れる。編集 tool の
+        // 引数は alias・パス・設定値であり、応答へ反響させない。
+        let result = normalize_tool_result(
+            "aviutl2_create_object",
+            router_argument_error(concat!(
+                r#"failed to deserialize parameters: invalid type: string "C:\Users\tester\secret.mp4","#,
+                " expected u32 at line 1 column 40",
+            )),
+        );
+
+        let text = text_of(&result);
+        let structured = result
+            .structured_content
+            .as_ref()
+            .expect("structuredContent がある");
+        let message = structured["message"].as_str().expect("message がある");
+        for forbidden in ["secret", "tester", "Users"] {
+            assert!(
+                !text.contains(forbidden),
+                "{forbidden} が text にあります: {text}"
+            );
+            assert!(
+                !message.contains(forbidden),
+                "{forbidden} が message にあります: {message}"
+            );
+        }
+        // どのフィールドが不正かを判断する手掛かりは残す。
+        assert!(text.contains("expected u32"), "{text}");
+    }
+
+    #[test]
+    fn argument_decoding_failure_keeps_the_field_name() {
+        // フィールド名はバッククォートで囲まれるため、値を伏せても残る。
+        let result = normalize_tool_result(
+            "aviutl2_set_object_item",
+            router_argument_error("failed to deserialize parameters: missing field `expected`"),
+        );
+        assert!(
+            text_of(&result).contains("expected"),
+            "{}",
+            text_of(&result)
+        );
+    }
+
+    #[test]
+    fn quoted_values_are_redacted_even_when_they_contain_quotes() {
+        // 値の中の引用符でも伏せる範囲が終わらない。終われば続きが漏れる。
+        let redacted = redact_quoted_values(r#"invalid type: string "秘\"密", expected u32"#);
+        assert!(!redacted.contains('秘'), "{redacted}");
+        assert!(!redacted.contains('密'), "{redacted}");
+        assert!(redacted.contains("expected u32"), "{redacted}");
+
+        // 閉じない引用符は末尾まで落とす。値が漏れる側へ倒れない。
+        let redacted = redact_quoted_values(r#"invalid type: string "秘密"#);
+        assert!(!redacted.contains('秘'), "{redacted}");
     }
 
     #[test]
