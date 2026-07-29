@@ -3430,11 +3430,14 @@ fn check_blocked(
         expected,
     );
     let blocked_note = match &blocked {
-        Ok(_) => {
+        Ok(applied) => {
             prompt(&format!(
                 "AviUtl2 のインスタンス {}: {stop}",
                 instance.label
             ));
+            // 拒否されるはずの編集が通っている。以降の確認が別の配置に対して
+            // 走らないよう、元の位置へ戻してから失敗として返す。
+            restore_position(harness, instance, applied, context.target)?;
             return Err(format!("{label}の編集が成功として返りました"));
         }
         Err(error) if error.code == ErrorCode::EditBlocked => describe_error(error),
@@ -3475,6 +3478,18 @@ fn check_blocked(
     )?;
 
     // 後始末: 元の位置へ戻す。
+    restore_position(harness, instance, &moved, context.target)?;
+
+    Ok(vec![blocked_note, format!("{label}の終了後は成功した")])
+}
+
+/// 移動の応答が返した selector を使って、対象を元の位置へ戻す。
+fn restore_position(
+    harness: &Harness,
+    instance: &Instance,
+    moved: &EditOutcome,
+    home: Placement,
+) -> Result<(), String> {
     let selector = moved
         .object
         .clone()
@@ -3486,8 +3501,8 @@ fn check_blocked(
             &instance.id,
             &selector,
             DestinationInput {
-                layer: context.target.layer as u32,
-                frame: context.target.frame as u32,
+                layer: home.layer as u32,
+                frame: home.frame as u32,
             },
             ExpectedInput {
                 project_epoch: epoch.clone(),
@@ -3496,8 +3511,7 @@ fn check_blocked(
         )
     })
     .map_err(|error| format!("元の位置へ戻せません: {}", describe_error(&error)))?;
-
-    Ok(vec![blocked_note, format!("{label}の終了後は成功した")])
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -3627,7 +3641,9 @@ fn check_stale_after_ui_item_change(
         Some("取り違え確認".to_string()),
         expected,
     );
+    let applied = attempt.as_ref().ok().cloned();
     let outcome = expect_rejection(attempt, ErrorCode::PreconditionFailed, Some("fingerprint"));
+    restore_default_name(harness, instance, applied.as_ref())?;
 
     prompt("UI で行った設定値の変更を取り消してから Enter を押してください。");
     outcome
@@ -3653,10 +3669,44 @@ fn check_stale_after_ui_move(
         Some("取り違え確認".to_string()),
         expected,
     );
+    let applied = attempt.as_ref().ok().cloned();
     let outcome = expect_rejection(attempt, ErrorCode::NotFound, None);
+    restore_default_name(harness, instance, applied.as_ref())?;
 
     prompt("UI で行った移動を取り消し、元の位置へ戻してから Enter を押してください。");
     outcome
+}
+
+/// 拒否されるはずの名前変更が通っていた場合に、標準名へ戻す。
+///
+/// 戻さずに進むと、以降の確認が名前の付いた別の対象に対して走る。
+fn restore_default_name(
+    harness: &Harness,
+    instance: &Instance,
+    applied: Option<&EditOutcome>,
+) -> Result<(), String> {
+    let Some(applied) = applied else {
+        return Ok(());
+    };
+    let selector = applied
+        .object
+        .clone()
+        .ok_or_else(|| "名前変更の応答が対象を返しませんでした".to_string())?
+        .selector;
+    let epoch = applied.project_epoch.clone();
+    with_revision_correction(applied.project_revision, |revision| {
+        harness.set_object_name(
+            &instance.id,
+            &selector,
+            None,
+            ExpectedInput {
+                project_epoch: epoch.clone(),
+                project_revision: revision,
+            },
+        )
+    })
+    .map_err(|error| format!("名前を標準名へ戻せません: {}", describe_error(&error)))?;
+    Ok(())
 }
 
 /// Undo / Redo で内容が元へ戻った後の古い前提条件が拒否されることを確かめる。
@@ -3697,7 +3747,7 @@ fn check_stale_after_undo_redo(
         Some("取り違え確認".to_string()),
         fresh,
     );
-    let accepted = retried.is_ok();
+    let applied = retried.as_ref().ok().cloned();
     report.observe(
         "undo_redo_with_fresh_expected",
         "Undo / Redo で内容が元へ戻った後、前提条件を読み直した古い selector は受理されるか",
@@ -3708,14 +3758,7 @@ fn check_stale_after_undo_redo(
     );
 
     // 後始末: 名前を標準名へ戻す。
-    if accepted {
-        let object = resolve_object(harness, instance, context.scene_id, context.target)?;
-        let expected = precondition(harness, instance)?;
-        require(
-            harness.set_object_name(&instance.id, &object.selector, None, expected),
-            "名前を戻せません",
-        )?;
-    }
+    restore_default_name(harness, instance, applied.as_ref())?;
 
     outcome
 }
@@ -4437,7 +4480,9 @@ fn section_scene_switch(
         Some("シーン確認".to_string()),
         expected,
     );
+    let applied = attempt.as_ref().ok().cloned();
     let outcome = expect_rejection(attempt, ErrorCode::PreconditionFailed, Some("scene_id"));
+    restore_default_name(harness, instance, applied.as_ref())?;
     report.record(
         "5.8",
         "シーン切替後の編集",
