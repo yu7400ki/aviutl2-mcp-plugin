@@ -15,8 +15,7 @@
 //!
 //! 1〜5 は [`verify_boundary`] が要求全体へ適用し、6〜7 は解決処理が行う。
 //! 判定を飛ばして変更へ進む経路が作れないよう、変更 API は
-//! [`MutationTicket`] を要求する。権利を作れるのは [`MutationPermit::issue`]
-//! だけ、
+//! [`MutationTicket`] を要求する。権利を作れるのは [`MutationPermit::issue`] だけ、
 //! permit を作れるのは [`Boundary::revalidate`] だけ、[`Boundary`] を作れるのは
 //! [`verify_boundary`] だけ、という連鎖で順序を型が強制する。
 
@@ -83,6 +82,11 @@ pub(crate) struct Boundary {
     observed: ProjectBoundary,
     scene_id: i32,
     kind: EditKind,
+    /// 変更の許可を既に取り出したか。
+    ///
+    /// 許可はそれぞれ独立に発行を数える。1 要求で 2 つ取ると、同じ要求の中で
+    /// revision が 2 度進み、応答が返す値がどちらの許可のものか定まらない。
+    spent: Cell<bool>,
 }
 
 impl Boundary {
@@ -107,10 +111,16 @@ impl Boundary {
     /// 大きなレイヤーでは相応の時間がかかり、その間にプロジェクト境界が変わり
     /// 得る。ここで不一致なら SDK を呼ばずに中断する。まだ何も変更していない
     /// ため中断は安全であり、変更の発行も記録されない。
+    ///
+    /// 1 要求で 2 度呼ぶことはできない。許可はそれぞれ独立に発行を数えるため、
+    /// 2 つ取ると revision が 2 度進み、応答が返す値が定まらない。
     pub(crate) fn revalidate<'a>(
         &self,
         project: &'a ProjectState,
     ) -> Result<MutationPermit<'a>, EditError> {
+        if self.spent.replace(true) {
+            return Err(EditError::Panicked);
+        }
         let current = ProjectBoundary::load(project);
         if current.epoch != self.observed.epoch {
             return Err(ReadError::EpochMismatch.into());
@@ -255,6 +265,7 @@ pub(crate) fn verify_boundary(
         observed,
         scene_id,
         kind,
+        spent: Cell::new(false),
     })
 }
 
@@ -496,6 +507,28 @@ mod tests {
             .err()
             .expect("revision の変化後に変更が許可されました");
         assert_eq!(error.details()["mismatch"], json!("project_revision"));
+    }
+
+    #[test]
+    fn a_second_permit_cannot_be_taken_for_the_same_request() {
+        // 許可はそれぞれ独立に発行を数える。2 つ取れると、同じ要求の中で
+        // revision が 2 度進み、応答が返す値がどちらのものか定まらない。
+        let project = state();
+        let epoch = project.epoch();
+        let boundary = verify_boundary(
+            &project,
+            &edit_info(0),
+            &expected(&epoch, 0),
+            EditKind::Content,
+            &[],
+            &[],
+        )
+        .unwrap();
+        boundary.revalidate(&project).expect("1 度目の許可");
+        let Err(error) = boundary.revalidate(&project) else {
+            panic!("同じ要求で 2 つ目の許可が取れました");
+        };
+        assert_eq!(error.error_code(), ErrorCode::InternalError);
     }
 
     #[test]
