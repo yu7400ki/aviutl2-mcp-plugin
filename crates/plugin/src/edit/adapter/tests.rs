@@ -1455,3 +1455,51 @@ fn the_added_position_comes_from_the_difference_in_the_name_list() {
         None
     );
 }
+
+#[test]
+fn every_nested_selector_is_checked_including_the_ones_inside_other_inputs() {
+    // 判定は要求が含む全てのセレクターへ及ぶ。ネストしたセレクターだけが照合を
+    // 免れると、そこから別プロジェクトの対象へ適用され得る。
+    let harness = Harness::new();
+    let mut item = SetObjectItemParams {
+        selector: harness.effect_selector(1, 100, "ぼかし", 0),
+        item: "範囲".to_string(),
+        value: ItemValue::Integer { value: 10 },
+        expected: harness.expected(),
+    };
+    item.selector.object.project_epoch = "別のプロジェクト".to_string();
+    let error = harness
+        .edit
+        .set_object_item(&item)
+        .expect_err("effect セレクターの内側の epoch 不一致が受理されました");
+    assert_eq!(error.details()["mismatch"], json!("project_epoch"));
+
+    let harness = Harness::new();
+    let mut object = harness.selector(1, 100);
+    object.project_epoch = "別のプロジェクト".to_string();
+    let error = harness
+        .edit
+        .add_effect(&AddEffectParams {
+            object,
+            effect_name: "ぼかし".to_string(),
+            expected: harness.expected(),
+        })
+        .expect_err("付与先の epoch 不一致が受理されました");
+    assert_eq!(error.details()["mismatch"], json!("project_epoch"));
+
+    let harness = Harness::new();
+    let mut focus = harness.selector(1, 100);
+    focus.project_epoch = "別のプロジェクト".to_string();
+    let error = harness
+        .edit
+        .set_selection(&SetSelectionParams {
+            expected_scene_id: SCENE_ID,
+            cursor: None,
+            selected_range: None,
+            focus: Some(FocusChange::Set { object: focus }),
+            expected: harness.expected(),
+        })
+        .expect_err("フォーカス対象の epoch 不一致が受理されました");
+    assert_eq!(error.details()["mismatch"], json!("project_epoch"));
+    assert!(!harness.host.mutated());
+}
