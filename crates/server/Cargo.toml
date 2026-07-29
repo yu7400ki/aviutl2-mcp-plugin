@@ -23,6 +23,13 @@ path = "src/main.rs"
 name = "live_host_acceptance"
 path = "examples/live_host_acceptance.rs"
 
+# 編集の実機受け入れ確認。破壊的であるため、固定サンプルプロジェクトの複製に対して
+# 実行する。分離方式は上と同じ。
+# 実行は `cargo run -p aviutl2-mcp-server --example live_edit_acceptance`。
+[[example]]
+name = "live_edit_acceptance"
+path = "examples/live_edit_acceptance.rs"
+
 [dependencies]
 aviutl2-mcp-core = { workspace = true }
 chrono = { workspace = true }
