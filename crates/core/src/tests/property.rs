@@ -737,9 +737,14 @@ proptest! {
             }
             _ => {
                 if let Ok(encoded) = encoded {
-                    // 書き込む文字列に NUL と制御文字は残らない。
+                    // 書き込む文字列に NUL は残らない。
                     prop_assert!(!encoded.contains('\0'));
-                    prop_assert!(!encoded.chars().any(char::is_control));
+                    // 改行・復帰・水平タブは複数行を取り得る値でのみ残る。
+                    // 他の値ではどの制御文字も残らない。
+                    let multiline = matches!(value, ItemValue::Text { .. });
+                    let allowed = |c: char| multiline && matches!(c, '\n' | '\r' | '\t');
+                    let unexpected = encoded.chars().any(|c| c.is_control() && !allowed(c));
+                    prop_assert!(!unexpected);
                     prop_assert!(validate_item_value(&value).is_ok());
                 }
             }
