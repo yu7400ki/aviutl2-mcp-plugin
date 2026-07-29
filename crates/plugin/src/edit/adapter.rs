@@ -94,15 +94,23 @@ impl<H: EditHost> HostEditAdapter<H> {
                 .enter_edit_section(move |editor| guard(|| f(editor)))
         })?;
         match entered {
-            Ok(result) => result.map_err(|error| self.attribute_panic(error, before)),
+            Ok(result) => result.map_err(|error| self.attribute_lost_issue(error, before)),
             Err(error) => Err(self.classify_section_failure(error)),
         }
     }
 
-    /// 捕捉した panic を、変更が入った可能性つきの失敗へ写す。
-    fn attribute_panic(&self, error: EditError, revision_before: u64) -> EditError {
+    /// 許可を経ずに区間を抜けた失敗を、変更が入った可能性つきの失敗へ写す。
+    ///
+    /// panic の捕捉は発行の記録を持つ許可ごと巻き戻し、2 つ目の許可の要求は
+    /// 許可を通らずに戻る。どちらも発行済みの変更を失敗へ結び付ける経路を
+    /// 持たないため、区間の前後で revision が動いたかで補う。
+    fn attribute_lost_issue(&self, error: EditError, revision_before: u64) -> EditError {
         let current = self.project.revision();
-        if matches!(error, EditError::Panicked) && current != revision_before {
+        let lost = matches!(
+            error,
+            EditError::Panicked | EditError::MutationPermitReissued
+        );
+        if lost && current != revision_before {
             return error.after_mutation(current);
         }
         error

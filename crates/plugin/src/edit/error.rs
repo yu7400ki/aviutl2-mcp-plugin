@@ -208,6 +208,13 @@ pub enum EditError {
     /// 編集区間の処理で panic を捕捉した。
     #[error("編集処理で panic を捕捉しました")]
     Panicked,
+    /// 1 つの前提から 2 つ目の変更許可を取ろうとした。
+    ///
+    /// 許可はそれぞれ独立に発行を数えるため、2 つ取ると同じ前提のもとで
+    /// revision が 2 度進み、応答が返す値がどちらの許可のものか定まらない。
+    /// 呼び出し側の組み立ての誤りであり、同じ要求を作り直しても解消しない。
+    #[error("1 つの前提から変更の許可を 2 度取ることはできません")]
+    MutationPermitReissued,
     /// SDK の変更 API を発行した後に生じた失敗。
     ///
     /// エラーコードは失敗の理由を表すものを保ち、書き換えない。変更が入った
@@ -253,7 +260,7 @@ impl EditError {
                 NotIssuedReason::TargetMissing => ErrorCode::NotFound,
                 NotIssuedReason::ArgumentNotRepresentable => ErrorCode::InvalidArgument,
             },
-            EditError::Panicked => ErrorCode::InternalError,
+            EditError::Panicked | EditError::MutationPermitReissued => ErrorCode::InternalError,
             EditError::AfterMutation { source, .. } => source.error_code(),
         }
     }
@@ -345,7 +352,7 @@ impl EditError {
             EditError::NotIssued { reason } => {
                 details.insert("reason".to_string(), json!(reason.as_str()));
             }
-            EditError::Panicked => {}
+            EditError::Panicked | EditError::MutationPermitReissued => {}
             EditError::AfterMutation {
                 source,
                 project_revision,
@@ -468,6 +475,7 @@ mod tests {
                 operation: "create_effect",
             },
             EditError::Panicked,
+            EditError::MutationPermitReissued,
             EditError::Sdk {
                 operation: "create_effect",
             }
@@ -492,6 +500,7 @@ mod tests {
             EditError::Sdk { .. } => "Sdk",
             EditError::NotIssued { .. } => "NotIssued",
             EditError::Panicked => "Panicked",
+            EditError::MutationPermitReissued => "MutationPermitReissued",
             EditError::AfterMutation { .. } => "AfterMutation",
         }
     }
@@ -511,6 +520,7 @@ mod tests {
             "Sdk",
             "NotIssued",
             "Panicked",
+            "MutationPermitReissued",
             "AfterMutation",
         ];
         let covered: Vec<&str> = all_errors().iter().map(variant_name).collect();
@@ -607,6 +617,8 @@ mod tests {
                 // 引数を写せなかった。SDK の失敗ではなく要求の誤りである。
                 ErrorCode::InvalidArgument,
                 ErrorCode::SdkError,
+                ErrorCode::InternalError,
+                // 前提の作り方の誤りであり、要求を作り直しても解消しない。
                 ErrorCode::InternalError,
                 ErrorCode::SdkError,
             ]

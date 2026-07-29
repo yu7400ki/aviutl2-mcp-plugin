@@ -119,7 +119,7 @@ impl Boundary {
         project: &'a ProjectState,
     ) -> Result<MutationPermit<'a>, EditError> {
         if self.spent.replace(true) {
-            return Err(EditError::Panicked);
+            return Err(EditError::MutationPermitReissued);
         }
         let current = ProjectBoundary::load(project);
         if current.epoch != self.observed.epoch {
@@ -529,6 +529,12 @@ mod tests {
             panic!("同じ要求で 2 つ目の許可が取れました");
         };
         assert_eq!(error.error_code(), ErrorCode::InternalError);
+        // 巻き戻しは起きていない。捕捉した panic を名乗ると、運用者は起きて
+        // いない panic の原因を探すことになる。
+        assert!(
+            matches!(error, EditError::MutationPermitReissued),
+            "{error} が 2 つ目の許可として報告されていません"
+        );
     }
 
     #[test]
