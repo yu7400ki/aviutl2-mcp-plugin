@@ -1258,17 +1258,19 @@ mod tests {
 
     #[test]
     fn list_layers_counts_objects_without_reading_them() {
-        // 件数のために名前と alias まで読むと、参照ロックを保持する時間が
+        // 件数のために名前や alias まで読むと、参照ロックを保持する時間が
         // オブジェクト数に比例して伸びる。
         let adapter = adapter();
         adapter.list_layers(0).unwrap();
 
         let calls = adapter.host.calls();
         assert!(calls.contains(&"object_count"), "{calls:?}");
-        assert!(
-            !calls.contains(&"objects_in_layer"),
-            "件数のためにオブジェクトを列挙しています: {calls:?}"
-        );
+        for forbidden in ["object_placements", "object_detail"] {
+            assert!(
+                !calls.contains(&forbidden),
+                "件数のために {forbidden} を呼んでいます: {calls:?}"
+            );
+        }
     }
 
     #[test]
