@@ -37,7 +37,12 @@ const SENSITIVE_KEY_FRAGMENTS: &[&str] = &[
 ];
 
 /// `details` の文字列値に許す最大文字数。
-const MAX_DETAIL_STRING_CHARS: usize = 200;
+///
+/// 接続先が名前を切り詰める長さと揃える。`details` に残る文字列は effect 名・
+/// 設定項目名のように呼び出し側が要求を訂正するのに使う識別子であり、ここで
+/// さらに短く切ると、長い名前が識別できないまま返る。接続先が既に同じ長さで
+/// 抑えているため、揃えても応答が膨らむことはない。
+const MAX_DETAIL_STRING_CHARS: usize = 1_024;
 
 /// `details` の配列に残す最大要素数。
 const MAX_DETAIL_ARRAY_ITEMS: usize = 32;
@@ -221,6 +226,12 @@ mod tests {
     use super::*;
     use crate::discovery::ExclusionReason;
     use aviutl2_mcp_core::{OPERATION_GET_OBJECT, OPERATION_MOVE_OBJECT};
+
+    /// 接続先が名前を残すと決めている文字数。
+    ///
+    /// 定数から導かずに書く。導くと、切り詰めの長さを変えたときにこの表明も
+    /// 一緒に動いてしまい、層の食い違いが戻っても落ちない。
+    const INSTANCE_NAME_LIMIT: usize = 1_024;
 
     #[test]
     fn invalid_argument_is_not_retryable() {
@@ -410,9 +421,26 @@ mod tests {
 
     #[test]
     fn long_detail_strings_are_clamped() {
-        let details = sanitize_details(&serde_json::json!({ "note": "あ".repeat(1_000) }), 0);
+        let details = sanitize_details(
+            &serde_json::json!({ "note": "あ".repeat(MAX_DETAIL_STRING_CHARS * 2) }),
+            0,
+        );
         let note = details["note"].as_str().expect("note は文字列");
-        assert!(note.chars().count() <= MAX_DETAIL_STRING_CHARS);
+        assert_eq!(note.chars().count(), MAX_DETAIL_STRING_CHARS);
+    }
+
+    #[test]
+    fn a_name_kept_by_the_instance_reaches_the_caller_whole() {
+        // 名前は要求を訂正するのに使う値である。接続先が残すと決めた長さを
+        // server が黙って短くすると、長い名前を指定し直せなくなる。
+        let name = "あ".repeat(INSTANCE_NAME_LIMIT);
+        let remote = ErrorObject::new(ErrorCode::NotFound, "effect がありません", false)
+            .with_details(serde_json::json!({ "effect_name": name }));
+        let error = from_pipe_error(
+            &PipeClientError::Remote(Box::new(remote)),
+            OPERATION_MOVE_OBJECT,
+        );
+        assert_eq!(error.details["effect_name"], serde_json::json!(name));
     }
 
     #[test]
