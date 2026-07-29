@@ -249,7 +249,9 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
             // プロジェクトの規模で決まってしまう。
             let mut items = Vec::with_capacity(window.len());
             for placement in window {
-                let detail = scene.object_detail(placement.layer, placement.frame_start)?;
+                let detail = scene
+                    .object_detail(placement.layer, placement.frame_start)
+                    .map_err(enumeration_failure)?;
                 items.push(object_summary(epoch, scene_id, &detail.object));
             }
             Ok(Ok(Page { items, meta }))
@@ -314,6 +316,22 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
             items,
             snapshot_revision,
         })
+    }
+}
+
+/// 列挙の途中で対象を読めなくなった失敗を、列挙そのものの失敗として畳む。
+///
+/// 対象の不在は、走査で位置を得てから詳細を読むまでの間に対象が消えた場合と、
+/// 詳細の読み取りが対象の不在を検出した場合に現れる。対象を 1 つも指定しない
+/// 列挙で「対象が見つからない」を返しても、要求元は何が見つからなかったのかを
+/// 特定できず、次の行動も決められない。列挙が全件を返せなかったという事実だけを
+/// 伝える。
+fn enumeration_failure(error: ReadError) -> ReadError {
+    match error {
+        ReadError::ObjectNotFound => ReadError::Sdk {
+            operation: "find_object",
+        },
+        other => other,
     }
 }
 
@@ -519,6 +537,10 @@ mod tests {
         /// 特定のオブジェクトだけが読めない状況を作り、他の対象の読み取りが
         /// 巻き込まれないことを確かめるために用いる。
         detail_fails_at: Option<usize>,
+        /// 走査には現れるのに詳細を読めない対象の開始フレーム。
+        ///
+        /// 走査と詳細の読み取りの間に対象が消えた状況を作る。
+        detail_missing_at: Option<usize>,
         /// 参照区間の確保そのものを失敗させる。
         section_fails: bool,
         /// 参照区間へ入る直前に進めるプロジェクト revision の回数。
@@ -546,6 +568,7 @@ mod tests {
                 catalog: fake_catalog(),
                 panic_at: None,
                 detail_fails_at: None,
+                detail_missing_at: None,
                 section_fails: false,
                 bump_on_enter: 0,
                 renew_boundary_on_enter: false,
@@ -703,6 +726,9 @@ mod tests {
             frame_start: usize,
         ) -> Result<HostObjectDetail, ReadError> {
             self.host.record("object_detail");
+            if self.host.detail_missing_at == Some(frame_start) {
+                return Err(ReadError::ObjectNotFound);
+            }
             let object = self
                 .host
                 .layers
@@ -1405,6 +1431,40 @@ mod tests {
         assert_eq!(page.meta.total_count, TOTAL as u32);
         assert_eq!(page.items.len(), LIMIT as usize);
         assert_eq!(detail_reads(&adapter), LIMIT as usize);
+    }
+
+    /// 列挙が「対象が見つからない」を返さないことを確かめる。
+    ///
+    /// 対象を 1 つも指定しない列挙で不在を返しても、要求元は何が見つからな
+    /// かったのかを特定できない。窓を確定してから対象が消えたのは列挙の失敗
+    /// である。
+    #[test]
+    fn list_objects_does_not_report_not_found() {
+        let adapter = adapter_with(|_| FakeHost {
+            detail_missing_at: Some(100),
+            ..FakeHost::new()
+        });
+
+        let error = adapter.list_objects_page(0, None).unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::SdkError);
+        assert_eq!(error.details()["sdk_operation"], "find_object");
+    }
+
+    /// 対象を指定する取得では、不在がそのまま不在として返ることを確かめる。
+    ///
+    /// 列挙側の畳み込みが、対象を指定する経路まで巻き込んではならない。
+    #[test]
+    fn get_object_reports_not_found_when_the_target_vanished() {
+        let adapter = adapter_with(|_| FakeHost {
+            detail_missing_at: Some(100),
+            ..FakeHost::new()
+        });
+        let selector = sample_selector(&adapter);
+
+        assert_eq!(
+            adapter.get_object(&selector).unwrap_err().error_code(),
+            ErrorCode::NotFound
+        );
     }
 
     /// スナップショット revision が一致しない要求で、重い読み取りへ進まない
