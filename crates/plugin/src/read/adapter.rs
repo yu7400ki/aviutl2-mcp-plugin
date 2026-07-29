@@ -486,7 +486,7 @@ mod tests {
     use crate::test_support::with_silent_panic_hook;
     use aviutl2_mcp_core::{
         AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
-        ItemValue, SectionRange,
+        ItemValue, MAX_PAGE_LIMIT, SectionRange,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1467,6 +1467,34 @@ mod tests {
             adapter.get_object(&selector).unwrap_err().error_code(),
             ErrorCode::NotFound
         );
+    }
+
+    /// 上限を超える件数の要求が、詳細を 1 件も読まずに拒否されることを
+    /// 確かめる。
+    ///
+    /// 切り出しは参照区間の内側にあり、件数の上限がそのまま 1 参照区間での
+    /// 重い読み取り回数の上限になる。要求の復号側の検証だけに頼ると、そこを
+    /// 通らない呼び出しで読み取り回数が列挙全件まで伸びる。
+    #[test]
+    fn list_objects_rejects_an_oversized_limit_before_reading_details() {
+        let adapter = adapter();
+        for limit in [MAX_PAGE_LIMIT + 1, u32::MAX] {
+            let error = adapter
+                .list_objects(
+                    0,
+                    None,
+                    &PageRequest {
+                        offset: 0,
+                        limit,
+                        snapshot_revision: None,
+                    },
+                )
+                .unwrap()
+                .unwrap_err();
+
+            assert_eq!(error, PageError::LimitOutOfRange(limit));
+        }
+        assert_eq!(detail_reads(&adapter), 0);
     }
 
     /// スナップショット revision が一致しない要求で、重い読み取りへ進まない

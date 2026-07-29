@@ -288,16 +288,21 @@ mod tests {
 
     #[test]
     fn take_page_rejects_invalid_limit() {
+        // 切り出しは応答の件数だけでなく、1 件ごとの取得が重い列挙で
+        // 取得回数の上限も担う。範囲の検証は切り出しの経路自体が行う。
         let items = sample_items(3);
-        let request = PageRequest {
-            offset: 0,
-            limit: 0,
-            snapshot_revision: None,
-        };
-        assert_eq!(
-            take_page(&items, &request, 1),
-            Err(PageError::LimitOutOfRange(0))
-        );
+        for limit in [0, MAX_PAGE_LIMIT + 1, u32::MAX] {
+            let request = PageRequest {
+                offset: 0,
+                limit,
+                snapshot_revision: None,
+            };
+            assert_eq!(
+                take_page(&items, &request, 1),
+                Err(PageError::LimitOutOfRange(limit)),
+                "limit {limit} が受理されました"
+            );
+        }
     }
 
     #[test]
