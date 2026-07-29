@@ -425,7 +425,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 Ok(_) => Err(permit.attribute(
                     &boundary,
                     EditError::UnsupportedTarget {
-                        reason: UnsupportedReason::EffectStateImmutable,
+                        reason: UnsupportedReason::ChangeNotApplied,
                     },
                 )),
                 Err(error) => Err(permit.attribute(&boundary, error.into())),
@@ -464,7 +464,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 return Err(permit.attribute(
                     &boundary,
                     EditError::UnsupportedTarget {
-                        reason: UnsupportedReason::EffectStateImmutable,
+                        reason: UnsupportedReason::ChangeNotApplied,
                     },
                 ));
             }
@@ -797,3 +797,6 @@ fn selection_state(
         applied,
     )
 }
+
+#[cfg(test)]
+mod tests;

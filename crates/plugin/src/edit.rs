@@ -8,6 +8,8 @@
 
 pub mod adapter;
 pub mod error;
+#[cfg(test)]
+pub(crate) mod fake;
 pub mod host;
 pub mod precondition;
 pub mod resolve;

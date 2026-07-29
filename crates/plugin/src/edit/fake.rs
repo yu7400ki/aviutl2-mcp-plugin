@@ -1,0 +1,1051 @@
+//! テストが共有する編集ホストのフェイク。
+//!
+//! [`EditHost`] と [`SceneEditor`] の位置に差し込むため、検証の対象は adapter の
+//! 本番実装そのものになる。呼び出しは順序ごと記録し、順序自体を検証できる。
+//!
+//! 読み取り経路の [`ReadHost`] も同じ状態の上へ実装する。読み取りが返す
+//! fingerprint と編集が照合する fingerprint が同じ材料から算出されることを、
+//! 同一のフェイク状態に対して確かめられる。
+
+use crate::edit::error::EditError;
+use crate::edit::host::{EditHost, EffectSlot, HostSelection, ObjectSlot, SceneEditor};
+use crate::edit::precondition::MutationTicket;
+use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
+use crate::project::ProjectState;
+use crate::read::ReadError;
+use crate::read::host::{
+    EditState, HostEditInfo, HostEffect, HostLayer, HostObject, HostObjectDetail,
+    HostObjectPlacement, ReadHost, SceneReader,
+};
+use aviutl2_mcp_core::{
+    AvailableEffect, AvailableEffectItem, Cursor, EffectFlags, EffectItem, EffectItemType,
+    EffectType, FiniteF64, FrameRange, ItemValue, SectionRange,
+};
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// フェイクが用いる現在シーンの ID。
+pub(crate) const SCENE_ID: i32 = 0;
+
+/// 差し込む失敗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fault {
+    /// 編集区間の確保に失敗する。
+    Section,
+    /// 変更 API が失敗を返す。
+    Mutation,
+    /// 変更後の読み直しが失敗する。
+    ReadBack,
+    /// 有効・ロックの変更を無言で無視する。
+    IgnoreEffectState,
+    /// 名前の変更を無言で無視する。
+    IgnoreObjectName,
+    /// 削除を無言で無視する。
+    IgnoreDelete,
+    /// 作成が何も生まない。
+    CreateNothing,
+    /// 作成で 2 件のオブジェクトが生まれる。
+    CreatePair,
+}
+
+/// panic させる位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PanicPoint {
+    /// 編集区間の外。準備状態の問い合わせで落ちる。
+    IsReady,
+    /// 編集区間へ入る呼び出しそのもの。クロージャは呼ばれない。
+    EnterSection,
+    /// 編集区間の内側。
+    InSection,
+}
+
+/// フェイクが保持するオブジェクト。
+///
+/// 識別子を持たせ、変更は識別子で適用する。座標で適用すると、照合した対象と
+/// 変更される対象が食い違う実装でもテストが通ってしまう。
+#[derive(Debug, Clone)]
+pub(crate) struct FakeObject {
+    pub(crate) id: usize,
+    pub(crate) placement: HostObjectPlacement,
+    pub(crate) alias: String,
+    pub(crate) effects: Vec<HostEffect>,
+}
+
+impl FakeObject {
+    fn host(&self) -> HostObject {
+        HostObject {
+            placement: self.placement.clone(),
+            alias: self.alias.clone(),
+            effects: self.effects.clone(),
+        }
+    }
+}
+
+/// フェイクが保持するレイヤー。
+#[derive(Debug, Clone)]
+pub(crate) struct FakeLayer {
+    pub(crate) locked: bool,
+    pub(crate) objects: Vec<FakeObject>,
+}
+
+/// フェイクが保持するプロジェクトの中身。
+#[derive(Debug, Clone)]
+pub(crate) struct FakeScene {
+    pub(crate) layers: Vec<FakeLayer>,
+    next_id: usize,
+    pub(crate) cursor: Cursor,
+    pub(crate) selected_range: Option<FrameRange>,
+    pub(crate) focus: Option<usize>,
+}
+
+impl FakeScene {
+    fn find(&self, layer: usize, frame_start: usize) -> Option<&FakeObject> {
+        self.layers
+            .get(layer)?
+            .objects
+            .iter()
+            .find(|object| object.placement.frame_start == frame_start)
+    }
+
+    fn by_id(&self, id: usize) -> Option<&FakeObject> {
+        self.layers
+            .iter()
+            .flat_map(|layer| layer.objects.iter())
+            .find(|object| object.id == id)
+    }
+
+    fn by_id_mut(&mut self, id: usize) -> Option<&mut FakeObject> {
+        self.layers
+            .iter_mut()
+            .flat_map(|layer| layer.objects.iter_mut())
+            .find(|object| object.id == id)
+    }
+
+    fn remove(&mut self, id: usize) {
+        for layer in &mut self.layers {
+            layer.objects.retain(|object| object.id != id);
+        }
+    }
+
+    fn insert(&mut self, layer: usize, object: FakeObject) {
+        let layer = &mut self.layers[layer];
+        layer.objects.push(object);
+        layer
+            .objects
+            .sort_by_key(|object| object.placement.frame_start);
+    }
+
+    fn take_id(&mut self) -> usize {
+        self.next_id += 1;
+        self.next_id
+    }
+}
+
+/// 実行の途中で切り替える設定。
+///
+/// セレクターは健全な状態の読み取りから得るため、失敗の差し込みはセレクターを
+/// 得た**後**で行う。構築時に固定してしまうと、要求を組み立てる段で先に失敗する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Knobs {
+    pub(crate) ready: bool,
+    pub(crate) state: EditState,
+    /// 2 回目以降の編集状態。区間の失敗後の読み直しに使う。
+    pub(crate) later_state: Option<EditState>,
+    pub(crate) fault: Option<Fault>,
+    pub(crate) panic_at: Option<PanicPoint>,
+    /// 次の詳細の読み取りで進めるプロジェクト revision の回数。
+    ///
+    /// 対象の解決と変更の間に境界が変わる状況を作る。1 度だけ働く。
+    pub(crate) bump_on_detail: u64,
+    /// 次の詳細の読み取りでプロジェクト境界を更新するか。1 度だけ働く。
+    pub(crate) renew_on_detail: bool,
+    /// 区間の内側でプロジェクト境界のロックを試みるか。
+    ///
+    /// 境界は再入できないロックで守られている。編集が区間を跨いでそれを保持
+    /// していれば、この取得で待ち合わせが解けなくなる。
+    pub(crate) probe_lock_in_section: bool,
+}
+
+impl Default for Knobs {
+    fn default() -> Self {
+        Self {
+            ready: true,
+            state: EditState::Edit,
+            later_state: None,
+            fault: None,
+            panic_at: None,
+            bump_on_detail: 0,
+            renew_on_detail: false,
+            probe_lock_in_section: false,
+        }
+    }
+}
+
+/// SDK の代わりに定型データを返す編集ホスト。
+pub(crate) struct FakeEditHost {
+    pub(crate) info: HostEditInfo,
+    pub(crate) catalog: Vec<AvailableEffect>,
+    pub(crate) scene: Mutex<FakeScene>,
+    pub(crate) project: Option<Arc<ProjectState>>,
+    knobs: Mutex<Knobs>,
+    enter_calls: AtomicUsize,
+    edit_state_calls: AtomicUsize,
+    calls: Mutex<Vec<&'static str>>,
+}
+
+impl FakeEditHost {
+    /// 既定の状態でフェイクを作る。
+    pub(crate) fn new() -> Self {
+        Self {
+            info: fake_edit_info(),
+            catalog: fake_catalog(),
+            scene: Mutex::new(fake_scene()),
+            project: None,
+            knobs: Mutex::new(Knobs::default()),
+            enter_calls: AtomicUsize::new(0),
+            edit_state_calls: AtomicUsize::new(0),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 設定を切り替える。
+    pub(crate) fn arm(&self, configure: impl FnOnce(&mut Knobs)) {
+        configure(&mut self.knobs.lock().unwrap());
+    }
+
+    /// 現在の設定を読む。
+    fn knobs(&self) -> Knobs {
+        *self.knobs.lock().unwrap()
+    }
+
+    /// 準備前の呼び出しを、実際の SDK と同じ失敗モードで再現する。
+    fn assert_ready(&self, api: &str) {
+        assert!(self.knobs().ready, "準備前に {api} が呼ばれました");
+    }
+
+    fn record(&self, call: &'static str) {
+        self.calls.lock().unwrap().push(call);
+    }
+
+    /// 記録された呼び出しを順序どおり返す。
+    pub(crate) fn calls(&self) -> Vec<&'static str> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    /// 編集区間へ入った回数。
+    pub(crate) fn enter_calls(&self) -> usize {
+        self.enter_calls.load(Ordering::Relaxed)
+    }
+
+    /// 変更 API が 1 度でも呼ばれたか。
+    pub(crate) fn mutated(&self) -> bool {
+        self.calls().iter().any(|call| MUTATIONS.contains(call))
+    }
+
+    /// フェイクが保持する状態を読む。
+    pub(crate) fn scene(&self) -> FakeScene {
+        self.scene.lock().unwrap().clone()
+    }
+}
+
+/// 変更 API として記録される呼び出し。
+pub(crate) const MUTATIONS: &[&str] = &[
+    "create_object_from_alias",
+    "create_object_from_media_file",
+    "move_object",
+    "delete_object",
+    "set_object_name",
+    "create_effect",
+    "delete_effect",
+    "set_effect_enable",
+    "set_effect_lock",
+    "set_effect_item_value",
+    "set_cursor_layer_frame",
+    "set_select_range",
+    "set_focus_object",
+];
+
+impl EditHost for FakeEditHost {
+    fn is_ready(&self) -> bool {
+        let knobs = self.knobs();
+        assert_ne!(
+            knobs.panic_at,
+            Some(PanicPoint::IsReady),
+            "準備状態の問い合わせで panic させます"
+        );
+        knobs.ready
+    }
+
+    fn edit_state(&self) -> Result<EditState, EditError> {
+        self.assert_ready("get_edit_state");
+        self.record("edit_state");
+        let knobs = self.knobs();
+        let calls = self.edit_state_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(if calls == 0 {
+            knobs.state
+        } else {
+            knobs.later_state.unwrap_or(knobs.state)
+        })
+    }
+
+    fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, EditError> {
+        self.assert_ready("get_effects");
+        self.record("effect_catalog");
+        Ok(self.catalog.clone())
+    }
+
+    fn observed_selection(&self) -> Result<HostSelection, EditError> {
+        self.assert_ready("get_edit_info");
+        self.record("observed_selection");
+        let scene = self.scene.lock().unwrap();
+        Ok(HostSelection {
+            scene_id: self.info.scene_id,
+            cursor: scene.cursor,
+            selected_range: scene.selected_range,
+            focus: scene
+                .focus
+                .and_then(|id| scene.by_id(id))
+                .map(FakeObject::host),
+        })
+    }
+
+    fn enter_edit_section<T, F>(&self, f: F) -> Result<T, EditError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&dyn SceneEditor) -> T + Send,
+    {
+        self.assert_ready("call_edit_section");
+        self.record("enter_edit_section");
+        self.enter_calls.fetch_add(1, Ordering::Relaxed);
+        let knobs = self.knobs();
+        // 実際の SDK は準備前の呼び出しをこの位置の表明で落とす。クロージャは
+        // 呼ばれないため、渡す側を包んでも捕捉できない。
+        assert_ne!(
+            knobs.panic_at,
+            Some(PanicPoint::EnterSection),
+            "編集区間へ入る呼び出しで panic させます"
+        );
+        if knobs.fault == Some(Fault::Section) {
+            return Err(EditError::Sdk {
+                operation: "call_edit_section",
+            });
+        }
+        if knobs.probe_lock_in_section
+            && let Some(project) = &self.project
+        {
+            // 境界のロックを取りに行く。編集が区間を跨いで保持していれば
+            // ここで止まる。
+            let _ = project.epoch();
+        }
+        assert_ne!(
+            knobs.panic_at,
+            Some(PanicPoint::InSection),
+            "編集区間の内側で panic させます"
+        );
+        let editor = FakeSceneEditor {
+            host: self,
+            objects: RefCell::new(Vec::new()),
+            effects: RefCell::new(Vec::new()),
+        };
+        Ok(f(&editor))
+    }
+}
+
+/// 共有したフェイクをそのまま編集ホストとして使えるようにする。
+///
+/// テストは同じ状態を読み取り経路と編集経路の双方へ渡す。
+impl EditHost for Arc<FakeEditHost> {
+    fn is_ready(&self) -> bool {
+        self.as_ref().is_ready()
+    }
+
+    fn edit_state(&self) -> Result<EditState, EditError> {
+        self.as_ref().edit_state()
+    }
+
+    fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, EditError> {
+        self.as_ref().effect_catalog()
+    }
+
+    fn observed_selection(&self) -> Result<HostSelection, EditError> {
+        self.as_ref().observed_selection()
+    }
+
+    fn enter_edit_section<T, F>(&self, f: F) -> Result<T, EditError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&dyn SceneEditor) -> T + Send,
+    {
+        self.as_ref().enter_edit_section(f)
+    }
+}
+
+/// 同じ状態の上に読み取り経路を実装するフェイク。
+pub(crate) struct FakeReadHost(pub(crate) Arc<FakeEditHost>);
+
+impl ReadHost for FakeReadHost {
+    fn is_ready(&self) -> bool {
+        self.0.knobs().ready
+    }
+
+    fn edit_state(&self) -> Result<EditState, ReadError> {
+        Ok(self.0.knobs().state)
+    }
+
+    fn edit_info(&self) -> Result<HostEditInfo, ReadError> {
+        Ok(self.0.info.clone())
+    }
+
+    fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError> {
+        Ok(self.0.catalog.clone())
+    }
+
+    fn enter_read_section<T, F>(&self, f: F) -> Result<T, ReadError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&dyn SceneReader) -> T + Send,
+    {
+        let editor = FakeSceneEditor {
+            host: &self.0,
+            objects: RefCell::new(Vec::new()),
+            effects: RefCell::new(Vec::new()),
+        };
+        Ok(f(&editor))
+    }
+}
+
+/// 編集区間の内側を表すフェイク。
+///
+/// 解決したオブジェクトは識別子で、effect は識別子と列の位置で覚える。変更は
+/// 覚えた対象へ適用するため、座標から探し直す実装では対象が食い違う。
+struct FakeSceneEditor<'a> {
+    host: &'a FakeEditHost,
+    objects: RefCell<Vec<usize>>,
+    effects: RefCell<Vec<(usize, usize)>>,
+}
+
+impl FakeSceneEditor<'_> {
+    fn object_id(&self, slot: ObjectSlot) -> Result<usize, EditError> {
+        self.objects
+            .borrow()
+            .get(slot.0)
+            .copied()
+            .ok_or(EditError::Sdk {
+                operation: "get_object_layer_frame",
+            })
+    }
+
+    fn effect_ref(&self, slot: EffectSlot) -> Result<(usize, usize), EditError> {
+        self.effects
+            .borrow()
+            .get(slot.0)
+            .copied()
+            .ok_or(EditError::Sdk {
+                operation: "get_effect_list",
+            })
+    }
+
+    /// 変更 API の失敗を差し込む。
+    fn mutation(&self, call: &'static str) -> Result<(), EditError> {
+        self.host.record(call);
+        if self.host.knobs().fault == Some(Fault::Mutation) {
+            return Err(EditError::Sdk { operation: call });
+        }
+        Ok(())
+    }
+}
+
+impl SceneReader for FakeSceneEditor<'_> {
+    fn scene_name(&self) -> Option<String> {
+        Some("Scene 1".to_string())
+    }
+
+    fn grid_bpm(&self) -> Result<Vec<FiniteF64>, ReadError> {
+        Ok(vec![FiniteF64::try_new(120.0).unwrap()])
+    }
+
+    fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {
+        self.host.record("layer");
+        let scene = self.host.scene.lock().unwrap();
+        let fake = scene.layers.get(layer).ok_or(ReadError::Sdk {
+            operation: "get_layer_name",
+        })?;
+        Ok(HostLayer {
+            name: None,
+            enabled: true,
+            locked: fake.locked,
+        })
+    }
+
+    fn object_count(&self, layer: usize) -> Result<usize, ReadError> {
+        let scene = self.host.scene.lock().unwrap();
+        Ok(scene
+            .layers
+            .get(layer)
+            .map(|layer| layer.objects.len())
+            .unwrap_or_default())
+    }
+
+    fn object_placements(&self, layer: usize) -> Result<Vec<HostObjectPlacement>, ReadError> {
+        self.host.record("object_placements");
+        let scene = self.host.scene.lock().unwrap();
+        Ok(scene
+            .layers
+            .get(layer)
+            .map(|layer| {
+                layer
+                    .objects
+                    .iter()
+                    .map(|object| object.placement.clone())
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    fn object_detail(
+        &self,
+        layer: usize,
+        frame_start: usize,
+    ) -> Result<HostObjectDetail, ReadError> {
+        self.host.record("object_detail");
+        // 対象の解決と変更の間に境界が変わる状況は 1 度だけ再現する。仕込みを
+        // 消費しておかないと、後続の読み直しでも繰り返し働いてしまう。
+        let mut armed = Knobs::default();
+        self.host.arm(|knobs| {
+            armed = *knobs;
+            knobs.bump_on_detail = 0;
+            knobs.renew_on_detail = false;
+        });
+        if let Some(project) = &self.host.project {
+            for _ in 0..armed.bump_on_detail {
+                project.on_object_updated();
+            }
+            if armed.renew_on_detail {
+                project.on_project_load(Some(r"C:\projects\reopened.aup2"));
+            }
+        }
+        // 読み直しの失敗は、変更を発行した後にだけ差し込む。解決の段で失敗させて
+        // しまうと、read-back の検証にならない。
+        if armed.fault == Some(Fault::ReadBack) && self.host.mutated() {
+            return Err(ReadError::Sdk {
+                operation: "get_object_alias",
+            });
+        }
+        let scene = self.host.scene.lock().unwrap();
+        let object = scene
+            .find(layer, frame_start)
+            .ok_or(ReadError::ObjectNotFound {
+                detected_by: "find_object",
+            })?;
+        Ok(HostObjectDetail {
+            sections: vec![SectionRange {
+                start: object.placement.frame_start,
+                end: object.placement.frame_end,
+            }],
+            object: object.host(),
+        })
+    }
+}
+
+impl SceneEditor for FakeSceneEditor<'_> {
+    fn reader(&self) -> &dyn SceneReader {
+        self
+    }
+
+    fn entry_edit_info(&self) -> &HostEditInfo {
+        &self.host.info
+    }
+
+    fn bind_object(&self, layer: usize, frame_start: usize) -> Result<ObjectSlot, EditError> {
+        self.host.record("bind_object");
+        let id = {
+            let scene = self.host.scene.lock().unwrap();
+            scene
+                .find(layer, frame_start)
+                .ok_or(ReadError::ObjectNotFound {
+                    detected_by: "find_object",
+                })?
+                .id
+        };
+        let mut objects = self.objects.borrow_mut();
+        objects.push(id);
+        Ok(ObjectSlot(objects.len() - 1))
+    }
+
+    fn bind_effect(&self, object: ObjectSlot, position: usize) -> Result<EffectSlot, EditError> {
+        self.host.record("bind_effect");
+        let id = self.object_id(object)?;
+        {
+            let scene = self.host.scene.lock().unwrap();
+            let object = scene.by_id(id).ok_or(EditError::Sdk {
+                operation: "get_effect_list",
+            })?;
+            if object.effects.len() <= position {
+                return Err(EditError::Sdk {
+                    operation: "get_effect_list",
+                });
+            }
+        }
+        let mut effects = self.effects.borrow_mut();
+        effects.push((id, position));
+        Ok(EffectSlot(effects.len() - 1))
+    }
+
+    fn effect_items(
+        &self,
+        effect: &ResolvedEffect<'_>,
+    ) -> Result<Vec<AvailableEffectItem>, EditError> {
+        self.host.record("effect_items");
+        let name = &effect.info().name;
+        self.host
+            .catalog
+            .iter()
+            .find(|available| available.name == *name)
+            .map(|available| available.items.clone())
+            .ok_or(EditError::Sdk {
+                operation: "enum_effect_item",
+            })
+    }
+
+    fn supports_media_file(&self, path: &str) -> Result<bool, EditError> {
+        self.host.record("is_support_media_file");
+        Ok(path.ends_with(".mp4"))
+    }
+
+    fn create_object_from_alias(
+        &self,
+        _ticket: MutationTicket<'_>,
+        alias: &str,
+        layer: usize,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.mutation("create_object_from_alias")?;
+        self.create(layer, frame, alias.to_string())
+    }
+
+    fn create_object_from_media_file(
+        &self,
+        _ticket: MutationTicket<'_>,
+        path: &str,
+        layer: usize,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.mutation("create_object_from_media_file")?;
+        self.create(layer, frame, format!("[{path}]"))
+    }
+
+    fn move_object(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        layer: usize,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.mutation("move_object")?;
+        let id = self.object_id(object.slot())?;
+        let mut scene = self.host.scene.lock().unwrap();
+        let mut moved = scene
+            .by_id(id)
+            .ok_or(EditError::Sdk {
+                operation: "move_object",
+            })?
+            .clone();
+        let length = moved.placement.frame_end - moved.placement.frame_start;
+        moved.placement.layer = layer;
+        moved.placement.frame_start = frame;
+        moved.placement.frame_end = frame + length;
+        scene.remove(id);
+        scene.insert(layer, moved);
+        Ok(())
+    }
+
+    fn delete_object(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+    ) -> Result<(), EditError> {
+        self.mutation("delete_object")?;
+        if self.host.knobs().fault == Some(Fault::IgnoreDelete) {
+            return Ok(());
+        }
+        let id = self.object_id(object.slot())?;
+        self.host.scene.lock().unwrap().remove(id);
+        Ok(())
+    }
+
+    fn set_object_name(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        name: Option<&str>,
+    ) -> Result<(), EditError> {
+        self.mutation("set_object_name")?;
+        if self.host.knobs().fault == Some(Fault::IgnoreObjectName) {
+            return Ok(());
+        }
+        let id = self.object_id(object.slot())?;
+        let mut scene = self.host.scene.lock().unwrap();
+        let object = scene.by_id_mut(id).ok_or(EditError::Sdk {
+            operation: "set_object_name",
+        })?;
+        object.placement.name = name.map(str::to_string);
+        Ok(())
+    }
+
+    fn create_effect(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        effect_name: &str,
+    ) -> Result<(), EditError> {
+        self.mutation("create_effect")?;
+        let id = self.object_id(object.slot())?;
+        let mut scene = self.host.scene.lock().unwrap();
+        let object = scene.by_id_mut(id).ok_or(EditError::Sdk {
+            operation: "create_effect",
+        })?;
+        // ホストは末尾へ付与する。同名の順序は列の出現順で決まる。
+        let index = object
+            .effects
+            .iter()
+            .filter(|effect| effect.name == effect_name)
+            .count();
+        object.effects.push(HostEffect {
+            name: effect_name.to_string(),
+            index,
+            enabled: true,
+            locked: false,
+            items: Vec::new(),
+        });
+        Ok(())
+    }
+
+    fn delete_effect(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        effect: &ResolvedEffect<'_>,
+    ) -> Result<(), EditError> {
+        self.mutation("delete_effect")?;
+        let id = self.object_id(object.slot())?;
+        let (_, position) = self.effect_ref(effect.slot())?;
+        let mut scene = self.host.scene.lock().unwrap();
+        let object = scene.by_id_mut(id).ok_or(EditError::Sdk {
+            operation: "delete_effect",
+        })?;
+        object.effects.remove(position);
+        renumber(&mut object.effects);
+        Ok(())
+    }
+
+    fn set_effect_enabled(
+        &self,
+        _ticket: MutationTicket<'_>,
+        effect: &ResolvedEffect<'_>,
+        enabled: bool,
+    ) -> Result<(), EditError> {
+        self.mutation("set_effect_enable")?;
+        if self.host.knobs().fault == Some(Fault::IgnoreEffectState) {
+            return Ok(());
+        }
+        self.with_effect(effect, |effect| effect.enabled = enabled)
+    }
+
+    fn set_effect_locked(
+        &self,
+        _ticket: MutationTicket<'_>,
+        effect: &ResolvedEffect<'_>,
+        locked: bool,
+    ) -> Result<(), EditError> {
+        self.mutation("set_effect_lock")?;
+        if self.host.knobs().fault == Some(Fault::IgnoreEffectState) {
+            return Ok(());
+        }
+        self.with_effect(effect, |effect| effect.locked = locked)
+    }
+
+    fn set_effect_item(
+        &self,
+        _ticket: MutationTicket<'_>,
+        effect: &ResolvedEffect<'_>,
+        item: &str,
+        value: &str,
+    ) -> Result<(), EditError> {
+        self.mutation("set_effect_item_value")?;
+        let item = item.to_string();
+        // ホストは値を正規化し得る。上限を超える指定は丸めて書き込まれる。
+        let normalized = value.parse::<i64>().unwrap_or_default().min(MAX_ITEM_VALUE);
+        self.with_effect(effect, move |effect| {
+            if let Some(entry) = effect.items.iter_mut().find(|entry| entry.name == item) {
+                entry.value = ItemValue::Integer { value: normalized };
+            }
+        })
+    }
+
+    fn set_cursor(
+        &self,
+        _ticket: MutationTicket<'_>,
+        layer: usize,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.mutation("set_cursor_layer_frame")?;
+        // ホストは範囲外の値をクランプする。
+        let mut scene = self.host.scene.lock().unwrap();
+        scene.cursor = Cursor {
+            layer: layer.min(MAX_LAYER),
+            frame: frame.min(MAX_FRAME),
+        };
+        Ok(())
+    }
+
+    fn set_select_range(
+        &self,
+        _ticket: MutationTicket<'_>,
+        range: Option<FrameRange>,
+    ) -> Result<(), EditError> {
+        self.mutation("set_select_range")?;
+        self.host.scene.lock().unwrap().selected_range = range;
+        Ok(())
+    }
+
+    fn set_focus_object(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: Option<&ResolvedObject<'_>>,
+    ) -> Result<(), EditError> {
+        self.mutation("set_focus_object")?;
+        let id = object
+            .map(|object| self.object_id(object.slot()))
+            .transpose()?;
+        self.host.scene.lock().unwrap().focus = id;
+        Ok(())
+    }
+}
+
+impl FakeSceneEditor<'_> {
+    /// 解決済み effect へ変更を適用する。
+    fn with_effect(
+        &self,
+        effect: &ResolvedEffect<'_>,
+        apply: impl FnOnce(&mut HostEffect),
+    ) -> Result<(), EditError> {
+        let (id, position) = self.effect_ref(effect.slot())?;
+        let mut scene = self.host.scene.lock().unwrap();
+        let object = scene.by_id_mut(id).ok_or(EditError::Sdk {
+            operation: "get_effect_list",
+        })?;
+        let effect = object.effects.get_mut(position).ok_or(EditError::Sdk {
+            operation: "get_effect_list",
+        })?;
+        apply(effect);
+        Ok(())
+    }
+
+    /// 作成をフェイクの状態へ反映する。
+    ///
+    /// 長さと挿入位置はホストが決める。要求した位置と異なる配置になる状況を
+    /// 再現するため、開始フレームを 1 つ後ろへずらす。
+    fn create(&self, layer: usize, frame: usize, alias: String) -> Result<(), EditError> {
+        if self.host.knobs().fault == Some(Fault::CreateNothing) {
+            return Ok(());
+        }
+        let mut scene = self.host.scene.lock().unwrap();
+        let id = scene.take_id();
+        scene.insert(
+            layer,
+            FakeObject {
+                id,
+                placement: HostObjectPlacement {
+                    layer,
+                    frame_start: frame + CREATE_FRAME_SHIFT,
+                    frame_end: frame + CREATE_FRAME_SHIFT + 59,
+                    name: None,
+                },
+                alias: alias.clone(),
+                effects: Vec::new(),
+            },
+        );
+        if self.host.knobs().fault == Some(Fault::CreatePair) {
+            let id = scene.take_id();
+            scene.insert(
+                layer,
+                FakeObject {
+                    id,
+                    placement: HostObjectPlacement {
+                        layer,
+                        frame_start: frame + CREATE_FRAME_SHIFT + 60,
+                        frame_end: frame + CREATE_FRAME_SHIFT + 119,
+                        name: None,
+                    },
+                    alias,
+                    effects: Vec::new(),
+                },
+            );
+        }
+        Ok(())
+    }
+}
+
+/// ホストが作成位置を自動調整する量。
+pub(crate) const CREATE_FRAME_SHIFT: usize = 5;
+
+/// カーソルがクランプされる上限。
+pub(crate) const MAX_LAYER: usize = 9;
+/// カーソルがクランプされる上限。
+pub(crate) const MAX_FRAME: usize = 999;
+/// ホストが設定項目の値を丸める上限。
+pub(crate) const MAX_ITEM_VALUE: i64 = 100;
+
+/// 同名 effect の順序を出現順で振り直す。
+fn renumber(effects: &mut [HostEffect]) {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for effect in effects.iter_mut() {
+        let next = seen.entry(effect.name.clone()).or_insert(0);
+        effect.index = *next;
+        *next += 1;
+    }
+}
+
+/// フェイクの編集情報。
+pub(crate) fn fake_edit_info() -> HostEditInfo {
+    HostEditInfo {
+        scene_id: SCENE_ID,
+        width: 1920,
+        height: 1080,
+        fps_rate: 30,
+        fps_scale: 1,
+        sample_rate: 48000,
+        cursor_frame: 0,
+        cursor_layer: 0,
+        frame_max: 3600,
+        layer_max: 2,
+        display_frame_start: 0,
+        display_layer_start: 0,
+        display_frame_num: 600,
+        display_layer_num: 10,
+        select_range_start: None,
+        select_range_end: None,
+    }
+}
+
+/// 設定項目を 1 つ持つ effect。
+fn blur(index: usize, range: i64) -> HostEffect {
+    HostEffect {
+        name: "ぼかし".to_string(),
+        index,
+        enabled: true,
+        locked: false,
+        items: vec![EffectItem {
+            name: "範囲".to_string(),
+            item_type: EffectItemType::Integer,
+            value: ItemValue::Integer { value: range },
+            track: None,
+        }],
+    }
+}
+
+/// 入力 effect。
+fn video() -> HostEffect {
+    HostEffect {
+        name: "動画ファイル".to_string(),
+        index: 0,
+        enabled: true,
+        locked: false,
+        items: Vec::new(),
+    }
+}
+
+/// フェイクの初期状態。
+pub(crate) fn fake_scene() -> FakeScene {
+    FakeScene {
+        layers: vec![
+            FakeLayer {
+                locked: false,
+                objects: vec![FakeObject {
+                    id: 1,
+                    placement: HostObjectPlacement {
+                        layer: 0,
+                        frame_start: 0,
+                        frame_end: 99,
+                        name: None,
+                    },
+                    alias: "[0:0]".to_string(),
+                    effects: Vec::new(),
+                }],
+            },
+            FakeLayer {
+                locked: false,
+                objects: vec![
+                    FakeObject {
+                        id: 2,
+                        placement: HostObjectPlacement {
+                            layer: 1,
+                            frame_start: 100,
+                            frame_end: 200,
+                            name: Some("立ち絵".to_string()),
+                        },
+                        alias: "[1:100]".to_string(),
+                        effects: vec![video(), blur(0, 20)],
+                    },
+                    FakeObject {
+                        id: 3,
+                        placement: HostObjectPlacement {
+                            layer: 1,
+                            frame_start: 300,
+                            frame_end: 400,
+                            name: Some("字幕".to_string()),
+                        },
+                        alias: "[1:300]".to_string(),
+                        effects: vec![blur(0, 20)],
+                    },
+                ],
+            },
+            FakeLayer {
+                locked: true,
+                objects: vec![FakeObject {
+                    id: 4,
+                    placement: HostObjectPlacement {
+                        layer: 2,
+                        frame_start: 0,
+                        frame_end: 99,
+                        name: None,
+                    },
+                    alias: "[2:0]".to_string(),
+                    effects: Vec::new(),
+                }],
+            },
+        ],
+        next_id: 100,
+        cursor: Cursor { frame: 0, layer: 0 },
+        selected_range: None,
+        focus: None,
+    }
+}
+
+/// フェイクの effect カタログ。
+pub(crate) fn fake_catalog() -> Vec<AvailableEffect> {
+    vec![
+        AvailableEffect {
+            name: "ぼかし".to_string(),
+            effect_type: EffectType::Filter,
+            flags: EffectFlags::from_raw(1),
+            items: vec![AvailableEffectItem {
+                name: "範囲".to_string(),
+                item_type: EffectItemType::Integer,
+            }],
+        },
+        AvailableEffect {
+            name: "動画ファイル".to_string(),
+            effect_type: EffectType::Input,
+            flags: EffectFlags::from_raw(3),
+            items: Vec::new(),
+        },
+        AvailableEffect {
+            name: "標準描画".to_string(),
+            effect_type: EffectType::Output,
+            flags: EffectFlags::from_raw(1),
+            items: Vec::new(),
+        },
+    ]
+}
