@@ -17,6 +17,7 @@
 
 pub mod budget;
 pub mod descriptor;
+pub mod edit;
 pub mod edit_info;
 pub mod effect;
 pub mod envelope;
@@ -47,6 +48,12 @@ pub use budget::{
 };
 pub use descriptor::{
     AuthSecret, DescriptorProject, InstanceDescriptor, InstanceInfo, InstanceProject,
+};
+pub use edit::{
+    AddEffectParams, CreateObjectParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
+    Destination, EditInputError, EditOutcome, Expected, FocusChange, MoveObjectParams,
+    ObjectSource, Placement, RangeChange, SelectionField, SelectionState, SetEffectStateParams,
+    SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
 };
 pub use edit_info::{Cursor, DisplayRange, EditInfo, Extent, FrameRange, SceneInfo, SceneRef};
 pub use effect::{
