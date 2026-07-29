@@ -133,7 +133,7 @@ fn run(report: &mut Report) -> Result<(), String> {
     section_item_round_trip(&harness, report, &a, &context)?;
     section_revision(report, &convergence);
     section_blocked(&harness, report, &a, &context)?;
-    section_target_confusion(&harness, report, &a, &context)?;
+    section_target_confusion(&harness, report, &a, &b, &context)?;
     section_misc(&harness, report, &a, &context)?;
     section_completion(&harness, report, &a, &b)?;
 
@@ -1641,6 +1641,7 @@ fn check_effect_index_shift(
     instance: &Instance,
     context: &Context,
 ) -> CheckResult {
+    let original_count = count_effects(harness, instance, context, &context.effect_name)?;
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
     let expected = precondition(harness, instance)?;
     let first = require(
@@ -1687,7 +1688,7 @@ fn check_effect_index_shift(
         .iter()
         .filter(|effect| effect.name == context.effect_name)
         .collect();
-    if same_name.len() < 2 {
+    if same_name.len() < original_count + 2 {
         return Err(format!(
             "同名 effect が {} 件しかなく index シフトを再現できません",
             same_name.len()
@@ -1727,17 +1728,20 @@ fn check_effect_index_shift(
         },
     );
 
-    // 後始末: 残った 1 つを削除して元の構成へ戻す。
-    let object_now = resolve_object(harness, instance, context.scene_id, context.target)?;
-    let detail = require(
-        harness.object(&instance.id, &object_now.selector),
-        "後始末の詳細を取得できません",
-    )?;
-    if let Some(effect) = detail
-        .effects
-        .iter()
-        .find(|effect| effect.name == context.effect_name)
-    {
+    // 後始末: 付与した分だけを削除し、元々あった同名 effect は残す。
+    while count_effects(harness, instance, context, &context.effect_name)? > original_count {
+        let object_now = resolve_object(harness, instance, context.scene_id, context.target)?;
+        let detail = require(
+            harness.object(&instance.id, &object_now.selector),
+            "後始末の詳細を取得できません",
+        )?;
+        let Some(effect) = detail
+            .effects
+            .iter()
+            .find(|effect| effect.name == context.effect_name)
+        else {
+            break;
+        };
         let expected = precondition(harness, instance)?;
         require(
             harness.delete_effect(&instance.id, &effect.selector, expected),
@@ -1746,6 +1750,25 @@ fn check_effect_index_shift(
     }
 
     outcome
+}
+
+/// 対象に積まれた同名 effect の件数を数える。
+fn count_effects(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    name: &str,
+) -> Result<usize, String> {
+    let object = resolve_object(harness, instance, context.scene_id, context.target)?;
+    let detail = require(
+        harness.object(&instance.id, &object.selector),
+        "effect 件数を数えられません",
+    )?;
+    Ok(detail
+        .effects
+        .iter()
+        .filter(|effect| effect.name == name)
+        .count())
 }
 
 /// ロックしたレイヤー上の対象が守られることを確かめる。
@@ -2119,67 +2142,46 @@ fn check_edit_chain(
     };
 
     // 移動。
-    state = chain_step(
-        harness,
-        instance,
-        &mut steps,
-        "move_object",
-        &state,
-        |state, revision| {
-            harness.move_object(
-                &instance.id,
-                &state.object.selector,
-                DestinationInput {
-                    layer: moved_to.layer as u32,
-                    frame: moved_to.frame as u32,
-                },
-                ExpectedInput {
-                    project_epoch: state.epoch.clone(),
-                    project_revision: revision,
-                },
-            )
-        },
-    )?;
+    state = chain_step(&mut steps, "move_object", &state, |state, revision| {
+        harness.move_object(
+            &instance.id,
+            &state.object.selector,
+            DestinationInput {
+                layer: moved_to.layer as u32,
+                frame: moved_to.frame as u32,
+            },
+            ExpectedInput {
+                project_epoch: state.epoch.clone(),
+                project_revision: revision,
+            },
+        )
+    })?;
 
     // 名前変更。
-    state = chain_step(
-        harness,
-        instance,
-        &mut steps,
-        "set_object_name",
-        &state,
-        |state, revision| {
-            harness.set_object_name(
-                &instance.id,
-                &state.object.selector,
-                Some("受け入れ確認".to_string()),
-                ExpectedInput {
-                    project_epoch: state.epoch.clone(),
-                    project_revision: revision,
-                },
-            )
-        },
-    )?;
+    state = chain_step(&mut steps, "set_object_name", &state, |state, revision| {
+        harness.set_object_name(
+            &instance.id,
+            &state.object.selector,
+            Some("受け入れ確認".to_string()),
+            ExpectedInput {
+                project_epoch: state.epoch.clone(),
+                project_revision: revision,
+            },
+        )
+    })?;
 
     // effect の付与。
-    let added = chain_outcome(
-        harness,
-        instance,
-        &mut steps,
-        "add_effect",
-        &state,
-        |state, revision| {
-            harness.add_effect(
-                &instance.id,
-                &state.object.selector,
-                &context.effect_name,
-                ExpectedInput {
-                    project_epoch: state.epoch.clone(),
-                    project_revision: revision,
-                },
-            )
-        },
-    )?;
+    let added = chain_outcome(&mut steps, "add_effect", &state, |state, revision| {
+        harness.add_effect(
+            &instance.id,
+            &state.object.selector,
+            &context.effect_name,
+            ExpectedInput {
+                project_epoch: state.epoch.clone(),
+                project_revision: revision,
+            },
+        )
+    })?;
     let effect = added
         .effect
         .clone()
@@ -2202,25 +2204,18 @@ fn check_edit_chain(
     {
         let next = altered_value(&item.value).expect("書き換えられる値を選んでいる");
         let selector = effect_selector.clone();
-        let changed = chain_outcome(
-            harness,
-            instance,
-            &mut steps,
-            "set_object_item",
-            &state,
-            |state, revision| {
-                harness.set_object_item(
-                    &instance.id,
-                    &selector,
-                    &item.name,
-                    &next,
-                    ExpectedInput {
-                        project_epoch: state.epoch.clone(),
-                        project_revision: revision,
-                    },
-                )
-            },
-        )?;
+        let changed = chain_outcome(&mut steps, "set_object_item", &state, |state, revision| {
+            harness.set_object_item(
+                &instance.id,
+                &selector,
+                &item.name,
+                &next,
+                ExpectedInput {
+                    project_epoch: state.epoch.clone(),
+                    project_revision: revision,
+                },
+            )
+        })?;
         effect_selector = changed
             .effect
             .clone()
@@ -2240,25 +2235,18 @@ fn check_edit_chain(
 
     // 有効状態の変更。
     let selector = effect_selector.clone();
-    let disabled = chain_outcome(
-        harness,
-        instance,
-        &mut steps,
-        "set_effect_state",
-        &state,
-        |state, revision| {
-            harness.set_effect_state(
-                &instance.id,
-                &selector,
-                Some(false),
-                None,
-                ExpectedInput {
-                    project_epoch: state.epoch.clone(),
-                    project_revision: revision,
-                },
-            )
-        },
-    )?;
+    let disabled = chain_outcome(&mut steps, "set_effect_state", &state, |state, revision| {
+        harness.set_effect_state(
+            &instance.id,
+            &selector,
+            Some(false),
+            None,
+            ExpectedInput {
+                project_epoch: state.epoch.clone(),
+                project_revision: revision,
+            },
+        )
+    })?;
     let effect_selector = disabled
         .effect
         .clone()
@@ -2275,23 +2263,16 @@ fn check_edit_chain(
 
     // effect の削除。
     let selector = effect_selector.clone();
-    state = chain_step(
-        harness,
-        instance,
-        &mut steps,
-        "delete_effect",
-        &state,
-        |state, revision| {
-            harness.delete_effect(
-                &instance.id,
-                &selector,
-                ExpectedInput {
-                    project_epoch: state.epoch.clone(),
-                    project_revision: revision,
-                },
-            )
-        },
-    )?;
+    state = chain_step(&mut steps, "delete_effect", &state, |state, revision| {
+        harness.delete_effect(
+            &instance.id,
+            &selector,
+            ExpectedInput {
+                project_epoch: state.epoch.clone(),
+                project_revision: revision,
+            },
+        )
+    })?;
 
     // オブジェクトの削除。後始末を兼ねる。
     let selector = state.object.selector.clone();
@@ -2330,8 +2311,6 @@ struct ChainState {
 
 /// 1 手を実行し、応答から次の状態を組み立てる。
 fn chain_step<F>(
-    harness: &Harness,
-    instance: &Instance,
     steps: &mut Vec<String>,
     label: &str,
     state: &ChainState,
@@ -2340,7 +2319,7 @@ fn chain_step<F>(
 where
     F: Fn(&ChainState, u64) -> Result<EditOutcome, ErrorObject>,
 {
-    let outcome = chain_outcome(harness, instance, steps, label, state, call)?;
+    let outcome = chain_outcome(steps, label, state, call)?;
     let object = outcome
         .object
         .clone()
@@ -2354,8 +2333,6 @@ where
 
 /// 1 手を実行して応答をそのまま返す。
 fn chain_outcome<F>(
-    _harness: &Harness,
-    _instance: &Instance,
     steps: &mut Vec<String>,
     label: &str,
     state: &ChainState,
@@ -3008,8 +2985,10 @@ fn round_trip_one(
     if after == value {
         Ok(RoundTrip::Matched)
     } else {
+        // 値そのものは記録へ残さない。種別だけで、値が変わったのか種別ごと
+        // 変わったのかを区別できる。
         Ok(RoundTrip::Differed(format!(
-            "書き戻し前後で値が異なる: 前={} 後={}",
+            "書き戻した値と読み直した値が異なる（種別は 前={} 後={}）",
             value.kind(),
             after.kind()
         )))
@@ -3530,10 +3509,20 @@ fn section_target_confusion(
     harness: &Harness,
     report: &mut Report,
     instance: &Instance,
+    other: &Instance,
     context: &Context,
 ) -> Result<(), String> {
     println!();
     println!("### 5.7 対象の取り違え防止");
+
+    let outcome = check_cross_instance_selector(harness, instance, other, context);
+    report.record(
+        "5.7",
+        "別 instance の selector",
+        "一方の selector を他方の編集 tool へ渡すと precondition_failed（mismatch=project_epoch）で拒否され、他方が変更されない",
+        Mode::Auto,
+        outcome,
+    );
 
     let outcome = check_stale_after_ui_item_change(harness, instance, context);
     report.record(
@@ -3572,6 +3561,49 @@ fn section_target_confusion(
     );
 
     Ok(())
+}
+
+/// 一方の selector が他方へ適用されないことを確かめる。
+fn check_cross_instance_selector(
+    harness: &Harness,
+    instance: &Instance,
+    other: &Instance,
+    context: &Context,
+) -> CheckResult {
+    let object = resolve_object(harness, instance, context.scene_id, context.target)?;
+    let expected = precondition(harness, instance)?;
+    let other_scene = scene_id(harness, other)?;
+    let before = snapshot(harness, other, other_scene)?;
+    let destination = free_slot(harness, other, other_scene)?;
+
+    let attempt = harness.move_object(
+        &other.id,
+        &object.selector,
+        DestinationInput {
+            layer: destination.layer as u32,
+            frame: destination.frame as u32,
+        },
+        expected,
+    );
+    let mut outcome = expect_rejection(
+        attempt,
+        ErrorCode::PreconditionFailed,
+        Some("project_epoch"),
+    );
+    if outcome.is_ok() {
+        let after = snapshot(harness, other, other_scene)?;
+        outcome = match expect_unchanged(&before, &after) {
+            Ok(()) => outcome.map(|mut notes| {
+                notes.push(format!("インスタンス {} は変化していない", other.label));
+                notes
+            }),
+            Err(reason) => Err(format!(
+                "拒否されたのにインスタンス {} が変化しました: {reason}",
+                other.label
+            )),
+        };
+    }
+    outcome
 }
 
 /// UI で内容を変えた後、内容の差で拒否されることを確かめる。
