@@ -126,19 +126,59 @@ fn run(report: &mut Report) -> Result<(), String> {
     let (a, b) = prepare(&harness, report)?;
     let context = Context::new(&harness, &a)?;
 
-    let convergence = section_fingerprint_premises(&harness, report, &a, &context)?;
-    section_basic_edits(&harness, report, &a, &context)?;
-    section_undo(&harness, report, &a, &context)?;
-    section_silent_rejection(&harness, report, &a, &context)?;
-    section_item_round_trip(&harness, report, &a, &context)?;
+    // 区間の途中で続行不能になっても、残りの区間は実行する。完了条件の検証は
+    // 最後に置かれており、手前の区間の環境不備でそこへ到達しないと、確かめたい
+    // ことが 1 件も確かめられないまま終わる。
+    let convergence = match section_fingerprint_premises(&harness, report, &a, &context) {
+        Ok(convergence) => convergence,
+        Err(reason) => {
+            record_section_failure(report, "5.9", reason);
+            Convergence::none()
+        }
+    };
+
+    let outcome = section_basic_edits(&harness, report, &a, &context);
+    record_section_failure_if_any(report, "5.1", outcome);
+    let outcome = section_undo(&harness, report, &a, &context);
+    record_section_failure_if_any(report, "5.2", outcome);
+    let outcome = section_silent_rejection(&harness, report, &a, &context);
+    record_section_failure_if_any(report, "5.3", outcome);
+    let outcome = section_item_round_trip(&harness, report, &a, &context);
+    record_section_failure_if_any(report, "5.4", outcome);
     section_revision(report, &convergence);
-    section_blocked(&harness, report, &a, &context)?;
-    section_target_confusion(&harness, report, &a, &b, &context)?;
-    section_misc(&harness, report, &a, &context)?;
-    section_completion(&harness, report, &a, &b)?;
+    let outcome = section_blocked(&harness, report, &a, &context);
+    record_section_failure_if_any(report, "5.6", outcome);
+    let outcome = section_target_confusion(&harness, report, &a, &b, &context);
+    record_section_failure_if_any(report, "5.7", outcome);
+    let outcome = section_misc(&harness, report, &a, &context);
+    record_section_failure_if_any(report, "5.8", outcome);
+    let outcome = section_completion(&harness, report, &a, &b);
+    record_section_failure_if_any(report, "6", outcome);
 
     prompt("すべての確認が終わりました。AviUtl2 を保存せずに閉じてから Enter を押してください。");
     Ok(())
+}
+
+/// 区間が続行不能になった場合に、その区間の不合格として記録する。
+fn record_section_failure_if_any(
+    report: &mut Report,
+    section: &'static str,
+    outcome: Result<(), String>,
+) {
+    if let Err(reason) = outcome {
+        record_section_failure(report, section, reason);
+    }
+}
+
+/// 区間を最後まで実行できなかったことを記録する。
+fn record_section_failure(report: &mut Report, section: &'static str, reason: String) {
+    report.record(
+        section,
+        format!("{section} の実行"),
+        "区間の全項目を最後まで実行できる",
+        Mode::Auto,
+        Err(reason),
+    );
 }
 
 /// 破壊的であることを実行前に告げる。
@@ -1378,6 +1418,17 @@ struct Convergence {
     corrected: usize,
 }
 
+impl Convergence {
+    /// 1 度も編集できなかったことを表す。
+    fn none() -> Self {
+        Self {
+            steps: 0,
+            first_attempt: 0,
+            corrected: 0,
+        }
+    }
+}
+
 /// fingerprint の前提を最初に確かめる。
 ///
 /// ここが破れていると以降の全ての編集が成立しないため、他のどの確認よりも先に
@@ -1867,11 +1918,7 @@ fn check_revision_convergence(
     instance: &Instance,
     context: &Context,
 ) -> (CheckResult, Convergence) {
-    let mut convergence = Convergence {
-        steps: 0,
-        first_attempt: 0,
-        corrected: 0,
-    };
+    let mut convergence = Convergence::none();
     let result = run_revision_chain(harness, instance, context, &mut convergence);
     (result, convergence)
 }
@@ -2853,7 +2900,21 @@ fn section_item_round_trip(
     println!();
     println!("### 5.4 設定値の round-trip");
 
-    let scratch = create_scratch_object(harness, instance, context)?;
+    // 確認は作業用オブジェクトに対して行う。既存の対象へ effect を足して回ると、
+    // 網羅のために足した分の後始末が失敗したときに元の構成へ戻せなくなる。
+    let scratch = match create_scratch_object(harness, instance, context) {
+        Ok(scratch) => scratch,
+        Err(reason) => {
+            report.skip(
+                "5.4",
+                "設定値の round-trip",
+                "aviutl2_get_object が返した値をそのまま書き戻せ、書き戻した後の読み取りが元の値と一致する",
+                Mode::Auto,
+                reason,
+            );
+            return Ok(());
+        }
+    };
     let added = add_effects_for_coverage(harness, instance, context, scratch)?;
 
     let mut results: Vec<TypeResult> = Vec::new();
@@ -3325,6 +3386,17 @@ fn check_track_item(
 fn section_revision(report: &mut Report, convergence: &Convergence) {
     println!();
     println!("### 5.5 revision の二重加算");
+
+    if convergence.steps == 0 {
+        report.skip(
+            "5.5",
+            "応答が返した revision の扱い",
+            "応答の project_revision をそのまま expected に使って次の編集が成功する。失敗する場合は details.current_project_revision による訂正で成功する",
+            Mode::Auto,
+            "連続編集を 1 度も実行できなかったため観測できません",
+        );
+        return;
+    }
 
     let doubled = convergence.corrected > 0;
     report.observe(
