@@ -424,6 +424,8 @@ fn effect_item_strategy() -> impl Strategy<Value = EffectItem> {
 struct OwnedEffectInput {
     effect_name: String,
     effect_index: usize,
+    position: usize,
+    effect_count: usize,
     enabled: bool,
     locked: bool,
     items: Vec<EffectItem>,
@@ -434,6 +436,8 @@ impl OwnedEffectInput {
         effect_fingerprint(EffectFingerprintInput {
             effect_name: &self.effect_name,
             effect_index: self.effect_index,
+            position: self.position,
+            effect_count: self.effect_count,
             enabled: self.enabled,
             locked: self.locked,
             items: &self.items,
@@ -445,17 +449,23 @@ fn effect_input_strategy() -> impl Strategy<Value = OwnedEffectInput> {
     (
         ".*",
         0..8usize,
+        0..8usize,
+        1..16usize,
         any::<bool>(),
         any::<bool>(),
         prop::collection::vec(effect_item_strategy(), 0..4),
     )
         .prop_map(
-            |(effect_name, effect_index, enabled, locked, items)| OwnedEffectInput {
-                effect_name,
-                effect_index,
-                enabled,
-                locked,
-                items,
+            |(effect_name, effect_index, position, effect_count, enabled, locked, items)| {
+                OwnedEffectInput {
+                    effect_name,
+                    effect_index,
+                    position,
+                    effect_count,
+                    enabled,
+                    locked,
+                    items,
+                }
             },
         )
 }
@@ -517,6 +527,31 @@ proptest! {
     ) {
         if a != b {
             prop_assert_ne!(a.compute(), b.compute());
+        }
+    }
+
+    /// 列の絶対位置だけが違う effect は別物である。
+    #[test]
+    fn effect_fingerprint_depends_on_the_position_in_the_list(
+        (input, position) in (effect_input_strategy(), 0..8usize),
+    ) {
+        if input.position != position {
+            let moved = OwnedEffectInput { position, ..input.clone() };
+            prop_assert_ne!(input.compute(), moved.compute());
+        }
+    }
+
+    /// 列の総数だけが違う effect は別物である。
+    ///
+    /// 前方の同名 effect が取り除かれた場合、残った側は同名内の番号が繰り上がって
+    /// 取り除く前の先頭と一致し得る。総数は必ず変わるため、ここで区別される。
+    #[test]
+    fn effect_fingerprint_depends_on_the_length_of_the_list(
+        (input, effect_count) in (effect_input_strategy(), 1..16usize),
+    ) {
+        if input.effect_count != effect_count {
+            let shifted = OwnedEffectInput { effect_count, ..input.clone() };
+            prop_assert_ne!(input.compute(), shifted.compute());
         }
     }
 }

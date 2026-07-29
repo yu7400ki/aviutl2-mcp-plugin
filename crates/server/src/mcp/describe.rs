@@ -463,6 +463,8 @@ mod tests {
                     EffectFingerprintInput {
                         effect_name: &long_name(),
                         effect_index: index,
+                        position: index,
+                        effect_count: OVERSIZED_COUNT,
                         enabled: true,
                         locked: false,
                         items: &[],

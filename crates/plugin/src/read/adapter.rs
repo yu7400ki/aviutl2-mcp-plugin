@@ -376,10 +376,8 @@ fn object_summary(epoch: &str, scene_id: i32, object: &HostObject) -> ObjectSumm
 /// オブジェクトの詳細を、算出済みの概要と組み合わせて組み立てる。
 fn object_detail(summary: ObjectSummary, revision: u64, detail: HostObjectDetail) -> ObjectDetail {
     let alias = detail.object.alias;
-    let effects = detail
-        .effects
-        .iter()
-        .map(|effect| effect_info(&summary.selector, effect))
+    let effects = effect_fingerprint_inputs(&detail.effects)
+        .map(|input| EffectInfo::new(summary.selector.clone(), input))
         .collect();
     ObjectDetail {
         summary,
@@ -390,18 +388,25 @@ fn object_detail(summary: ObjectSummary, revision: u64, detail: HostObjectDetail
     }
 }
 
-/// effect の読み取り結果を組み立てる。
-fn effect_info(object: &ObjectSelector, effect: &HostEffect) -> EffectInfo {
-    EffectInfo::new(
-        object.clone(),
-        EffectFingerprintInput {
+/// effect 列の各要素について fingerprint の入力を組み立てる。
+///
+/// 列の絶対位置と総数も材料に含めるため、要素を単独では組み立てられない。
+fn effect_fingerprint_inputs(
+    effects: &[HostEffect],
+) -> impl Iterator<Item = EffectFingerprintInput<'_>> {
+    let effect_count = effects.len();
+    effects
+        .iter()
+        .enumerate()
+        .map(move |(position, effect)| EffectFingerprintInput {
             effect_name: &effect.name,
             effect_index: effect.index,
+            position,
+            effect_count,
             enabled: effect.enabled,
             locked: effect.locked,
             items: &effect.items,
-        },
-    )
+        })
 }
 
 /// シーン情報を組み立てる。

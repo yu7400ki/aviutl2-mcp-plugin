@@ -326,6 +326,17 @@ pub struct EffectFingerprintInput<'a> {
     pub effect_name: &'a str,
     /// 同名 effect のうち何番目か。0 始まり。
     pub effect_index: usize,
+    /// effect 列全体での位置。0 始まり。
+    ///
+    /// 同名 effect の何番目かとは別に、列の絶対位置も材料にする。
+    pub position: usize,
+    /// オブジェクトに付与された effect の総数。
+    ///
+    /// 前方の同名 effect が取り除かれると、後続の同名 effect は同名内の番号が
+    /// 繰り上がる。繰り上がった側の設定が元と同じ場合、名前と同名内の番号だけ
+    /// では取り除く前の値と一致してしまい、別の effect を同じものとして扱って
+    /// しまう。取り除けば総数は必ず変わるため、総数を混ぜることで区別できる。
+    pub effect_count: usize,
     /// effect が有効か。
     pub enabled: bool,
     /// effect がロックされているか。
@@ -374,6 +385,8 @@ pub fn effect_fingerprint(input: EffectFingerprintInput<'_>) -> Fingerprint {
     bytes.text("algorithm", FingerprintAlgorithm::GENERATED.as_str());
     bytes.text("effect_name", input.effect_name);
     bytes.count("effect_index", input.effect_index);
+    bytes.count("position", input.position);
+    bytes.count("effect_count", input.effect_count);
     bytes.boolean("enabled", input.enabled);
     bytes.boolean("locked", input.locked);
     bytes.count("item_count", input.items.len());
@@ -436,6 +449,8 @@ mod tests {
         effect_fingerprint(EffectFingerprintInput {
             effect_name: "動画ファイル",
             effect_index: 0,
+            position: 0,
+            effect_count: 1,
             enabled: true,
             locked: false,
             items,
@@ -549,6 +564,8 @@ mod tests {
         let base = EffectFingerprintInput {
             effect_name: "動画ファイル",
             effect_index: 0,
+            position: 1,
+            effect_count: 3,
             enabled: true,
             locked: false,
             items: &items,
@@ -563,6 +580,14 @@ mod tests {
                 ..base
             },
             EffectFingerprintInput {
+                position: 2,
+                ..base
+            },
+            EffectFingerprintInput {
+                effect_count: 4,
+                ..base
+            },
+            EffectFingerprintInput {
                 enabled: false,
                 ..base
             },
@@ -574,6 +599,29 @@ mod tests {
         ] {
             assert_ne!(effect_fingerprint(base), effect_fingerprint(changed));
         }
+    }
+
+    #[test]
+    fn effect_fingerprint_detects_an_index_shift() {
+        // 同名 effect が 2 つ並び、前方の 1 つが取り除かれた状況を作る。
+        // 残った側は同名内の番号が 1 から 0 へ繰り上がり、設定が同じなら
+        // 取り除く前の先頭と名前・番号・設定が全て一致する。列の総数を材料に
+        // 含めることで、両者を別の effect として区別する。
+        let items = sample_items();
+        let before = EffectFingerprintInput {
+            effect_name: "ぼかし",
+            effect_index: 0,
+            position: 0,
+            effect_count: 2,
+            enabled: true,
+            locked: false,
+            items: &items,
+        };
+        let after = EffectFingerprintInput {
+            effect_count: 1,
+            ..before
+        };
+        assert_ne!(effect_fingerprint(before), effect_fingerprint(after));
     }
 
     #[test]

@@ -587,6 +587,8 @@ mod tests {
             EffectFingerprintInput {
                 effect_name: "動画ファイル",
                 effect_index: 0,
+                position: 0,
+                effect_count: 1,
                 enabled: true,
                 locked: false,
                 items: &items,
