@@ -754,16 +754,13 @@ async fn malformed_instance_id_never_reaches_an_edit_operation() {
 
 #[tokio::test]
 async fn precondition_failure_reaches_the_tool_result_with_the_current_revision() {
-    let error = ErrorObject::new(
-        ErrorCode::PreconditionFailed,
-        "プロジェクトが変化しました",
-        true,
-    )
-    .with_details(json!({
-        "current_project_revision": 44,
-        "mismatch": "project_revision",
-        "retry_requires": "refetch",
-    }));
+    let error = ErrorObject::new(ErrorCode::PreconditionFailed, "対象が変化しました", true)
+        .with_details(json!({
+            "current_project_revision": 44,
+            "mutation_issued": true,
+            "mismatch": "fingerprint",
+            "retry_requires": "refetch",
+        }));
     let harness = Harness::start(OperationResponses::from([(
         "move_object".to_string(),
         err_result(error),
@@ -784,7 +781,8 @@ async fn precondition_failure_reaches_the_tool_result_with_the_current_revision(
     assert_eq!(structured["code"], json!("precondition_failed"));
     assert_eq!(structured["retryable"], json!(true));
     assert_eq!(structured["details"]["current_project_revision"], json!(44));
-    assert_eq!(structured["details"]["mismatch"], json!("project_revision"));
+    assert_eq!(structured["details"]["mutation_issued"], json!(true));
+    assert_eq!(structured["details"]["mismatch"], json!("fingerprint"));
     assert_eq!(structured["details"]["retry_requires"], json!("refetch"));
     assert!(structured["correlation_id"].is_string());
 }

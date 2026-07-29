@@ -516,12 +516,15 @@ impl AviUtl2McpServer {
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
     /// project_revision をそのまま指定する。省略はできない。
+    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
+    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// 複数オブジェクトを含む alias は全てが作成され、created に全件、object に
     /// その先頭が入る。長さと挿入位置はホストが自動調整し得るため、応答が返す
     /// 位置が実際の配置である。
-    /// 同じ要求を再送すると重複して作成し得る。成功すると project_revision が
-    /// 進むため、同じ expected での再送は precondition_failed となり通常は防がれる。
+    /// 同じ要求を再送すると重複して作成し得る。作成先に既存オブジェクトがあれば
+    /// precondition_failed（destination_occupied）となるため通常は防がれるが、
+    /// ホストが挿入位置を自動調整した場合はすり抜け得る。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
@@ -565,6 +568,8 @@ impl AviUtl2McpServer {
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
     /// project_revision をそのまま指定する。省略はできない。
+    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
+    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
     /// selector には応答が返した値をそのまま指定する。応答が返した selector は
     /// 読み直さずにそのまま次の編集へ渡せる。
     /// 宛先に既存オブジェクトがある場合は precondition_failed となる。
@@ -611,6 +616,8 @@ impl AviUtl2McpServer {
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
     /// project_revision をそのまま指定する。省略はできない。
+    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
+    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
     /// selector には応答が返した値をそのまま指定する。応答が返した selector は
     /// 読み直さずにそのまま次の編集へ渡せる。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
@@ -657,6 +664,8 @@ impl AviUtl2McpServer {
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
     /// project_revision をそのまま指定する。省略はできない。
+    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
+    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
     /// selector には aviutl2_get_object が返した effect の selector をそのまま指定する。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// effect の設定を変えるとそのオブジェクトの fingerprint も変わるため、変更前の
@@ -708,11 +717,14 @@ impl AviUtl2McpServer {
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
     /// project_revision をそのまま指定する。省略はできない。
+    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
+    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// effect を足すとそのオブジェクトの fingerprint も変わるため、変更前の
     /// selector で続けて編集すると precondition_failed となる。
-    /// 同じ要求を再送すると重複して付与し得る。成功すると project_revision が
-    /// 進むため、同じ expected での再送は precondition_failed となり通常は防がれる。
+    /// 同じ要求を再送すると重複して付与し得る。付与によってオブジェクトの
+    /// fingerprint が変わるため、同じ selector での再送は precondition_failed と
+    /// なり防がれる。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
@@ -759,6 +771,8 @@ impl AviUtl2McpServer {
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
     /// project_revision をそのまま指定する。省略はできない。
+    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
+    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
     /// selector には aviutl2_get_object が返した effect の selector をそのまま指定する。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// effect の状態を変えるとそのオブジェクトの fingerprint も変わるため、変更前の
@@ -807,6 +821,8 @@ impl AviUtl2McpServer {
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
     /// project_revision をそのまま指定する。省略はできない。
+    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
+    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
     /// selector には aviutl2_get_object が返した effect の selector をそのまま指定する。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// effect を削除するとそのオブジェクトの fingerprint も変わるため、変更前の
@@ -855,6 +871,8 @@ impl AviUtl2McpServer {
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
     /// project_revision をそのまま指定する。省略はできない。
+    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
+    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
     /// selector には応答が返した値をそのまま指定する。他の編集 tool では応答が
     /// 返した selector をそのまま次の編集へ渡せるが、削除した対象の selector は
     /// 以後どの編集にも使えない。
@@ -902,6 +920,8 @@ impl AviUtl2McpServer {
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
     /// project_revision をそのまま指定する。省略はできない。
+    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
+    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
     /// focus の selector には応答が返した値をそのまま指定する。応答が返した
     /// selector は読み直さずにそのまま次の編集へ渡せる。
     /// この tool は取り消し操作で元へ戻る保証が無く、他の編集 tool と異なり
@@ -1427,8 +1447,8 @@ mod tests {
     /// 全編集 tool で偽、`open_world_hint` も全 tool で偽であるため表に持たない。
     ///
     /// 作成系を冪等と名乗らないのは、再送で重複して作られ得るためである。
-    /// `expected` の検証により通常は防がれるが、annotation は「再送が安全である」
-    /// と主張しない側へ倒す。
+    /// 宛先の重複確認と対象の fingerprint により通常は防がれるが、annotation は
+    /// 「再送が安全である」と主張しない側へ倒す。
     const EDIT_TOOL_ANNOTATIONS: &[(&str, bool, bool)] = &[
         ("aviutl2_create_object", false, false),
         ("aviutl2_move_object", false, true),
@@ -1598,6 +1618,40 @@ mod tests {
                     "{name} の説明に {keyword} がありません"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn edit_tool_descriptions_admit_that_the_revision_is_not_verified() {
+        // expected は受け取るが project_revision を照合しない。説明が黙っていると、
+        // 呼び出し側は拒否を避けるために revision を取り直し続ける。
+        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+            let description = description_of(name);
+            assert!(
+                description.contains("project_revision は現在は照合されず"),
+                "{name} の説明が project_revision を照合しないことを述べていません"
+            );
+        }
+    }
+
+    #[test]
+    fn creation_tools_name_the_guard_that_actually_stops_a_resend() {
+        // revision を照合しない以上、再送を止めるのは宛先の重複確認と対象の
+        // fingerprint である。防ぐ仕組みを取り違えて案内すると、呼び出し側は
+        // 効かない対策を信じて再送する。
+        assert!(
+            description_of("aviutl2_create_object").contains("destination_occupied"),
+            "aviutl2_create_object の説明が宛先重複の確認に触れていません"
+        );
+        assert!(
+            description_of("aviutl2_add_effect").contains("fingerprint が変わるため"),
+            "aviutl2_add_effect の説明が fingerprint の変化に触れていません"
+        );
+        for name in ["aviutl2_create_object", "aviutl2_add_effect"] {
+            assert!(
+                !description_of(name).contains("同じ expected での再送"),
+                "{name} の説明が expected による重複防止を主張しています"
+            );
         }
     }
 
