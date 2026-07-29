@@ -12,8 +12,8 @@ use crate::edit::fake::{
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
 use aviutl2_mcp_core::{
-    CursorPosition, Destination, EffectSelector, ErrorCode, Expected, Fingerprint, ItemValue,
-    ObjectSelector, PageRequest, Placement,
+    CursorPosition, Destination, EditOperation, EffectSelector, ErrorCode, Expected, Fingerprint,
+    ItemValue, ObjectSelector, PageRequest, Placement,
 };
 use serde_json::json;
 use std::sync::mpsc::channel;
@@ -1712,13 +1712,17 @@ fn a_panic_before_any_mutation_is_not_reported_as_a_possible_change() {
 /// 内容を変える operation を 1 つ実行する。
 type ContentEdit = fn(&Harness, Expected) -> Result<EditOutcome, EditError>;
 
-/// 内容を変える 8 つの operation を 1 つずつ実行する。
+/// operation を 1 つ実行する手続きを引く。
 ///
-/// 選択状態の変更だけは内容を変えないため含めない。含めるかどうかで
-/// revision の扱いが変わるので、一覧はここへ 1 つだけ置く。
-fn content_edits() -> Vec<(&'static str, ContentEdit)> {
-    vec![
-        ("create_object", |harness, expected| {
+/// **網羅 match で書く。** operation を足すとここがコンパイルエラーになるため、
+/// revision の照合・加算・ロックの拒否を確かめる一連のテストから漏れることが
+/// ない。手書きの一覧にしておくと、足し忘れても全て緑のまま通ってしまう。
+///
+/// 選択状態の変更だけは内容を変えないため `None` を返す。含めるかどうかで
+/// revision の扱いが変わるので、その区別もこの 1 か所に置く。
+fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
+    Some(match operation {
+        EditOperation::CreateObject => |harness: &Harness, expected| {
             harness.edit.create_object(&CreateObjectParams {
                 source: ObjectSource::ObjectAlias {
                     alias: "[obj]".to_string(),
@@ -1730,8 +1734,8 @@ fn content_edits() -> Vec<(&'static str, ContentEdit)> {
                 },
                 expected,
             })
-        }),
-        ("move_object", |harness, expected| {
+        },
+        EditOperation::MoveObject => |harness: &Harness, expected| {
             harness.edit.move_object(&MoveObjectParams {
                 selector: harness.selector(1, 100),
                 destination: Destination {
@@ -1740,50 +1744,74 @@ fn content_edits() -> Vec<(&'static str, ContentEdit)> {
                 },
                 expected,
             })
-        }),
-        ("delete_object", |harness, expected| {
+        },
+        EditOperation::DeleteObject => |harness: &Harness, expected| {
             harness.edit.delete_object(&DeleteObjectParams {
                 selector: harness.selector(1, 100),
                 expected,
             })
-        }),
-        ("set_object_name", |harness, expected| {
+        },
+        EditOperation::SetObjectName => |harness: &Harness, expected| {
             harness.edit.set_object_name(&SetObjectNameParams {
                 selector: harness.selector(1, 100),
                 name: Some("名前".to_string()),
                 expected,
             })
-        }),
-        ("set_object_item", |harness, expected| {
+        },
+        EditOperation::SetObjectItem => |harness: &Harness, expected| {
             harness.edit.set_object_item(&SetObjectItemParams {
                 selector: harness.effect_selector(1, 100, "ぼかし", 0),
                 item: "範囲".to_string(),
                 value: ItemValue::Integer { value: 30 },
                 expected,
             })
-        }),
-        ("add_effect", |harness, expected| {
+        },
+        EditOperation::AddEffect => |harness: &Harness, expected| {
             harness.edit.add_effect(&AddEffectParams {
                 object: harness.selector(1, 100),
                 effect_name: "ぼかし".to_string(),
                 expected,
             })
-        }),
-        ("delete_effect", |harness, expected| {
+        },
+        EditOperation::DeleteEffect => |harness: &Harness, expected| {
             harness.edit.delete_effect(&DeleteEffectParams {
                 selector: harness.effect_selector(1, 100, "ぼかし", 0),
                 expected,
             })
-        }),
-        ("set_effect_state", |harness, expected| {
+        },
+        EditOperation::SetEffectState => |harness: &Harness, expected| {
             harness.edit.set_effect_state(&SetEffectStateParams {
                 selector: harness.effect_selector(1, 100, "ぼかし", 0),
                 enabled: Some(false),
                 locked: None,
                 expected,
             })
-        }),
-    ]
+        },
+        // 選択状態はプロジェクトの内容ではない。revision を照合も加算もしない。
+        EditOperation::SetSelection => return None,
+    })
+}
+
+/// 内容を変える operation を全て、名前つきで列挙する。
+fn content_edits() -> Vec<(&'static str, ContentEdit)> {
+    EditOperation::ALL
+        .into_iter()
+        .filter_map(|operation| content_edit(operation).map(|run| (operation.as_str(), run)))
+        .collect()
+}
+
+#[test]
+fn only_the_selection_change_is_left_out_of_the_content_edits() {
+    // 網羅 match は operation の追加を止めるが、既存の枝を除外へ書き換えても
+    // 止まらない。内容を変えないのが選択状態の変更だけであることを併せて固定
+    // することで、追加も除外も見逃さない。
+    let excluded: Vec<&str> = EditOperation::ALL
+        .into_iter()
+        .filter(|operation| content_edit(*operation).is_none())
+        .map(EditOperation::as_str)
+        .collect();
+
+    assert_eq!(excluded, vec![EditOperation::SetSelection.as_str()]);
 }
 
 #[test]

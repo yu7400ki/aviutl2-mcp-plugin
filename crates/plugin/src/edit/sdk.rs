@@ -33,19 +33,26 @@ fn sdk(operation: &'static str) -> EditError {
 /// 引っ掛かった要求は SDK を呼ばずに専用の理由で戻る。SDK が実際に失敗を返した
 /// 場合と区別できるため、区別したまま伝える。届いていない失敗を SDK の失敗と
 /// して扱うと、プロジェクトが一切変わっていないのに変更を発行したことになる。
+/// 網羅 match で書く。`_` で受けると、上流が失敗の種類を足したり割り直したり
+/// したときに黙って SDK の失敗として扱われ、届いていない要求が発行として
+/// 記録されるところまで戻ってしまう。
 fn mutation_failure(operation: &'static str, error: &EditSectionError) -> EditError {
+    let not_issued = |reason| EditError::NotIssued { reason };
     match error {
+        // 対象の存在確認は呼び出しの先頭にあり、SDK へは届かない。
         EditSectionError::ObjectDoesNotExist | EditSectionError::EffectDoesNotExist => {
-            EditError::NotIssued {
-                reason: NotIssuedReason::TargetMissing,
-            }
+            not_issued(NotIssuedReason::TargetMissing)
         }
+        // 引数を SDK の型へ写す変換は関数ポインタを呼ぶ前に評価される。
         EditSectionError::ValueOutOfRange(_)
         | EditSectionError::InputCstrContainsNull(_)
-        | EditSectionError::InputCwstrContainsNull(_) => EditError::NotIssued {
-            reason: NotIssuedReason::ArgumentNotRepresentable,
-        },
-        _ => sdk(operation),
+        | EditSectionError::InputCwstrContainsNull(_) => {
+            not_issued(NotIssuedReason::ArgumentNotRepresentable)
+        }
+        // SDK が実際に失敗を返した、あるいは返した値を解釈できなかった。
+        EditSectionError::ApiCallFailed
+        | EditSectionError::NonUtf8Data(_)
+        | EditSectionError::ParseFailed(_) => sdk(operation),
     }
 }
 
@@ -476,20 +483,44 @@ mod tests {
     fn a_failure_before_the_sdk_call_is_told_apart_from_an_sdk_failure() {
         // 届いていない失敗を SDK の失敗として扱うと、プロジェクトが一切
         // 変わっていないのに変更を発行したことになる。
-        for error in [
-            EditSectionError::ObjectDoesNotExist,
-            EditSectionError::EffectDoesNotExist,
-        ] {
+        //
+        // 対象の存在確認も、引数を SDK の型へ写す変換も、いずれも FFI の
+        // 呼び出しより前にある。到達しないまま戻る理由をすべて挙げる。
+        let out_of_range = u8::try_from(300u32).expect_err("範囲外の変換");
+        let utf8_nul = std::ffi::CString::new("a\0b").expect_err("NUL を含む文字列");
+        let utf16_nul = aviutl2::config::translate_strict("a\0b")
+            .expect_err("NUL を含む文字列が UTF-16 へ写りました");
+        let not_issued: Vec<(EditSectionError, NotIssuedReason)> = vec![
+            (
+                EditSectionError::ObjectDoesNotExist,
+                NotIssuedReason::TargetMissing,
+            ),
+            (
+                EditSectionError::EffectDoesNotExist,
+                NotIssuedReason::TargetMissing,
+            ),
+            (
+                EditSectionError::ValueOutOfRange(out_of_range),
+                NotIssuedReason::ArgumentNotRepresentable,
+            ),
+            (
+                EditSectionError::InputCstrContainsNull(utf8_nul),
+                NotIssuedReason::ArgumentNotRepresentable,
+            ),
+            (
+                EditSectionError::InputCwstrContainsNull(utf16_nul),
+                NotIssuedReason::ArgumentNotRepresentable,
+            ),
+        ];
+        for (error, expected) in not_issued {
+            let mapped = mutation_failure("move_object", &error);
             assert!(
-                matches!(
-                    mutation_failure("move_object", &error),
-                    EditError::NotIssued {
-                        reason: NotIssuedReason::TargetMissing
-                    }
-                ),
-                "{error} が SDK の失敗として扱われました"
+                matches!(mapped, EditError::NotIssued { reason } if reason == expected),
+                "{error} が {} として扱われませんでした",
+                expected.as_str()
             );
         }
+
         assert!(
             matches!(
                 mutation_failure("move_object", &EditSectionError::ApiCallFailed),

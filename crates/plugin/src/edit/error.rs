@@ -455,6 +455,15 @@ mod tests {
             EditError::UnsupportedTarget {
                 reason: UnsupportedReason::MediaNotSupported,
             },
+            EditError::UnsupportedTarget {
+                reason: UnsupportedReason::ChangeNotApplied,
+            },
+            EditError::NotIssued {
+                reason: NotIssuedReason::TargetMissing,
+            },
+            EditError::NotIssued {
+                reason: NotIssuedReason::ArgumentNotRepresentable,
+            },
             EditError::Sdk {
                 operation: "create_effect",
             },
@@ -464,6 +473,103 @@ mod tests {
             }
             .after_mutation(44),
         ]
+    }
+
+    /// variant を表す名前を返す。
+    ///
+    /// 網羅 match で書く。variant を足すとここがコンパイルエラーになり、すぐ下の
+    /// 一覧と [`all_errors`] へ足す必要があることが分かる。名前だけを返すのは、
+    /// 代表値の作り方が variant ごとに違うためである。
+    fn variant_name(error: &EditError) -> &'static str {
+        match error {
+            EditError::Read(_) => "Read",
+            EditError::RevisionMismatch { .. } => "RevisionMismatch",
+            EditError::DestinationOccupied { .. } => "DestinationOccupied",
+            EditError::LayerLocked { .. } => "LayerLocked",
+            EditError::EffectNotFound { .. } => "EffectNotFound",
+            EditError::ItemWrite(_) => "ItemWrite",
+            EditError::UnsupportedTarget { .. } => "UnsupportedTarget",
+            EditError::Sdk { .. } => "Sdk",
+            EditError::NotIssued { .. } => "NotIssued",
+            EditError::Panicked => "Panicked",
+            EditError::AfterMutation { .. } => "AfterMutation",
+        }
+    }
+
+    #[test]
+    fn all_errors_covers_every_variant() {
+        // 代表値の一覧は手書きであり、足し忘れても他のテストは緑のまま通る。
+        // 落ちたものは応答コードも再試行の案内も許可キーも守られない。
+        const VARIANTS: &[&str] = &[
+            "Read",
+            "RevisionMismatch",
+            "DestinationOccupied",
+            "LayerLocked",
+            "EffectNotFound",
+            "ItemWrite",
+            "UnsupportedTarget",
+            "Sdk",
+            "NotIssued",
+            "Panicked",
+            "AfterMutation",
+        ];
+        let covered: Vec<&str> = all_errors().iter().map(variant_name).collect();
+        for variant in VARIANTS {
+            assert!(
+                covered.contains(variant),
+                "{variant} の代表値が一覧にありません"
+            );
+        }
+    }
+
+    #[test]
+    fn all_errors_covers_every_reason() {
+        // 理由ごとに応答の補助情報が変わるため、variant を 1 つ挙げるだけでは
+        // 足りない。網羅 match を添えて、理由を足したときに気付ける形にする。
+        let unsupported = [
+            UnsupportedReason::EffectNotRegistered,
+            UnsupportedReason::EffectStateImmutable,
+            UnsupportedReason::MediaNotSupported,
+            UnsupportedReason::ChangeNotApplied,
+        ];
+        for reason in unsupported {
+            match reason {
+                UnsupportedReason::EffectNotRegistered
+                | UnsupportedReason::EffectStateImmutable
+                | UnsupportedReason::MediaNotSupported
+                | UnsupportedReason::ChangeNotApplied => {}
+            }
+        }
+        let not_issued = [
+            NotIssuedReason::TargetMissing,
+            NotIssuedReason::ArgumentNotRepresentable,
+        ];
+        for reason in not_issued {
+            match reason {
+                NotIssuedReason::TargetMissing | NotIssuedReason::ArgumentNotRepresentable => {}
+            }
+        }
+
+        let reasons: Vec<String> = all_errors()
+            .iter()
+            .filter_map(|error| {
+                error
+                    .details()
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        for expected in unsupported
+            .iter()
+            .map(|reason| reason.as_str())
+            .chain(not_issued.iter().map(|reason| reason.as_str()))
+        {
+            assert!(
+                reasons.iter().any(|reason| reason == expected),
+                "{expected} の代表値が一覧にありません"
+            );
+        }
     }
 
     #[test]
@@ -495,6 +601,11 @@ mod tests {
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
+                ErrorCode::UnsupportedOperation,
+                // 対象が失われていた。要求の対象が無いのだから見つからない。
+                ErrorCode::NotFound,
+                // 引数を写せなかった。SDK の失敗ではなく要求の誤りである。
+                ErrorCode::InvalidArgument,
                 ErrorCode::SdkError,
                 ErrorCode::InternalError,
                 ErrorCode::SdkError,
