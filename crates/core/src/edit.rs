@@ -391,7 +391,8 @@ pub struct SetSelectionParams {
     /// 現在シーンの一致確認に使う guard。
     ///
     /// カーソルと選択範囲はシーンに属する値であり、対象を指す selector を
-    /// 持たない。guard が無いと revision だけが対象同一性の拠り所になる。
+    /// 持たない。guard が無いと、要求が想定したシーンと現在シーンの一致を
+    /// 確かめる手段が無い。
     pub expected_scene_id: i32,
     /// カーソル位置。省略時は変更しない。
     #[serde(default)]

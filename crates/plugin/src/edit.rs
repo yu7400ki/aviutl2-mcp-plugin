@@ -60,7 +60,7 @@ pub trait EditAdapter: Send + Sync {
 
     /// カーソル・選択範囲・フォーカスを変更する。
     ///
-    /// プロジェクトの内容を変えないため、revision を照合せず進めもしない。
+    /// プロジェクトの内容を変えないため、revision を進めない。
     fn set_selection(&self, params: &SetSelectionParams) -> Result<SelectionState, EditError>;
 }
 

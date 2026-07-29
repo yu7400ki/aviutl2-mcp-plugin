@@ -950,7 +950,7 @@ fn changing_the_selection_ignores_a_stale_revision_but_not_a_stale_epoch() {
             focus: None,
             expected: expected.clone(),
         })
-        .expect("revision の照合で選択状態の変更が拒否されました");
+        .expect("古い revision の前提で選択状態の変更が拒否されました");
 
     let error = harness
         .edit

@@ -103,8 +103,8 @@ fn admits_notification(last_taken: Option<Instant>, now: Instant, min_interval: 
 /// 変更種別ごとの未取り出しフラグと、直近に取り出した時刻だけを持つ。
 /// 記録は無制限に行い、取り出しを [`NOTIFY_MIN_INTERVAL`] で制限する。
 /// 制限中に生じた変更はフラグとして残るため、次の取り出しでまとめて観測できる。
-/// 取り出しが遅れて個々の変更を観測できなくても、revision の照合で変更の
-/// 見落としは検出できる。
+/// 取り出しが遅れて個々の変更を観測できなくても、要求元は応答が返す revision を
+/// 手元の値と比べることで、変更があったこと自体には気付ける。
 struct ChangeNotifier {
     pending: AtomicU32,
     /// 直近に変更を取り出した時刻。`origin` からの経過ナノ秒で保持する。
