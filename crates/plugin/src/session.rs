@@ -620,8 +620,12 @@ fn decode_request(operation: ReadOperation, params: &Value) -> Result<ReadReques
 
 /// 読み取りを実行し、応答へ載せる result を組み立てる。
 ///
-/// 読み取り口は SDK の参照区間を抜けてから所有型の DTO を返す。ページの切り出しと
-/// JSON への変換はいずれもその外側で行い、参照区間の内側には持ち込まない。
+/// 読み取り口は SDK の参照区間を抜けてから所有型の DTO を返す。JSON への変換は
+/// その外側で行い、参照区間の内側には持ち込まない。
+///
+/// ページの切り出しも原則ここで行うが、オブジェクトの列挙だけは読み取り口が
+/// 参照区間の内側で切り出す。1 件の読み取りが重く、応答へ載せない対象まで読むと
+/// 参照区間の保持時間がプロジェクトの規模で決まってしまうためである。
 fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Value, ErrorObject> {
     match request {
         ReadRequest::GetEditInfo => to_result(&adapter.get_edit_info().map_err(read_error)?),
@@ -642,9 +646,8 @@ fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Valu
             to_result(&ListLayersResult { items, page })
         }
         ReadRequest::ListObjects(params) => {
-            // オブジェクトの切り出しは読み取り口が参照区間の内側で行う。1 件の
-            // 読み取りが重く、応答へ載せない対象まで読むと参照区間の保持時間が
-            // プロジェクトの規模で決まってしまう。
+            // 切り出しは読み取り口が済ませている。参照区間の失敗と、ページ要求
+            // そのものの不整合は別の失敗であり、対応するエラーも異なる。
             let page = adapter
                 .list_objects(
                     params.expected_scene_id,
