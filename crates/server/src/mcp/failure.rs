@@ -7,7 +7,7 @@
 use crate::discovery::ResolveInstanceError;
 use crate::mcp::summary::clamp_chars;
 use crate::pipe_client::PipeClientError;
-use aviutl2_mcp_core::{ErrorCode, ErrorObject};
+use aviutl2_mcp_core::{EditOperation, ErrorCode, ErrorObject};
 use serde_json::{Map, Value};
 
 /// `details` から取り除く key の断片（小文字で比較する）。
@@ -81,12 +81,30 @@ pub fn from_resolve_error(error: &ResolveInstanceError) -> ErrorObject {
 
 /// 要求送信の失敗をエラーへ変換する。
 ///
-/// 接続先が返したエラー応答はそのまま用いる。
-pub fn from_pipe_error(error: &PipeClientError) -> ErrorObject {
+/// 接続先が返したエラー応答はそのまま用いる。応答を受け取れなかった失敗は
+/// server 側で組み立て、編集 operation であれば変更の有無が不明であることを
+/// 機械可読な補助情報として添える。
+///
+/// 予算切れや接続断は、接続先が編集区間へ入ったあとにも起こり得る。そのとき
+/// 変更は適用され取り消し履歴にも載っているのに、要求元は `timeout` を受け取る。
+/// 補助情報が無いと、要求元は「変更は入っていない」と読んで再送し、冪等でない
+/// 作成や付与を重複させる。判別できない経路は必ず不明側を名乗る。
+///
+/// read には添えない。読み取りは副作用を持たないため、変更の有無という問いが
+/// そもそも成り立たず、`refetch` の案内も意味を持たない。
+pub fn from_pipe_error(error: &PipeClientError, operation: &str) -> ErrorObject {
     if let PipeClientError::Remote(remote) = error {
         return sanitize(remote.as_ref().clone());
     }
-    from_code(error.error_code(), describe_pipe_error(error))
+    let error = from_code(error.error_code(), describe_pipe_error(error));
+    if EditOperation::from_operation_name(operation).is_none() {
+        return error;
+    }
+    error.with_details(serde_json::json!({
+        "change_applied": "unknown",
+        "mutation_origin": "server",
+        "retry_requires": "refetch",
+    }))
 }
 
 /// エラーへ相関 ID を設定する。
@@ -202,6 +220,7 @@ fn describe_pipe_error(error: &PipeClientError) -> &'static str {
 mod tests {
     use super::*;
     use crate::discovery::ExclusionReason;
+    use aviutl2_mcp_core::{OPERATION_GET_OBJECT, OPERATION_MOVE_OBJECT};
 
     #[test]
     fn invalid_argument_is_not_retryable() {
@@ -239,7 +258,10 @@ mod tests {
     fn remote_pipe_error_is_preserved() {
         let remote = ErrorObject::new(ErrorCode::PreconditionFailed, "scene が変化しました", true)
             .with_details(serde_json::json!({ "current_project_revision": 12 }));
-        let error = from_pipe_error(&PipeClientError::Remote(Box::new(remote)));
+        let error = from_pipe_error(
+            &PipeClientError::Remote(Box::new(remote)),
+            OPERATION_MOVE_OBJECT,
+        );
         assert_eq!(error.code, ErrorCode::PreconditionFailed);
         assert_eq!(
             error.details["current_project_revision"],
@@ -249,15 +271,88 @@ mod tests {
 
     #[test]
     fn timeout_maps_to_timeout_code() {
-        let error = from_pipe_error(&PipeClientError::Timeout);
+        let error = from_pipe_error(&PipeClientError::Timeout, OPERATION_MOVE_OBJECT);
         assert_eq!(error.code, ErrorCode::Timeout);
         assert!(error.retryable);
     }
 
     #[test]
     fn desynced_connection_maps_to_instance_stale() {
-        let error = from_pipe_error(&PipeClientError::Desynced);
+        let error = from_pipe_error(&PipeClientError::Desynced, OPERATION_MOVE_OBJECT);
         assert_eq!(error.code, ErrorCode::InstanceStale);
+    }
+
+    #[test]
+    fn edit_failures_without_a_response_report_an_unknown_change() {
+        // 応答を受け取れていない以上、要求が実行されたかは分からない。分からない
+        // ことを名乗らないと、要求元は変更が無いものとして再送し、冪等でない
+        // 作成や付与を重複させる。
+        for pipe_error in [
+            PipeClientError::Timeout,
+            PipeClientError::Desynced,
+            PipeClientError::ConnectFailed,
+            PipeClientError::Framing,
+            PipeClientError::InvalidResponse,
+        ] {
+            let error = from_pipe_error(&pipe_error, OPERATION_MOVE_OBJECT);
+            assert_eq!(
+                error.details["change_applied"],
+                serde_json::json!("unknown"),
+                "{pipe_error}"
+            );
+            assert_eq!(
+                error.details["mutation_origin"],
+                serde_json::json!("server"),
+                "{pipe_error}"
+            );
+            assert_eq!(
+                error.details["retry_requires"],
+                serde_json::json!("refetch"),
+                "{pipe_error}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_edit_operation_reports_an_unknown_change_on_a_timeout() {
+        // operation を足したときに、変更の有無を添える経路から漏れないようにする。
+        for operation in aviutl2_mcp_core::EditOperation::ALL {
+            let error = from_pipe_error(&PipeClientError::Timeout, operation.as_str());
+            assert_eq!(
+                error.details["change_applied"],
+                serde_json::json!("unknown"),
+                "{}",
+                operation.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn read_failures_do_not_claim_anything_about_a_change() {
+        // 読み取りは副作用を持たない。変更の有無という問いが成り立たないため、
+        // 答えを名乗らない。
+        let error = from_pipe_error(&PipeClientError::Timeout, OPERATION_GET_OBJECT);
+        assert!(error.details.get("change_applied").is_none());
+        assert!(error.details.get("mutation_origin").is_none());
+        assert!(error.details.get("retry_requires").is_none());
+    }
+
+    #[test]
+    fn a_response_from_the_instance_keeps_its_own_change_applied_hint() {
+        // 接続先は実行前の期限超過だけを未適用と名乗れる。判別できた側の答えを
+        // server の推測で塗り替えない。
+        let remote = ErrorObject::new(ErrorCode::Timeout, "期限を超過しました", true).with_details(
+            serde_json::json!({ "change_applied": "no", "mutation_origin": "plugin" }),
+        );
+        let error = from_pipe_error(
+            &PipeClientError::Remote(Box::new(remote)),
+            OPERATION_MOVE_OBJECT,
+        );
+        assert_eq!(error.details["change_applied"], serde_json::json!("no"));
+        assert_eq!(
+            error.details["mutation_origin"],
+            serde_json::json!("plugin")
+        );
     }
 
     #[test]
@@ -275,7 +370,10 @@ mod tests {
                 "retry_after_ms": 100,
             }),
         );
-        let error = from_pipe_error(&PipeClientError::Remote(Box::new(remote)));
+        let error = from_pipe_error(
+            &PipeClientError::Remote(Box::new(remote)),
+            OPERATION_MOVE_OBJECT,
+        );
         let details = error.details.as_object().expect("details は object");
         for key in [
             "auth_secret",
@@ -366,7 +464,10 @@ mod tests {
     #[test]
     fn long_remote_message_is_clamped() {
         let remote = ErrorObject::new(ErrorCode::SdkError, "え".repeat(10_000), false);
-        let error = from_pipe_error(&PipeClientError::Remote(Box::new(remote)));
+        let error = from_pipe_error(
+            &PipeClientError::Remote(Box::new(remote)),
+            OPERATION_MOVE_OBJECT,
+        );
         assert!(error.message.chars().count() <= MAX_MESSAGE_CHARS);
     }
 }

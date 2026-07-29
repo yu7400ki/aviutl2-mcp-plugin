@@ -1229,7 +1229,7 @@ where
     resolved
         .client
         .request_typed(operation, params, deadline)
-        .map_err(|e| failure::from_pipe_error(&e))
+        .map_err(|e| failure::from_pipe_error(&e, operation))
 }
 
 /// tool call ごとの相関 ID を発番する。
@@ -1975,9 +1975,10 @@ mod tests {
                 "current_project_revision": 7,
             }));
         let error = failure::with_correlation_id(
-            failure::from_pipe_error(&crate::pipe_client::PipeClientError::Remote(Box::new(
-                remote,
-            ))),
+            failure::from_pipe_error(
+                &crate::pipe_client::PipeClientError::Remote(Box::new(remote)),
+                aviutl2_mcp_core::OPERATION_MOVE_OBJECT,
+            ),
             "correlation",
         );
         let result = error_result(&error);
@@ -2168,9 +2169,10 @@ mod tests {
             aviutl2_mcp_core::ErrorObject::new(ErrorCode::HostBusy, "起動処理中です", true)
                 .with_details(serde_json::json!({ "retry_after_ms": 500 }));
         let error = failure::with_correlation_id(
-            failure::from_pipe_error(&crate::pipe_client::PipeClientError::Remote(Box::new(
-                remote,
-            ))),
+            failure::from_pipe_error(
+                &crate::pipe_client::PipeClientError::Remote(Box::new(remote)),
+                aviutl2_mcp_core::OPERATION_MOVE_OBJECT,
+            ),
             "correlation",
         );
         let data = to_mcp_error(&error).data.expect("data がある");

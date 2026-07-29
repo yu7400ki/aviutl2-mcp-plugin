@@ -69,6 +69,34 @@ impl Harness {
         }
     }
 
+    /// 応答を遅らせる mock と、実行予算を縮めたサーバーを起こす。
+    ///
+    /// 遅延は生存確認の `ping` には掛からないため、期限を使い切るのは編集の
+    /// 往復だけになる。
+    fn with_delay(
+        responses: OperationResponses,
+        response_delay: Duration,
+        limits: CallLimits,
+    ) -> Self {
+        let registry_dir = temp_registry_dir();
+        let mock = MockPipeServer::start_with_delayed_operations(
+            InstanceId::new_v4(),
+            AuthSecret::generate(),
+            std::process::id(),
+            current_process_created_at(),
+            InstanceState::Ready,
+            responses,
+            response_delay,
+        );
+        mock.write_descriptor(&registry_dir);
+        std::thread::sleep(MOCK_STARTUP_GRACE);
+        Self {
+            server: AviUtl2McpServer::with_limits(registry_dir.clone(), limits),
+            mock,
+            registry_dir,
+        }
+    }
+
     fn instance_id(&self) -> String {
         self.mock.instance_id().to_string()
     }
@@ -785,6 +813,91 @@ async fn timeout_from_the_instance_keeps_the_change_applied_hint() {
     assert_eq!(structured["code"], json!("timeout"));
     assert_eq!(structured["details"]["change_applied"], json!("unknown"));
     assert_eq!(structured["details"]["mutation_origin"], json!("plugin"));
+}
+
+/// 応答しないインスタンスを演じる時間。編集の要求予算を確実に超える長さにする。
+const SLOW_EDIT: Duration = Duration::from_millis(500);
+
+/// 期限超過を起こすために縮めた編集 operation の予算。
+///
+/// [`SLOW_EDIT`] より十分短く、接続と生存確認が終わるだけの余裕はある値を選ぶ。
+const SHORT_EDIT_BUDGET: Duration = Duration::from_millis(200);
+
+#[tokio::test]
+async fn a_timeout_built_by_the_server_reports_an_unknown_change() {
+    // 予算切れは、インスタンスが編集区間へ入ったあとにも起きる。そのとき変更は
+    // 適用され取り消し履歴にも載っているのに、要求元が受け取るのは timeout で
+    // ある。実行前の期限超過だけが未適用を名乗れるので、判別できない側は不明を
+    // 名乗り、読み直しを促す。
+    let harness = Harness::with_delay(
+        responses("create_object", created()),
+        SLOW_EDIT,
+        CallLimits {
+            edit_request: SHORT_EDIT_BUDGET,
+            ..CallLimits::default()
+        },
+    );
+
+    let result = harness
+        .server
+        .aviutl2_create_object(Parameters(CreateObjectInput {
+            instance_id: harness.instance_id(),
+            source: ObjectSourceInput::ObjectAlias {
+                alias: "[vo]".to_string(),
+            },
+            placement: PlacementInput {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame: 0,
+            },
+            expected: expected_input(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true), "{}", text_of(&result));
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("timeout"), "{structured}");
+    assert_eq!(
+        structured["details"]["change_applied"],
+        json!("unknown"),
+        "{structured}"
+    );
+    assert_eq!(
+        structured["details"]["mutation_origin"],
+        json!("server"),
+        "{structured}"
+    );
+    assert_eq!(
+        structured["details"]["retry_requires"],
+        json!("refetch"),
+        "{structured}"
+    );
+}
+
+#[tokio::test]
+async fn a_read_that_outlasts_its_budget_stays_silent_about_changes() {
+    let harness = Harness::with_delay(
+        responses("get_current_scene", json!({ "unexpected": true })),
+        SLOW_EDIT,
+        CallLimits {
+            request: SHORT_EDIT_BUDGET,
+            ..CallLimits::default()
+        },
+    );
+
+    let result = harness
+        .server
+        .aviutl2_get_current_scene(Parameters(aviutl2_mcp_server::mcp::input::InstanceInput {
+            instance_id: harness.instance_id(),
+        }))
+        .await;
+
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("timeout"), "{structured}");
+    assert!(
+        structured["details"].get("change_applied").is_none(),
+        "読み取りが変更の有無を名乗りました: {structured}"
+    );
 }
 
 #[tokio::test]
