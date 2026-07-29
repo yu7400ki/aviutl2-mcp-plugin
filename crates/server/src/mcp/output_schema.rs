@@ -84,43 +84,45 @@ pub fn create_object() -> Value {
 
 /// `aviutl2_move_object` の出力。
 pub fn move_object() -> Value {
-    edit_outcome(object_summary(), null(), array(object_summary()))
+    edit_outcome(object_summary(), null(), nothing_created())
 }
 
 /// `aviutl2_set_object_name` の出力。
 pub fn set_object_name() -> Value {
-    edit_outcome(object_summary(), null(), array(object_summary()))
+    edit_outcome(object_summary(), null(), nothing_created())
 }
 
 /// `aviutl2_delete_object` の出力。
 ///
 /// 対象は消えているため `object` は必ず null になる。
 pub fn delete_object() -> Value {
-    edit_outcome(null(), null(), array(object_summary()))
+    edit_outcome(null(), null(), nothing_created())
 }
 
 /// `aviutl2_set_object_item` の出力。
 ///
 /// `effect` には書き込み後に読み直した値が入る。
 pub fn set_object_item() -> Value {
-    edit_outcome(object_summary(), effect_info(), array(object_summary()))
+    edit_outcome(object_summary(), effect_info(), nothing_created())
 }
 
 /// `aviutl2_add_effect` の出力。
+///
+/// effect の付与はオブジェクトを作らないため `created` は空である。
 pub fn add_effect() -> Value {
-    edit_outcome(object_summary(), effect_info(), array(object_summary()))
+    edit_outcome(object_summary(), effect_info(), nothing_created())
 }
 
 /// `aviutl2_set_effect_state` の出力。
 pub fn set_effect_state() -> Value {
-    edit_outcome(object_summary(), effect_info(), array(object_summary()))
+    edit_outcome(object_summary(), effect_info(), nothing_created())
 }
 
 /// `aviutl2_delete_effect` の出力。
 ///
 /// effect は消えているため `effect` は必ず null になる。
 pub fn delete_effect() -> Value {
-    edit_outcome(object_summary(), null(), array(object_summary()))
+    edit_outcome(object_summary(), null(), nothing_created())
 }
 
 /// `aviutl2_set_selection` の出力。
@@ -149,6 +151,15 @@ fn edit_outcome(target: Value, effect: Value, created: Value) -> Value {
         ("effect", effect),
         ("created", created),
     ])
+}
+
+/// オブジェクトを作らない operation の `created`。
+///
+/// 空配列しか許さない。`object` / `effect` と同じく、operation ごとに何が
+/// 入るかを schema へ残す。緩めると、作成しない operation の応答に対象が
+/// 紛れ込んでも検出できない。
+fn nothing_created() -> Value {
+    json!({ "type": "array", "items": object_summary(), "maxItems": 0 })
 }
 
 /// 選択状態のうち適用できた項目。
@@ -531,6 +542,14 @@ mod tests {
                 Ok(())
             }
             Value::Array(items) => {
+                if let Some(max) = schema.get("maxItems").and_then(Value::as_u64)
+                    && items.len() as u64 > max
+                {
+                    return Err(format!(
+                        "{path}: 要素数が {max} 件を超えています: {}",
+                        items.len()
+                    ));
+                }
                 let Some(item_schema) = schema.get("items") else {
                     return Ok(());
                 };
@@ -980,6 +999,50 @@ mod tests {
             check(&delete_effect(), &to_value(&outcome), "$").is_err(),
             "削除の応答に残った effect を検出できていません"
         );
+    }
+
+    #[test]
+    fn non_creating_schemas_require_an_empty_created_list() {
+        // 作成しない operation の応答に対象が紛れ込んでも、`created` が
+        // 素の配列のままでは検出できない。
+        let mut value = to_value(&EditOutcome::object_changed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            sample_object_summary(),
+        ));
+        value["created"] = json!([to_value(&sample_object_summary())]);
+        for (name, schema) in [
+            ("move_object", move_object()),
+            ("set_object_name", set_object_name()),
+            ("delete_object", delete_object()),
+            ("delete_effect", delete_effect()),
+            ("set_object_item", set_object_item()),
+            ("add_effect", add_effect()),
+            ("set_effect_state", set_effect_state()),
+            ("set_selection", set_selection()),
+        ] {
+            if name == "set_selection" {
+                // 選択状態は `created` を持たない。property 名の照合で落ちる。
+                assert!(check(&schema, &value, "$").is_err(), "{name}");
+                continue;
+            }
+            assert!(
+                check(&schema, &value, "$").is_err(),
+                "{name} が作成された対象を素通ししています"
+            );
+        }
+    }
+
+    #[test]
+    fn creating_schema_accepts_multiple_created_objects() {
+        // 作成だけは複数件を返す。空しか許さない側へ倒すと、複数オブジェクトを
+        // 含む alias の応答が自分の宣言に適合しなくなる。
+        let outcome = EditOutcome::created(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            vec![sample_object_summary(), sample_object_summary()],
+        );
+        assert_conforms(create_object(), &to_value(&outcome));
     }
 
     #[test]
