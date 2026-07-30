@@ -509,6 +509,63 @@ mod tests {
         ]
     }
 
+    /// 種別ごとに、書き込みを公開するかを述べる。
+    ///
+    /// [`EffectItemType`] に対する網羅 `match` であり `_` を使わない。**種別を
+    /// 足すとここが落ち、公開するかを書くまでコンパイルできない。**
+    fn expects_writable(item_type: &EffectItemType) -> bool {
+        match item_type {
+            EffectItemType::Integer
+            | EffectItemType::Number
+            | EffectItemType::Check
+            | EffectItemType::Text
+            | EffectItemType::String
+            | EffectItemType::File
+            | EffectItemType::Folder
+            | EffectItemType::Font
+            | EffectItemType::Color
+            | EffectItemType::Select
+            | EffectItemType::Combo => true,
+            EffectItemType::Scene
+            | EffectItemType::Range
+            | EffectItemType::Mask
+            | EffectItemType::Figure
+            | EffectItemType::Data
+            | EffectItemType::Unknown(_) => false,
+        }
+    }
+
+    /// 既知の種別を列挙する。
+    ///
+    /// 未知を名乗る種別値に当たるまで辿るため、既知の種別が増えても一覧は
+    /// 種別値が連続する限り自動で伸びる。
+    fn known_item_types() -> Vec<EffectItemType> {
+        let mut types = Vec::new();
+        for raw in 1i32.. {
+            let item_type = EffectItemType::from_raw(raw);
+            if item_type == EffectItemType::Unknown(raw) {
+                break;
+            }
+            types.push(item_type);
+        }
+        types
+    }
+
+    /// 書き込みが公開されているかを、変換の応答から判定する。
+    ///
+    /// 公開しない種別だけが [`ItemWriteError::UnsupportedItemType`] を返す。
+    /// 値の形の照合は公開の判定より後に行われるため、形が合わない値を渡しても
+    /// 判定は変わらない。
+    fn is_exposed_for_write(item_type: &EffectItemType) -> bool {
+        let probe = ItemValue::Text {
+            value: "文字列".to_string(),
+        };
+        !matches!(
+            encode_item_value(item_type, &probe),
+            Err(ItemWriteError::UnsupportedItemType { .. })
+        )
+    }
+
     #[test]
     fn write_accepts_the_documented_pairs() {
         for (item_type, value, encoded) in writable_pairs() {
@@ -568,6 +625,22 @@ mod tests {
     }
 
     #[test]
+    fn the_exposed_types_are_the_ones_declared_writable() {
+        // 公開の範囲を、種別を網羅した宣言と突き合わせる。実装だけを直した
+        // 場合も、宣言だけを直した場合も落ちる。
+        for item_type in known_item_types()
+            .into_iter()
+            .chain([EffectItemType::Unknown(99)])
+        {
+            assert_eq!(
+                is_exposed_for_write(&item_type),
+                expects_writable(&item_type),
+                "{item_type} の公開の可否が宣言と異なります"
+            );
+        }
+    }
+
+    #[test]
     fn every_known_item_type_is_listed_as_writable_or_not() {
         // 既知の種別が公開・非公開のどちらの一覧にも現れないまま検査を素通り
         // することを防ぐ。
@@ -576,17 +649,16 @@ mod tests {
             .map(|(item_type, _, _)| item_type)
             .collect();
         let non_writable = non_writable_item_types();
-        for raw in 1..=16 {
-            let item_type = EffectItemType::from_raw(raw);
-            assert_ne!(
-                item_type,
-                EffectItemType::Unknown(raw),
-                "既知の種別ではない"
-            );
+        for item_type in known_item_types() {
             assert_eq!(
                 writable.contains(&item_type),
-                !non_writable.contains(&item_type),
-                "{item_type} がどちらの一覧にも現れないか、両方に現れます"
+                expects_writable(&item_type),
+                "{item_type} が公開する種別の一覧と宣言で食い違います"
+            );
+            assert_eq!(
+                non_writable.contains(&item_type),
+                !expects_writable(&item_type),
+                "{item_type} が公開しない種別の一覧と宣言で食い違います"
             );
         }
     }
