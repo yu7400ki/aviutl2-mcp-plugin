@@ -98,6 +98,8 @@ const MAX_PAGES: usize = 20;
 const STABILITY_READS: usize = 10;
 /// 応答が返した値を次の前提へ渡す連続編集の回数。
 const REVISION_CHAIN_STEPS: usize = 10;
+/// 作業用レイヤーを空へ戻すときに削除を試みる上限。
+const CLEAR_LAYER_LIMIT: usize = 32;
 
 fn main() {
     let mut report = Report::new();
@@ -1300,6 +1302,80 @@ fn env_value(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
+/// 主たる対象の alias を読み取る。作成元として使い回す。
+fn target_alias(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+) -> Result<String, String> {
+    let source = resolve_object(harness, instance, context.scene_id, context.target)?;
+    let detail = require(
+        harness.object(&instance.id, &source.selector),
+        "作成元の alias を取得できません",
+    )?;
+    Ok(detail.alias)
+}
+
+/// alias から指定した位置へオブジェクトを作り、実際の配置を返す。
+fn create_object_at(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    alias: &str,
+    at: Placement,
+) -> Result<Placement, String> {
+    let created = require(
+        harness.create_object(
+            &instance.id,
+            ObjectSourceInput::ObjectAlias {
+                alias: alias.to_string(),
+            },
+            PlacementInput {
+                scene_id: context.scene_id,
+                layer: at.layer as u32,
+                frame: at.frame as u32,
+            },
+            precondition(harness, instance)?,
+        ),
+        "オブジェクトを作成できません",
+    )?;
+    let object = created
+        .object
+        .ok_or_else(|| "作成の応答が対象を返しませんでした".to_string())?;
+    Ok(Placement {
+        layer: object.layer,
+        frame: object.frame_start,
+    })
+}
+
+/// 指定したレイヤーのオブジェクトを全て削除する。
+///
+/// 呼び出し前に空であったレイヤーへ用いる。残っているものは全てその確認が
+/// 作ったものであり、削除すれば元の状態へ戻る。
+fn clear_layer(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    layer: usize,
+) -> Result<(), String> {
+    for _ in 0..CLEAR_LAYER_LIMIT {
+        let objects = require(
+            harness.objects(&instance.id, context.scene_id, Some(layer)),
+            "オブジェクトを列挙できません",
+        )?;
+        let Some(object) = objects.first() else {
+            return Ok(());
+        };
+        require(
+            harness.delete_object(&instance.id, &object.selector),
+            "作成したオブジェクトを削除できません",
+        )?;
+    }
+    Err(format!(
+        "レイヤー {layer} のオブジェクトを {CLEAR_LAYER_LIMIT} 件削除しても空になりません"
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // 準備
 // ---------------------------------------------------------------------------
@@ -1516,6 +1592,15 @@ fn section_fingerprint_premises(
         "レイヤーのロック",
         "ロックしたレイヤー上の対象への移動・削除が precondition_failed（layer_locked）になり、名前変更は成功する",
         Mode::Operator,
+        outcome,
+    );
+
+    let outcome = check_layer_lock_scope(harness, instance, context);
+    report.record(
+        "5.9",
+        "ロックが守る範囲",
+        "ロックされたレイヤー上で名前変更・設定値変更・effect の付与/状態変更/削除・レイヤー状態の変更が成功し、作成・移動・削除が precondition_failed（layer_locked）になる",
+        Mode::Auto,
         outcome,
     );
 
@@ -2049,6 +2134,281 @@ fn check_layer_lock(
         }
     }
     Ok(notes)
+}
+
+/// ロック中の 1 operation の結果。
+struct LockedOperation {
+    /// operation の呼び名。
+    label: &'static str,
+    /// ロック中でも成功すべきか。
+    allowed: bool,
+    /// 実際の結果。
+    outcome: Result<(), ErrorObject>,
+}
+
+impl LockedOperation {
+    /// ロック中でも成功すべき operation。
+    fn allowed(label: &'static str, outcome: Result<(), ErrorObject>) -> Self {
+        Self {
+            label,
+            allowed: true,
+            outcome,
+        }
+    }
+
+    /// ロック中は拒否されるべき operation。
+    fn denied(label: &'static str, outcome: Result<(), ErrorObject>) -> Self {
+        Self {
+            label,
+            allowed: false,
+            outcome,
+        }
+    }
+}
+
+/// ロックが守る範囲を operation ごとに固定する。
+///
+/// ロックが止めるのはオブジェクトの削除と時間軸上の移動であり、内容の変更は
+/// 止めない。1 つだけ直して他が回帰しても気付けるよう、可否を 1 つの表に並べる。
+/// 対象は作業用に作ったオブジェクトとし、確認の後にレイヤーごと元の空の状態へ
+/// 戻す。
+fn check_layer_lock_scope(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+) -> CheckResult {
+    let work = context.free_slots[1];
+    let away = context.free_slots[2];
+    let alias = target_alias(harness, instance, context)?;
+    let inside = create_object_at(harness, instance, context, &alias, work)?;
+    let outside = create_object_at(harness, instance, context, &alias, away)?;
+
+    let epoch = precondition(harness, instance)?;
+    let locked = require(
+        harness.set_layer_state(
+            &instance.id,
+            context.scene_id,
+            work.layer,
+            LayerStateChange::locked(true),
+            epoch,
+        ),
+        "作業レイヤーをロックできません",
+    );
+    let probed = match locked {
+        Ok(_) => probe_locked_operations(harness, instance, context, &alias, inside, outside),
+        Err(reason) => Err(reason),
+    };
+
+    // 後始末: ロックを解いてから、作業に使った 2 つのレイヤーを空へ戻す。
+    // 解除を先に行わないと、作業用オブジェクトの削除がロックに阻まれる。
+    let cleaned = cleanup_lock_scope(harness, instance, context, work.layer, away.layer);
+    match (probed, cleaned) {
+        (Ok(notes), Ok(())) => Ok(notes),
+        (Ok(_), Err(reason)) => Err(format!("後始末に失敗しました: {reason}")),
+        (Err(reason), _) => Err(reason),
+    }
+}
+
+/// ロック中の各 operation を実行し、可否の表を組み立てる。
+fn probe_locked_operations(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    alias: &str,
+    inside: Placement,
+    outside: Placement,
+) -> CheckResult {
+    let mut rows = Vec::new();
+    let mut extras = Vec::new();
+
+    let target = resolve_object(harness, instance, context.scene_id, inside)?;
+    let other = resolve_object(harness, instance, context.scene_id, outside)?;
+    // 宛先は空けておく。埋まっていると、拒否の理由が宛先重複とロックのどちらか
+    // 分からなくなる。
+    let free_inside = target.frame_end + 1;
+    let free_outside = other.frame_end + 1;
+
+    let epoch = precondition(harness, instance)?;
+    let created = harness.create_object(
+        &instance.id,
+        ObjectSourceInput::ObjectAlias {
+            alias: alias.to_string(),
+        },
+        PlacementInput {
+            scene_id: context.scene_id,
+            layer: inside.layer as u32,
+            frame: free_inside as u32,
+        },
+        epoch,
+    );
+    rows.push(LockedOperation::denied(
+        "create_object（宛先がロック）",
+        created.map(|_| ()),
+    ));
+
+    let moved_out = harness.move_object(
+        &instance.id,
+        &target.selector,
+        DestinationInput {
+            layer: outside.layer as u32,
+            frame: free_outside as u32,
+        },
+    );
+    rows.push(LockedOperation::denied(
+        "move_object（対象がロック）",
+        moved_out.map(|_| ()),
+    ));
+
+    let moved_in = harness.move_object(
+        &instance.id,
+        &other.selector,
+        DestinationInput {
+            layer: inside.layer as u32,
+            frame: free_inside as u32,
+        },
+    );
+    rows.push(LockedOperation::denied(
+        "move_object（宛先がロック）",
+        moved_in.map(|_| ()),
+    ));
+
+    let deleted = harness.delete_object(&instance.id, &target.selector);
+    rows.push(LockedOperation::denied(
+        "delete_object",
+        deleted.map(|_| ()),
+    ));
+
+    let target = resolve_object(harness, instance, context.scene_id, inside)?;
+    let renamed = harness.set_object_name(
+        &instance.id,
+        &target.selector,
+        Some("ロック中の名前変更".to_string()),
+    );
+    rows.push(LockedOperation::allowed(
+        "set_object_name",
+        renamed.map(|_| ()),
+    ));
+
+    let target = resolve_object(harness, instance, context.scene_id, inside)?;
+    let detail = require(
+        harness.object(&instance.id, &target.selector),
+        "ロック中の対象の詳細を取得できません",
+    )?;
+    match alterable_item(&detail) {
+        Some((selector, item, next)) => {
+            let changed = harness.set_object_item(&instance.id, &selector, &item.name, &next);
+            rows.push(LockedOperation::allowed(
+                "set_object_item",
+                changed.map(|_| ()),
+            ));
+        }
+        None => {
+            extras.push("set_object_item: 書き換えられる設定項目が対象にありません".to_string())
+        }
+    }
+
+    let target = resolve_object(harness, instance, context.scene_id, inside)?;
+    let added = harness.add_effect(&instance.id, &target.selector, &context.effect_name);
+    let effect = added
+        .as_ref()
+        .ok()
+        .and_then(|outcome| outcome.effect.clone());
+    rows.push(LockedOperation::allowed("add_effect", added.map(|_| ())));
+    match effect {
+        Some(effect) => {
+            let disabled = harness.set_effect_enabled(&instance.id, &effect.selector, false);
+            let after = disabled
+                .as_ref()
+                .ok()
+                .and_then(|outcome| outcome.effect.clone());
+            rows.push(LockedOperation::allowed(
+                "set_effect_enabled",
+                disabled.map(|_| ()),
+            ));
+            match after {
+                Some(after) => {
+                    let removed = harness.delete_effect(&instance.id, &after.selector);
+                    rows.push(LockedOperation::allowed(
+                        "delete_effect",
+                        removed.map(|_| ()),
+                    ));
+                }
+                None => extras
+                    .push("delete_effect: 有効状態の変更が effect を返しませんでした".to_string()),
+            }
+        }
+        None => extras.push(
+            "set_effect_enabled / delete_effect: 付与が effect を返しませんでした".to_string(),
+        ),
+    }
+
+    // ロックを掛けたレイヤー自身の状態変更。同じ値を設定するため状態は変わらない。
+    let epoch = precondition(harness, instance)?;
+    let state = harness.set_layer_state(
+        &instance.id,
+        context.scene_id,
+        inside.layer,
+        LayerStateChange::locked(true),
+        epoch,
+    );
+    rows.push(LockedOperation::allowed(
+        "set_layer_state",
+        state.map(|_| ()),
+    ));
+
+    let mut notes = verify_locked_operations(rows)?;
+    notes.extend(extras);
+    Ok(notes)
+}
+
+/// 表の全行が期待どおりであることを確かめる。
+fn verify_locked_operations(rows: Vec<LockedOperation>) -> CheckResult {
+    let mut notes = Vec::new();
+    for row in rows {
+        let label = row.label;
+        if row.allowed {
+            match row.outcome {
+                Ok(()) => notes.push(format!("{label}: ロック中でも成功した")),
+                Err(error) => {
+                    return Err(format!(
+                        "{label} がロック中に拒否されました: {}",
+                        describe_error(&error)
+                    ));
+                }
+            }
+            continue;
+        }
+        match expect_layer_locked(row.outcome) {
+            Ok(observed) => notes.push(format!("{label}: {}", observed.join(" "))),
+            Err(reason) => {
+                return Err(format!("{label} がロックで拒否されませんでした: {reason}"));
+            }
+        }
+    }
+    Ok(notes)
+}
+
+/// ロックを解除し、作業に使った 2 つのレイヤーを空へ戻す。
+fn cleanup_lock_scope(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    locked_layer: usize,
+    other_layer: usize,
+) -> Result<(), String> {
+    let epoch = precondition(harness, instance)?;
+    require(
+        harness.set_layer_state(
+            &instance.id,
+            context.scene_id,
+            locked_layer,
+            LayerStateChange::locked(false),
+            epoch,
+        ),
+        "作業レイヤーのロックを解除できません",
+    )?;
+    clear_layer(harness, instance, context, locked_layer)?;
+    clear_layer(harness, instance, context, other_layer)
 }
 
 /// ロックによる行き止まりが MCP だけで解けることを確かめる。
@@ -3089,34 +3449,8 @@ fn create_scratch_object(
     instance: &Instance,
     context: &Context,
 ) -> Result<Placement, String> {
-    let source = resolve_object(harness, instance, context.scene_id, context.target)?;
-    let detail = require(
-        harness.object(&instance.id, &source.selector),
-        "作成元の alias を取得できません",
-    )?;
-    let slot = context.free_slots[1];
-    let created = require(
-        harness.create_object(
-            &instance.id,
-            ObjectSourceInput::ObjectAlias {
-                alias: detail.alias.clone(),
-            },
-            PlacementInput {
-                scene_id: context.scene_id,
-                layer: slot.layer as u32,
-                frame: slot.frame as u32,
-            },
-            precondition(harness, instance)?,
-        ),
-        "確認用オブジェクトを作成できません",
-    )?;
-    let object = created
-        .object
-        .ok_or_else(|| "作成の応答が対象を返しませんでした".to_string())?;
-    Ok(Placement {
-        layer: object.layer,
-        frame: object.frame_start,
-    })
+    let alias = target_alias(harness, instance, context)?;
+    create_object_at(harness, instance, context, &alias, context.free_slots[1])
 }
 
 /// 公開種別を網羅するため、足りない種別を持つ effect を作業オブジェクトへ足す。
