@@ -183,6 +183,7 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
             lifecycle.clone(),
             read_adapter,
             edit_adapter,
+            render_adapter.clone(),
             stop_signal,
         ) {
             Ok(s) => s,

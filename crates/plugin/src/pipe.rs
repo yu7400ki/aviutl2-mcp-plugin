@@ -7,6 +7,7 @@
 use crate::edit::EditAdapter;
 use crate::lifecycle::Lifecycle;
 use crate::read::ReadAdapter;
+use crate::render::RenderAdapter;
 use crate::security::ProtectedSecurityAttributes;
 use crate::session;
 use crate::win_io::{self, EventHandle, IoError, OverlappedOp, WaitOutcome};
@@ -306,8 +307,8 @@ impl PipeServer {
     /// 指定したライフサイクルに紐づく named pipe server を起動する。
     ///
     /// 戻り値は制御ハンドルであり、accept スレッドとは共有しない。スレッドへ
-    /// 渡すのは停止イベントとライフサイクル・読み取り口・編集口のみで、スレッドから
-    /// 制御ハンドルを触る経路は存在しない。
+    /// 渡すのは停止イベントとライフサイクル・読み取り口・編集口・レンダリングの
+    /// 実行口のみで、スレッドから制御ハンドルを触る経路は存在しない。
     ///
     /// 停止イベントを引数に取るのは、**接続受理ループの外にもこの合図を観測する
     /// 処理があるため**である。観測する側は起動より前に組み立てられるため、
@@ -316,6 +317,7 @@ impl PipeServer {
         lifecycle: Arc<Lifecycle>,
         read_adapter: Arc<dyn ReadAdapter>,
         edit_adapter: Arc<dyn EditAdapter>,
+        render_adapter: Arc<dyn RenderAdapter>,
         stop_signal: Arc<StopSignal>,
     ) -> Result<Self> {
         // 送信は行わない。スレッド終了時に `tx` が drop され、受信側が
@@ -330,7 +332,13 @@ impl PipeServer {
             // その Drop がこのスレッドを join する。ここで同じ write lock を
             // 要求すると確実にデッドロックする。
             let _finished = tx;
-            if let Err(e) = accept_loop(lifecycle, read_adapter, edit_adapter, stop_for_thread) {
+            if let Err(e) = accept_loop(
+                lifecycle,
+                read_adapter,
+                edit_adapter,
+                render_adapter,
+                stop_for_thread,
+            ) {
                 tracing::error!("named pipe server ループが異常終了しました: {e:?}");
             }
         });
@@ -420,6 +428,7 @@ fn accept_loop(
     lifecycle: Arc<Lifecycle>,
     read_adapter: Arc<dyn ReadAdapter>,
     edit_adapter: Arc<dyn EditAdapter>,
+    render_adapter: Arc<dyn RenderAdapter>,
     stop: Arc<StopSignal>,
 ) -> Result<()> {
     let pipe_name = pipe_name_for(&lifecycle.instance_id());
@@ -469,6 +478,7 @@ fn accept_loop(
                     lifecycle.clone(),
                     read_adapter.clone(),
                     edit_adapter.clone(),
+                    render_adapter.clone(),
                 );
             }
             Connection::Stopped => break,
@@ -650,6 +660,7 @@ mod tests {
             lifecycle.clone(),
             read_adapter,
             sdk_edit_adapter(project),
+            stub_render_adapter(),
             new_stop_signal(),
         )
         .unwrap()
@@ -658,6 +669,69 @@ mod tests {
     /// 接続受理ループを止める合図を 1 つ作る。
     fn new_stop_signal() -> Arc<StopSignal> {
         Arc::new(StopSignal::new().unwrap())
+    }
+
+    /// 実在の値と取り違えないよう、レンダリングの応答に現れる値へ目印を付ける。
+    const STUB_RENDER_FRAME: u32 = 42;
+    const STUB_RENDER_WIDTH: u32 = 320;
+    const STUB_RENDER_HEIGHT: u32 = 180;
+    const STUB_HANDOFF_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    /// レンダリングの実行口の代わりに定型の結果を返す実装。
+    ///
+    /// SDK もホストも呼ばない。確かめるのは要求が実行口まで届き、その結果が
+    /// 応答として返る経路である。`delay` を与えると、実行が要求の期限を
+    /// 追い越した状況を作れる。
+    struct StubRenderAdapter {
+        delay: Duration,
+        discarded: Mutex<Vec<String>>,
+    }
+
+    impl StubRenderAdapter {
+        fn new(delay: Duration) -> Self {
+            Self {
+                delay,
+                discarded: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl RenderAdapter for StubRenderAdapter {
+        fn render_frame(
+            &self,
+            params: &aviutl2_mcp_core::RenderFrameParams,
+        ) -> Result<aviutl2_mcp_core::RenderFrameResult, crate::render::RenderError> {
+            std::thread::sleep(self.delay);
+            Ok(aviutl2_mcp_core::RenderFrameResult {
+                project_epoch: STUB_EPOCH.to_string(),
+                project_revision: STUB_REVISION,
+                scene_id: params.expected_scene_id,
+                frame: params.frame,
+                width: STUB_RENDER_WIDTH,
+                height: STUB_RENDER_HEIGHT,
+                media_type: crate::render::ARTIFACT_MEDIA_TYPE.to_string(),
+                byte_length: 4,
+                sha256: format!("sha256:{}", "0".repeat(64)),
+                handoff_token: STUB_HANDOFF_TOKEN.to_string(),
+            })
+        }
+
+        fn discard_artifact(&self, handoff_token: &str) {
+            self.discarded
+                .lock()
+                .unwrap()
+                .push(handoff_token.to_string());
+        }
+    }
+
+    /// 何も遅らせないレンダリングの実行口。
+    fn stub_render_adapter() -> Arc<dyn RenderAdapter> {
+        Arc::new(StubRenderAdapter::new(Duration::ZERO))
+    }
+
+    /// [`StubRenderAdapter`] が受け付けるレンダリング要求の params。
+    fn render_frame_params() -> serde_json::Value {
+        serde_json::json!({ "expected_scene_id": STUB_SCENE_ID, "frame": STUB_RENDER_FRAME })
     }
 
     /// 指定した読み取り口を添えて server を起動する。
@@ -673,6 +747,7 @@ mod tests {
             lifecycle.clone(),
             read_adapter,
             edit_adapter,
+            stub_render_adapter(),
             new_stop_signal(),
         )
         .unwrap()
@@ -1217,6 +1292,161 @@ mod tests {
         cleanup(dir);
     }
 
+    /// レンダリングの結果が要求元まで届くことを確かめる。
+    ///
+    /// 確かめるのは、レンダリングが第 3 の実行口として要求処理へ配線され、
+    /// その結果が成功応答として送り出されることである。
+    #[test]
+    fn render_request_receives_its_result() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let render = Arc::new(StubRenderAdapter::new(Duration::ZERO));
+        let server = start_server_with_all_adapters(
+            &lifecycle,
+            Arc::new(StubReadAdapter),
+            sdk_edit_adapter(Arc::new(ProjectState::new())),
+            render.clone(),
+        );
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+
+        let response = exchange_with_params(
+            &client,
+            id,
+            version,
+            "render_frame",
+            render_frame_params(),
+            None,
+        );
+        match response.result {
+            aviutl2_mcp_core::ResponseResult::Ok { result } => {
+                assert_eq!(result["scene_id"], STUB_SCENE_ID);
+                assert_eq!(result["frame"], STUB_RENDER_FRAME);
+                assert_eq!(result["width"], STUB_RENDER_WIDTH);
+                assert_eq!(result["height"], STUB_RENDER_HEIGHT);
+                // 引き渡し用の識別子は応答に載る。受け取った側が成果物を
+                // 引き取るために要る値であり、そこから先へは出さない。
+                assert_eq!(result["handoff_token"], STUB_HANDOFF_TOKEN);
+            }
+            aviutl2_mcp_core::ResponseResult::Err { error } => {
+                panic!("レンダリングがエラー応答になりました: {error:?}")
+            }
+        }
+
+        // 送信できた成果物は受け取る側が所有する。実行口へ差し戻さない。
+        assert!(
+            render.discarded.lock().unwrap().is_empty(),
+            "送信できた成果物が消されました"
+        );
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    /// 巻き戻しに失敗した一括適用が、不整合の可能性を伴って要求元まで届くことを
+    /// 確かめる。
+    ///
+    /// IPC 要求 → 要求処理の振り分け → 編集口 → SDK のフェイク → 応答を 1 本に
+    /// 繋いだ経路で見る。**戻せなかった事実はどの層でも握り潰してはならない。**
+    #[test]
+    fn a_batch_whose_rollback_failed_reports_consistency_unknown() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let (edit_adapter, read_adapter, params) = rollback_failing_batch();
+        let server = start_server_with_adapters(&lifecycle, read_adapter, edit_adapter);
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+
+        let error = expect_error(
+            exchange_with_params(&client, id, version, "apply_batch", params, None),
+            "巻き戻しに失敗した一括適用",
+        );
+
+        assert_eq!(error.code, aviutl2_mcp_core::ErrorCode::SdkError);
+        assert!(!error.retryable);
+        assert_eq!(
+            error.details["consistency_unknown"],
+            serde_json::json!(true)
+        );
+        assert_eq!(error.details["rolled_back"], serde_json::json!(false));
+        assert_eq!(error.details["rolled_back_count"], serde_json::json!(0));
+        assert_eq!(error.details["failed_index"], serde_json::json!(2));
+        assert_eq!(error.details["mutation_issued"], serde_json::json!(true));
+        assert_eq!(
+            error.details["retry_requires"],
+            serde_json::json!("refetch")
+        );
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    /// 巻き戻しが必ず失敗する一括適用の一式を組む。
+    ///
+    /// ホストが移動先を調整するため、元位置へ戻したつもりの対象が別の場所に
+    /// 居る。読み直しで食い違うため、戻せた件数は 0 になる。
+    ///
+    /// セレクターは失敗を仕込む前の健全な読み取りから取る。要求を組み立てる段で
+    /// 落ちてしまうと、一括適用の判定を試せない。
+    fn rollback_failing_batch() -> (
+        Arc<dyn EditAdapter>,
+        Arc<dyn ReadAdapter>,
+        serde_json::Value,
+    ) {
+        use crate::edit::fake::{FakeEditHost, FakeReadHost, Fault, MOVE_FRAME_SHIFT, SCENE_ID};
+
+        let project = Arc::new(ProjectState::new());
+        let mut host = FakeEditHost::new();
+        host.project = Some(project.clone());
+        let host = Arc::new(host);
+        let read = Arc::new(crate::read::HostReadAdapter::new(
+            FakeReadHost(host.clone()),
+            project.clone(),
+        ));
+
+        let page = read
+            .list_objects(SCENE_ID, None, &aviutl2_mcp_core::PageRequest::default())
+            .expect("列挙に失敗しました")
+            .expect("ページ要求が拒否されました");
+        let selector = |layer: usize, frame: usize| {
+            page.items
+                .iter()
+                .find(|item| item.layer == layer && item.frame_start == frame)
+                .unwrap_or_else(|| panic!("レイヤー {layer} フレーム {frame} の対象がありません"))
+                .selector
+                .clone()
+        };
+        let params = serde_json::json!({
+            "operations": [
+                {
+                    "type": "move_object",
+                    "selector": selector(0, 0),
+                    "destination": { "layer": 1, "frame": 500 },
+                },
+                {
+                    "type": "move_object",
+                    "selector": selector(1, 100),
+                    "destination": { "layer": 1, "frame": 700 },
+                },
+                {
+                    "type": "move_object",
+                    "selector": selector(1, 300),
+                    "destination": { "layer": 1, "frame": 500 + MOVE_FRAME_SHIFT as u32 },
+                },
+            ],
+        });
+
+        host.arm(|knobs| knobs.fault = Some(Fault::AdjustMoveDestination));
+        let edit = Arc::new(crate::edit::HostEditAdapter::new(host, project));
+        (edit, read, params)
+    }
+
     /// 未対応の operation が切断ではなくエラー応答として返ることを確かめる。
     #[test]
     fn unknown_operation_receives_an_error_response() {
@@ -1228,7 +1458,7 @@ mod tests {
         let client = connect_client(&pipe_name_for(&id));
         let version = complete_handshake(&client, id, &secret);
 
-        match exchange_read(&client, id, version, "apply_batch").result {
+        match exchange_read(&client, id, version, "future_operation").result {
             aviutl2_mcp_core::ResponseResult::Err { error } => {
                 assert_eq!(
                     error.code,
@@ -1874,7 +2104,12 @@ mod tests {
             &self,
             _: &aviutl2_mcp_core::ApplyBatchParams,
         ) -> Result<aviutl2_mcp_core::BatchOutcome, crate::edit::EditError> {
-            Err(Self::unavailable())
+            std::thread::sleep(SLOW_WORK);
+            Ok(aviutl2_mcp_core::BatchOutcome {
+                project_epoch: STUB_EPOCH.to_string(),
+                project_revision: STUB_REVISION,
+                results: Vec::new(),
+            })
         }
 
         fn set_selection(
@@ -1900,10 +2135,21 @@ mod tests {
         read_adapter: Arc<dyn ReadAdapter>,
         edit_adapter: Arc<dyn EditAdapter>,
     ) -> PipeServer {
+        start_server_with_all_adapters(lifecycle, read_adapter, edit_adapter, stub_render_adapter())
+    }
+
+    /// 3 つの実行口をすべて指定して server を起動する。
+    fn start_server_with_all_adapters(
+        lifecycle: &Arc<Lifecycle>,
+        read_adapter: Arc<dyn ReadAdapter>,
+        edit_adapter: Arc<dyn EditAdapter>,
+        render_adapter: Arc<dyn RenderAdapter>,
+    ) -> PipeServer {
         PipeServer::start(
             lifecycle.clone(),
             read_adapter,
             edit_adapter,
+            render_adapter,
             new_stop_signal(),
         )
         .unwrap()
@@ -2095,5 +2341,111 @@ mod tests {
         drop(client);
         server.stop(Duration::from_secs(5));
         cleanup(dir);
+    }
+
+    /// 期限を過ぎても一括適用の結果は破棄されない。
+    ///
+    /// 一括適用は 1 要求で運ぶ変更が多く、単一の編集より上限が長い。破棄すると
+    /// そのすべてが要求元からは失敗として観測される。
+    #[test]
+    fn a_batch_that_outlives_its_deadline_still_delivers_its_result() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = start_server_with_adapters(
+            &lifecycle,
+            Arc::new(SlowReadAdapter),
+            Arc::new(SlowEditAdapter),
+        );
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+
+        let deadline = (chrono::Utc::now().timestamp_millis() + SLOW_DEADLINE_MS) as u64;
+        let response = exchange_with_params(
+            &client,
+            id,
+            version,
+            "apply_batch",
+            slow_batch_params(STUB_EPOCH),
+            Some(deadline),
+        );
+        match response.result {
+            aviutl2_mcp_core::ResponseResult::Ok { result } => {
+                assert_eq!(result["project_epoch"], STUB_EPOCH);
+                assert_eq!(result["results"], serde_json::json!([]));
+            }
+            aviutl2_mcp_core::ResponseResult::Err { error } => {
+                panic!("適用済みの一括適用の結果が破棄されました: {error:?}")
+            }
+        }
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    /// 期限を過ぎてもレンダリングの結果は破棄されない。
+    ///
+    /// 破棄すると引き渡し用ファイルが宙に浮く。受け取る側は識別子を得ていない
+    /// ため掃除できない。**読み取りの破棄を確かめる直前のテストと対にしてある。**
+    /// 破棄経路をレンダリングへ再利用すると、どちらか一方が必ず落ちる。
+    #[test]
+    fn a_render_that_outlives_its_deadline_still_delivers_its_result() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = start_server_with_all_adapters(
+            &lifecycle,
+            Arc::new(SlowReadAdapter),
+            Arc::new(SlowEditAdapter),
+            Arc::new(StubRenderAdapter::new(SLOW_WORK)),
+        );
+        let id = lifecycle.instance_id();
+        let secret = *lifecycle.auth_secret().as_bytes();
+
+        let client = connect_client(&pipe_name_for(&id));
+        let version = complete_handshake(&client, id, &secret);
+
+        let deadline = (chrono::Utc::now().timestamp_millis() + SLOW_DEADLINE_MS) as u64;
+        let response = exchange_with_params(
+            &client,
+            id,
+            version,
+            "render_frame",
+            render_frame_params(),
+            Some(deadline),
+        );
+        match response.result {
+            aviutl2_mcp_core::ResponseResult::Ok { result } => {
+                assert_eq!(result["handoff_token"], STUB_HANDOFF_TOKEN);
+            }
+            aviutl2_mcp_core::ResponseResult::Err { error } => {
+                panic!("できあがった成果物の応答が破棄されました: {error:?}")
+            }
+        }
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    /// [`SlowEditAdapter`] へ届く一括適用の params。
+    ///
+    /// 実行口は対象を解決しないため、セレクターは要求内容だけで決まる検証を
+    /// 通れば足りる。
+    fn slow_batch_params(epoch: &str) -> serde_json::Value {
+        serde_json::json!({
+            "operations": [{
+                "type": "move_object",
+                "selector": {
+                    "project_epoch": epoch,
+                    "scene_id": STUB_SCENE_ID,
+                    "layer": 1,
+                    "frame": 100,
+                    "name": null,
+                    "fingerprint": format!("sha256:{}", "0".repeat(64)),
+                },
+                "destination": { "layer": 1, "frame": 300 },
+            }],
+        })
     }
 }

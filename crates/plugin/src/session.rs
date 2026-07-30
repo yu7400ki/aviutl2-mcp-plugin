@@ -13,19 +13,22 @@ use crate::edit::{EditAdapter, EditError};
 use crate::lifecycle::Lifecycle;
 use crate::pipe::PipeStream;
 use crate::read::{ReadAdapter, ReadError};
+use crate::render::{RenderAdapter, RenderError};
 use anyhow::{Context, Result};
 use aviutl2_mcp_core::{
-    AddEffectParams, ClientAuth, ClientHello, CreateObjectParams, DeleteEffectParams,
-    DeleteObjectParams, EditInputError, EditOperation, ErrorCode, ErrorObject,
-    GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GetObjectParams, InstanceId,
-    InstanceState, KnownOperation, ListAvailableEffectsParams, ListAvailableEffectsResult,
-    ListLayersParams, ListLayersResult, ListObjectsParams, ListObjectsResult, MoveObjectParams,
-    Nonce, ObjectFilterError, PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT,
-    PLUGIN_WRITE_TIMEOUT, PageError, PageRequest, PongProject, PongResult, ProtocolVersion,
-    ReadOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult,
-    SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSelectionParams, compute_client_mac, compute_server_mac, deserialize_json, take_page,
-    verify_mac,
+    AddEffectParams, ApplyBatchParams, BatchInputError, ClientAuth, ClientHello,
+    CreateObjectParams, DeleteEffectParams, DeleteObjectParams, EditInputError, EditOperation,
+    ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams,
+    GetObjectParams, InstanceId, InstanceState, KnownOperation, ListAvailableEffectsParams,
+    ListAvailableEffectsResult, ListLayersParams, ListLayersResult, ListObjectsParams,
+    ListObjectsResult, MoveObjectParams, Nonce, ObjectFilterError, PLUGIN_BATCH_TIMEOUT,
+    PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT,
+    PLUGIN_RENDER_ARTIFACT_TIMEOUT, PLUGIN_RENDER_WAIT_TIMEOUT, PLUGIN_WRITE_TIMEOUT, PageError,
+    PageRequest, PongProject, PongResult, ProtocolVersion, ReadOperation, RenderFrameParams,
+    RenderFrameResult, RenderInputError, RenderOperation, RequestBudgetKind, RequestEnvelope,
+    RequestId, ResponseEnvelope, ResponseKind, ResponseResult, SetEffectEnabledParams,
+    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+    compute_client_mac, compute_server_mac, deserialize_json, take_page, verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -91,6 +94,25 @@ const READ_TIMEOUT: Duration = PLUGIN_READ_TIMEOUT;
 /// 無いため、超過しても待つほかない。
 const EDIT_TIMEOUT: Duration = PLUGIN_EDIT_TIMEOUT;
 
+/// 一括適用の実行に許す上限。
+///
+/// 編集と同じ役割を持ち、効くのが編集区間へ入る前の判定に限られることも
+/// 同じである。単一の編集より長いのは費用の主項が違うためで、一括適用の
+/// 事前解決相は「異なるレイヤー数 × レイヤー内オブジェクト数」に比例し、
+/// 変更を 1 つも発行しないうちに単一編集の上限へ届き得る。
+const BATCH_TIMEOUT: Duration = PLUGIN_BATCH_TIMEOUT;
+
+/// レンダリングの実行に許す上限。
+///
+/// 完了通知の待ちと、成果物の符号化・書き出しの取り分を合わせた長さである。
+/// 内訳ごとの上限はレンダリングの実行口が持つため、ここではその合計だけを
+/// 要求の期限と突き合わせる。
+///
+/// 応答の送信はこの期限とは別に区切るため、レンダリングがこの上限を使い
+/// 切っても送信の持ち時間は [`WRITE_TIMEOUT`] のまま残る。
+const RENDER_TIMEOUT: Duration =
+    PLUGIN_RENDER_WAIT_TIMEOUT.saturating_add(PLUGIN_RENDER_ARTIFACT_TIMEOUT);
+
 /// 読み取りを受け付けられない状態で案内する再試行間隔（ミリ秒）。
 ///
 /// 起動処理も終了処理も利用者の操作を待たずに進むため、待ち時間は短く採る。
@@ -98,13 +120,14 @@ const HOST_BUSY_RETRY_AFTER_MS: u64 = 500;
 
 /// 1 接続の処理を panic boundary で包んで実行する。
 ///
-/// 読み取り口は全接続で共有し、SDK 呼び出しとプロジェクト状態の参照は
-/// その内側へ閉じる。
+/// 読み取り口・編集口・レンダリングの実行口は全接続で共有し、SDK 呼び出しと
+/// プロジェクト状態の参照はその内側へ閉じる。
 pub fn handle_connection(
     stream: PipeStream,
     lifecycle: Arc<Lifecycle>,
     read_adapter: Arc<dyn ReadAdapter>,
     edit_adapter: Arc<dyn EditAdapter>,
+    render_adapter: Arc<dyn RenderAdapter>,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if let Err(e) = run_connection(
@@ -112,6 +135,7 @@ pub fn handle_connection(
             &lifecycle,
             read_adapter.as_ref(),
             edit_adapter.as_ref(),
+            render_adapter.as_ref(),
         ) {
             tracing::warn!("接続処理を終了しました: {e:?}");
         }
@@ -127,9 +151,16 @@ fn run_connection(
     lifecycle: &Lifecycle,
     read_adapter: &dyn ReadAdapter,
     edit_adapter: &dyn EditAdapter,
+    render_adapter: &dyn RenderAdapter,
 ) -> Result<()> {
     perform_handshake(stream, lifecycle)?;
-    run_request_loop(stream, lifecycle, read_adapter, edit_adapter)
+    run_request_loop(
+        stream,
+        lifecycle,
+        read_adapter,
+        edit_adapter,
+        render_adapter,
+    )
 }
 
 /// handshake を実行する。
@@ -203,6 +234,7 @@ fn run_request_loop(
     lifecycle: &Lifecycle,
     read_adapter: &dyn ReadAdapter,
     edit_adapter: &dyn EditAdapter,
+    render_adapter: &dyn RenderAdapter,
 ) -> Result<()> {
     loop {
         if lifecycle.state() == InstanceState::Draining {
@@ -298,7 +330,7 @@ fn run_request_loop(
                 let read_deadline = resolve_request_deadline(
                     Instant::now(),
                     Utc::now().timestamp_millis(),
-                    READ_TIMEOUT,
+                    execution_timeout(KnownOperation::Read(operation)),
                     request.deadline_unix_ms,
                 );
                 let outcome = execute_read(
@@ -345,7 +377,7 @@ fn run_request_loop(
                 let edit_deadline = resolve_request_deadline(
                     Instant::now(),
                     Utc::now().timestamp_millis(),
-                    EDIT_TIMEOUT,
+                    execution_timeout(KnownOperation::Edit(operation)),
                     request.deadline_unix_ms,
                 );
                 let outcome = execute_edit(
@@ -366,10 +398,50 @@ fn run_request_loop(
                 }
 
                 // 期限を過ぎていても結果は捨てず、送信の持ち時間を丸ごと充てる。
-                let deadline = edit_send_deadline(Instant::now());
+                let deadline = retained_send_deadline(Instant::now());
                 let response =
                     response_envelope(request.request_id, lifecycle.instance_id(), outcome);
                 send_response(stream, &response, deadline)?;
+            }
+            Operation::Render(operation) => {
+                let render_deadline = resolve_request_deadline(
+                    Instant::now(),
+                    Utc::now().timestamp_millis(),
+                    execution_timeout(KnownOperation::Render(operation)),
+                    request.deadline_unix_ms,
+                );
+                let outcome = execute_render(
+                    render_adapter,
+                    &lifecycle.state(),
+                    operation,
+                    &request.params,
+                    render_deadline,
+                );
+
+                if let Err(error) = &outcome {
+                    tracing::debug!(
+                        request_id = ?request.request_id,
+                        operation = %request.operation,
+                        code = %error.code,
+                        "レンダリング要求を失敗として返します"
+                    );
+                }
+
+                // 引き渡し用ファイルは応答を送れた場合にだけ受け取る側の所有へ
+                // 移る。送る前に識別子を控え、送信に失敗したら実行口へ戻す。
+                let handoff_token = outcome
+                    .as_ref()
+                    .ok()
+                    .map(|result| result.handoff_token.clone());
+                let outcome = outcome.and_then(|result| to_result(&result));
+
+                // 期限を過ぎていても結果は捨てず、送信の持ち時間を丸ごと充てる。
+                let deadline = retained_send_deadline(Instant::now());
+                let response =
+                    response_envelope(request.request_id, lifecycle.instance_id(), outcome);
+                deliver_render_response(render_adapter, handoff_token.as_deref(), || {
+                    send_response(stream, &response, deadline)
+                })?;
             }
         }
     }
@@ -406,16 +478,18 @@ enum Operation {
     /// 読み取り。受け付けられるライフサイクル状態でのみ実行する。
     Read(ReadOperation),
     /// 編集。受け付けられるライフサイクル状態でのみ実行する。
+    ///
+    /// 一括適用もここに含まれる。受付判定・失敗の写像・実行口が単一の編集と
+    /// 同じであり、別の族を立てる理由が無い。
     Edit(EditOperation),
+    /// レンダリング。受け付けられるライフサイクル状態でのみ実行する。
+    Render(RenderOperation),
 }
 
 /// operation 名を処理経路へ対応付ける。
 ///
 /// 名前の一覧は [`KnownOperation`] から導く。族ごとの照合をここへ書き写すと、
 /// operation を増やしたときに片方だけへ足し忘れても検出できない。
-///
-/// **分類できても実行口があるとは限らない。** 描画は本接続処理が呼び出す
-/// adapter を持たないため、名前としては分類できても未対応として返す。
 fn classify_operation(name: &str) -> Result<Operation, ErrorObject> {
     if name == "ping" {
         return Ok(Operation::Ping);
@@ -423,7 +497,25 @@ fn classify_operation(name: &str) -> Result<Operation, ErrorObject> {
     match KnownOperation::from_operation_name(name) {
         Some(KnownOperation::Read(operation)) => Ok(Operation::Read(operation)),
         Some(KnownOperation::Edit(operation)) => Ok(Operation::Edit(operation)),
-        Some(KnownOperation::Render(_)) | None => Err(unsupported_operation()),
+        Some(KnownOperation::Render(operation)) => Ok(Operation::Render(operation)),
+        None => Err(unsupported_operation()),
+    }
+}
+
+/// operation の実行に許す上限を、要求予算の区分から引く。
+///
+/// 区分の判定そのものは [`KnownOperation::budget_kind`] に委ねる。ここで
+/// operation 名や族から直接引くと、要求元が使う予算の区分と plugin 側の上限が
+/// 別々の一覧で決まり、片方だけを変えても気付けない。
+///
+/// **`_` を使わない網羅 `match` で書く。** 区分を足すと腕が足りずコンパイルが
+/// 落ちるため、上限を決めないまま新しい区分が既定へ落ちることがない。
+fn execution_timeout(operation: KnownOperation) -> Duration {
+    match operation.budget_kind() {
+        RequestBudgetKind::Read => READ_TIMEOUT,
+        RequestBudgetKind::Edit => EDIT_TIMEOUT,
+        RequestBudgetKind::Batch => BATCH_TIMEOUT,
+        RequestBudgetKind::Render => RENDER_TIMEOUT,
     }
 }
 
@@ -478,6 +570,34 @@ fn execute_edit(
         return Err(edit_timeout_before_execution());
     }
     dispatch_edit(adapter, request)
+}
+
+/// params の復号・受付判定・期限判定を通してからレンダリングを実行する。
+///
+/// 手順は読み取り・編集と同じで、params の復号を最初に行う。要求内容の誤りは
+/// ライフサイクル状態にも期限にも依存せず、状態由来の再試行可能なエラーで返すと
+/// 要求元に解消しない再試行を促してしまう。
+///
+/// 期限を判定できるのはホストへタスクを投入する前だけである。投入したタスクを
+/// 取り消す手段は無く、投入後は完了の待ちを打ち切れても、ホストが抱えるタスク
+/// そのものは残る。
+///
+/// 変更の有無を伝えるキーを添えないのは、レンダリングがプロジェクトを一切
+/// 変更しないためである。添えると、要求元は編集と同じ警戒を要すると誤解する。
+fn execute_render(
+    adapter: &dyn RenderAdapter,
+    state: &InstanceState,
+    operation: RenderOperation,
+    params: &Value,
+    deadline: RequestDeadline,
+) -> Result<RenderFrameResult, ErrorObject> {
+    let request = decode_render_request(operation, params)?;
+    admit_request(state)?;
+    if deadline == RequestDeadline::Exceeded {
+        // 未投入のまま中止する。ホストは何も抱えていない。
+        return Err(timeout_before_execution());
+    }
+    dispatch_render(adapter, request)
 }
 
 /// 実行前に期限を超過していた要求へ返すエラー。
@@ -595,28 +715,59 @@ fn resolve_read_response(
     }
 }
 
-/// 編集を終えた時点で、応答送信の期限を決める。
+/// 結果を破棄しない operation の、応答送信の期限を決める。
 ///
 /// **編集の結果は破棄しない。** 編集が完了していればプロジェクトは変わり、
 /// 取り消し単位にも登録されている。結果を破棄すると、適用された変更が要求元
 /// からは失敗または無応答として観測される。要求元は自然に再送し、作成は冪等で
 /// ないため重複し得る。破棄で節約できるのは高々送信上限の 1 秒であり、適用済み
-/// の変更を隠すことと釣り合わない。
+/// の変更を隠すことと釣り合わない。一括適用は 1 要求で運ぶ変更が多いぶん、
+/// この規則の重みが増す。
 ///
-/// 読み取りが結果を破棄してよいのは「読み取りは編集を伴わないため捨てても
-/// 中途半端な状態が残らない」からであり、編集ではその前提が成り立たない。
-/// 読み取りの破棄経路を編集へ再利用しない。
+/// **レンダリングの結果も破棄しない。** レンダリングは副作用を持たないため
+/// 捨ててもプロジェクトは壊れないが、捨てると引き渡し用ファイルが宙に浮く。
+/// 受け取る側は識別子を得ていないため掃除できず、期限切れの掃除まで残る。
+/// 送信できれば受け取る側が即座に所有して片付けられる。破棄で節約できるのは
+/// 送信上限だけで、レンダリング・符号化・書き出しの費用は既に払い終えている。
+///
+/// 読み取りが結果を破棄してよいのは「捨てても中途半端な状態も宙に浮くものも
+/// 残らない」からであり、編集でもレンダリングでもその前提が成り立たない。
+/// **読み取りの破棄経路をこの 2 つへ再利用しない。**
 ///
 /// **送信には常に送信上限をそのまま充てる。要求の期限で縮めない。** 予算配分は
 /// 送信の持ち時間を実行とは別枠で確保しており、要求の期限で縮めると、実行が
-/// 期限際まで掛かった編集の送信に数ミリ秒しか残らない。送信に失敗すれば適用
+/// 期限際まで掛かった要求の送信に数ミリ秒しか残らない。送信に失敗すれば適用
 /// 済みの変更が要求元からは無応答に見え、結果を破棄しないことで防ごうとした
 /// 状況がそのまま起きる。
 ///
 /// **これは読み取りと異なる規則である。** 読み取りは要求の残り時間と送信上限の
 /// 短い方を採る。捨ててよい結果と、捨ててはいけない結果の差がここに出る。
-fn edit_send_deadline(now: Instant) -> Instant {
+fn retained_send_deadline(now: Instant) -> Instant {
     now + WRITE_TIMEOUT
+}
+
+/// レンダリングの応答を送り、送れなかった成果物を実行口へ戻す。
+///
+/// 引き渡し用ファイルの識別子は応答にだけ載る。送信できなければ受け取る側は
+/// 識別子を持たず、ファイルを引き取ることも掃除することもできないため、
+/// ここで実行口へ差し戻す。**送信できた場合は消さない。** 受け取る側が所有し、
+/// 引き取りを終えたときに片付ける。
+///
+/// **編集にはこれに対応する後始末が無い。** 変更は既に取り消し単位へ登録されて
+/// おり、応答を送れなくても実行口へ差し戻せるものが存在しない。
+fn deliver_render_response(
+    adapter: &dyn RenderAdapter,
+    handoff_token: Option<&str>,
+    send: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let sent = send();
+    if sent.is_err()
+        && let Some(handoff_token) = handoff_token
+    {
+        tracing::warn!("応答を送れなかったため引き渡し用ファイルを削除します");
+        adapter.discard_artifact(handoff_token);
+    }
+    sent
 }
 
 /// ライフサイクル状態が読み取り・編集を受け付けられるかを判定する。
@@ -796,6 +947,7 @@ enum EditRequest {
     SetEffectEnabled(Box<SetEffectEnabledParams>),
     SetLayerState(Box<SetLayerStateParams>),
     SetSelection(Box<SetSelectionParams>),
+    ApplyBatch(Box<ApplyBatchParams>),
 }
 
 /// operation 別の params を復号し、要求内容だけで決まる検証を済ませる。
@@ -804,9 +956,9 @@ enum EditRequest {
 /// 決まり、ライフサイクル状態にも期限にも編集口の応答にも依存しない。検証の
 /// 実体は core と共有し、server と plugin が同じ判定を行う。
 ///
-/// **一括適用は編集 operation として分類されるが、この層がまだ要求を編集口へ
-/// 渡していない。** 復号の段で未対応として返し、受け付けられないことをこの層で
-/// 明示する。
+/// 一括適用は各 sub-operation について単独編集と同じ検証を通し、加えて件数・
+/// シーンの揃い・同じ状態を書き換える重複を見る。いずれも要求内容だけで決まる
+/// ため、他の編集と同じくこの段で判定する。
 fn decode_edit_request(
     operation: EditOperation,
     params: &Value,
@@ -840,7 +992,36 @@ fn decode_edit_request(
             decoded!(SetLayerStateParams, EditRequest::SetLayerState)
         }
         EditOperation::SetSelection => decoded!(SetSelectionParams, EditRequest::SetSelection),
-        EditOperation::ApplyBatch => return Err(unsupported_operation()),
+        EditOperation::ApplyBatch => {
+            let params: ApplyBatchParams = decode_params(params)?;
+            params.validate().map_err(batch_input_error)?;
+            EditRequest::ApplyBatch(Box::new(params))
+        }
+    })
+}
+
+/// 復号と検証を終えたレンダリング要求。
+///
+/// この型を作れた時点で、要求内容だけで判定できる誤りは残っていない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderRequest {
+    RenderFrame(RenderFrameParams),
+}
+
+/// operation 別の params を復号し、要求内容だけで決まる検証を済ませる。
+///
+/// ここで見るのはフレーム番号が受け渡せる範囲に収まることだけである。シーンの
+/// 長さとの比較は編集情報を要するため、実行口が判定する。
+fn decode_render_request(
+    operation: RenderOperation,
+    params: &Value,
+) -> Result<RenderRequest, ErrorObject> {
+    Ok(match operation {
+        RenderOperation::RenderFrame => {
+            let params: RenderFrameParams = decode_params(params)?;
+            params.validate().map_err(render_input_error)?;
+            RenderRequest::RenderFrame(params)
+        }
     })
 }
 
@@ -880,6 +1061,22 @@ fn dispatch_edit(adapter: &dyn EditAdapter, request: EditRequest) -> Result<Valu
         EditRequest::SetSelection(params) => {
             to_result(&adapter.set_selection(&params).map_err(edit_error)?)
         }
+        EditRequest::ApplyBatch(params) => {
+            to_result(&adapter.apply_batch(&params).map_err(edit_error)?)
+        }
+    }
+}
+
+/// レンダリングを実行し、応答へ載せる result を組み立てる。
+///
+/// JSON への変換はここでは行わない。応答を送れなかったときに引き渡し用ファイル
+/// を消せるよう、識別子を持つ所有型のまま呼び出し元へ返す。
+fn dispatch_render(
+    adapter: &dyn RenderAdapter,
+    request: RenderRequest,
+) -> Result<RenderFrameResult, ErrorObject> {
+    match request {
+        RenderRequest::RenderFrame(params) => adapter.render_frame(&params).map_err(render_error),
     }
 }
 
@@ -924,11 +1121,30 @@ fn edit_error(error: EditError) -> ErrorObject {
         .with_details(error.details())
 }
 
+/// レンダリングの失敗を応答用のエラーへ変換する。
+fn render_error(error: RenderError) -> ErrorObject {
+    ErrorObject::new(error.error_code(), error.to_string(), error.retryable())
+        .with_details(error.details())
+}
+
 /// 要求内容だけで決まる検証の失敗を応答用のエラーへ変換する。
 ///
 /// 失敗の説明には対象フィールド名と規則の上限だけが現れる。設定値・alias・
 /// パスそのものは含まない。
 fn edit_input_error(error: EditInputError) -> ErrorObject {
+    error_object(error.error_code(), error.to_string())
+}
+
+/// 一括適用の要求内容だけで決まる検証の失敗を応答用のエラーへ変換する。
+///
+/// 失敗の説明には、落ちた sub-operation の位置と、単独編集と同じ規則の破れが
+/// 現れる。設定値・alias・パスそのものは含まない。
+fn batch_input_error(error: BatchInputError) -> ErrorObject {
+    error_object(error.error_code(), error.to_string())
+}
+
+/// レンダリングの要求内容だけで決まる検証の失敗を応答用のエラーへ変換する。
+fn render_input_error(error: RenderInputError) -> ErrorObject {
     error_object(error.error_code(), error.to_string())
 }
 
@@ -2256,7 +2472,8 @@ mod edit_tests {
     use super::*;
     use aviutl2_mcp_core::{
         EditOutcome, LayerInfo, LayerStateOutcome, ObjectFingerprintInput, ObjectSummary,
-        SelectionField, SelectionState, SetLayerStateParams,
+        SERVER_BATCH_REQUEST_BUDGET, SelectionField, SelectionState, SetLayerStateParams,
+        TRANSPORT_HEADROOM,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -2439,9 +2656,18 @@ mod edit_tests {
                 "expected_project_epoch": EPOCH,
             }),
             EditOperation::SetSelection => selection_params(),
-            // 一括適用は復号の段で未対応として返る。要求を渡せるようになった
-            // ときに現在の形をここへ書く。
-            EditOperation::ApplyBatch => return None,
+            EditOperation::ApplyBatch => batch_params(),
+        })
+    }
+
+    /// 移動 1 件だけの一括適用 params。
+    fn batch_params() -> Value {
+        json!({
+            "operations": [{
+                "type": "move_object",
+                "selector": fake_summary().selector,
+                "destination": { "layer": 1, "frame": 300 },
+            }],
         })
     }
 
@@ -2459,6 +2685,7 @@ mod edit_tests {
             EditRequest::SetEffectEnabled(params) => serde_json::to_value(params),
             EditRequest::SetLayerState(params) => serde_json::to_value(params),
             EditRequest::SetSelection(params) => serde_json::to_value(params),
+            EditRequest::ApplyBatch(params) => serde_json::to_value(params),
         };
         Ok(encoded.expect("params は直列化できる"))
     }
@@ -2621,35 +2848,44 @@ mod edit_tests {
     }
 
     #[test]
-    fn operations_without_an_adapter_are_answered_as_unsupported() {
-        // 分類できることと実行できることは別である。実行口を持たない
-        // operation は、状態にも期限にも依らず未対応として返す。
-        for operation in aviutl2_mcp_core::RenderOperation::ALL {
-            let error = classify_operation(operation.as_str()).expect_err(&format!(
-                "{} が実行経路へ振り分けられました",
+    fn only_names_outside_every_family_are_unsupported() {
+        // 分類できる名前には必ず実行口がある。未対応として返るのは、どの族にも
+        // 属さない名前だけである。
+        for operation in EditOperation::ALL
+            .map(KnownOperation::Edit)
+            .into_iter()
+            .chain(ReadOperation::ALL.map(KnownOperation::Read))
+            .chain(RenderOperation::ALL.map(KnownOperation::Render))
+        {
+            assert!(
+                classify_operation(operation.as_str()).is_ok(),
+                "{} が未対応として返りました",
                 operation.as_str()
-            ));
-            assert_eq!(error.code, ErrorCode::UnsupportedOperation);
+            );
         }
 
-        let error = decode_edit_request(EditOperation::ApplyBatch, &json!({ "operations": [] }))
-            .expect_err("一括適用が復号されました");
-        assert_eq!(error.code, ErrorCode::UnsupportedOperation);
+        for name in ["apply_batches", "render_frames", "future_operation"] {
+            let error = classify_operation(name).expect_err(&format!("{name} が受理されました"));
+            assert_eq!(error.code, ErrorCode::UnsupportedOperation, "{name}");
+            assert!(!error.retryable, "{name}");
+        }
     }
 
     #[test]
-    fn the_request_table_leaves_out_only_the_operations_without_an_adapter() {
+    fn the_request_table_leaves_out_no_operation() {
         // 網羅 match は operation の追加を止めるが、既存の枝を除外へ書き換えても
-        // 止まらない。表から外れているものを固定することで、除外を増やしても
-        // 減らしてもここが落ちる。実行できるようになった operation を表へ
-        // 書き忘れた場合は、上の未対応の主張が先に落ちる。
+        // 止まらない。表から外れているものが 1 つも無いことを固定することで、
+        // 除外を増やせばここが落ちる。
         let excluded: Vec<&str> = EditOperation::ALL
             .into_iter()
             .filter(|operation| current_request(*operation).is_none())
             .map(EditOperation::as_str)
             .collect();
 
-        assert_eq!(excluded, vec![EditOperation::ApplyBatch.as_str()]);
+        assert!(
+            excluded.is_empty(),
+            "要求の形の表から外れています: {excluded:?}"
+        );
     }
 
     #[test]
@@ -2804,7 +3040,7 @@ mod edit_tests {
         // 期限際まで掛かった編集の送信に数ミリ秒しか残らないと、適用済みの
         // 変更が要求元からは無応答に見える。
         let now = Instant::now();
-        assert_eq!(edit_send_deadline(now), now + WRITE_TIMEOUT);
+        assert_eq!(retained_send_deadline(now), now + WRITE_TIMEOUT);
 
         // 読み取りは要求の残り時間で縮める。捨ててよい結果と捨ててはいけない
         // 結果の差がここに出る。
@@ -2816,6 +3052,657 @@ mod edit_tests {
                 Some((NOW_UNIX_MS + 200) as u64)
             ),
             RequestDeadline::Within(now + Duration::from_millis(200))
+        );
+    }
+
+    #[test]
+    fn a_batch_is_given_its_own_execution_budget() {
+        // 一括適用の費用は変更の件数だけでは決まらない。単一の編集と同じ上限に
+        // 落ちると、事前解決相だけで尽きる要求が実行前の期限超過になる。
+        assert_eq!(
+            execution_timeout(KnownOperation::Edit(EditOperation::ApplyBatch)),
+            BATCH_TIMEOUT
+        );
+        assert_ne!(BATCH_TIMEOUT, EDIT_TIMEOUT);
+
+        // 一括適用以外の編集は編集の上限のままである。
+        for operation in EditOperation::ALL {
+            if operation == EditOperation::ApplyBatch {
+                continue;
+            }
+            assert_eq!(
+                execution_timeout(KnownOperation::Edit(operation)),
+                EDIT_TIMEOUT,
+                "{} が編集の上限から外れました",
+                operation.as_str()
+            );
+        }
+
+        // 一括適用が実行の上限まで走っても、応答送信の持ち時間が一括適用の
+        // 要求フェーズ予算の内側に残る。一括適用は結果を破棄しないため、
+        // この余地が無いと応答を送り切れないまま接続が切れ得る。
+        assert!(
+            BATCH_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_BATCH_REQUEST_BUDGET,
+            "一括適用 {BATCH_TIMEOUT:?} と送信 {WRITE_TIMEOUT:?} が要求フェーズ予算 {SERVER_BATCH_REQUEST_BUDGET:?} に収まらない"
+        );
+    }
+
+    #[test]
+    fn an_expired_deadline_stops_the_batch_before_it_starts() {
+        let adapter = FakeEditAdapter::new();
+        let error = execute_edit(
+            &adapter,
+            &InstanceState::Ready,
+            EditOperation::ApplyBatch,
+            &batch_params(),
+            RequestDeadline::Exceeded,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert!(error.retryable);
+        // 実行前に返す timeout だけが「変更は行われていない」と名乗れる。
+        assert_eq!(error.details["change_applied"], json!("no"));
+        assert_eq!(error.details["retry_requires"], json!("resend"));
+        assert!(adapter.calls().is_empty(), "SDK を呼ばずに中止していません");
+    }
+
+    #[test]
+    fn a_batch_within_the_deadline_reaches_the_adapter() {
+        let adapter = FakeEditAdapter::new();
+        let result = execute_edit(
+            &adapter,
+            &InstanceState::Ready,
+            EditOperation::ApplyBatch,
+            &batch_params(),
+            RequestDeadline::Within(Instant::now() + Duration::from_secs(1)),
+        )
+        .expect("期限内の一括適用が拒否されました");
+
+        assert_eq!(adapter.calls(), vec!["apply_batch"]);
+        assert_eq!(result["project_epoch"], json!(EPOCH));
+        assert_eq!(result["results"], json!([]));
+    }
+
+    #[test]
+    fn a_batch_result_is_never_discarded_after_its_deadline() {
+        // 一括適用が期限を使い切っても結果は捨てない。捨てると、1 要求ぶんの
+        // 変更がまとめて要求元からは無応答として観測される。
+        let now = Instant::now();
+        assert_eq!(retained_send_deadline(now), now + WRITE_TIMEOUT);
+
+        // 読み取りは同じ状況で結果を捨てる。捨ててよい結果と、捨ててはいけない
+        // 結果の差がここに出る。
+        assert_eq!(
+            decide_send(
+                now,
+                NOW_UNIX_MS,
+                RequestDeadline::Within(now - Duration::from_millis(1)),
+                None,
+            ),
+            SendDecision::Discard
+        );
+    }
+
+    #[test]
+    fn invalid_batch_params_are_rejected_before_the_lifecycle_state_is_checked() {
+        // 起動処理中でも、要求内容の誤りは要求の誤りとして返す。
+        let adapter = FakeEditAdapter::new();
+        let error = execute_edit(
+            &adapter,
+            &InstanceState::Starting,
+            EditOperation::ApplyBatch,
+            &json!({ "operations": [] }),
+            RequestDeadline::Within(Instant::now() + Duration::from_secs(1)),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(adapter.calls().is_empty());
+    }
+
+    #[test]
+    fn batch_wide_rules_are_checked_before_the_batch_reaches_the_adapter() {
+        // 件数・シーンの揃い・同じ状態を書き換える重複は、一括適用で初めて
+        // 生じる要求内容の誤りである。実行口へ渡す前にここで落とす。
+        let mut other_scene = fake_summary().selector;
+        other_scene.scene_id = SCENE_ID + 1;
+        let duplicate = json!({
+            "type": "move_object",
+            "selector": fake_summary().selector,
+            "destination": { "layer": 1, "frame": 300 },
+        });
+        let cases = [
+            ("件数 0", json!({ "operations": [] })),
+            (
+                "シーンの不揃い",
+                json!({
+                    "operations": [
+                        duplicate,
+                        {
+                            "type": "move_object",
+                            "selector": other_scene,
+                            "destination": { "layer": 1, "frame": 400 },
+                        },
+                    ],
+                }),
+            ),
+            (
+                "同じ状態の重複",
+                json!({ "operations": [duplicate, duplicate] }),
+            ),
+        ];
+
+        for (label, params) in cases {
+            let adapter = FakeEditAdapter::new();
+            let error = execute_edit(
+                &adapter,
+                &InstanceState::Ready,
+                EditOperation::ApplyBatch,
+                &params,
+                RequestDeadline::Within(Instant::now() + Duration::from_secs(1)),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{label}");
+            assert!(adapter.calls().is_empty(), "{label} が実行口へ届きました");
+        }
+    }
+
+    /// 期限判定の基準時刻。読み取り側のテストと同じ値を用いる。
+    const NOW_UNIX_MS: i64 = 1_785_144_000_000;
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use aviutl2_mcp_core::{
+        RenderFrameResult, SERVER_ARTIFACT_INGEST_BUDGET, SERVER_RENDER_REQUEST_BUDGET,
+        TRANSPORT_HEADROOM,
+    };
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    const EPOCH: &str = "9d0a5f4e-2f47-4a13-9a5e-1e2f3a4b5c6d";
+    const SCENE_ID: i32 = 0;
+    const FRAME: u32 = 42;
+
+    /// 引き渡し用ファイルの識別子。小文字 16 進 32 文字。
+    const HANDOFF_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    /// 成果物の置き場。応答にも補助情報にも現れてはならない値の代表。
+    const ARTIFACT_PATH: &str = r"C:\Users\example\artifacts\frame.png";
+
+    /// レンダリングの実行口の代わりに定型データを返す実装。
+    ///
+    /// 呼び出しを記録するため、受付判定や params の検証で弾かれた要求が実行口へ
+    /// 進んでいないことを確かめられる。
+    struct FakeRenderAdapter {
+        calls: Mutex<Vec<&'static str>>,
+        discarded: Mutex<Vec<String>>,
+        /// 最初の呼び出しで返す失敗。
+        failure: Mutex<Option<RenderError>>,
+    }
+
+    impl FakeRenderAdapter {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                discarded: Mutex::new(Vec::new()),
+                failure: Mutex::new(None),
+            }
+        }
+
+        /// 最初のレンダリングが指定の失敗を返す実行口を作る。
+        fn failing(error: RenderError) -> Self {
+            let adapter = Self::new();
+            *adapter.failure.lock().unwrap() = Some(error);
+            adapter
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn discarded(&self) -> Vec<String> {
+            self.discarded.lock().unwrap().clone()
+        }
+    }
+
+    impl RenderAdapter for FakeRenderAdapter {
+        fn render_frame(
+            &self,
+            params: &RenderFrameParams,
+        ) -> Result<RenderFrameResult, RenderError> {
+            self.calls.lock().unwrap().push("render_frame");
+            if let Some(error) = self.failure.lock().unwrap().take() {
+                return Err(error);
+            }
+            Ok(RenderFrameResult {
+                project_epoch: EPOCH.to_string(),
+                project_revision: 3,
+                scene_id: params.expected_scene_id,
+                frame: params.frame,
+                width: 320,
+                height: 180,
+                media_type: crate::render::ARTIFACT_MEDIA_TYPE.to_string(),
+                byte_length: 4,
+                sha256: format!("sha256:{}", "0".repeat(64)),
+                handoff_token: HANDOFF_TOKEN.to_string(),
+            })
+        }
+
+        fn discard_artifact(&self, handoff_token: &str) {
+            self.discarded
+                .lock()
+                .unwrap()
+                .push(handoff_token.to_string());
+        }
+    }
+
+    /// 受け付けられる要求の params。
+    fn render_params() -> Value {
+        json!({ "expected_scene_id": SCENE_ID, "frame": FRAME })
+    }
+
+    /// 期限内の判定。
+    fn within() -> RequestDeadline {
+        RequestDeadline::Within(Instant::now() + Duration::from_secs(1))
+    }
+
+    #[test]
+    fn every_render_operation_is_routed_from_its_name() {
+        for operation in RenderOperation::ALL {
+            assert_eq!(
+                classify_operation(operation.as_str()).unwrap(),
+                Operation::Render(operation),
+                "{} がレンダリングへ振り分けられていません",
+                operation.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_render_within_the_deadline_reaches_the_adapter() {
+        let adapter = FakeRenderAdapter::new();
+        let result = execute_render(
+            &adapter,
+            &InstanceState::Ready,
+            RenderOperation::RenderFrame,
+            &render_params(),
+            within(),
+        )
+        .expect("期限内のレンダリングが拒否されました");
+
+        assert_eq!(adapter.calls(), vec!["render_frame"]);
+        assert_eq!(result.scene_id, SCENE_ID);
+        assert_eq!(result.frame, FRAME);
+        assert_eq!(result.handoff_token, HANDOFF_TOKEN);
+    }
+
+    #[test]
+    fn render_params_are_decoded_before_the_lifecycle_state_is_checked() {
+        // 起動処理中でも、要求内容の誤りは要求の誤りとして返す。状態由来の
+        // 再試行可能なエラーで返すと、解消しない再試行を促してしまう。
+        for params in [
+            json!({ "expected_scene_id": SCENE_ID }),
+            json!({ "expected_scene_id": SCENE_ID, "frame": FRAME, "future": 1 }),
+            json!({ "expected_scene_id": SCENE_ID, "frame": -1 }),
+            json!({ "expected_scene_id": SCENE_ID, "frame": u32::MAX }),
+            json!({ "frame": FRAME }),
+        ] {
+            let adapter = FakeRenderAdapter::new();
+            let error = execute_render(
+                &adapter,
+                &InstanceState::Starting,
+                RenderOperation::RenderFrame,
+                &params,
+                within(),
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error.code,
+                ErrorCode::InvalidArgument,
+                "{params} が状態由来のエラーで返りました"
+            );
+            assert!(adapter.calls().is_empty(), "{params}");
+        }
+    }
+
+    #[test]
+    fn a_starting_instance_rejects_a_well_formed_render() {
+        let adapter = FakeRenderAdapter::new();
+        let error = execute_render(
+            &adapter,
+            &InstanceState::Starting,
+            RenderOperation::RenderFrame,
+            &render_params(),
+            within(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::HostBusy);
+        assert!(error.retryable);
+        assert!(adapter.calls().is_empty());
+    }
+
+    #[test]
+    fn an_expired_deadline_stops_the_render_before_it_starts() {
+        let adapter = FakeRenderAdapter::new();
+        let error = execute_render(
+            &adapter,
+            &InstanceState::Ready,
+            RenderOperation::RenderFrame,
+            &render_params(),
+            RequestDeadline::Exceeded,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert!(error.retryable);
+        assert!(
+            adapter.calls().is_empty(),
+            "期限超過後にホストへタスクを投入しました"
+        );
+    }
+
+    #[test]
+    fn a_render_timeout_never_warns_about_an_applied_change() {
+        // レンダリングはプロジェクトを変更しない。変更の有無を伝えるキーを
+        // 添えると、要求元は編集と同じ警戒（読み直してから再送）を要すると
+        // 誤解する。
+        let adapter = FakeRenderAdapter::new();
+        let render = execute_render(
+            &adapter,
+            &InstanceState::Ready,
+            RenderOperation::RenderFrame,
+            &render_params(),
+            RequestDeadline::Exceeded,
+        )
+        .unwrap_err();
+        assert_eq!(render.code, ErrorCode::Timeout);
+        assert_eq!(render.details.get("change_applied"), None);
+        assert_eq!(render.details.get("mutation_origin"), None);
+
+        // 完了を待てなかった失敗にも付かない。代わりに落ちた段を伝える。
+        let waited = render_error(RenderError::WaitTimeout);
+        assert_eq!(waited.code, ErrorCode::Timeout);
+        assert_eq!(waited.details.get("change_applied"), None);
+        assert_eq!(waited.details["render_stage"], json!("wait"));
+
+        // 編集の同じ経路には付く。変更が入ったか判別できる側だけが名乗る。
+        let edit = edit_timeout_before_execution();
+        assert_eq!(edit.code, ErrorCode::Timeout);
+        assert_eq!(edit.details["change_applied"], json!("no"));
+    }
+
+    #[test]
+    fn a_render_result_is_never_discarded_after_its_deadline() {
+        // レンダリングの結果を捨てると引き渡し用ファイルが宙に浮く。受け取る
+        // 側は識別子を得ていないため掃除できない。
+        let now = Instant::now();
+        assert_eq!(retained_send_deadline(now), now + WRITE_TIMEOUT);
+
+        // 読み取りは同じ状況で結果を捨てる。破棄経路をレンダリングへ
+        // 再利用しないことが、この差として現れる。
+        assert_eq!(
+            decide_send(
+                now,
+                NOW_UNIX_MS,
+                RequestDeadline::Within(now - Duration::from_millis(1)),
+                None,
+            ),
+            SendDecision::Discard
+        );
+    }
+
+    #[test]
+    fn a_failed_send_returns_the_artifact_to_the_adapter() {
+        let adapter = FakeRenderAdapter::new();
+
+        // 送信できた成果物は受け取る側が所有する。消してはならない。
+        deliver_render_response(&adapter, Some(HANDOFF_TOKEN), || Ok(()))
+            .expect("送信できた応答が失敗として返りました");
+        assert!(
+            adapter.discarded().is_empty(),
+            "送信できた成果物を消しました"
+        );
+
+        // 送信に失敗すれば受け取る側は識別子を持たない。ここで消す。
+        deliver_render_response(&adapter, Some(HANDOFF_TOKEN), || {
+            anyhow::bail!("応答の送信に失敗しました")
+        })
+        .expect_err("送信の失敗が握り潰されました");
+        assert_eq!(adapter.discarded(), vec![HANDOFF_TOKEN.to_string()]);
+    }
+
+    #[test]
+    fn a_failed_send_of_a_failure_response_has_no_artifact_to_return() {
+        // 失敗した要求は成果物を作っていない。消すものが無いのに実行口を
+        // 呼ぶと、他の要求の成果物を消しかねない。
+        let adapter = FakeRenderAdapter::new();
+        deliver_render_response(&adapter, None, || anyhow::bail!("応答の送信に失敗しました"))
+            .expect_err("送信の失敗が握り潰されました");
+        assert!(adapter.discarded().is_empty());
+    }
+
+    #[test]
+    fn only_the_render_response_leaves_something_to_clean_up() {
+        // レンダリングの結果は引き渡し用ファイルを 1 つ残す。だから送信に
+        // 失敗したときの後始末が要る。
+        let adapter = FakeRenderAdapter::new();
+        let rendered = execute_render(
+            &adapter,
+            &InstanceState::Ready,
+            RenderOperation::RenderFrame,
+            &render_params(),
+            within(),
+        )
+        .expect("期限内のレンダリングが拒否されました");
+        assert!(!rendered.handoff_token.is_empty());
+
+        // 一括適用の結果は掃除すべきものを 1 つも残さない。変更は既に取り消し
+        // 単位へ登録されており、応答を送れなくても差し戻せるものは無い。
+        let outcome = serde_json::to_value(aviutl2_mcp_core::BatchOutcome {
+            project_epoch: EPOCH.to_string(),
+            project_revision: 1,
+            results: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(outcome.get("handoff_token"), None);
+        assert!(!outcome.to_string().contains(HANDOFF_TOKEN));
+    }
+
+    /// レンダリングの失敗の代表値。実行口が返し得る全 variant を並べる。
+    fn render_error_variants() -> Vec<fn() -> RenderError> {
+        vec![
+            || RenderError::Read(crate::read::ReadError::NotReady),
+            || {
+                RenderError::Read(crate::read::ReadError::EditBlocked {
+                    state: crate::read::EditState::Save,
+                })
+            },
+            || RenderError::SceneMismatch {
+                expected: SCENE_ID,
+                current: SCENE_ID + 1,
+            },
+            || RenderError::FrameOutOfRange,
+            || RenderError::FrameTooLarge,
+            || RenderError::WaitTimeout,
+            || RenderError::ShuttingDown,
+            || RenderError::TooManyAbandoned,
+            || RenderError::InvalidBuffer {
+                rule: crate::render::BufferRule::PitchTooSmall,
+            },
+            || RenderError::Artifact {
+                stage: crate::render::ArtifactStage::Encode,
+            },
+            || RenderError::Artifact {
+                stage: crate::render::ArtifactStage::Write,
+            },
+            || RenderError::Sdk {
+                operation: "rendering_scene_video",
+            },
+            || RenderError::Panicked,
+        ]
+    }
+
+    #[test]
+    fn render_failures_keep_their_code_and_details() {
+        for make in render_error_variants() {
+            let expected = make();
+            let adapter = FakeRenderAdapter::failing(make());
+
+            let error = execute_render(
+                &adapter,
+                &InstanceState::Ready,
+                RenderOperation::RenderFrame,
+                &render_params(),
+                within(),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code, expected.error_code(), "{expected}");
+            assert_eq!(error.retryable, expected.retryable(), "{expected}");
+            assert_eq!(error.message, expected.to_string(), "{expected}");
+            assert_eq!(error.details, expected.details(), "{expected}");
+        }
+    }
+
+    #[test]
+    fn render_failures_never_produce_cancelled() {
+        // 受信から実行までの窓も保留キューも無いため、取り消しは生成しない。
+        for make in render_error_variants() {
+            let adapter = FakeRenderAdapter::failing(make());
+            let error = execute_render(
+                &adapter,
+                &InstanceState::Ready,
+                RenderOperation::RenderFrame,
+                &render_params(),
+                within(),
+            )
+            .unwrap_err();
+            assert_ne!(error.code, ErrorCode::Cancelled, "{}", error.message);
+        }
+
+        for deadline in [RequestDeadline::Exceeded, within()] {
+            for state in [
+                InstanceState::Starting,
+                InstanceState::Draining,
+                InstanceState::Gone,
+            ] {
+                let adapter = FakeRenderAdapter::new();
+                let error = execute_render(
+                    &adapter,
+                    &state,
+                    RenderOperation::RenderFrame,
+                    &render_params(),
+                    deadline,
+                )
+                .unwrap_err();
+                assert_ne!(error.code, ErrorCode::Cancelled, "{state}");
+            }
+        }
+    }
+
+    #[test]
+    fn render_failures_only_use_allowed_details_keys() {
+        // 補助情報のキーはここで列挙したものに限る。新しいキーを足す際は、
+        // 引き渡し用の識別子・パス・画像でないことを確かめた上で追加する。
+        const ALLOWED: &[&str] = &[
+            "retry_after_ms",
+            "edit_state",
+            "expected_scene_id",
+            "current_scene_id",
+            "mismatch",
+            "reason",
+            "render_stage",
+            "sdk_operation",
+            "retry_requires",
+        ];
+        for make in render_error_variants() {
+            let adapter = FakeRenderAdapter::failing(make());
+            let error = execute_render(
+                &adapter,
+                &InstanceState::Ready,
+                RenderOperation::RenderFrame,
+                &render_params(),
+                within(),
+            )
+            .unwrap_err();
+
+            for key in error.details.as_object().expect("補助情報は object").keys() {
+                assert!(
+                    ALLOWED.contains(&key.as_str()),
+                    "{} の補助情報に未許可のキー {key} が含まれています",
+                    error.message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn neither_the_handoff_token_nor_a_path_reaches_a_failure_response() {
+        // 引き渡し用の識別子を渡せば、それだけで成果物の在り処が分かる。画像
+        // には利用者のプロジェクトの内容が写る。どちらも失敗の応答へ出さない。
+        let mut documents = Vec::new();
+        for make in render_error_variants() {
+            let adapter = FakeRenderAdapter::failing(make());
+            let error = execute_render(
+                &adapter,
+                &InstanceState::Ready,
+                RenderOperation::RenderFrame,
+                &render_params(),
+                within(),
+            )
+            .unwrap_err();
+            documents.push(serde_json::to_string(&error).unwrap());
+        }
+        documents.push(
+            serde_json::to_string(
+                &execute_render(
+                    &FakeRenderAdapter::new(),
+                    &InstanceState::Ready,
+                    RenderOperation::RenderFrame,
+                    &render_params(),
+                    RequestDeadline::Exceeded,
+                )
+                .unwrap_err(),
+            )
+            .unwrap(),
+        );
+
+        for document in documents {
+            let lowered = document.to_lowercase();
+            for forbidden in [HANDOFF_TOKEN, ARTIFACT_PATH, ".png", r"c:\", "token", "0x"] {
+                assert!(
+                    !lowered.contains(&forbidden.to_lowercase()),
+                    "{forbidden} が応答に含まれます: {document}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_render_is_given_its_own_execution_budget() {
+        assert_eq!(
+            execution_timeout(KnownOperation::Render(RenderOperation::RenderFrame)),
+            RENDER_TIMEOUT
+        );
+        // 最も短い予算へ落ちると、投入した瞬間に予算が尽きる。
+        assert_ne!(RENDER_TIMEOUT, READ_TIMEOUT);
+        assert_ne!(RENDER_TIMEOUT, EDIT_TIMEOUT);
+        assert_ne!(RENDER_TIMEOUT, BATCH_TIMEOUT);
+
+        // レンダリングが実行の上限まで走っても、応答送信と、要求元が応答を
+        // 受けてから行う成果物の引き取りの持ち時間が要求フェーズ予算の内側に
+        // 残る。**引き取りの段を数え忘れると、どの層の期限にも捕まらないまま
+        // 予算を超えてから成功する経路ができる。**
+        assert!(
+            RENDER_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM + SERVER_ARTIFACT_INGEST_BUDGET
+                <= SERVER_RENDER_REQUEST_BUDGET,
+            "レンダリング {RENDER_TIMEOUT:?} と送信 {WRITE_TIMEOUT:?} と引き取り {SERVER_ARTIFACT_INGEST_BUDGET:?} が要求フェーズ予算 {SERVER_RENDER_REQUEST_BUDGET:?} に収まらない"
         );
     }
 
