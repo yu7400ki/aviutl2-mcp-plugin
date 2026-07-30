@@ -19,7 +19,7 @@ use aviutl2_mcp_core::{
 const MAX_NAME_CHARS: usize = 60;
 
 /// 編集の応答に共通して添える次の操作の案内。
-const EDIT_NEXT_STEP: &str = "続けて編集する場合は structuredContent の selector と project_revision をそのまま使えます。前提条件が合わない場合は対象を読み直してください";
+const EDIT_NEXT_STEP: &str = "続けて編集する場合は structuredContent の selector をそのまま使えます。project_revision は要求には指定しません。前提条件が合わない場合は対象を読み直してください";
 
 /// `aviutl2_list_instances` の text content。
 pub fn instances(response: &ListInstancesResponse) -> String {

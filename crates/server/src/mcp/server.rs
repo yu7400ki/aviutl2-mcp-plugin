@@ -514,10 +514,11 @@ impl AviUtl2McpServer {
 
     /// メディアファイルまたは object alias からオブジェクトを作成する。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
-    /// project_revision をそのまま指定する。省略はできない。
-    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
-    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
+    /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
+    /// project_epoch をそのまま指定する。省略はできない。作成は対象を指す selector を
+    /// 持たないため、これがプロジェクト境界を照合する唯一の材料である。
+    /// 要求は project_revision を運ばない。読み取りから作成までに revision が進んで
+    /// いても拒否されない。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// 複数オブジェクトを含む alias は全てが作成され、created に全件、object に
     /// その先頭が入る。長さと挿入位置はホストが自動調整し得るため、応答が返す
@@ -566,10 +567,10 @@ impl AviUtl2McpServer {
 
     /// オブジェクトのレイヤーと開始フレームを変更する。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
-    /// project_revision をそのまま指定する。省略はできない。
-    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
-    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
+    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
+    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
+    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
+    /// selector の project_epoch が拒否する。
     /// selector には応答が返した値をそのまま指定する。応答が返した selector は
     /// 読み直さずにそのまま次の編集へ渡せる。
     /// 宛先に既存オブジェクトがある場合は precondition_failed となる。
@@ -614,10 +615,10 @@ impl AviUtl2McpServer {
 
     /// オブジェクト名を変更する。name を省略するか null にすると標準名へ戻す。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
-    /// project_revision をそのまま指定する。省略はできない。
-    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
-    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
+    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
+    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
+    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
+    /// selector の project_epoch が拒否する。
     /// selector には応答が返した値をそのまま指定する。応答が返した selector は
     /// 読み直さずにそのまま次の編集へ渡せる。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
@@ -662,10 +663,10 @@ impl AviUtl2McpServer {
     /// effect の設定項目またはトラックバーの値を変更する。
     /// 設定項目はいずれかの effect に属するため、対象は effect の selector で指す。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
-    /// project_revision をそのまま指定する。省略はできない。
-    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
-    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
+    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
+    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
+    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
+    /// selector の project_epoch が拒否する。
     /// selector には aviutl2_get_object が返した effect の selector をそのまま指定する。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// effect の設定を変えるとそのオブジェクトの fingerprint も変わるため、変更前の
@@ -715,10 +716,10 @@ impl AviUtl2McpServer {
     /// effect_name には aviutl2_list_available_effects が返す名前を指定する。
     /// 登録されていない名前は unsupported_operation となる。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
-    /// project_revision をそのまま指定する。省略はできない。
-    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
-    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
+    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
+    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
+    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
+    /// selector の project_epoch が拒否する。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// effect を足すとそのオブジェクトの fingerprint も変わるため、変更前の
     /// selector で続けて編集すると precondition_failed となる。
@@ -769,10 +770,10 @@ impl AviUtl2McpServer {
     /// 出力 item の有効化と、audio effect / 出力 item のロックは変更できず
     /// unsupported_operation となる。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
-    /// project_revision をそのまま指定する。省略はできない。
-    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
-    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
+    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
+    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
+    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
+    /// selector の project_epoch が拒否する。
     /// selector には aviutl2_get_object が返した effect の selector をそのまま指定する。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// effect の状態を変えるとそのオブジェクトの fingerprint も変わるため、変更前の
@@ -819,10 +820,10 @@ impl AviUtl2McpServer {
     /// オブジェクトから effect を削除する。
     /// 対象が既に失われている場合は not_found となり、追加の変更は起きない。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
-    /// project_revision をそのまま指定する。省略はできない。
-    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
-    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
+    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
+    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
+    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
+    /// selector の project_epoch が拒否する。
     /// selector には aviutl2_get_object が返した effect の selector をそのまま指定する。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// effect を削除するとそのオブジェクトの fingerprint も変わるため、変更前の
@@ -869,10 +870,10 @@ impl AviUtl2McpServer {
     /// オブジェクトを削除する。
     /// 対象が既に失われている場合は not_found となり、追加の変更は起きない。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
-    /// project_revision をそのまま指定する。省略はできない。
-    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
-    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
+    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
+    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
+    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
+    /// selector の project_epoch が拒否する。
     /// selector には応答が返した値をそのまま指定する。他の編集 tool では応答が
     /// 返した selector をそのまま次の編集へ渡せるが、削除した対象の selector は
     /// 以後どの編集にも使えない。
@@ -918,12 +919,15 @@ impl AviUtl2McpServer {
     /// カーソル位置・選択範囲・フォーカス対象を変更する。
     /// cursor と selected_range と focus の 3 つ全てを省略した要求は受け付けない。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// expected には直前の読み取りまたは編集の応答が返した project_epoch と
-    /// project_revision をそのまま指定する。省略はできない。
-    /// project_revision は現在は照合されず、古い値でも拒否されない。対象が変化して
-    /// いれば fingerprint が、別のプロジェクトであれば project_epoch が拒否する。
-    /// focus の selector には応答が返した値をそのまま指定する。応答が返した
-    /// selector は読み直さずにそのまま次の編集へ渡せる。
+    /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
+    /// project_epoch をそのまま指定する。省略はできない。focus を省略した要求は
+    /// selector を 1 つも持たないため、これがプロジェクト境界を照合する材料である。
+    /// 要求は project_revision を運ばない。読み取りから変更までに revision が進んで
+    /// いても拒否されない。
+    /// focus の selector には応答が返した値をそのまま指定する。指定した対象が
+    /// 変化していれば fingerprint が、別のプロジェクトであれば selector の
+    /// project_epoch が拒否する。応答が返した selector は読み直さずにそのまま
+    /// 次の編集へ渡せる。
     /// この tool は取り消し操作で元へ戻る保証が無く、他の編集 tool と異なり
     /// 取り消し単位を作らない。
     /// 応答が返す反映値は編集と原子的に観測したものではなく、ホストが範囲外の値を
@@ -980,7 +984,7 @@ impl ServerHandler for AviUtl2McpServer {
         );
         info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
-            "AviUtl2 の編集内容を読み取り、変更する。aviutl2_list_instances 以外の tool は instance_id が必須である。frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。変更する tool は expected に直前の読み取りまたは編集の応答が返した project_epoch と project_revision を必ず指定する。"
+            "AviUtl2 の編集内容を読み取り、変更する。aviutl2_list_instances 以外の tool は instance_id が必須である。frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。変更する tool は対象を selector で指し、応答が返した値をそのまま送り返す。selector を持たない aviutl2_create_object と aviutl2_set_selection では、応答が返した project_epoch を expected_project_epoch に必ず指定する。"
                 .to_string(),
         );
         info
@@ -1598,6 +1602,13 @@ mod tests {
             .to_string()
     }
 
+    /// 前提の epoch を要求が運ぶ tool。
+    ///
+    /// 対象を指す selector を持たないため、これがプロジェクト境界を照合する
+    /// 材料になる。
+    const TOOLS_CARRYING_AN_EXPECTED_EPOCH: &[&str] =
+        &["aviutl2_create_object", "aviutl2_set_selection"];
+
     #[test]
     fn edit_tool_descriptions_state_what_costs_the_caller_if_assumed_wrong() {
         // いずれも誤った前提で操作すると損失が生じる事項であり、説明から
@@ -1607,8 +1618,7 @@ mod tests {
             for keyword in [
                 "0 始まり",
                 "UI の表示とは異なる",
-                "expected",
-                "省略はできない",
+                "project_epoch",
                 "selector",
                 "change_applied",
                 "unknown",
@@ -1622,14 +1632,41 @@ mod tests {
     }
 
     #[test]
-    fn edit_tool_descriptions_admit_that_the_revision_is_not_verified() {
-        // expected は受け取るが project_revision を照合しない。説明が黙っていると、
-        // 呼び出し側は拒否を避けるために revision を取り直し続ける。
+    fn only_the_tools_without_a_selector_ask_for_an_expected_epoch() {
+        // 前提の epoch を運ぶのは selector を持たない 2 tool だけである。他の tool の
+        // 説明が求めると、呼び出し側は送れない値を探すことになる。どちらの側に
+        // 属するかを表で固定するので、tool を足したときに素通りしない。
+        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+            let description = description_of(name);
+            if TOOLS_CARRYING_AN_EXPECTED_EPOCH.contains(name) {
+                for keyword in ["expected_project_epoch", "省略はできない"] {
+                    assert!(
+                        description.contains(keyword),
+                        "{name} の説明に {keyword} がありません"
+                    );
+                }
+                continue;
+            }
+            assert!(
+                !description.contains("expected_project_epoch"),
+                "{name} の説明が運べない前提の epoch を求めています"
+            );
+            assert!(
+                description.contains("selector が運ぶ project_epoch"),
+                "{name} の説明が境界の照合材料を示していません"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_tool_descriptions_admit_that_the_revision_is_not_part_of_the_request() {
+        // 要求は project_revision を運ばない。説明が黙っていると、呼び出し側は
+        // 拒否を避けるために revision を取り直し続ける。
         for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
             let description = description_of(name);
             assert!(
-                description.contains("project_revision は現在は照合されず"),
-                "{name} の説明が project_revision を照合しないことを述べていません"
+                description.contains("project_revision を運ばない"),
+                "{name} の説明が revision を要求しないことを述べていません"
             );
         }
     }
