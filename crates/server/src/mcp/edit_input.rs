@@ -186,7 +186,8 @@ impl DestinationInput {
 pub enum ObjectSourceInput {
     /// メディアファイルから作成する。
     MediaFile {
-        /// 絶対パス。相対パス・device path・代替データストリーム・ネットワークパス（UNC）は受け付けない。
+        /// 絶対パス。相対パス・device path・代替データストリーム・
+        /// ネットワークパス（UNC）は受け付けない。
         /// ネットワーク上の素材はドライブレターを割り当てて指定する。
         #[schemars(length(min = 1, max = MAX_PATH_CHARS))]
         path: String,
@@ -322,13 +323,17 @@ pub enum ItemValueInput {
     },
     /// ファイルパス。
     File {
-        /// 絶対パス。相対パス・device path・代替データストリーム・ネットワークパス（UNC）は受け付けない。
+        /// 絶対パス。相対パス・device path・代替データストリーム・
+        /// ネットワークパス（UNC）は受け付けない。
+        /// ネットワーク上の素材はドライブレターを割り当てて指定する。
         #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]
         path: String,
     },
     /// フォルダパス。
     Folder {
-        /// 絶対パス。相対パス・device path・代替データストリーム・ネットワークパス（UNC）は受け付けない。
+        /// 絶対パス。相対パス・device path・代替データストリーム・
+        /// ネットワークパス（UNC）は受け付けない。
+        /// ネットワーク上の場所はドライブレターを割り当てて指定する。
         #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]
         path: String,
     },
