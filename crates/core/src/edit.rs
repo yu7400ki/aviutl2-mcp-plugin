@@ -1438,6 +1438,44 @@ mod tests {
     }
 
     #[test]
+    fn paths_reject_control_characters_on_top_of_the_syntax_rules() {
+        // ファイル名に現れ得ない文字は、構文の規則を通っても渡さない。
+        for control in ['\u{1}', '\u{1b}', '\n', '\t'] {
+            let path = format!(r"C:\movie{control}.mp4");
+            assert_eq!(
+                validate_path(&path),
+                Ok(()),
+                "{control:?} が構文の規則で落ちています"
+            );
+
+            assert_eq!(
+                CreateObjectParams {
+                    source: ObjectSource::MediaFile { path: path.clone() },
+                    ..sample_create()
+                }
+                .validate(),
+                Err(EditInputError::Text {
+                    field: FIELD_PATH,
+                    source: TextSyntaxError::ContainsControl,
+                }),
+                "作成元の {control:?}"
+            );
+
+            assert_eq!(
+                SetObjectItemParams {
+                    value: ItemValue::File { path },
+                    ..sample_set_object_item()
+                }
+                .validate(),
+                Err(EditInputError::ItemValue(ItemWriteError::Text(
+                    TextSyntaxError::ContainsControl
+                ))),
+                "設定値の {control:?}"
+            );
+        }
+    }
+
+    #[test]
     fn media_file_path_is_bounded_only_by_the_path_limit() {
         // 作成元のパスは設定項目の値ではないため、値としての上限は掛からない。
         let path = format!(r"C:\{}", "a".repeat(MAX_PATH_UTF16_UNITS - 3));
