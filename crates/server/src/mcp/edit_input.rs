@@ -630,7 +630,7 @@ fn from_input_error(error: EditInputError) -> ErrorObject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::{ErrorCode, ObjectFingerprintInput, ObjectSummary};
+    use aviutl2_mcp_core::{EditOperation, ErrorCode, ObjectFingerprintInput, ObjectSummary};
     use serde_json::{Value, json};
 
     const SAMPLE_ID: &str = "8df98c04-e7c2-4f98-b3ce-fc1c39d76414";
@@ -662,6 +662,191 @@ mod tests {
             "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             "fingerprint_algorithm": "sha256-raw-v1",
         })
+    }
+
+    /// tool ごとの、現在の形の入力を引く。
+    ///
+    /// **`_` を使わない網羅 match で書く。** 編集 operation を足すとここが
+    /// コンパイルエラーになるため、入力の形を確かめる一連のテストから漏れる
+    /// ことがない。手書きの一覧にすると、足し忘れても全て緑のまま通ってしまう。
+    fn current_input(operation: EditOperation) -> Value {
+        match operation {
+            EditOperation::CreateObject => json!({
+                "instance_id": SAMPLE_ID,
+                "source": { "type": "object_alias", "alias": "a" },
+                "placement": { "scene_id": 3, "layer": 1, "frame": 0 },
+                "expected_project_epoch": SAMPLE_EPOCH,
+            }),
+            EditOperation::MoveObject => json!({
+                "instance_id": SAMPLE_ID,
+                "selector": object_selector_json(),
+                "destination": { "layer": 1, "frame": 0 },
+            }),
+            EditOperation::DeleteObject => json!({
+                "instance_id": SAMPLE_ID,
+                "selector": object_selector_json(),
+            }),
+            EditOperation::SetObjectName => json!({
+                "instance_id": SAMPLE_ID,
+                "selector": object_selector_json(),
+                "name": "名前",
+            }),
+            EditOperation::SetObjectItem => json!({
+                "instance_id": SAMPLE_ID,
+                "selector": effect_selector_json(),
+                "item": "X",
+                "value": { "type": "integer", "value": 1 },
+            }),
+            EditOperation::AddEffect => json!({
+                "instance_id": SAMPLE_ID,
+                "object": object_selector_json(),
+                "effect_name": "ぼかし",
+            }),
+            EditOperation::DeleteEffect => json!({
+                "instance_id": SAMPLE_ID,
+                "selector": effect_selector_json(),
+            }),
+            EditOperation::SetEffectState => json!({
+                "instance_id": SAMPLE_ID,
+                "selector": effect_selector_json(),
+                "enabled": true,
+            }),
+            EditOperation::SetSelection => json!({
+                "instance_id": SAMPLE_ID,
+                "expected_scene_id": 3,
+                "cursor": { "layer": 1, "frame": 2 },
+                "expected_project_epoch": SAMPLE_EPOCH,
+            }),
+        }
+    }
+
+    /// 入力を復元し、IPC の params へ写して返す。
+    ///
+    /// 写して返すのは、読み捨てたフィールドが params へ流れ込んでいないことを
+    /// 突き合わせられるようにするためである。
+    fn decode_input(operation: EditOperation, input: &Value) -> Result<Value, ErrorCode> {
+        /// 復元と変換を済ませて params を JSON へ写す。
+        macro_rules! decoded {
+            ($ty:ty) => {{
+                let input: $ty = serde_json::from_value(input.clone())
+                    // 復元の失敗は tool router が invalid_argument へ写す。
+                    .map_err(|_| ErrorCode::InvalidArgument)?;
+                let params = input.to_params().map_err(|error| error.code)?;
+                serde_json::to_value(&params).expect("params は直列化できる")
+            }};
+        }
+        Ok(match operation {
+            EditOperation::CreateObject => decoded!(CreateObjectInput),
+            EditOperation::MoveObject => decoded!(MoveObjectInput),
+            EditOperation::DeleteObject => decoded!(DeleteObjectInput),
+            EditOperation::SetObjectName => decoded!(SetObjectNameInput),
+            EditOperation::SetObjectItem => decoded!(SetObjectItemInput),
+            EditOperation::AddEffect => decoded!(AddEffectInput),
+            EditOperation::DeleteEffect => decoded!(DeleteEffectInput),
+            EditOperation::SetEffectState => decoded!(SetEffectStateInput),
+            EditOperation::SetSelection => decoded!(SetSelectionInput),
+        })
+    }
+
+    #[test]
+    fn every_edit_input_follows_the_backward_compatibility_table() {
+        // 以前の形で組み立てられた要求を拒否しない。1 つの tool で通しても、他が
+        // 未知フィールドの拒否のままなら気付けないため、全 tool を網羅 match から
+        // 引いて同じ表に掛ける。
+        for operation in EditOperation::ALL {
+            let name = operation.as_str();
+            let current = current_input(operation);
+            let decoded = decode_input(operation, &current)
+                .unwrap_or_else(|code| panic!("{name} の現在の形が拒否されました: {code:?}"));
+
+            // 旧: 前提条件の入れ物を持つ。受理し、値は params へ流れない。
+            let mut old = current.clone();
+            old.as_object_mut().unwrap().insert(
+                "expected".to_string(),
+                json!({ "project_epoch": "別のプロジェクト", "project_revision": 42 }),
+            );
+            assert_eq!(
+                decode_input(operation, &old).ok().as_ref(),
+                Some(&decoded),
+                "{name} が以前の形の入力を拒否したか、読み捨てた値を使いました"
+            );
+
+            // 旧: 入れ物が epoch だけを持つ。
+            let mut old = current.clone();
+            old.as_object_mut().unwrap().insert(
+                "expected".to_string(),
+                json!({ "project_epoch": SAMPLE_EPOCH }),
+            );
+            assert_eq!(
+                decode_input(operation, &old).ok().as_ref(),
+                Some(&decoded),
+                "{name} が epoch だけの入れ物を拒否しました"
+            );
+
+            // 未知フィールドは従来どおり拒否する。互換のために保護を失わない。
+            let mut unknown = current.clone();
+            unknown
+                .as_object_mut()
+                .unwrap()
+                .insert("unknown_field".to_string(), json!(1));
+            assert_eq!(
+                decode_input(operation, &unknown),
+                Err(ErrorCode::InvalidArgument),
+                "{name} が未知フィールドを受理しました"
+            );
+        }
+    }
+
+    #[test]
+    fn every_edit_input_accepts_the_selectors_of_both_shapes() {
+        // effect セレクターが算出方式を運ぶ以前の形も、オブジェクトセレクターが
+        // 運ばない形も、どちらも受理する。
+        for operation in EditOperation::ALL {
+            let name = operation.as_str();
+            let mut input = current_input(operation);
+            let value = serde_json::to_string(&input).expect("直列化できる");
+            let carries_effect_selector = value.contains("effect_index");
+            let carries_object_selector = value.contains("project_epoch");
+
+            if carries_effect_selector {
+                let mut old = input.clone();
+                old["selector"]["fingerprint_algorithm"] = json!("sha256-raw-v1");
+                assert!(
+                    decode_input(operation, &old).is_ok(),
+                    "{name} が effect セレクターの算出方式を拒否しました"
+                );
+            }
+            if carries_object_selector {
+                strip_object_algorithms(&mut input);
+                assert!(
+                    decode_input(operation, &input).is_ok(),
+                    "{name} が算出方式を持たないセレクターを拒否しました"
+                );
+            }
+        }
+    }
+
+    /// JSON を辿り、全てのオブジェクトセレクターから算出方式を落とす。
+    ///
+    /// 要求の形ごとに selector の位置を知らずに済むよう、`project_epoch` を持つ
+    /// オブジェクトをセレクターと見なす。
+    fn strip_object_algorithms(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                if map.contains_key("project_epoch") {
+                    map.remove("fingerprint_algorithm");
+                }
+                for nested in map.values_mut() {
+                    strip_object_algorithms(nested);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    strip_object_algorithms(item);
+                }
+            }
+            _ => {}
+        }
     }
 
     #[test]

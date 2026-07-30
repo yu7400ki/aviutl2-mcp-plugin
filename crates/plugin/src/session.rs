@@ -2455,6 +2455,213 @@ mod edit_tests {
         })
     }
 
+    /// operation ごとの、現在の形の要求 params を引く。
+    ///
+    /// **`_` を使わない網羅 match で書く。** 編集 operation を足すとここが
+    /// コンパイルエラーになるため、要求の形を確かめる一連のテストから漏れる
+    /// ことがない。手書きの一覧にすると、足し忘れても全て緑のまま通ってしまう。
+    fn current_request(operation: EditOperation) -> Value {
+        match operation {
+            EditOperation::CreateObject => json!({
+                "source": { "type": "object_alias", "alias": "[1:100]" },
+                "placement": { "scene_id": SCENE_ID, "layer": 1, "frame": 0 },
+                "expected_project_epoch": EPOCH,
+            }),
+            EditOperation::MoveObject => json!({
+                "selector": fake_summary().selector,
+                "destination": { "layer": 1, "frame": 300 },
+            }),
+            EditOperation::DeleteObject => json!({ "selector": fake_summary().selector }),
+            EditOperation::SetObjectName => json!({
+                "selector": fake_summary().selector,
+                "name": "名前",
+            }),
+            EditOperation::SetObjectItem => json!({
+                "selector": fake_effect_selector(),
+                "item": "X",
+                "value": { "type": "integer", "value": 1 },
+            }),
+            EditOperation::AddEffect => json!({
+                "object": fake_summary().selector,
+                "effect_name": "ぼかし",
+            }),
+            EditOperation::DeleteEffect => json!({ "selector": fake_effect_selector() }),
+            EditOperation::SetEffectState => json!({
+                "selector": fake_effect_selector(),
+                "enabled": true,
+            }),
+            EditOperation::SetSelection => selection_params(),
+        }
+    }
+
+    /// 要求を復号し、成功したら params を JSON へ写して返す。
+    ///
+    /// 写して返すのは、読み捨てたフィールドが params へ流れ込んでいないことを
+    /// 突き合わせられるようにするためである。
+    fn decode_request(operation: EditOperation, params: &Value) -> Result<Value, ErrorObject> {
+        let request = decode_edit_request(operation, params)?;
+        let encoded = match &request {
+            EditRequest::CreateObject(params) => serde_json::to_value(params),
+            EditRequest::MoveObject(params) => serde_json::to_value(params),
+            EditRequest::DeleteObject(params) => serde_json::to_value(params),
+            EditRequest::SetObjectName(params) => serde_json::to_value(params),
+            EditRequest::SetObjectItem(params) => serde_json::to_value(params),
+            EditRequest::AddEffect(params) => serde_json::to_value(params),
+            EditRequest::DeleteEffect(params) => serde_json::to_value(params),
+            EditRequest::SetEffectState(params) => serde_json::to_value(params),
+            EditRequest::SetSelection(params) => serde_json::to_value(params),
+        };
+        Ok(encoded.expect("params は直列化できる"))
+    }
+
+    /// JSON の中の全てのオブジェクト selector へ手を入れる。
+    ///
+    /// 要求の形ごとに selector の位置を知らずに済むよう、木を辿って
+    /// `project_epoch` を持つオブジェクトを selector と見なす。
+    fn for_each_object_selector(
+        value: &mut Value,
+        apply: &impl Fn(&mut serde_json::Map<String, Value>),
+    ) {
+        match value {
+            Value::Object(map) => {
+                if map.contains_key("project_epoch") {
+                    apply(map);
+                }
+                for nested in map.values_mut() {
+                    for_each_object_selector(nested, apply);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    for_each_object_selector(item, apply);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// JSON の中の全ての effect selector へ手を入れる。
+    fn for_each_effect_selector(
+        value: &mut Value,
+        apply: &impl Fn(&mut serde_json::Map<String, Value>),
+    ) {
+        match value {
+            Value::Object(map) => {
+                if map.contains_key("effect_index") && map.contains_key("object") {
+                    apply(map);
+                }
+                for nested in map.values_mut() {
+                    for_each_effect_selector(nested, apply);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    for_each_effect_selector(item, apply);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn every_edit_request_follows_the_backward_compatibility_table() {
+        // 以前の形で組み立てられた要求を拒否しない。1 つの operation で通しても、
+        // 他が未知フィールドの拒否のままなら気付けないため、全 operation を
+        // 網羅 match から引いて同じ表に掛ける。
+        for operation in EditOperation::ALL {
+            let name = operation.as_str();
+            let current = current_request(operation);
+            let decoded = decode_request(operation, &current)
+                .unwrap_or_else(|error| panic!("{name} の現在の形が拒否されました: {error:?}"));
+
+            // 旧: 前提条件の入れ物を持つ。受理し、値は params へ流れない。
+            let mut old = current.clone();
+            old.as_object_mut().unwrap().insert(
+                "expected".to_string(),
+                json!({ "project_epoch": "別のプロジェクト", "project_revision": 42 }),
+            );
+            assert_eq!(
+                decode_request(operation, &old).ok().as_ref(),
+                Some(&decoded),
+                "{name} が以前の形の要求を拒否したか、読み捨てた値を使いました"
+            );
+
+            // 旧: 入れ物が epoch だけを持つ。
+            let mut old = current.clone();
+            old.as_object_mut()
+                .unwrap()
+                .insert("expected".to_string(), json!({ "project_epoch": EPOCH }));
+            assert_eq!(
+                decode_request(operation, &old).ok().as_ref(),
+                Some(&decoded),
+                "{name} が epoch だけの入れ物を拒否しました"
+            );
+
+            // 旧: effect セレクターが算出方式を運ぶ。往復型なので元から通る。
+            let mut old = current.clone();
+            for_each_effect_selector(&mut old, &|map| {
+                map.insert("fingerprint_algorithm".to_string(), json!("sha256-raw-v1"));
+            });
+            assert!(
+                decode_request(operation, &old).is_ok(),
+                "{name} が effect セレクターの算出方式を拒否しました"
+            );
+
+            // 新: オブジェクトセレクターが算出方式を運ばない。
+            let mut without = current.clone();
+            for_each_object_selector(&mut without, &|map| {
+                map.remove("fingerprint_algorithm");
+            });
+            assert!(
+                decode_request(operation, &without).is_ok(),
+                "{name} が算出方式を持たないセレクターを拒否しました"
+            );
+
+            // 未知フィールドは従来どおり拒否する。互換のために保護を失わない。
+            let mut unknown = current.clone();
+            unknown
+                .as_object_mut()
+                .unwrap()
+                .insert("unknown_field".to_string(), json!(1));
+            let error = decode_request(operation, &unknown)
+                .expect_err(&format!("{name} が未知フィールドを受理しました"));
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{name}");
+        }
+    }
+
+    #[test]
+    fn only_the_requests_without_a_selector_require_an_expected_epoch() {
+        // 前提の epoch を持つのは、対象を指すセレクターを持たない要求だけである。
+        // 持つ要求ではその欠落が拒否になり、持たない要求ではフィールド自体が無い。
+        let mut carriers = Vec::new();
+        for operation in EditOperation::ALL {
+            let current = current_request(operation);
+            let mut without = current.clone();
+            if without
+                .as_object_mut()
+                .unwrap()
+                .remove("expected_project_epoch")
+                .is_none()
+            {
+                continue;
+            }
+            carriers.push(operation.as_str());
+            let error = decode_request(operation, &without).expect_err(&format!(
+                "{} が前提の epoch なしで受理されました",
+                operation.as_str()
+            ));
+            assert_eq!(error.code, ErrorCode::InvalidArgument);
+        }
+
+        assert_eq!(
+            carriers,
+            vec![
+                EditOperation::CreateObject.as_str(),
+                EditOperation::SetSelection.as_str()
+            ]
+        );
+    }
+
     #[test]
     fn every_edit_operation_is_routed_from_its_name() {
         for operation in EditOperation::ALL {
