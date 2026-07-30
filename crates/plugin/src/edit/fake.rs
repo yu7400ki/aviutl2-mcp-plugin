@@ -48,7 +48,9 @@ pub(crate) enum Fault {
     IgnoreDelete,
     /// 作成が何も生まない。
     CreateNothing,
-    /// 作成で 2 件のオブジェクトが生まれる。
+    /// 作成で 2 件のオブジェクトが、別々のレイヤーへ生まれる。
+    ///
+    /// 複数オブジェクトを含む alias は各オブジェクトが自分のレイヤーを持てる。
     CreatePair,
     /// effect を列の先頭へ挿入する。
     PrependEffect,
@@ -1039,13 +1041,16 @@ impl FakeSceneEditor<'_> {
             },
         );
         if self.host.knobs().fault == Some(Fault::CreatePair) {
+            // 2 件目は配置先とは別のレイヤーへ置く。配置先だけを走査していると
+            // 応答に現れず、要求元から到達できなくなる。
+            let sibling = layer + 1;
             let id = scene.take_id();
             scene.insert(
-                layer,
+                sibling,
                 FakeObject {
                     id,
                     placement: HostObjectPlacement {
-                        layer,
+                        layer: sibling,
                         frame_start: frame + CREATE_FRAME_SHIFT + 60,
                         frame_end: frame + CREATE_FRAME_SHIFT + 119,
                         name: None,
@@ -1189,6 +1194,16 @@ pub(crate) fn fake_scene() -> FakeScene {
                     alias: "[2:0]".to_string(),
                     effects: Vec::new(),
                 }],
+            },
+            // 編集情報が名乗る layer_max より先にある空レイヤー。ここへ作ると
+            // オブジェクトの存在する最大レイヤーが伸びる。
+            FakeLayer {
+                locked: false,
+                objects: Vec::new(),
+            },
+            FakeLayer {
+                locked: false,
+                objects: Vec::new(),
             },
         ],
         next_id: 100,

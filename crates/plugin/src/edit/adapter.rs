@@ -31,6 +31,7 @@ use aviutl2_mcp_core::{
     ObjectSummary, RangeChange, SelectionField, SelectionState, SetEffectStateParams,
     SetObjectItemParams, SetObjectNameParams, SetSelectionParams, prepare_item_write,
 };
+use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
@@ -263,6 +264,7 @@ fn ensure_destination_free(
 ) -> Result<(), EditError> {
     let occupant = occupants
         .iter()
+        .filter(|placement| placement.layer == layer)
         .filter(|placement| Some(placement.frame_start) != moving_from)
         .find(|placement| placement.frame_start <= frame && frame <= placement.frame_end);
     if let Some(occupant) = occupant {
@@ -350,22 +352,52 @@ fn effect_names(effects: &[HostEffect]) -> Vec<String> {
     effects.iter().map(|effect| effect.name.clone()).collect()
 }
 
-/// 作成前後のレイヤー列挙から、新たに現れた対象の開始フレームを求める。
+/// 作成の差分を取るために走査するレイヤーの範囲。
+///
+/// 配置先のレイヤーだけでは足りない。複数オブジェクトを含む alias は各
+/// オブジェクトが自分のレイヤーを持てるため、別のレイヤーへ作られた分が差分に
+/// 現れず、要求元は自分が作ったものを移動も削除もできなくなる。
+///
+/// 上限は、区間へ入った時点でオブジェクトが存在する最大レイヤーと配置先の
+/// レイヤーの大きい方とする。作成はオブジェクトの存在する範囲を配置先まで
+/// 伸ばし得る。
+fn creation_scan_range(
+    editor: &dyn SceneEditor,
+    destination_layer: usize,
+) -> RangeInclusive<usize> {
+    0..=editor.entry_edit_info().layer_max.max(destination_layer)
+}
+
+/// 指定範囲のレイヤーからオブジェクトの位置を集める。
+///
+/// alias も effect も読まない。差分を取るのに要るのは位置だけである。
+fn scene_placements(
+    editor: &dyn SceneEditor,
+    layers: RangeInclusive<usize>,
+) -> Result<Vec<HostObjectPlacement>, EditError> {
+    let mut placements = Vec::new();
+    for layer in layers {
+        placements.extend(editor.reader().object_placements(layer)?);
+    }
+    Ok(placements)
+}
+
+/// 作成前後の走査から、新たに現れた対象のレイヤーと開始フレームを求める。
 ///
 /// SDK は複数オブジェクトを含む alias でも先頭のハンドルしか返さない。差分を
 /// 取らないと 2 件目以降が要求元から到達不能になり、個別に移動も削除もできなく
 /// なる。
-fn created_frame_starts(
+fn created_placements(
     before: &[HostObjectPlacement],
     after: Vec<HostObjectPlacement>,
-) -> Vec<usize> {
-    let mut created: Vec<usize> = after
+) -> Vec<(usize, usize)> {
+    let mut created: Vec<(usize, usize)> = after
         .into_iter()
-        .map(|placement| placement.frame_start)
-        .filter(|frame_start| {
+        .map(|placement| (placement.layer, placement.frame_start))
+        .filter(|created| {
             !before
                 .iter()
-                .any(|placement| placement.frame_start == *frame_start)
+                .any(|placement| (placement.layer, placement.frame_start) == *created)
         })
         .collect();
     created.sort_unstable();
@@ -397,7 +429,10 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 &[],
             )?;
             ensure_layer_unlocked(editor, layer)?;
-            let before = editor.reader().object_placements(layer)?;
+            // 差分はシーン全体から取る。走査は宛先の事前確認にも使うため、
+            // 作成前の走査はここ 1 回で足りる。
+            let layers = creation_scan_range(editor, layer);
+            let before = scene_placements(editor, layers.clone())?;
             ensure_destination_free(&before, layer, frame, None)?;
             // 拡張子だけの確認に留める。実際に読めるかを調べる確認はファイルを
             // 開くため、割り込めない編集区間の内側では行えない。拡張子が通った
@@ -421,8 +456,8 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 }
             })?;
 
-            let after = attribute(&permit, &boundary, editor.reader().object_placements(layer))?;
-            let created = created_frame_starts(&before, after);
+            let after = attribute(&permit, &boundary, scene_placements(editor, layers))?;
+            let created = created_placements(&before, after);
             if created.is_empty() {
                 // 作成されたのに位置を特定できない状態であり、応答の selector を
                 // 組み立てられない。
@@ -435,11 +470,11 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             }
 
             let mut summaries = Vec::with_capacity(created.len());
-            for frame_start in created {
+            for (created_layer, frame_start) in created {
                 let summary = attribute(
                     &permit,
                     &boundary,
-                    reread(editor, &boundary, layer, frame_start),
+                    reread(editor, &boundary, created_layer, frame_start),
                 )?;
                 summaries.push(summary);
             }

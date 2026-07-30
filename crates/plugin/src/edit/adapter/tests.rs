@@ -671,7 +671,11 @@ fn creation_reports_the_placement_the_host_chose() {
 
 #[test]
 fn creation_reports_every_object_the_alias_produced() {
+    // 複数オブジェクトを含む alias は各オブジェクトが自分のレイヤーを持てる。
+    // 配置先だけを走査していると、別のレイヤーへ作られた分は応答に現れず、
+    // 要求元は自分が作ったものを移動も削除もできない。
     let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::CreatePair)));
+    harness.host.clear_calls();
     let outcome = harness
         .edit
         .create_object(&CreateObjectParams {
@@ -680,7 +684,7 @@ fn creation_reports_every_object_the_alias_produced() {
             },
             placement: Placement {
                 scene_id: SCENE_ID,
-                layer: 1,
+                layer: 0,
                 frame: 600,
             },
             expected_project_epoch: harness.epoch(),
@@ -693,6 +697,100 @@ fn creation_reports_every_object_the_alias_produced() {
         "2 件目以降が要求元から到達不能になります"
     );
     assert_eq!(outcome.object.as_ref(), outcome.created.first());
+    let layers: Vec<usize> = outcome.created.iter().map(|item| item.layer).collect();
+    assert_eq!(layers, vec![0, 1], "別レイヤーへ作られた分が漏れています");
+
+    // 返った selector で 2 件目を個別に削除できる。
+    harness
+        .edit
+        .delete_object(&DeleteObjectParams {
+            selector: outcome.created[1].selector.clone(),
+        })
+        .expect("2 件目を個別に削除できません");
+}
+
+#[test]
+fn creation_scans_every_layer_before_and_after() {
+    // 走査はシーン全体に及ぶ。区間へ入った時点でオブジェクトが存在する最大
+    // レイヤーまでを、作成の前後で 1 度ずつ見る。
+    let harness = Harness::new();
+    let layer_max = harness.host.info.layer_max;
+    harness.host.clear_calls();
+    harness
+        .edit
+        .create_object(&CreateObjectParams {
+            source: ObjectSource::ObjectAlias {
+                alias: "[obj]".to_string(),
+            },
+            placement: Placement {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame: 600,
+            },
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect("作成に失敗しました");
+
+    let scans = harness
+        .host
+        .calls()
+        .iter()
+        .filter(|call| **call == "object_placements")
+        .count();
+    assert_eq!(
+        scans,
+        (layer_max + 1) * 2,
+        "シーン全体の走査が作成の前後で 1 度ずつ行われていません"
+    );
+}
+
+#[test]
+fn creation_reaches_a_layer_beyond_the_previous_maximum() {
+    // 作成はオブジェクトの存在する範囲を配置先まで伸ばし得る。区間へ入った
+    // 時点の最大レイヤーだけを見ると、伸びた先へ作られた分を取りこぼす。
+    let harness = Harness::new();
+    let beyond = harness.host.info.layer_max + 1;
+    let outcome = harness
+        .edit
+        .create_object(&CreateObjectParams {
+            source: ObjectSource::ObjectAlias {
+                alias: "[obj]".to_string(),
+            },
+            placement: Placement {
+                scene_id: SCENE_ID,
+                layer: beyond as u32,
+                frame: 600,
+            },
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect("作成に失敗しました");
+
+    assert_eq!(outcome.created.len(), 1);
+    assert_eq!(outcome.created[0].layer, beyond);
+}
+
+#[test]
+fn creation_from_a_media_file_takes_the_same_difference() {
+    // 経路によって差分の範囲を変えると、SDK が複数のオブジェクトを作る場合に
+    // 片方だけが取りこぼす。同じ危険には同じ対処を当てる。
+    let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::CreatePair)));
+    let outcome = harness
+        .edit
+        .create_object(&CreateObjectParams {
+            source: ObjectSource::MediaFile {
+                path: r"C:\media\clip.mp4".to_string(),
+            },
+            placement: Placement {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame: 600,
+            },
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect("作成に失敗しました");
+
+    let layers: Vec<usize> = outcome.created.iter().map(|item| item.layer).collect();
+    assert_eq!(layers, vec![1, 2], "別レイヤーへ作られた分が漏れています");
 }
 
 #[test]
