@@ -298,16 +298,19 @@ fn run_request_loop(
         // 期限は operation の実行に対する制約であり、要求自体の妥当性検証
         // （version・instance・operation）を通した後に評価する。妥当性の誤りは
         // 再試行しても解消しないため、再試行可能な `timeout` より先に返す。
+        //
+        // 上限は分類した operation から 1 か所で引く。族ごとに引き直すと、
+        // 予算区分を足したときに一部の族だけが古い上限のまま残る。
+        let execution_deadline = resolve_request_deadline(
+            Instant::now(),
+            Utc::now().timestamp_millis(),
+            execution_timeout(operation),
+            request.deadline_unix_ms,
+        );
+
         match operation {
             Operation::Ping => {
-                // 生存確認は状態を読むだけで、実行に費やす時間を持たない。
-                // 期限は応答の送信にそのまま充てる。
-                let deadline = match resolve_request_deadline(
-                    Instant::now(),
-                    Utc::now().timestamp_millis(),
-                    WRITE_TIMEOUT,
-                    request.deadline_unix_ms,
-                ) {
+                let deadline = match execution_deadline {
                     RequestDeadline::Within(deadline) => deadline,
                     RequestDeadline::Exceeded => {
                         send_error(
@@ -327,24 +330,18 @@ fn run_request_loop(
                 send_response(stream, &response, deadline)?;
             }
             Operation::Read(operation) => {
-                let read_deadline = resolve_request_deadline(
-                    Instant::now(),
-                    Utc::now().timestamp_millis(),
-                    execution_timeout(KnownOperation::Read(operation)),
-                    request.deadline_unix_ms,
-                );
                 let outcome = execute_read(
                     read_adapter,
                     &lifecycle.state(),
                     operation,
                     &request.params,
-                    read_deadline,
+                    execution_deadline,
                 );
 
                 let read_response = resolve_read_response(
                     Instant::now(),
                     Utc::now().timestamp_millis(),
-                    read_deadline,
+                    execution_deadline,
                     request.deadline_unix_ms,
                     outcome,
                 );
@@ -374,18 +371,12 @@ fn run_request_loop(
                 send_response(stream, &response, read_response.deadline)?;
             }
             Operation::Edit(operation) => {
-                let edit_deadline = resolve_request_deadline(
-                    Instant::now(),
-                    Utc::now().timestamp_millis(),
-                    execution_timeout(KnownOperation::Edit(operation)),
-                    request.deadline_unix_ms,
-                );
                 let outcome = execute_edit(
                     edit_adapter,
                     &lifecycle.state(),
                     operation,
                     &request.params,
-                    edit_deadline,
+                    execution_deadline,
                 );
 
                 if let Err(error) = &outcome {
@@ -404,18 +395,12 @@ fn run_request_loop(
                 send_response(stream, &response, deadline)?;
             }
             Operation::Render(operation) => {
-                let render_deadline = resolve_request_deadline(
-                    Instant::now(),
-                    Utc::now().timestamp_millis(),
-                    execution_timeout(KnownOperation::Render(operation)),
-                    request.deadline_unix_ms,
-                );
                 let outcome = execute_render(
                     render_adapter,
                     &lifecycle.state(),
                     operation,
                     &request.params,
-                    render_deadline,
+                    execution_deadline,
                 );
 
                 if let Err(error) = &outcome {
@@ -495,16 +480,27 @@ fn classify_operation(name: &str) -> Result<Operation, ErrorObject> {
     }
 }
 
-/// operation の実行に許す上限を、要求予算の区分から引く。
+/// operation の実行に許す上限を引く。
 ///
-/// 区分の判定そのものは [`KnownOperation::budget_kind`] に委ねる。ここで
-/// operation 名や族から直接引くと、要求元が使う予算の区分と plugin 側の上限が
-/// 別々の一覧で決まり、片方だけを変えても気付けない。
+/// 生存確認だけは実行に費やす時間を持たない。状態を読むだけで完結するため、
+/// 期限をそのまま応答の送信へ充てる。
 ///
-/// **`_` を使わない網羅 `match` で書く。** 区分を足すと腕が足りずコンパイルが
-/// 落ちるため、上限を決めないまま新しい区分が既定へ落ちることがない。
-fn execution_timeout(operation: KnownOperation) -> Duration {
-    match operation.budget_kind() {
+/// 残りは要求予算の区分から引き、区分の判定そのものは
+/// [`KnownOperation::budget_kind`] に委ねる。ここで operation 名や族から直接
+/// 引くと、要求元が使う予算の区分と plugin 側の上限が別々の一覧で決まり、
+/// 片方だけを変えても気付けない。
+///
+/// **どちらの `match` も `_` を使わない網羅 `match` で書く。** operation の族
+/// も予算の区分も、足すと腕が足りずコンパイルが落ちる。上限を決めないまま
+/// 新しい operation が既定へ落ちることがない。
+fn execution_timeout(operation: Operation) -> Duration {
+    let known = match operation {
+        Operation::Ping => return WRITE_TIMEOUT,
+        Operation::Read(operation) => KnownOperation::Read(operation),
+        Operation::Edit(operation) => KnownOperation::Edit(operation),
+        Operation::Render(operation) => KnownOperation::Render(operation),
+    };
+    match known.budget_kind() {
         RequestBudgetKind::Read => READ_TIMEOUT,
         RequestBudgetKind::Edit => EDIT_TIMEOUT,
         RequestBudgetKind::Batch => BATCH_TIMEOUT,
@@ -2178,6 +2174,31 @@ mod tests {
     }
 
     #[test]
+    fn every_operation_draws_the_execution_budget_of_its_kind() {
+        // 上限を引く経路は要求処理に 1 つしかない。ここが operation ごとに
+        // 意図どおりの値を返すことが、全 operation の期限判定の根拠になる。
+        assert_eq!(execution_timeout(Operation::Ping), WRITE_TIMEOUT);
+
+        for operation in ReadOperation::ALL {
+            assert_eq!(
+                execution_timeout(Operation::Read(operation)),
+                READ_TIMEOUT,
+                "{} が読み取りの上限から外れました",
+                operation.as_str()
+            );
+        }
+
+        for operation in aviutl2_mcp_core::RenderOperation::ALL {
+            assert_eq!(
+                execution_timeout(Operation::Render(operation)),
+                RENDER_TIMEOUT,
+                "{} がレンダリングの上限から外れました",
+                operation.as_str()
+            );
+        }
+    }
+
+    #[test]
     fn admit_request_accepts_only_serviceable_states() {
         for state in [InstanceState::Ready, InstanceState::Busy] {
             assert_eq!(admit_request(&state), Ok(()), "{state} が拒否されました");
@@ -3062,7 +3083,7 @@ mod edit_tests {
         // 一括適用の費用は変更の件数だけでは決まらない。単一の編集と同じ上限に
         // 落ちると、事前解決相だけで尽きる要求が実行前の期限超過になる。
         assert_eq!(
-            execution_timeout(KnownOperation::Edit(EditOperation::ApplyBatch)),
+            execution_timeout(Operation::Edit(EditOperation::ApplyBatch)),
             BATCH_TIMEOUT
         );
         assert_ne!(BATCH_TIMEOUT, EDIT_TIMEOUT);
@@ -3073,7 +3094,7 @@ mod edit_tests {
                 continue;
             }
             assert_eq!(
-                execution_timeout(KnownOperation::Edit(operation)),
+                execution_timeout(Operation::Edit(operation)),
                 EDIT_TIMEOUT,
                 "{} が編集の上限から外れました",
                 operation.as_str()
@@ -3701,7 +3722,7 @@ mod render_tests {
     #[test]
     fn a_render_is_given_its_own_execution_budget() {
         assert_eq!(
-            execution_timeout(KnownOperation::Render(RenderOperation::RenderFrame)),
+            execution_timeout(Operation::Render(RenderOperation::RenderFrame)),
             RENDER_TIMEOUT
         );
         // 最も短い予算へ落ちると、投入した瞬間に予算が尽きる。
