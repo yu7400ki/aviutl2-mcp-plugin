@@ -584,10 +584,7 @@ fn rejected_edit_tool_calls_take_the_same_path() {
     let registry_dir = temp_registry_dir();
     std::fs::create_dir_all(&registry_dir).expect("registry を作れる");
     let instance_id = InstanceId::new_v4().to_string();
-    let expected = json!({
-        "project_epoch": "78be92d1-c8c9-44c6-ae52-387548971468",
-        "project_revision": 42,
-    });
+    let epoch = "78be92d1-c8c9-44c6-ae52-387548971468";
 
     let mut requests = initialize_requests();
     // 未知フィールド。
@@ -600,22 +597,21 @@ fn rejected_edit_tool_calls_take_the_same_path() {
             "arguments": {
                 "instance_id": instance_id,
                 "selector": {},
-                "expected": expected,
                 "future": 1,
             },
         },
     }));
-    // 必須の前提条件が無い。
+    // 前提の epoch を持たない作成。セレクターを持たない要求では必須である。
     requests.push(json!({
         "jsonrpc": "2.0",
         "id": 3,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_move_object",
+            "name": "aviutl2_create_object",
             "arguments": {
                 "instance_id": instance_id,
-                "selector": {},
-                "destination": { "layer": 1, "frame": 0 },
+                "source": { "type": "object_alias", "alias": "[vo]" },
+                "placement": { "scene_id": 0, "layer": 1, "frame": 0 },
             },
         },
     }));
@@ -629,7 +625,7 @@ fn rejected_edit_tool_calls_take_the_same_path() {
             "arguments": {
                 "instance_id": instance_id,
                 "expected_scene_id": 0,
-                "expected": expected,
+                "expected_project_epoch": epoch,
             },
         },
     }));
@@ -644,7 +640,7 @@ fn rejected_edit_tool_calls_take_the_same_path() {
                 "instance_id": instance_id,
                 "source": { "type": "object_alias", "alias": "[vo]" },
                 "placement": { "scene_id": 0, "layer": SECRET_ARGUMENT, "frame": 0 },
-                "expected": expected,
+                "expected_project_epoch": epoch,
             },
         },
     }));
@@ -1285,10 +1281,6 @@ fn edit_tool_call_and_resource_read_survive_overlapping() {
                         "name": null,
                         "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
                         "fingerprint_algorithm": "sha256-raw-v1",
-                    },
-                    "expected": {
-                        "project_epoch": "78be92d1-c8c9-44c6-ae52-387548971468",
-                        "project_revision": 42,
                     },
                 },
             },

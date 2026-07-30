@@ -51,8 +51,8 @@ pub use descriptor::{
 };
 pub use edit::{
     AddEffectParams, CreateObjectParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
-    Destination, EditInputError, EditOutcome, Expected, FocusChange, MoveObjectParams,
-    ObjectSource, Placement, RangeChange, SelectionField, SelectionState, SetEffectStateParams,
+    Destination, EditInputError, EditOutcome, FocusChange, MoveObjectParams, ObjectSource,
+    Placement, RangeChange, SelectionField, SelectionState, SetEffectStateParams,
     SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
 };
 pub use edit_info::{Cursor, DisplayRange, EditInfo, Extent, FrameRange, SceneInfo, SceneRef};

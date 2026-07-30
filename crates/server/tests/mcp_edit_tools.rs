@@ -9,9 +9,9 @@ use aviutl2_mcp_core::{
 };
 use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, CreateObjectInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
-    DestinationInput, EffectSelectorInput, ExpectedInput, FocusChangeInput, ItemValueInput,
-    MoveObjectInput, ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectStateInput,
-    SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
+    DestinationInput, EffectSelectorInput, FocusChangeInput, ItemValueInput, MoveObjectInput,
+    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectStateInput, SetObjectItemInput,
+    SetObjectNameInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::ObjectSelectorInput;
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
@@ -266,17 +266,6 @@ fn effect_selector_input() -> EffectSelectorInput {
     }
 }
 
-fn expected_input() -> ExpectedInput {
-    ExpectedInput {
-        project_epoch: EPOCH.to_string(),
-        project_revision: EXPECTED_REVISION,
-    }
-}
-
-fn expected_json() -> Value {
-    json!({ "project_epoch": EPOCH, "project_revision": EXPECTED_REVISION })
-}
-
 fn selector_json() -> Value {
     serde_json::to_value(sample_summary().selector).expect("直列化できる")
 }
@@ -302,7 +291,7 @@ async fn create_object_tool_sends_create_object_operation() {
                 layer: 1,
                 frame: 0,
             },
-            expected: expected_input(),
+            expected_project_epoch: EPOCH.to_string(),
         }))
         .await;
 
@@ -316,7 +305,7 @@ async fn create_object_tool_sends_create_object_operation() {
         json!({
             "source": { "type": "object_alias", "alias": SECRET_ALIAS },
             "placement": { "scene_id": SCENE_ID, "layer": 1, "frame": 0 },
-            "expected": expected_json(),
+            "expected_project_epoch": EPOCH,
         }),
     );
     let text = text_of(&result);
@@ -338,7 +327,6 @@ async fn move_object_tool_sends_move_object_operation() {
                 layer: 5,
                 frame: 300,
             },
-            expected: expected_input(),
         }))
         .await;
 
@@ -352,7 +340,6 @@ async fn move_object_tool_sends_move_object_operation() {
         json!({
             "selector": selector_json(),
             "destination": { "layer": 5, "frame": 300 },
-            "expected": expected_json(),
         }),
     );
 }
@@ -368,7 +355,6 @@ async fn set_object_name_tool_sends_the_new_name() {
             instance_id: harness.instance_id(),
             selector: selector_input(),
             name: Some("新しい名前".to_string()),
-            expected: expected_input(),
         }))
         .await;
 
@@ -380,7 +366,6 @@ async fn set_object_name_tool_sends_the_new_name() {
         json!({
             "selector": selector_json(),
             "name": "新しい名前",
-            "expected": expected_json(),
         }),
     );
 }
@@ -395,7 +380,6 @@ async fn set_object_name_tool_sends_null_to_restore_the_default_name() {
             instance_id: harness.instance_id(),
             selector: selector_input(),
             name: None,
-            expected: expected_input(),
         }))
         .await;
 
@@ -417,7 +401,6 @@ async fn set_object_item_tool_sends_the_effect_selector_and_value() {
             value: ItemValueInput::Text {
                 value: SECRET_ITEM_VALUE.to_string(),
             },
-            expected: expected_input(),
         }))
         .await;
 
@@ -432,7 +415,6 @@ async fn set_object_item_tool_sends_the_effect_selector_and_value() {
             "selector": effect_selector_json(),
             "item": "テキスト",
             "value": { "type": "text", "value": SECRET_ITEM_VALUE },
-            "expected": expected_json(),
         }),
     );
 }
@@ -454,7 +436,6 @@ async fn set_object_item_tool_forwards_the_choice_value_verbatim() {
                 value: "通常".to_string(),
                 index: Some(3),
             },
-            expected: expected_input(),
         }))
         .await;
 
@@ -475,7 +456,6 @@ async fn add_effect_tool_sends_the_effect_name() {
             instance_id: harness.instance_id(),
             object: selector_input(),
             effect_name: "ぼかし".to_string(),
-            expected: expected_input(),
         }))
         .await;
 
@@ -489,7 +469,6 @@ async fn add_effect_tool_sends_the_effect_name() {
         json!({
             "object": selector_json(),
             "effect_name": "ぼかし",
-            "expected": expected_json(),
         }),
     );
 }
@@ -506,7 +485,6 @@ async fn set_effect_state_tool_sends_only_the_requested_changes() {
             selector: effect_selector_input(),
             enabled: Some(false),
             locked: None,
-            expected: expected_input(),
         }))
         .await;
 
@@ -519,7 +497,6 @@ async fn set_effect_state_tool_sends_only_the_requested_changes() {
             "selector": effect_selector_json(),
             "enabled": false,
             "locked": null,
-            "expected": expected_json(),
         }),
     );
 }
@@ -534,7 +511,6 @@ async fn delete_effect_tool_sends_delete_effect_operation() {
         .aviutl2_delete_effect(Parameters(DeleteEffectInput {
             instance_id: harness.instance_id(),
             selector: effect_selector_input(),
-            expected: expected_input(),
         }))
         .await;
 
@@ -547,7 +523,6 @@ async fn delete_effect_tool_sends_delete_effect_operation() {
         request.params,
         json!({
             "selector": effect_selector_json(),
-            "expected": expected_json(),
         }),
     );
 }
@@ -562,7 +537,6 @@ async fn delete_object_tool_sends_delete_object_operation() {
         .aviutl2_delete_object(Parameters(DeleteObjectInput {
             instance_id: harness.instance_id(),
             selector: selector_input(),
-            expected: expected_input(),
         }))
         .await;
 
@@ -575,7 +549,6 @@ async fn delete_object_tool_sends_delete_object_operation() {
         request.params,
         json!({
             "selector": selector_json(),
-            "expected": expected_json(),
         }),
     );
     let text = text_of(&result);
@@ -601,7 +574,7 @@ async fn set_selection_tool_sends_the_scene_guard_and_changes() {
             focus: Some(FocusChangeInput::Set {
                 object: selector_input(),
             }),
-            expected: expected_input(),
+            expected_project_epoch: EPOCH.to_string(),
         }))
         .await;
 
@@ -617,7 +590,7 @@ async fn set_selection_tool_sends_the_scene_guard_and_changes() {
             "cursor": { "layer": 2, "frame": 120 },
             "selected_range": { "type": "clear" },
             "focus": { "type": "set", "object": selector_json() },
-            "expected": expected_json(),
+            "expected_project_epoch": EPOCH,
         }),
     );
     let text = text_of(&result);
@@ -669,7 +642,6 @@ async fn edit_requests_carry_a_deadline_derived_from_the_edit_budget() {
             instance_id: harness.instance_id(),
             selector: selector_input(),
             destination: DestinationInput { layer: 5, frame: 0 },
-            expected: expected_input(),
         }))
         .await;
     let after = Utc::now().timestamp_millis() as u64;
@@ -717,7 +689,7 @@ async fn invalid_edit_input_is_rejected_before_any_ipc() {
                 layer: 1,
                 frame: 0,
             },
-            expected: expected_input(),
+            expected_project_epoch: EPOCH.to_string(),
         }))
         .await;
 
@@ -741,7 +713,7 @@ async fn malformed_instance_id_never_reaches_an_edit_operation() {
             cursor: Some(CursorPositionInput { layer: 0, frame: 0 }),
             selected_range: None,
             focus: None,
-            expected: expected_input(),
+            expected_project_epoch: EPOCH.to_string(),
         }))
         .await;
 
@@ -773,7 +745,6 @@ async fn precondition_failure_reaches_the_tool_result_with_the_current_revision(
             instance_id: harness.instance_id(),
             selector: selector_input(),
             destination: DestinationInput { layer: 5, frame: 0 },
-            expected: expected_input(),
         }))
         .await;
 
@@ -804,7 +775,6 @@ async fn timeout_from_the_instance_keeps_the_change_applied_hint() {
             instance_id: harness.instance_id(),
             object: selector_input(),
             effect_name: "ぼかし".to_string(),
-            expected: expected_input(),
         }))
         .await;
 
@@ -849,7 +819,7 @@ async fn a_timeout_built_by_the_server_reports_an_unknown_change() {
                 layer: 1,
                 frame: 0,
             },
-            expected: expected_input(),
+            expected_project_epoch: EPOCH.to_string(),
         }))
         .await;
 
@@ -929,7 +899,7 @@ async fn secrets_in_edit_failures_never_reach_the_tool_result() {
                 layer: 1,
                 frame: 0,
             },
-            expected: expected_input(),
+            expected_project_epoch: EPOCH.to_string(),
         }))
         .await;
 
@@ -973,7 +943,6 @@ async fn edit_text_never_echoes_the_alias_path_or_item_value_that_was_sent() {
             value: ItemValueInput::File {
                 path: SECRET_PATH.to_string(),
             },
-            expected: expected_input(),
         }))
         .await;
 
@@ -1001,7 +970,6 @@ async fn edit_tool_reports_an_unsupported_operation_from_the_instance() {
             selector: effect_selector_input(),
             enabled: Some(true),
             locked: None,
-            expected: expected_input(),
         }))
         .await;
 
@@ -1018,7 +986,6 @@ async fn unknown_instance_id_never_reaches_an_edit_operation() {
         .aviutl2_delete_object(Parameters(DeleteObjectInput {
             instance_id: InstanceId::new_v4().to_string(),
             selector: selector_input(),
-            expected: expected_input(),
         }))
         .await;
 

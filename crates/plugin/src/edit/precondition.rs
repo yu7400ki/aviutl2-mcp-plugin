@@ -3,7 +3,7 @@
 //! 判定は次の順に行う。ひとつでも失敗したら SDK の変更 API を呼ばずに区間を
 //! 抜ける。
 //!
-//! 1. 前提の `project_epoch` が現在の epoch と一致するか
+//! 1. 要求が前提の `project_epoch` を運ぶ場合、現在の epoch と一致するか
 //! 2. セレクターの `project_epoch` が同じく一致するか
 //! 3. シーンの guard が区間へ入った時点の現在シーンと一致するか
 //! 4. セレクターの fingerprint 算出方式が現在生成できる方式と一致するか
@@ -17,10 +17,21 @@
 //! permit を作れるのは [`Boundary::revalidate`] だけ、[`Boundary`] を作れるのは
 //! [`verify_boundary`] だけ、という連鎖で順序を型が強制する。
 //!
+//! # 判定 1 はセレクターを持たない要求だけに掛かる
+//!
+//! セレクターを運ぶ要求では、判定 2 が通れば「同じプロジェクトの、その時点の
+//! 対象」が定まる。同じ `observed.epoch` に対する判定 1 が独立に落とせるのは、
+//! セレクターが現在のもので fingerprint も一致するのに、前提だけが古い応答から
+//! 写された要求——**正しい編集**だけである。同じ意味の値を 1 要求の 2 か所へ
+//! 置くと、不整合な組を作れてしまう。
+//!
+//! したがって前提の epoch は、対象を指すセレクターを持たない要求
+//! （オブジェクトの作成と、`focus` を省略し得る選択状態の変更）だけが運ぶ。
+//!
 //! # `project_revision` を照合しない
 //!
-//! 要求は [`Expected::project_revision`] を必須で受け取るが、**現在の revision と
-//! 比べない。** 照合を書き忘れているのではなく、意図して行っていない。
+//! 要求は revision を運ばない。照合を書き忘れているのではなく、照合しないと
+//! 決めたうえで要求からも外している。
 //!
 //! revision はプロジェクト全体で 1 つのカウンタであり、どのオブジェクトを
 //! 編集しても、UI 上の操作でも進む。利用者が UI で編集しながら要求を送る使い方
@@ -46,7 +57,7 @@ use crate::project::ProjectState;
 use crate::read::ReadError;
 use crate::read::adapter::ensure_fingerprint_algorithm;
 use crate::read::host::HostEditInfo;
-use aviutl2_mcp_core::{Expected, ObjectSelector};
+use aviutl2_mcp_core::ObjectSelector;
 use std::cell::Cell;
 use std::marker::PhantomData;
 
@@ -233,25 +244,32 @@ pub struct MutationTicket<'a> {
 
 /// 判定 1〜4 を要求全体へ適用する。
 ///
+/// `expected_project_epoch` は、対象を指すセレクターを持たない要求だけが運ぶ
+/// 前提の epoch である。セレクターを持つ要求は `None` を渡す。判定 2 が同じ値を
+/// 照合するため、両方を課すと不整合な組を作れる余地だけが増える。
+///
 /// `guards` には要求が持つ全てのシーン guard を、`selectors` には要求が含む
 /// 全ての [`ObjectSelector`] をネストも含めて渡す。判定を段ごとに全対象へ
 /// 適用するので、ある selector だけが照合を免れることがない。
 pub(crate) fn verify_boundary(
     project: &ProjectState,
     entry_info: &HostEditInfo,
-    expected: &Expected,
+    expected_project_epoch: Option<&str>,
     kind: EditKind,
     guards: &[i32],
     selectors: &[&ObjectSelector],
 ) -> Result<Boundary, EditError> {
     let observed = ProjectBoundary::load(project);
 
-    // 1. 前提の epoch。
-    if expected.project_epoch != observed.epoch {
+    // 1. 前提の epoch。セレクターを持たない要求では、これがプロジェクト境界を
+    //    照合する唯一の材料である。
+    if let Some(expected) = expected_project_epoch
+        && expected != observed.epoch
+    {
         return Err(ReadError::EpochMismatch.into());
     }
-    // 2. セレクターの epoch。前提とセレクターは別々の応答に由来し得るため、
-    //    両方を照合して初めて「同じプロジェクトの、その時点の対象」が定まる。
+    // 2. セレクターの epoch。同じプロジェクトの、その時点の対象であることを
+    //    ここで定める。
     for selector in selectors {
         if selector.project_epoch != observed.epoch {
             return Err(ReadError::EpochMismatch.into());
@@ -331,13 +349,6 @@ mod tests {
         .selector
     }
 
-    fn expected(epoch: &str, revision: u64) -> Expected {
-        Expected {
-            project_epoch: epoch.to_string(),
-            project_revision: revision,
-        }
-    }
-
     fn state() -> Arc<ProjectState> {
         Arc::new(ProjectState::new())
     }
@@ -349,7 +360,7 @@ mod tests {
         let boundary = verify_boundary(
             &project,
             &edit_info(0),
-            &expected(&epoch, 0),
+            None,
             EditKind::Content,
             &[0],
             &[&selector(&epoch)],
@@ -361,93 +372,86 @@ mod tests {
     }
 
     #[test]
-    fn expected_epoch_is_checked_before_the_selector() {
+    fn a_selector_carrying_the_current_epoch_needs_no_expected_epoch() {
+        // セレクターを運ぶ要求は前提の epoch を持たない。判定 2 が同じ値を
+        // 照合するため、境界は selector だけで定まる。
         let project = state();
-        let epoch = project.epoch();
-        // 前提とセレクターの双方が食い違う要求で、先に落ちる段を確かめる。
-        let error = verify_boundary(
-            &project,
-            &edit_info(0),
-            &expected("別のプロジェクト", 0),
-            EditKind::Content,
-            &[0],
-            &[&selector("さらに別のプロジェクト")],
-        )
-        .expect_err("epoch 不一致が受理されました");
-        assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
-        assert_eq!(error.details()["mismatch"], json!("project_epoch"));
-        let _ = epoch;
-    }
-
-    #[test]
-    fn either_epoch_alone_is_enough_to_reject() {
-        let project = state();
-        let epoch = project.epoch();
-        for (expected_epoch, selector_epoch) in [
-            ("別のプロジェクト".to_string(), epoch.clone()),
-            (epoch.clone(), "別のプロジェクト".to_string()),
-        ] {
-            let error = verify_boundary(
-                &project,
-                &edit_info(0),
-                &expected(&expected_epoch, 0),
-                EditKind::Content,
-                &[0],
-                &[&selector(&selector_epoch)],
-            )
-            .expect_err("片方だけの epoch 不一致が受理されました");
-            assert_eq!(error.details()["mismatch"], json!("project_epoch"));
-        }
-    }
-
-    #[test]
-    fn a_stale_revision_does_not_reject_a_content_edit() {
-        let project = state();
-        project.on_object_updated();
         let epoch = project.epoch();
         verify_boundary(
             &project,
             &edit_info(0),
-            &expected(&epoch, 0),
+            None,
             EditKind::Content,
-            &[0],
+            &[],
             &[&selector(&epoch)],
         )
-        .expect("古い revision の前提が拒否されました");
+        .expect("前提の epoch を持たない要求が拒否されました");
     }
 
     #[test]
-    fn a_stale_revision_does_not_hide_the_scene_check() {
-        // revision を見なくなっても、後続の判定はそのまま働く。
+    fn a_stale_selector_epoch_is_rejected_without_an_expected_epoch() {
+        let project = state();
+        let error = verify_boundary(
+            &project,
+            &edit_info(0),
+            None,
+            EditKind::Content,
+            &[],
+            &[&selector("別のプロジェクト")],
+        )
+        .expect_err("別プロジェクトのセレクターが受理されました");
+        assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+        assert_eq!(error.details()["mismatch"], json!("project_epoch"));
+    }
+
+    #[test]
+    fn a_request_without_a_selector_is_checked_against_the_expected_epoch() {
+        // 作成と、フォーカスを省略した選択状態の変更は対象を指すセレクターを
+        // 持たない。前提の epoch だけがプロジェクト境界を照合する材料である。
+        let project = state();
+        for kind in [EditKind::Content, EditKind::Selection] {
+            let error = verify_boundary(
+                &project,
+                &edit_info(0),
+                Some("別のプロジェクト"),
+                kind,
+                &[0],
+                &[],
+            )
+            .expect_err("別プロジェクトの前提が受理されました");
+            assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+            assert_eq!(error.details()["mismatch"], json!("project_epoch"));
+        }
+
+        let epoch = project.epoch();
+        verify_boundary(
+            &project,
+            &edit_info(0),
+            Some(&epoch),
+            EditKind::Content,
+            &[0],
+            &[],
+        )
+        .expect("現在の epoch を名乗る要求が拒否されました");
+    }
+
+    #[test]
+    fn an_advanced_revision_does_not_hide_the_scene_check() {
+        // revision は要求に現れないが、他所の変更で進む。後続の判定はそのまま
+        // 働く。
         let project = state();
         project.on_object_updated();
         let epoch = project.epoch();
         let error = verify_boundary(
             &project,
             &edit_info(7),
-            &expected(&epoch, 0),
+            None,
             EditKind::Content,
             &[0],
             &[&selector(&epoch)],
         )
         .expect_err("シーンの食い違いが受理されました");
         assert_eq!(error.details()["mismatch"], json!("scene_id"));
-    }
-
-    #[test]
-    fn a_stale_revision_does_not_reject_a_selection_edit() {
-        let project = state();
-        project.on_object_updated();
-        let epoch = project.epoch();
-        verify_boundary(
-            &project,
-            &edit_info(0),
-            &expected(&epoch, 0),
-            EditKind::Selection,
-            &[0],
-            &[],
-        )
-        .expect("選択状態の変更が古い revision で拒否されました");
     }
 
     #[test]
@@ -462,7 +466,7 @@ mod tests {
         let error = verify_boundary(
             &project,
             &edit_info(0),
-            &expected(&epoch, 0),
+            None,
             EditKind::Content,
             &[],
             &[&stale],
@@ -484,7 +488,7 @@ mod tests {
         let error = verify_boundary(
             &project,
             &edit_info(0),
-            &expected(&epoch, 0),
+            None,
             EditKind::Content,
             &[],
             &[&stale],
@@ -496,16 +500,8 @@ mod tests {
     #[test]
     fn revalidation_rejects_a_project_boundary_change() {
         let project = state();
-        let epoch = project.epoch();
-        let boundary = verify_boundary(
-            &project,
-            &edit_info(0),
-            &expected(&epoch, 0),
-            EditKind::Content,
-            &[],
-            &[],
-        )
-        .unwrap();
+        let boundary =
+            verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
         project.on_project_load(Some(r"C:\projects\other.aup2"));
         let error = boundary
             .revalidate(&project)
@@ -520,16 +516,8 @@ mod tests {
         // 再検証が見るのはプロジェクト境界だけである。解決中に他所の変更が
         // 入っても、対象の内容が変わっていなければ変更を止めない。
         let project = state();
-        let epoch = project.epoch();
-        let boundary = verify_boundary(
-            &project,
-            &edit_info(0),
-            &expected(&epoch, 0),
-            EditKind::Content,
-            &[],
-            &[],
-        )
-        .unwrap();
+        let boundary =
+            verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
         project.on_object_updated();
         boundary
             .revalidate(&project)
@@ -541,16 +529,8 @@ mod tests {
         // 許可はそれぞれ独立に発行を数える。2 つ取れると、同じ要求の中で
         // revision が 2 度進み、応答が返す値がどちらのものか定まらない。
         let project = state();
-        let epoch = project.epoch();
-        let boundary = verify_boundary(
-            &project,
-            &edit_info(0),
-            &expected(&epoch, 0),
-            EditKind::Content,
-            &[],
-            &[],
-        )
-        .unwrap();
+        let boundary =
+            verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
         boundary.revalidate(&project).expect("1 度目の許可");
         let Err(error) = boundary.revalidate(&project) else {
             panic!("同じ要求で 2 つ目の許可が取れました");
@@ -567,16 +547,8 @@ mod tests {
     #[test]
     fn the_first_issue_advances_the_revision_once() {
         let project = state();
-        let epoch = project.epoch();
-        let boundary = verify_boundary(
-            &project,
-            &edit_info(0),
-            &expected(&epoch, 0),
-            EditKind::Content,
-            &[],
-            &[],
-        )
-        .unwrap();
+        let boundary =
+            verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
         let permit = boundary.revalidate(&project).unwrap();
         assert_eq!(permit.project_revision(&boundary), 0);
 
@@ -591,16 +563,8 @@ mod tests {
     #[test]
     fn selection_edits_do_not_advance_the_revision() {
         let project = state();
-        let epoch = project.epoch();
-        let boundary = verify_boundary(
-            &project,
-            &edit_info(0),
-            &expected(&epoch, 0),
-            EditKind::Selection,
-            &[],
-            &[],
-        )
-        .unwrap();
+        let boundary =
+            verify_boundary(&project, &edit_info(0), None, EditKind::Selection, &[], &[]).unwrap();
         let permit = boundary.revalidate(&project).unwrap();
         let _ = permit.issue(&boundary, |_ticket| Ok(()));
         assert_eq!(project.revision(), 0);
@@ -610,16 +574,8 @@ mod tests {
     #[test]
     fn failures_before_the_first_issue_are_not_attributed_to_a_mutation() {
         let project = state();
-        let epoch = project.epoch();
-        let boundary = verify_boundary(
-            &project,
-            &edit_info(0),
-            &expected(&epoch, 0),
-            EditKind::Content,
-            &[],
-            &[],
-        )
-        .unwrap();
+        let boundary =
+            verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
         let permit = boundary.revalidate(&project).unwrap();
         let error = permit.attribute(&boundary, EditError::Panicked);
         assert!(error.details().get("mutation_issued").is_none());

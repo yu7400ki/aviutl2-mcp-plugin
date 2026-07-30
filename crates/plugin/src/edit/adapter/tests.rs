@@ -13,8 +13,8 @@ use crate::edit::fake::{
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
 use aviutl2_mcp_core::{
-    CursorPosition, Destination, EditOperation, EffectSelector, ErrorCode, Expected, Fingerprint,
-    ItemValue, ObjectSelector, PageRequest, Placement,
+    CursorPosition, Destination, EditOperation, EffectSelector, ErrorCode, Fingerprint, ItemValue,
+    ObjectSelector, PageRequest, Placement,
 };
 use serde_json::json;
 use std::sync::mpsc::channel;
@@ -49,12 +49,12 @@ impl Harness {
         }
     }
 
-    /// 現在のプロジェクト世代を前提として組み立てる。
-    fn expected(&self) -> Expected {
-        Expected {
-            project_epoch: self.project.epoch(),
-            project_revision: self.project.revision(),
-        }
+    /// 現在のプロジェクト epoch を返す。
+    ///
+    /// セレクターを持たない要求（作成・選択状態の変更）だけがこれを前提として
+    /// 運ぶ。
+    fn epoch(&self) -> String {
+        self.project.epoch()
     }
 
     /// 仕込んだ失敗を止めた状態で読み取る。
@@ -168,7 +168,6 @@ fn move_params(harness: &Harness) -> MoveObjectParams {
             layer: 1,
             frame: 500,
         },
-        expected: harness.expected(),
     }
 }
 
@@ -248,12 +247,11 @@ fn one_request_enters_the_edit_section_exactly_once() {
 // ------------------------------------------------------------ 検証順序 1〜8
 
 #[test]
-fn the_expected_epoch_is_checked_first() {
+fn the_selector_epoch_is_checked_first() {
     let harness = Harness::new();
     let mut params = move_params(&harness);
-    // 前提・セレクター・シーン・fingerprint の全てを壊しても、最初の段で落ちる。
-    params.expected.project_epoch = "別のプロジェクト".to_string();
-    params.selector.project_epoch = "さらに別のプロジェクト".to_string();
+    // セレクター・シーン・fingerprint の全てを壊しても、最初の段で落ちる。
+    params.selector.project_epoch = "別のプロジェクト".to_string();
     params.selector.scene_id = 9;
     params.selector.fingerprint = tamper(&params.selector.fingerprint);
 
@@ -264,23 +262,7 @@ fn the_expected_epoch_is_checked_first() {
 }
 
 #[test]
-fn the_selector_epoch_is_checked_even_with_a_current_revision() {
-    let harness = Harness::new();
-    harness.project.on_object_updated();
-    let mut params = move_params(&harness);
-    params.expected.project_revision = harness.project.revision();
-    params.selector.project_epoch = "別のプロジェクト".to_string();
-
-    let error = harness
-        .edit
-        .move_object(&params)
-        .expect_err("セレクターの epoch 不一致");
-    assert_eq!(error.details()["mismatch"], json!("project_epoch"));
-    assert!(!harness.host.mutated());
-}
-
-#[test]
-fn a_stale_revision_is_accepted_when_the_fingerprint_matches() {
+fn an_advanced_revision_is_accepted_when_the_fingerprint_matches() {
     let harness = Harness::new();
     let params = move_params(&harness);
     // 対象は変えずに revision だけを進める。fingerprint は一致したままである。
@@ -289,7 +271,7 @@ fn a_stale_revision_is_accepted_when_the_fingerprint_matches() {
     harness
         .edit
         .move_object(&params)
-        .expect("古い revision の前提が拒否されました");
+        .expect("revision が進んだだけで編集が拒否されました");
     assert!(harness.host.mutated());
 }
 
@@ -382,7 +364,6 @@ fn an_ambiguous_selector_reports_the_candidate_count() {
             layer: 1,
             frame: 500,
         },
-        expected: harness.expected(),
     };
     params.selector.layer = 1;
     params.selector.frame = 100;
@@ -455,7 +436,6 @@ fn the_edit_path_accepts_the_selector_the_read_path_returned() {
         .set_object_name(&SetObjectNameParams {
             selector: detail.summary.selector.clone(),
             name: Some("新しい名前".to_string()),
-            expected: harness.expected(),
         })
         .expect("読み取りが返したセレクターが編集で拒否されました");
 
@@ -480,7 +460,6 @@ fn an_effect_edit_checks_both_the_object_and_the_effect_fingerprint() {
         .edit
         .delete_effect(&DeleteEffectParams {
             selector: object_tampered,
-            expected: harness.expected(),
         })
         .expect_err("オブジェクトの fingerprint 改竄が通りました");
     assert_eq!(error.details()["mismatch"], json!("fingerprint"));
@@ -491,7 +470,6 @@ fn an_effect_edit_checks_both_the_object_and_the_effect_fingerprint() {
         .edit
         .delete_effect(&DeleteEffectParams {
             selector: effect_tampered,
-            expected: harness.expected(),
         })
         .expect_err("effect の fingerprint 改竄が通りました");
     assert_eq!(error.details()["mismatch"], json!("fingerprint"));
@@ -506,10 +484,7 @@ fn a_missing_effect_is_not_found() {
 
     let error = harness
         .edit
-        .delete_effect(&DeleteEffectParams {
-            selector,
-            expected: harness.expected(),
-        })
+        .delete_effect(&DeleteEffectParams { selector })
         .expect_err("存在しない effect が解決されました");
     assert_eq!(error.error_code(), ErrorCode::NotFound);
     assert_eq!(error.details()["effect_name"], json!("ぼかし"));
@@ -526,7 +501,6 @@ fn a_locked_layer_is_rejected() {
         .edit
         .delete_object(&DeleteObjectParams {
             selector: harness.selector(2, 0),
-            expected: harness.expected(),
         })
         .expect_err("ロックされたレイヤーの対象が削除されました");
 
@@ -595,7 +569,7 @@ fn an_occupied_creation_target_is_rejected() {
                 layer: 1,
                 frame: 150,
             },
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect_err("既存の対象へ重ねて作成できました");
 
@@ -617,7 +591,7 @@ fn an_unsupported_media_file_is_rejected_before_the_mutation() {
                 layer: 1,
                 frame: 600,
             },
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect_err("対応しないメディアから作成できました");
 
@@ -634,7 +608,6 @@ fn an_unregistered_effect_name_is_rejected_without_entering_the_section() {
         .add_effect(&AddEffectParams {
             object: harness.selector(1, 100),
             effect_name: "存在しないエフェクト".to_string(),
-            expected: harness.expected(),
         })
         .expect_err("未登録の effect が付与されました");
 
@@ -659,7 +632,7 @@ fn creation_reports_the_placement_the_host_chose() {
                 layer: 1,
                 frame: 600,
             },
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect("作成に失敗しました");
 
@@ -687,7 +660,7 @@ fn creation_reports_every_object_the_alias_produced() {
                 layer: 1,
                 frame: 600,
             },
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect("作成に失敗しました");
 
@@ -713,7 +686,7 @@ fn a_creation_that_produces_nothing_reports_the_mutation() {
                 layer: 1,
                 frame: 600,
             },
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect_err("位置を特定できないのに成功として返りました");
 
@@ -735,7 +708,6 @@ fn a_silently_ignored_effect_state_change_is_not_reported_as_success() {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
             enabled: Some(false),
             locked: None,
-            expected: harness.expected(),
         })
         .expect_err("無言で無視された変更が成功として返りました");
 
@@ -761,7 +733,6 @@ fn locking_an_effect_changes_the_object_fingerprint() {
             selector,
             enabled: None,
             locked: Some(true),
-            expected: harness.expected(),
         })
         .expect("ロックの変更に失敗しました");
 
@@ -796,7 +767,6 @@ fn an_output_effect_is_rejected_before_the_section_when_the_type_is_known() {
             selector: harness.effect_selector(1, 100, "標準描画", 0),
             enabled: Some(false),
             locked: None,
-            expected: harness.expected(),
         })
         .expect_err("出力項目の有効・無効が変更できました");
 
@@ -813,7 +783,6 @@ fn a_silently_ignored_rename_is_not_reported_as_success() {
         .set_object_name(&SetObjectNameParams {
             selector: harness.selector(1, 100),
             name: Some("新しい名前".to_string()),
-            expected: harness.expected(),
         })
         .expect_err("無言で無視された改名が成功として返りました");
 
@@ -828,7 +797,6 @@ fn a_silently_ignored_deletion_is_not_reported_as_success() {
         .edit
         .delete_object(&DeleteObjectParams {
             selector: harness.selector(1, 100),
-            expected: harness.expected(),
         })
         .expect_err("残っている対象が削除済みとして返りました");
 
@@ -843,7 +811,6 @@ fn deletion_confirms_that_the_target_is_gone() {
         .edit
         .delete_object(&DeleteObjectParams {
             selector: harness.selector(1, 100),
-            expected: harness.expected(),
         })
         .expect("削除に失敗しました");
 
@@ -875,7 +842,6 @@ fn edits_that_do_not_need_effects_never_read_them() {
         .set_object_name(&SetObjectNameParams {
             selector,
             name: Some("新しい名前".to_string()),
-            expected: harness.expected(),
         })
         .expect("改名に失敗しました");
 
@@ -901,7 +867,6 @@ fn edits_that_target_an_effect_read_them() {
             selector,
             item: "範囲".to_string(),
             value: ItemValue::Integer { value: 30 },
-            expected: harness.expected(),
         })
         .expect("設定項目の変更に失敗しました");
 
@@ -923,7 +888,6 @@ fn a_normalized_item_value_is_reported_instead_of_being_treated_as_a_failure() {
             value: ItemValue::Integer {
                 value: MAX_ITEM_VALUE + 150,
             },
-            expected: harness.expected(),
         })
         .expect("正規化された値が失敗として扱われました");
 
@@ -951,7 +915,6 @@ fn an_unknown_item_name_is_not_found() {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
             item: "存在しない項目".to_string(),
             value: ItemValue::Integer { value: 1 },
-            expected: harness.expected(),
         })
         .expect_err("存在しない設定項目へ書き込めました");
 
@@ -968,7 +931,6 @@ fn an_added_effect_is_located_by_the_difference_in_the_name_list() {
         .add_effect(&AddEffectParams {
             object: harness.selector(1, 100),
             effect_name: "ぼかし".to_string(),
-            expected: harness.expected(),
         })
         .expect("effect の付与に失敗しました");
 
@@ -1014,7 +976,6 @@ fn issuing_a_mutation_advances_the_revision_once() {
             // 2 つの変更 API を発行しても加算は 1 度きりである。
             enabled: Some(false),
             locked: Some(true),
-            expected: harness.expected(),
         })
         .expect("状態の変更に失敗しました");
 
@@ -1043,7 +1004,7 @@ fn changing_the_selection_does_not_advance_the_revision() {
             cursor: Some(CursorPosition { layer: 1, frame: 5 }),
             selected_range: None,
             focus: None,
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect("選択状態の変更に失敗しました");
 
@@ -1056,9 +1017,9 @@ fn changing_the_selection_does_not_advance_the_revision() {
 }
 
 #[test]
-fn changing_the_selection_ignores_a_stale_revision_but_not_a_stale_epoch() {
+fn changing_the_selection_ignores_an_advanced_revision_but_not_a_stale_epoch() {
     let harness = Harness::new();
-    let expected = harness.expected();
+    let epoch = harness.epoch();
     harness.project.on_object_updated();
 
     harness
@@ -1068,9 +1029,9 @@ fn changing_the_selection_ignores_a_stale_revision_but_not_a_stale_epoch() {
             cursor: Some(CursorPosition { layer: 1, frame: 5 }),
             selected_range: None,
             focus: None,
-            expected: expected.clone(),
+            expected_project_epoch: epoch,
         })
-        .expect("古い revision の前提で選択状態の変更が拒否されました");
+        .expect("revision が進んだだけで選択状態の変更が拒否されました");
 
     let error = harness
         .edit
@@ -1079,10 +1040,7 @@ fn changing_the_selection_ignores_a_stale_revision_but_not_a_stale_epoch() {
             cursor: Some(CursorPosition { layer: 1, frame: 5 }),
             selected_range: None,
             focus: None,
-            expected: Expected {
-                project_epoch: "別のプロジェクト".to_string(),
-                ..expected
-            },
+            expected_project_epoch: "別のプロジェクト".to_string(),
         })
         .expect_err("別プロジェクトの前提が受理されました");
     assert_eq!(error.details()["mismatch"], json!("project_epoch"));
@@ -1105,7 +1063,7 @@ fn the_selection_is_applied_in_a_fixed_order() {
             focus: Some(FocusChange::Set {
                 object: harness.selector(1, 100),
             }),
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect("選択状態の変更に失敗しました");
 
@@ -1156,7 +1114,7 @@ fn a_focus_target_is_resolved_before_it_is_set() {
             cursor: None,
             selected_range: None,
             focus: Some(FocusChange::Set { object: selector }),
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect_err("照合を経ずにフォーカスが設定されました");
 
@@ -1178,7 +1136,7 @@ fn a_scene_guard_protects_the_selection() {
             cursor: Some(CursorPosition { layer: 1, frame: 5 }),
             selected_range: None,
             focus: None,
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect_err("別シーンの前提が受理されました");
 
@@ -1197,7 +1155,6 @@ fn the_returned_selector_supports_the_next_edit_without_a_reread() {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
             item: "範囲".to_string(),
             value: ItemValue::Integer { value: 30 },
-            expected: harness.expected(),
         })
         .expect("1 回目の編集に失敗しました");
 
@@ -1208,10 +1165,6 @@ fn the_returned_selector_supports_the_next_edit_without_a_reread() {
             selector: effect.selector,
             item: "範囲".to_string(),
             value: ItemValue::Integer { value: 40 },
-            expected: Expected {
-                project_epoch: first.project_epoch,
-                project_revision: first.project_revision,
-            },
         })
         .expect("応答が返したセレクターで続けて編集できませんでした");
 }
@@ -1220,7 +1173,6 @@ fn the_returned_selector_supports_the_next_edit_without_a_reread() {
 fn the_previous_selector_is_rejected_on_the_second_edit() {
     let harness = Harness::new();
     let selector = harness.effect_selector(1, 100, "ぼかし", 0);
-    let expected = harness.expected();
 
     harness
         .edit
@@ -1228,7 +1180,6 @@ fn the_previous_selector_is_rejected_on_the_second_edit() {
             selector: selector.clone(),
             item: "範囲".to_string(),
             value: ItemValue::Integer { value: 30 },
-            expected: expected.clone(),
         })
         .expect("1 回目の編集に失敗しました");
 
@@ -1238,7 +1189,6 @@ fn the_previous_selector_is_rejected_on_the_second_edit() {
             selector,
             item: "範囲".to_string(),
             value: ItemValue::Integer { value: 40 },
-            expected,
         })
         .expect_err("古いセレクターでの再送が受理されました");
     assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
@@ -1262,7 +1212,7 @@ fn each_operation_fills_the_outcome_it_is_defined_to_fill() {
                 layer: 1,
                 frame: 600,
             },
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect("create_object");
     assert!(outcome.object.is_some());
@@ -1283,7 +1233,6 @@ fn each_operation_fills_the_outcome_it_is_defined_to_fill() {
         .edit
         .delete_object(&DeleteObjectParams {
             selector: harness.selector(1, 100),
-            expected: harness.expected(),
         })
         .expect("delete_object");
     assert!(outcome.object.is_none());
@@ -1296,7 +1245,6 @@ fn each_operation_fills_the_outcome_it_is_defined_to_fill() {
         .set_object_name(&SetObjectNameParams {
             selector: harness.selector(1, 100),
             name: Some("名前".to_string()),
-            expected: harness.expected(),
         })
         .expect("set_object_name");
     assert!(outcome.object.is_some());
@@ -1310,7 +1258,6 @@ fn each_operation_fills_the_outcome_it_is_defined_to_fill() {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
             item: "範囲".to_string(),
             value: ItemValue::Integer { value: 30 },
-            expected: harness.expected(),
         })
         .expect("set_object_item");
     assert!(outcome.object.is_some());
@@ -1323,7 +1270,6 @@ fn each_operation_fills_the_outcome_it_is_defined_to_fill() {
         .add_effect(&AddEffectParams {
             object: harness.selector(1, 100),
             effect_name: "ぼかし".to_string(),
-            expected: harness.expected(),
         })
         .expect("add_effect");
     assert!(outcome.object.is_some());
@@ -1335,7 +1281,6 @@ fn each_operation_fills_the_outcome_it_is_defined_to_fill() {
         .edit
         .delete_effect(&DeleteEffectParams {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
-            expected: harness.expected(),
         })
         .expect("delete_effect");
     assert!(outcome.object.is_some());
@@ -1352,7 +1297,6 @@ fn each_operation_fills_the_outcome_it_is_defined_to_fill() {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
             enabled: Some(false),
             locked: None,
-            expected: harness.expected(),
         })
         .expect("set_effect_state");
     assert!(outcome.object.is_some());
@@ -1526,7 +1470,6 @@ fn an_added_effect_is_located_even_when_the_host_does_not_append_it() {
         .add_effect(&AddEffectParams {
             object: harness.selector(1, 100),
             effect_name: "ぼかし".to_string(),
-            expected: harness.expected(),
         })
         .expect("effect の付与に失敗しました");
 
@@ -1548,7 +1491,6 @@ fn an_ambiguous_effect_difference_is_reported_instead_of_being_guessed() {
         .add_effect(&AddEffectParams {
             object: harness.selector(1, 100),
             effect_name: "ぼかし".to_string(),
-            expected: harness.expected(),
         })
         .expect_err("位置を特定できないのに selector が返りました");
 
@@ -1601,7 +1543,6 @@ fn every_nested_selector_is_checked_including_the_ones_inside_other_inputs() {
         selector: harness.effect_selector(1, 100, "ぼかし", 0),
         item: "範囲".to_string(),
         value: ItemValue::Integer { value: 10 },
-        expected: harness.expected(),
     };
     item.selector.object.project_epoch = "別のプロジェクト".to_string();
     let error = harness
@@ -1618,7 +1559,6 @@ fn every_nested_selector_is_checked_including_the_ones_inside_other_inputs() {
         .add_effect(&AddEffectParams {
             object,
             effect_name: "ぼかし".to_string(),
-            expected: harness.expected(),
         })
         .expect_err("付与先の epoch 不一致が受理されました");
     assert_eq!(error.details()["mismatch"], json!("project_epoch"));
@@ -1633,7 +1573,7 @@ fn every_nested_selector_is_checked_including_the_ones_inside_other_inputs() {
             cursor: None,
             selected_range: None,
             focus: Some(FocusChange::Set { object: focus }),
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect_err("フォーカス対象の epoch 不一致が受理されました");
     assert_eq!(error.details()["mismatch"], json!("project_epoch"));
@@ -1709,7 +1649,7 @@ fn a_partially_applied_selection_reports_both_lists() {
             cursor: None,
             selected_range: None,
             focus: Some(FocusChange::Set { object: focus }),
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect("適用できた項目を伝える手段が失われました");
 
@@ -1736,7 +1676,7 @@ fn the_same_selection_failure_does_not_change_success_by_what_else_was_requested
             focus: Some(FocusChange::Set {
                 object: focus.clone(),
             }),
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect("フォーカスだけの要求");
 
@@ -1752,7 +1692,7 @@ fn the_same_selection_failure_does_not_change_success_by_what_else_was_requested
             cursor: Some(CursorPosition { layer: 0, frame: 1 }),
             selected_range: None,
             focus: Some(FocusChange::Set { object: focus }),
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect("カーソルを併せた要求");
 
@@ -1770,7 +1710,7 @@ fn every_requested_selection_field_appears_in_exactly_one_list() {
             cursor: Some(CursorPosition { layer: 1, frame: 5 }),
             selected_range: Some(RangeChange::Clear {}),
             focus: Some(FocusChange::Clear {}),
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect("選択状態の変更");
 
@@ -1838,24 +1778,23 @@ fn a_panic_before_any_mutation_is_not_reported_as_a_possible_change() {
 
 /// 内容を変える operation を 1 つ、指す対象を差し替えて実行する。
 ///
-/// 第 3 引数は「この要求はどのプロジェクトのどのシーンの、どの対象を指すか」の
+/// 第 2 引数は「この要求はどのプロジェクトのどのシーンの、どの対象を指すか」の
 /// 表明である。対象を持つ operation はこれをそのまま selector として渡し、対象
 /// を持たない作成は epoch を前提へ、シーンを配置先へ写す。どちらも同じ表明で
 /// あり、食い違わせたときに拒否されることを同じ形で確かめられる。
-type ContentEdit = fn(&Harness, Expected, ObjectSelector) -> Result<EditOutcome, EditError>;
+type ContentEdit = fn(&Harness, ObjectSelector) -> Result<EditOutcome, EditError>;
 
 /// operation を 1 つ実行する手続きを引く。
 ///
 /// **網羅 match で書く。** operation を足すとここがコンパイルエラーになるため、
-/// 古い revision の受理・revision の加算・ロックの拒否を確かめる一連のテスト
-/// から漏れることがない。手書きの一覧にしておくと、足し忘れても全て緑のまま
-/// 通ってしまう。
+/// revision の加算・ロックの拒否・境界の照合を確かめる一連のテストから漏れる
+/// ことがない。手書きの一覧にしておくと、足し忘れても全て緑のまま通ってしまう。
 ///
 /// 選択状態の変更だけは内容を変えないため `None` を返す。含めるかどうかで
 /// revision の扱いが変わるので、その区別もこの 1 か所に置く。
 fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
     Some(match operation {
-        EditOperation::CreateObject => |harness: &Harness, expected: Expected, target| {
+        EditOperation::CreateObject => |harness: &Harness, target: ObjectSelector| {
             let ObjectSelector {
                 project_epoch,
                 scene_id,
@@ -1870,62 +1809,52 @@ fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
                     layer: 1,
                     frame: 600,
                 },
-                expected: Expected {
-                    project_epoch,
-                    ..expected
-                },
+                expected_project_epoch: project_epoch,
             })
         },
-        EditOperation::MoveObject => |harness: &Harness, expected, target| {
+        EditOperation::MoveObject => |harness: &Harness, target| {
             harness.edit.move_object(&MoveObjectParams {
                 selector: target,
                 destination: Destination {
                     layer: 1,
                     frame: 500,
                 },
-                expected,
             })
         },
-        EditOperation::DeleteObject => |harness: &Harness, expected, target| {
-            harness.edit.delete_object(&DeleteObjectParams {
-                selector: target,
-                expected,
-            })
+        EditOperation::DeleteObject => |harness: &Harness, target| {
+            harness
+                .edit
+                .delete_object(&DeleteObjectParams { selector: target })
         },
-        EditOperation::SetObjectName => |harness: &Harness, expected, target| {
+        EditOperation::SetObjectName => |harness: &Harness, target| {
             harness.edit.set_object_name(&SetObjectNameParams {
                 selector: target,
                 name: Some("名前".to_string()),
-                expected,
             })
         },
-        EditOperation::SetObjectItem => |harness: &Harness, expected, target| {
+        EditOperation::SetObjectItem => |harness: &Harness, target| {
             harness.edit.set_object_item(&SetObjectItemParams {
                 selector: harness.effect_selector_of(target, "ぼかし", 0),
                 item: "範囲".to_string(),
                 value: ItemValue::Integer { value: 30 },
-                expected,
             })
         },
-        EditOperation::AddEffect => |harness: &Harness, expected, target| {
+        EditOperation::AddEffect => |harness: &Harness, target| {
             harness.edit.add_effect(&AddEffectParams {
                 object: target,
                 effect_name: "ぼかし".to_string(),
-                expected,
             })
         },
-        EditOperation::DeleteEffect => |harness: &Harness, expected, target| {
+        EditOperation::DeleteEffect => |harness: &Harness, target| {
             harness.edit.delete_effect(&DeleteEffectParams {
                 selector: harness.effect_selector_of(target, "ぼかし", 0),
-                expected,
             })
         },
-        EditOperation::SetEffectState => |harness: &Harness, expected, target| {
+        EditOperation::SetEffectState => |harness: &Harness, target| {
             harness.edit.set_effect_state(&SetEffectStateParams {
                 selector: harness.effect_selector_of(target, "ぼかし", 0),
                 enabled: Some(false),
                 locked: None,
-                expected,
             })
         },
         // 選択状態はプロジェクトの内容ではない。revision を進めない。
@@ -1956,21 +1885,20 @@ fn only_the_selection_change_is_left_out_of_the_content_edits() {
 }
 
 #[test]
-fn every_content_edit_accepts_a_stale_revision() {
+fn every_content_edit_accepts_a_revision_that_advanced() {
     // revision はプロジェクト全体で 1 つのカウンタであり、どの対象を編集しても
-    // UI 上の操作でも進む。照合すると、人が編集しているプロジェクトでは要求を
-    // 組み立てている間に必ず古くなり、訂正して送り直す間にまた進むため収束
-    // しない。対象が変化していないことは fingerprint が、プロジェクトが同じで
-    // あることは epoch が保証する。
+    // UI 上の操作でも進む。読み取りから編集までの間に進んだだけで拒否すると、
+    // 人が編集しているプロジェクトでは収束しない。対象が変化していないことは
+    // fingerprint が、プロジェクトが同じであることは epoch が保証する。
     for (name, run) in content_edits() {
         let harness = Harness::new();
-        let stale = harness.expected();
         let target = harness.selector(1, 100);
         // 対象は変えずに revision だけを進める。fingerprint は一致したままである。
         harness.project.on_object_updated();
 
-        run(&harness, stale, target)
-            .unwrap_or_else(|error| panic!("{name} が古い revision の前提を拒否しました: {error}"));
+        run(&harness, target).unwrap_or_else(|error| {
+            panic!("{name} が revision の進みを理由に拒否しました: {error}")
+        });
         assert!(
             harness.host.mutated(),
             "{name} が変更 API を呼びませんでした"
@@ -1982,9 +1910,8 @@ fn every_content_edit_accepts_a_stale_revision() {
 fn every_content_edit_advances_the_revision_once() {
     for (name, run) in content_edits() {
         let harness = Harness::new();
-        let expected = harness.expected();
         let target = harness.selector(1, 100);
-        let outcome = run(&harness, expected, target).unwrap_or_else(|error| {
+        let outcome = run(&harness, target).unwrap_or_else(|error| {
             panic!("{name} が失敗しました: {error}");
         });
 
@@ -2010,12 +1937,11 @@ fn every_content_edit_refuses_a_locked_layer() {
     // 利用者が明示的にロックした対象への書き換えは削除と同格の破壊である。
     for (name, run) in content_edits() {
         let harness = Harness::new();
-        let expected = harness.expected();
         let target = harness.selector(1, 100);
         // 対象と作成先を含むレイヤーをロックする。
         harness.host.lock_layer(1, true);
 
-        let Err(error) = run(&harness, expected, target) else {
+        let Err(error) = run(&harness, target) else {
             panic!("{name} がロックされたレイヤーを書き換えました");
         };
         assert_eq!(
@@ -2036,11 +1962,10 @@ fn every_content_edit_refuses_a_target_from_another_project() {
     // 対象が名乗る epoch の照合だけが、別インスタンス向けに作った要求を止める。
     for (name, run) in content_edits() {
         let harness = Harness::new();
-        let expected = harness.expected();
         let mut target = harness.selector(1, 100);
         target.project_epoch = "別のプロジェクト".to_string();
 
-        let Err(error) = run(&harness, expected, target) else {
+        let Err(error) = run(&harness, target) else {
             panic!("{name} が別プロジェクトの対象を受理しました");
         };
         assert_eq!(
@@ -2064,11 +1989,10 @@ fn every_content_edit_refuses_a_target_from_another_scene() {
     // シーンの同じ位置へ適用される。
     for (name, run) in content_edits() {
         let harness = Harness::new();
-        let expected = harness.expected();
         let mut target = harness.selector(1, 100);
         target.scene_id = SCENE_ID + 7;
 
-        let Err(error) = run(&harness, expected, target) else {
+        let Err(error) = run(&harness, target) else {
             panic!("{name} が別シーンの対象を受理しました");
         };
         assert_eq!(
@@ -2098,7 +2022,7 @@ fn creation_checks_the_scene_guard_of_its_placement() {
                 layer: 1,
                 frame: 600,
             },
-            expected: harness.expected(),
+            expected_project_epoch: harness.epoch(),
         })
         .expect_err("別シーン向けの作成が受理されました");
 
@@ -2146,7 +2070,6 @@ fn an_audio_only_effect_refuses_a_lock_change_before_the_section() {
             selector: harness.effect_selector(1, 100, "音声フェード", 0),
             enabled: None,
             locked: Some(true),
-            expected: harness.expected(),
         })
         .expect_err("音声 effect のロックが変更できました");
 
@@ -2167,7 +2090,6 @@ fn an_effect_that_handles_video_as_well_is_not_refused_by_the_flags_alone() {
             selector: harness.effect_selector(1, 100, "動画ファイル", 0),
             enabled: None,
             locked: Some(true),
-            expected: harness.expected(),
         })
         .expect("画像も扱う effect のロック変更が拒否されました");
 }

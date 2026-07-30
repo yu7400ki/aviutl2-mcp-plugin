@@ -1816,7 +1816,7 @@ mod tests {
         serde_json::json!({
             "expected_scene_id": 0,
             "cursor": { "layer": 0, "frame": 0 },
-            "expected": { "project_epoch": epoch, "project_revision": 0 },
+            "expected_project_epoch": epoch,
         })
     }
 

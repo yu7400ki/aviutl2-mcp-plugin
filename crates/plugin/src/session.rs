@@ -2451,7 +2451,7 @@ mod edit_tests {
         json!({
             "expected_scene_id": SCENE_ID,
             "cursor": { "layer": 0, "frame": 0 },
-            "expected": { "project_epoch": EPOCH, "project_revision": 0 },
+            "expected_project_epoch": EPOCH,
         })
     }
 
@@ -2494,7 +2494,7 @@ mod edit_tests {
             EditOperation::SetSelection,
             &json!({
                 "expected_scene_id": SCENE_ID,
-                "expected": { "project_epoch": EPOCH, "project_revision": 0 },
+                "expected_project_epoch": EPOCH,
             }),
             RequestDeadline::Within(Instant::now() + Duration::from_secs(1)),
         )
@@ -2524,7 +2524,7 @@ mod edit_tests {
                     json!({
                         "source": { "type": "media_file", "path": path },
                         "placement": { "scene_id": SCENE_ID, "layer": 1, "frame": 0 },
-                        "expected": { "project_epoch": EPOCH, "project_revision": 0 },
+                        "expected_project_epoch": EPOCH,
                     }),
                 ),
                 (
@@ -2533,7 +2533,6 @@ mod edit_tests {
                         "selector": fake_effect_selector(),
                         "item": "ファイル",
                         "value": { "type": "file", "path": path },
-                        "expected": { "project_epoch": EPOCH, "project_revision": 0 },
                     }),
                 ),
             ] {

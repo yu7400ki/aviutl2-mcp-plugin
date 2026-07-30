@@ -355,7 +355,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                &params.expected,
+                Some(params.expected_project_epoch.as_str()),
                 EditKind::Content,
                 &[params.placement.scene_id],
                 &[],
@@ -425,7 +425,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                &params.expected,
+                None,
                 EditKind::Content,
                 &[],
                 &[&params.selector],
@@ -459,7 +459,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                &params.expected,
+                None,
                 EditKind::Content,
                 &[],
                 &[&params.selector],
@@ -499,7 +499,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                &params.expected,
+                None,
                 EditKind::Content,
                 &[],
                 &[&params.selector],
@@ -542,7 +542,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                &params.expected,
+                None,
                 EditKind::Content,
                 &[],
                 &[&params.selector.object],
@@ -587,7 +587,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                &params.expected,
+                None,
                 EditKind::Content,
                 &[],
                 &[&params.object],
@@ -641,7 +641,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                &params.expected,
+                None,
                 EditKind::Content,
                 &[],
                 &[&params.selector.object],
@@ -676,7 +676,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                &params.expected,
+                None,
                 EditKind::Content,
                 &[],
                 &[&params.selector.object],
@@ -734,7 +734,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                &params.expected,
+                Some(params.expected_project_epoch.as_str()),
                 EditKind::Selection,
                 &[params.expected_scene_id],
                 focus_selector.as_slice(),

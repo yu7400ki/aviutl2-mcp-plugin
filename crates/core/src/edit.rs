@@ -5,6 +5,13 @@
 //! 往復型であり、未知フィールドを拒否しない（応答へ optional field が増えた
 //! ときに往復が壊れるため）。
 //!
+//! プロジェクト境界の照合は、対象を指す [`ObjectSelector`] が運ぶ
+//! `project_epoch` で行う。同じ意味の値を 1 要求の 2 か所へ置くと不整合な組を
+//! 作れてしまうため、selector を持つ operation は境界の照合用に epoch を別途
+//! 受け取らない。selector を持たない [`CreateObjectParams`]（対象がまだ無い）と
+//! [`SetSelectionParams`]（`focus` を省略できる）だけが
+//! `expected_project_epoch` を持つ。
+//!
 //! 応答は読み取りの DTO（[`ObjectSummary`] / [`EffectInfo`] / [`Cursor`] /
 //! [`FrameRange`]）を再利用する。編集専用の対称型を作ると、クライアントが
 //! 読み取りと編集の結果を同じ経路で扱えなくなる。
@@ -22,30 +29,6 @@ use crate::validation::{
     validate_path,
 };
 use serde::{Deserialize, Serialize};
-
-/// 編集の前提条件。
-///
-/// 対象の同一性は selector が持つ fingerprint で検証するため、本型は
-/// プロジェクトの世代だけを表す。同じ意味の値を 1 要求の 2 個所へ置くと、
-/// 不整合な組を作れてしまう。作成系（対象がまだ無い）と既存対象系で同一
-/// 構造であり、型を分けない。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Expected {
-    /// 応答が返したプロジェクトの epoch。
-    ///
-    /// 現在の epoch と照合し、食い違えば編集を拒否する。
-    pub project_epoch: String,
-    /// 応答が返したプロジェクトの revision。
-    ///
-    /// **現在は現在値と照合しない。** 応答が返した値をそのまま渡してよく、
-    /// 古くなっていても編集は拒否されない。revision はプロジェクト全体で
-    /// 1 つのカウンタであり、どの対象を編集しても UI 上の操作でも進むため、
-    /// 人が編集しているプロジェクトでは要求を組み立てている間にほぼ確実に
-    /// ずれる。対象が変化したことは fingerprint が、プロジェクトが変わった
-    /// ことは epoch が、それぞれ独立に捕まえる。
-    pub project_revision: u64,
-}
 
 /// 作成の配置先。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,8 +182,11 @@ pub struct CreateObjectParams {
     pub source: ObjectSource,
     /// 配置先。
     pub placement: Placement,
-    /// 前提条件。
-    pub expected: Expected,
+    /// 応答が返した `project_epoch`。
+    ///
+    /// 作成は対象を指すセレクターを持たないため、プロジェクト境界を照合する
+    /// 唯一の材料である。
+    pub expected_project_epoch: String,
 }
 
 impl CreateObjectParams {
@@ -219,8 +205,6 @@ pub struct MoveObjectParams {
     pub selector: ObjectSelector,
     /// 移動先。
     pub destination: Destination,
-    /// 前提条件。
-    pub expected: Expected,
 }
 
 impl MoveObjectParams {
@@ -237,8 +221,6 @@ impl MoveObjectParams {
 pub struct DeleteObjectParams {
     /// 対象オブジェクト。
     pub selector: ObjectSelector,
-    /// 前提条件。
-    pub expected: Expected,
 }
 
 impl DeleteObjectParams {
@@ -260,8 +242,6 @@ pub struct SetObjectNameParams {
     /// 新しい名前。`null` と省略はどちらも標準名へ戻すことを意味する。
     #[serde(default)]
     pub name: Option<String>,
-    /// 前提条件。
-    pub expected: Expected,
 }
 
 impl SetObjectNameParams {
@@ -291,8 +271,6 @@ pub struct SetObjectItemParams {
     pub item: String,
     /// 設定する値。
     pub value: ItemValue,
-    /// 前提条件。
-    pub expected: Expected,
 }
 
 impl SetObjectItemParams {
@@ -319,8 +297,6 @@ pub struct AddEffectParams {
     pub object: ObjectSelector,
     /// 付与する effect 名。
     pub effect_name: String,
-    /// 前提条件。
-    pub expected: Expected,
 }
 
 impl AddEffectParams {
@@ -340,8 +316,6 @@ impl AddEffectParams {
 pub struct DeleteEffectParams {
     /// 対象 effect。
     pub selector: EffectSelector,
-    /// 前提条件。
-    pub expected: Expected,
 }
 
 impl DeleteEffectParams {
@@ -366,8 +340,6 @@ pub struct SetEffectStateParams {
     /// ロック状態。省略時は変更しない。
     #[serde(default)]
     pub locked: Option<bool>,
-    /// 前提条件。
-    pub expected: Expected,
 }
 
 impl SetEffectStateParams {
@@ -404,8 +376,11 @@ pub struct SetSelectionParams {
     /// フォーカス対象。省略時は変更しない。
     #[serde(default)]
     pub focus: Option<FocusChange>,
-    /// 前提条件。
-    pub expected: Expected,
+    /// 応答が返した `project_epoch`。
+    ///
+    /// `focus` を省略した要求はセレクターを 1 つも持たないため、プロジェクト
+    /// 境界を照合する材料が他に無い。
+    pub expected_project_epoch: String,
 }
 
 impl SetSelectionParams {
@@ -793,13 +768,6 @@ mod tests {
         sample_effect_info().selector
     }
 
-    fn sample_expected() -> Expected {
-        Expected {
-            project_epoch: EPOCH.to_string(),
-            project_revision: 42,
-        }
-    }
-
     fn sample_create() -> CreateObjectParams {
         CreateObjectParams {
             source: ObjectSource::MediaFile {
@@ -810,7 +778,7 @@ mod tests {
                 layer: 2,
                 frame: 120,
             },
-            expected: sample_expected(),
+            expected_project_epoch: EPOCH.to_string(),
         }
     }
 
@@ -821,7 +789,6 @@ mod tests {
                 layer: 3,
                 frame: 240,
             },
-            expected: sample_expected(),
         }
     }
 
@@ -832,7 +799,6 @@ mod tests {
             value: ItemValue::Number {
                 value: FiniteF64::try_new(12.5).unwrap(),
             },
-            expected: sample_expected(),
         }
     }
 
@@ -847,7 +813,7 @@ mod tests {
             focus: Some(FocusChange::Set {
                 object: sample_object_selector(),
             }),
-            expected: sample_expected(),
+            expected_project_epoch: EPOCH.to_string(),
         }
     }
 
@@ -893,33 +859,27 @@ mod tests {
         assert_roundtrip(sample_move());
         assert_roundtrip(DeleteObjectParams {
             selector: sample_object_selector(),
-            expected: sample_expected(),
         });
         assert_roundtrip(SetObjectNameParams {
             selector: sample_object_selector(),
             name: Some("立ち絵".to_string()),
-            expected: sample_expected(),
         });
         assert_roundtrip(SetObjectNameParams {
             selector: sample_object_selector(),
             name: None,
-            expected: sample_expected(),
         });
         assert_roundtrip(sample_set_object_item());
         assert_roundtrip(AddEffectParams {
             object: sample_object_selector(),
             effect_name: "ぼかし".to_string(),
-            expected: sample_expected(),
         });
         assert_roundtrip(DeleteEffectParams {
             selector: sample_effect_selector(),
-            expected: sample_expected(),
         });
         assert_roundtrip(SetEffectStateParams {
             selector: sample_effect_selector(),
             enabled: Some(false),
             locked: None,
-            expected: sample_expected(),
         });
         assert_roundtrip(sample_set_selection());
         assert_roundtrip(SetSelectionParams {
@@ -947,7 +907,6 @@ mod tests {
             DeleteObjectParams,
             DeleteObjectParams {
                 selector: sample_object_selector(),
-                expected: sample_expected(),
             }
         );
         assert_rejects_unknown!(
@@ -955,7 +914,6 @@ mod tests {
             SetObjectNameParams {
                 selector: sample_object_selector(),
                 name: None,
-                expected: sample_expected(),
             }
         );
         assert_rejects_unknown!(SetObjectItemParams, sample_set_object_item());
@@ -964,14 +922,12 @@ mod tests {
             AddEffectParams {
                 object: sample_object_selector(),
                 effect_name: "ぼかし".to_string(),
-                expected: sample_expected(),
             }
         );
         assert_rejects_unknown!(
             DeleteEffectParams,
             DeleteEffectParams {
                 selector: sample_effect_selector(),
-                expected: sample_expected(),
             }
         );
         assert_rejects_unknown!(
@@ -980,11 +936,9 @@ mod tests {
                 selector: sample_effect_selector(),
                 enabled: Some(true),
                 locked: Some(false),
-                expected: sample_expected(),
             }
         );
         assert_rejects_unknown!(SetSelectionParams, sample_set_selection());
-        assert_rejects_unknown!(Expected, sample_expected());
         assert_rejects_unknown!(
             Placement,
             Placement {
@@ -1013,21 +967,21 @@ mod tests {
 
     #[test]
     fn params_reject_missing_required_fields() {
-        for key in ["source", "placement", "expected"] {
+        for key in ["source", "placement", "expected_project_epoch"] {
             assert!(
                 serde_json::from_value::<CreateObjectParams>(without_field(&sample_create(), key))
                     .is_err(),
                 "{key} の欠落が受理されました"
             );
         }
-        for key in ["selector", "destination", "expected"] {
+        for key in ["selector", "destination"] {
             assert!(
                 serde_json::from_value::<MoveObjectParams>(without_field(&sample_move(), key))
                     .is_err(),
                 "{key} の欠落が受理されました"
             );
         }
-        for key in ["selector", "item", "value", "expected"] {
+        for key in ["selector", "item", "value"] {
             assert!(
                 serde_json::from_value::<SetObjectItemParams>(without_field(
                     &sample_set_object_item(),
@@ -1037,19 +991,13 @@ mod tests {
                 "{key} の欠落が受理されました"
             );
         }
-        for key in ["expected_scene_id", "expected"] {
+        for key in ["expected_scene_id", "expected_project_epoch"] {
             assert!(
                 serde_json::from_value::<SetSelectionParams>(without_field(
                     &sample_set_selection(),
                     key
                 ))
                 .is_err(),
-                "{key} の欠落が受理されました"
-            );
-        }
-        for key in ["project_epoch", "project_revision"] {
-            assert!(
-                serde_json::from_value::<Expected>(without_field(&sample_expected(), key)).is_err(),
                 "{key} の欠落が受理されました"
             );
         }
@@ -1060,7 +1008,6 @@ mod tests {
         let params: SetEffectStateParams = serde_json::from_value(json!({
             "selector": serde_json::to_value(sample_effect_selector()).unwrap(),
             "enabled": true,
-            "expected": serde_json::to_value(sample_expected()).unwrap(),
         }))
         .unwrap();
         assert_eq!(params.enabled, Some(true));
@@ -1069,13 +1016,11 @@ mod tests {
         // 省略と null の明示はどちらも標準名へ戻すことを意味する。
         let omitted: SetObjectNameParams = serde_json::from_value(json!({
             "selector": serde_json::to_value(sample_object_selector()).unwrap(),
-            "expected": serde_json::to_value(sample_expected()).unwrap(),
         }))
         .unwrap();
         let explicit: SetObjectNameParams = serde_json::from_value(json!({
             "selector": serde_json::to_value(sample_object_selector()).unwrap(),
             "name": Value::Null,
-            "expected": serde_json::to_value(sample_expected()).unwrap(),
         }))
         .unwrap();
         assert_eq!(omitted, explicit);
@@ -1269,7 +1214,6 @@ mod tests {
             selector: sample_effect_selector(),
             enabled: None,
             locked: None,
-            expected: sample_expected(),
         };
         let error = params.validate().unwrap_err();
         assert_eq!(
@@ -1290,7 +1234,6 @@ mod tests {
                     selector: sample_effect_selector(),
                     enabled,
                     locked,
-                    expected: sample_expected(),
                 }
                 .validate(),
                 Ok(())
@@ -1305,7 +1248,7 @@ mod tests {
             cursor: None,
             selected_range: None,
             focus: None,
-            expected: sample_expected(),
+            expected_project_epoch: EPOCH.to_string(),
         };
         let error = params.validate().unwrap_err();
         assert_eq!(
@@ -1497,7 +1440,6 @@ mod tests {
             SetObjectNameParams {
                 selector: sample_object_selector(),
                 name: Some(name.clone()),
-                expected: sample_expected(),
             }
             .validate(),
             Err(EditInputError::Text {
@@ -1509,7 +1451,6 @@ mod tests {
             AddEffectParams {
                 object: sample_object_selector(),
                 effect_name: name.clone(),
-                expected: sample_expected(),
             }
             .validate(),
             Err(EditInputError::Text {
@@ -1534,7 +1475,6 @@ mod tests {
             SetObjectNameParams {
                 selector: sample_object_selector(),
                 name: Some(name),
-                expected: sample_expected(),
             }
             .validate(),
             Ok(())
@@ -1757,7 +1697,6 @@ mod tests {
                 layer: 1,
                 frame: 10,
             },
-            expected: sample_expected(),
         }
         .validate()
         .expect_err("範囲外のレイヤー番号が受理されました");
@@ -1765,12 +1704,9 @@ mod tests {
 
         let mut selector = sample_object_selector();
         selector.frame = out_of_range;
-        let error = DeleteObjectParams {
-            selector,
-            expected: sample_expected(),
-        }
-        .validate()
-        .expect_err("範囲外の開始フレーム番号が受理されました");
+        let error = DeleteObjectParams { selector }
+            .validate()
+            .expect_err("範囲外の開始フレーム番号が受理されました");
         assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
     }
 
@@ -1788,32 +1724,27 @@ mod tests {
             SetObjectNameParams {
                 selector: object.clone(),
                 name: None,
-                expected: sample_expected(),
             }
             .validate(),
             SetObjectItemParams {
                 selector: effect.clone(),
                 item: "範囲".to_string(),
                 value: ItemValue::Integer { value: 1 },
-                expected: sample_expected(),
             }
             .validate(),
             AddEffectParams {
                 object: object.clone(),
                 effect_name: "ぼかし".to_string(),
-                expected: sample_expected(),
             }
             .validate(),
             DeleteEffectParams {
                 selector: effect.clone(),
-                expected: sample_expected(),
             }
             .validate(),
             SetEffectStateParams {
                 selector: effect,
                 enabled: Some(true),
                 locked: None,
-                expected: sample_expected(),
             }
             .validate(),
             SetSelectionParams {
@@ -1821,7 +1752,7 @@ mod tests {
                 cursor: None,
                 selected_range: None,
                 focus: Some(FocusChange::Set { object }),
-                expected: sample_expected(),
+                expected_project_epoch: EPOCH.to_string(),
             }
             .validate(),
         ];

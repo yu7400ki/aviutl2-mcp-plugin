@@ -59,9 +59,9 @@ use aviutl2_mcp_server::api::ListInstancesResponse;
 use aviutl2_mcp_server::discovery::default_registry_dir;
 use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, CreateObjectInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
-    DestinationInput, EffectSelectorInput, ExpectedInput, FocusChangeInput, ItemValueInput,
-    MoveObjectInput, ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectStateInput,
-    SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
+    DestinationInput, EffectSelectorInput, FocusChangeInput, ItemValueInput, MoveObjectInput,
+    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectStateInput, SetObjectItemInput,
+    SetObjectNameInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::{
     AvailableEffectsPageInput, GetObjectInput, InstanceInput, ListAvailableEffectsInput,
@@ -657,7 +657,7 @@ impl Harness {
         instance: &str,
         source: ObjectSourceInput,
         placement: PlacementInput,
-        expected: ExpectedInput,
+        expected_project_epoch: String,
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
@@ -667,7 +667,7 @@ impl Harness {
                         instance_id: instance.to_string(),
                         source,
                         placement,
-                        expected,
+                        expected_project_epoch,
                     })),
             );
         self.decode(result)
@@ -678,7 +678,6 @@ impl Harness {
         instance: &str,
         selector: &ObjectSelector,
         destination: DestinationInput,
-        expected: ExpectedInput,
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
@@ -686,7 +685,6 @@ impl Harness {
                 instance_id: instance.to_string(),
                 selector: object_selector_input(selector),
                 destination,
-                expected,
             })));
         self.decode(result)
     }
@@ -696,7 +694,6 @@ impl Harness {
         instance: &str,
         selector: &ObjectSelector,
         name: Option<String>,
-        expected: ExpectedInput,
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
@@ -706,7 +703,6 @@ impl Harness {
                         instance_id: instance.to_string(),
                         selector: object_selector_input(selector),
                         name,
-                        expected,
                     })),
             );
         self.decode(result)
@@ -718,7 +714,6 @@ impl Harness {
         selector: &EffectSelector,
         item: &str,
         value: &ItemValue,
-        expected: ExpectedInput,
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
@@ -729,7 +724,6 @@ impl Harness {
                         selector: effect_selector_input(selector),
                         item: item.to_string(),
                         value: item_value_input(value),
-                        expected,
                     })),
             );
         self.decode(result)
@@ -740,7 +734,6 @@ impl Harness {
         instance: &str,
         object: &ObjectSelector,
         effect_name: &str,
-        expected: ExpectedInput,
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
@@ -748,7 +741,6 @@ impl Harness {
                 instance_id: instance.to_string(),
                 object: object_selector_input(object),
                 effect_name: effect_name.to_string(),
-                expected,
             })));
         self.decode(result)
     }
@@ -759,7 +751,6 @@ impl Harness {
         selector: &EffectSelector,
         enabled: Option<bool>,
         locked: Option<bool>,
-        expected: ExpectedInput,
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
@@ -770,7 +761,6 @@ impl Harness {
                         selector: effect_selector_input(selector),
                         enabled,
                         locked,
-                        expected,
                     })),
             );
         self.decode(result)
@@ -780,7 +770,6 @@ impl Harness {
         &self,
         instance: &str,
         selector: &EffectSelector,
-        expected: ExpectedInput,
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
@@ -789,7 +778,6 @@ impl Harness {
                     .aviutl2_delete_effect(Parameters(DeleteEffectInput {
                         instance_id: instance.to_string(),
                         selector: effect_selector_input(selector),
-                        expected,
                     })),
             );
         self.decode(result)
@@ -799,7 +787,6 @@ impl Harness {
         &self,
         instance: &str,
         selector: &ObjectSelector,
-        expected: ExpectedInput,
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
@@ -808,7 +795,6 @@ impl Harness {
                     .aviutl2_delete_object(Parameters(DeleteObjectInput {
                         instance_id: instance.to_string(),
                         selector: object_selector_input(selector),
-                        expected,
                     })),
             );
         self.decode(result)
@@ -819,7 +805,7 @@ impl Harness {
         instance: &str,
         scene_id: i32,
         change: SelectionChange,
-        expected: ExpectedInput,
+        expected_project_epoch: String,
     ) -> Result<SelectionState, ErrorObject> {
         let result = self
             .runtime
@@ -831,7 +817,7 @@ impl Harness {
                         cursor: change.cursor,
                         selected_range: change.selected_range,
                         focus: change.focus,
-                        expected,
+                        expected_project_epoch,
                     })),
             );
         self.decode(result)
@@ -1063,21 +1049,17 @@ fn scene_id(harness: &Harness, instance: &Instance) -> Result<i32, String> {
     Ok(info.scene.id)
 }
 
-/// 直前に読み取った値を前提条件として組み立てる。
-fn precondition(harness: &Harness, instance: &Instance) -> Result<ExpectedInput, String> {
+/// 直前に読み取った epoch を前提条件として得る。
+///
+/// セレクターを持たない要求（作成・選択状態の変更）だけがこれを運ぶ。
+fn precondition(harness: &Harness, instance: &Instance) -> Result<String, String> {
     let info = require(harness.edit_info(&instance.id), "編集情報を取得できません")?;
-    Ok(ExpectedInput {
-        project_epoch: info.project_epoch,
-        project_revision: info.project_revision,
-    })
+    Ok(info.project_epoch)
 }
 
-/// 応答が返した epoch と revision を前提条件として組み立てる。
-fn outcome_precondition(outcome: &EditOutcome) -> ExpectedInput {
-    ExpectedInput {
-        project_epoch: outcome.project_epoch.clone(),
-        project_revision: outcome.project_revision,
-    }
+/// 応答が返した epoch を前提条件として得る。
+fn outcome_precondition(outcome: &EditOutcome) -> String {
+    outcome.project_epoch.clone()
 }
 
 /// 失敗を実行の中断理由へ写す。
@@ -1580,9 +1562,8 @@ fn check_alias_covers_effects(
     let before_fingerprint = object.fingerprint.clone();
     let original = item.value.clone();
 
-    let expected = precondition(harness, instance)?;
     let changed = require(
-        harness.set_object_item(&instance.id, &selector, &item.name, &next, expected),
+        harness.set_object_item(&instance.id, &selector, &item.name, &next),
         "設定値を変更できません",
     )?;
     let after_item = changed
@@ -1604,9 +1585,7 @@ fn check_alias_covers_effects(
         .find(|effect| effect.name == selector.effect_name)
         .map(|effect| effect.selector.clone())
         .ok_or_else(|| "変更した effect を再取得できませんでした".to_string())?;
-    let expected = precondition(harness, instance)?;
-    let toggled =
-        harness.set_effect_state(&instance.id, &effect_selector, Some(false), None, expected);
+    let toggled = harness.set_effect_state(&instance.id, &effect_selector, Some(false), None);
     let (enabled_changed_fingerprint, enabled_changed_alias, toggled_object) = match &toggled {
         Ok(outcome) => {
             let object = outcome.object.clone();
@@ -1645,9 +1624,7 @@ fn check_alias_covers_effects(
         .iter()
         .find(|effect| effect.name == selector.effect_name)
     {
-        let expected = precondition(harness, instance)?;
-        let _ =
-            harness.set_effect_state(&instance.id, &effect.selector, Some(true), None, expected);
+        let _ = harness.set_effect_state(&instance.id, &effect.selector, Some(true), None);
     }
     restore_item(
         harness,
@@ -1698,9 +1675,8 @@ fn restore_item(
     else {
         return Err("戻す対象の effect が見つかりません".to_string());
     };
-    let expected = precondition(harness, instance)?;
     require(
-        harness.set_object_item(&instance.id, &effect.selector, item_name, value, expected),
+        harness.set_object_item(&instance.id, &effect.selector, item_name, value),
         "設定値を元へ戻せません",
     )?;
     Ok(())
@@ -1715,14 +1691,8 @@ fn check_effect_index_shift(
 ) -> CheckResult {
     let original_count = count_effects(harness, instance, context, &context.effect_name)?;
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
-    let expected = precondition(harness, instance)?;
     let first = require(
-        harness.add_effect(
-            &instance.id,
-            &object.selector,
-            &context.effect_name,
-            expected,
-        ),
+        harness.add_effect(&instance.id, &object.selector, &context.effect_name),
         "1 つ目の effect を付与できません",
     )?;
     let object_after_first = first
@@ -1734,7 +1704,6 @@ fn check_effect_index_shift(
             &instance.id,
             &object_after_first.selector,
             &context.effect_name,
-            outcome_precondition(&first),
         )
         .map_err(|error| {
             format!(
@@ -1765,9 +1734,8 @@ fn check_effect_index_shift(
     let front = same_name[0].selector.clone();
 
     // 前方を削除する。以降、繰り上がった側が index 0 を名乗る。
-    let expected = precondition(harness, instance)?;
     let deleted = require(
-        harness.delete_effect(&instance.id, &front, expected),
+        harness.delete_effect(&instance.id, &front),
         "前方の effect を削除できません",
     )?;
     let object_after_delete = deleted
@@ -1783,8 +1751,7 @@ fn check_effect_index_shift(
         effect_index: front.effect_index,
         fingerprint: front.fingerprint.clone(),
     };
-    let expected = precondition(harness, instance)?;
-    let attempt = harness.set_effect_state(&instance.id, &stale, Some(false), None, expected);
+    let attempt = harness.set_effect_state(&instance.id, &stale, Some(false), None);
     let outcome = expect_rejection(
         attempt,
         ErrorCode::PreconditionFailed,
@@ -1813,9 +1780,8 @@ fn check_effect_index_shift(
         else {
             break;
         };
-        let expected = precondition(harness, instance)?;
         require(
-            harness.delete_effect(&instance.id, &effect.selector, expected),
+            harness.delete_effect(&instance.id, &effect.selector),
             "付与した effect を削除できません",
         )?;
     }
@@ -1842,10 +1808,12 @@ fn count_effects(
         .count())
 }
 
-/// 別の対象を編集しても、先に読んだ前提のまま元の対象を編集できることを確かめる。
+/// 別の対象を編集しても、先に読んだセレクターのまま元の対象を編集できることを
+/// 確かめる。
 ///
 /// project_revision はプロジェクト全体で 1 つのカウンタであり、どの対象を編集しても
-/// 進む。前提として照合していれば、対象と無関係な編集が挟まっただけで拒否される。
+/// 進む。要求の前提として照合していれば、対象と無関係な編集が挟まっただけで
+/// 拒否される。
 fn check_unrelated_edit_keeps_the_precondition(
     harness: &Harness,
     report: &mut Report,
@@ -1854,15 +1822,15 @@ fn check_unrelated_edit_keeps_the_precondition(
 ) -> CheckResult {
     let target = resolve_object(harness, instance, context.scene_id, context.target)?;
     let original_name = target.name.clone();
-    // 対象を読んだ時点の前提。以降 revision は進むが、この値を使い続ける。
-    let stale = precondition(harness, instance)?;
+    // 対象を読んだ時点の revision。以降 revision は進むが、要求はこれを運ばない。
+    let observed_revision =
+        require(harness.edit_info(&instance.id), "編集情報を取得できません")?.project_revision;
 
     let detail = require(
         harness.object(&instance.id, &target.selector),
         "別対象の作成元となる alias を取得できません",
     )?;
     let slot = context.free_slots[1];
-    let expected = precondition(harness, instance)?;
     let created = require(
         harness.create_object(
             &instance.id,
@@ -1874,12 +1842,19 @@ fn check_unrelated_edit_keeps_the_precondition(
                 layer: slot.layer as u32,
                 frame: slot.frame as u32,
             },
-            expected,
+            precondition(harness, instance)?,
         ),
         "別対象を作成できません",
     )?;
 
-    let probed = probe_stale_precondition(harness, report, instance, &target, &created, &stale);
+    let probed = probe_stale_precondition(
+        harness,
+        report,
+        instance,
+        &target,
+        &created,
+        observed_revision,
+    );
     let cleaned = cleanup_unrelated_edit(harness, instance, context, slot, &original_name);
     match (probed, cleaned) {
         (Ok(notes), Ok(())) => Ok(notes),
@@ -1888,14 +1863,14 @@ fn check_unrelated_edit_keeps_the_precondition(
     }
 }
 
-/// 別対象を編集したうえで、古くなった前提のまま元の対象を編集する。
+/// 別対象を編集したうえで、読んだ時点のセレクターで元の対象を編集する。
 fn probe_stale_precondition(
     harness: &Harness,
     report: &mut Report,
     instance: &Instance,
     target: &ObjectSummary,
     created: &EditOutcome,
-    stale: &ExpectedInput,
+    observed_revision: u64,
 ) -> CheckResult {
     let other = created
         .object
@@ -1906,41 +1881,36 @@ fn probe_stale_precondition(
             &instance.id,
             &other.selector,
             Some("別対象の編集".to_string()),
-            outcome_precondition(created),
         ),
         "別対象を編集できません",
     )?;
 
-    // 元の対象の内容は変えていないため、selector も読んだ時点のまま使う。
+    // 元の対象の内容は変えていないため、selector は読んだ時点のまま使う。
     // 変わったのは revision だけであり、拒否されればそれを照合していることになる。
     let applied = harness
         .set_object_name(
             &instance.id,
             &target.selector,
             Some("旧前提での編集".to_string()),
-            stale.clone(),
         )
         .map_err(|error| {
             format!(
-                "別対象の編集で古びた前提が拒否されました: {}",
+                "別対象の編集を挟んだ後の編集が拒否されました: {}",
                 describe_error(&error)
             )
         })?;
 
     report.observe(
         "unrelated_edit_invalidates_the_precondition",
-        "別の対象を編集した後、読んだ時点の project_revision のままで編集できるか",
+        "別の対象を編集した後、読んだ時点のセレクターのままで編集できるか",
         format!(
-            "revision は {} から {} へ進んだが、{} を前提にした編集が成功した",
-            stale.project_revision, renamed.project_revision, stale.project_revision
+            "revision は {} から {} へ進んだが、読んだ時点のセレクターでの編集が成功した",
+            observed_revision, renamed.project_revision
         ),
     );
     Ok(vec![format!(
-        "別対象の編集で revision が {} 進んだ後も、revision={} の前提で編集でき、編集後は revision={}",
-        renamed
-            .project_revision
-            .saturating_sub(stale.project_revision),
-        stale.project_revision,
+        "別対象の編集で revision が {} 進んだ後も、読んだ時点のセレクターで編集でき、編集後は revision={}",
+        renamed.project_revision.saturating_sub(observed_revision),
         applied.project_revision
     )])
 }
@@ -1955,22 +1925,15 @@ fn cleanup_unrelated_edit(
 ) -> Result<(), String> {
     let target = resolve_object(harness, instance, context.scene_id, context.target)?;
     if &target.name != original_name {
-        let expected = precondition(harness, instance)?;
         require(
-            harness.set_object_name(
-                &instance.id,
-                &target.selector,
-                original_name.clone(),
-                expected,
-            ),
+            harness.set_object_name(&instance.id, &target.selector, original_name.clone()),
             "元の対象の名前を戻せません",
         )?;
     }
 
     let other = resolve_object(harness, instance, context.scene_id, slot)?;
-    let expected = precondition(harness, instance)?;
     require(
-        harness.delete_object(&instance.id, &other.selector, expected),
+        harness.delete_object(&instance.id, &other.selector),
         "作成した別対象を削除できません",
     )?;
     Ok(())
@@ -1990,8 +1953,6 @@ fn check_layer_lock(
 
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
     let destination = context.free_slots[0];
-
-    let expected = precondition(harness, instance)?;
     let moved = harness.move_object(
         &instance.id,
         &object.selector,
@@ -1999,20 +1960,14 @@ fn check_layer_lock(
             layer: destination.layer as u32,
             frame: destination.frame as u32,
         },
-        expected,
     );
     let move_outcome = expect_layer_locked(moved);
-
-    let expected = precondition(harness, instance)?;
-    let deleted = harness.delete_object(&instance.id, &object.selector, expected);
+    let deleted = harness.delete_object(&instance.id, &object.selector);
     let delete_outcome = expect_layer_locked(deleted);
-
-    let expected = precondition(harness, instance)?;
     let renamed = harness.set_object_name(
         &instance.id,
         &object.selector,
         Some("ロック確認".to_string()),
-        expected,
     );
     let rename_outcome = expect_layer_locked(renamed);
 
@@ -2088,8 +2043,8 @@ fn run_revision_chain(
     let home = context.target;
     let away = context.free_slots[0];
 
-    let expected = precondition(harness, instance)?;
-    let mut previous = expected.project_revision;
+    let mut previous =
+        require(harness.edit_info(&instance.id), "編集情報を取得できません")?.project_revision;
     let mut current = require(
         harness.move_object(
             &instance.id,
@@ -2098,7 +2053,6 @@ fn run_revision_chain(
                 layer: away.layer as u32,
                 frame: away.frame as u32,
             },
-            expected,
         ),
         "対象を移動できません",
     )?;
@@ -2121,7 +2075,6 @@ fn run_revision_chain(
                     layer: destination.layer as u32,
                     frame: destination.frame as u32,
                 },
-                outcome_precondition(&current),
             )
             .map_err(|error| {
                 format!(
@@ -2150,7 +2103,6 @@ fn run_revision_chain(
                     layer: home.layer as u32,
                     frame: home.frame as u32,
                 },
-                outcome_precondition(&current),
             )
             .map_err(|error| format!("元の位置へ戻せません: {}", describe_error(&error)))?;
     }
@@ -2217,7 +2169,6 @@ fn check_create_from_media(
     path: &str,
 ) -> CheckResult {
     let slot = context.free_slots[1];
-    let expected = precondition(harness, instance)?;
     let created = require(
         harness.create_object(
             &instance.id,
@@ -2229,7 +2180,7 @@ fn check_create_from_media(
                 layer: slot.layer as u32,
                 frame: slot.frame as u32,
             },
-            expected,
+            precondition(harness, instance)?,
         ),
         "メディアファイルから作成できません",
     )?;
@@ -2256,11 +2207,7 @@ fn check_create_from_media(
 
     // 後始末: 作成したオブジェクトを削除する。
     harness
-        .delete_object(
-            &instance.id,
-            &object.selector,
-            outcome_precondition(&created),
-        )
+        .delete_object(&instance.id, &object.selector)
         .map_err(|error| {
             format!(
                 "作成したオブジェクトを削除できません: {}",
@@ -2295,8 +2242,6 @@ fn check_edit_chain(
     let alias = detail.alias.clone();
     let slot = context.free_slots[1];
     let moved_to = context.free_slots[2];
-
-    let expected = precondition(harness, instance)?;
     let created = require(
         harness.create_object(
             &instance.id,
@@ -2308,7 +2253,7 @@ fn check_edit_chain(
                 layer: slot.layer as u32,
                 frame: slot.frame as u32,
             },
-            expected,
+            precondition(harness, instance)?,
         ),
         "alias から作成できません",
     )?;
@@ -2319,14 +2264,10 @@ fn check_edit_chain(
         .object
         .clone()
         .ok_or_else(|| "作成の応答が対象を返しませんでした".to_string())?;
-    let mut state = ChainState {
-        epoch: created.project_epoch.clone(),
-        revision: created.project_revision,
-        object,
-    };
+    let mut state = ChainState { object };
 
     // 移動。
-    state = chain_step(&mut steps, "move_object", &state, |state, revision| {
+    state = chain_step(&mut steps, "move_object", &state, |state| {
         harness.move_object(
             &instance.id,
             &state.object.selector,
@@ -2334,45 +2275,27 @@ fn check_edit_chain(
                 layer: moved_to.layer as u32,
                 frame: moved_to.frame as u32,
             },
-            ExpectedInput {
-                project_epoch: state.epoch.clone(),
-                project_revision: revision,
-            },
         )
     })?;
 
     // 名前変更。
-    state = chain_step(&mut steps, "set_object_name", &state, |state, revision| {
+    state = chain_step(&mut steps, "set_object_name", &state, |state| {
         harness.set_object_name(
             &instance.id,
             &state.object.selector,
             Some("受け入れ確認".to_string()),
-            ExpectedInput {
-                project_epoch: state.epoch.clone(),
-                project_revision: revision,
-            },
         )
     })?;
 
     // effect の付与。
-    let added = chain_outcome(&mut steps, "add_effect", &state, |state, revision| {
-        harness.add_effect(
-            &instance.id,
-            &state.object.selector,
-            &context.effect_name,
-            ExpectedInput {
-                project_epoch: state.epoch.clone(),
-                project_revision: revision,
-            },
-        )
+    let added = chain_outcome(&mut steps, "add_effect", &state, |state| {
+        harness.add_effect(&instance.id, &state.object.selector, &context.effect_name)
     })?;
     let effect = added
         .effect
         .clone()
         .ok_or_else(|| "付与の応答が effect を返しませんでした".to_string())?;
     state = ChainState {
-        epoch: added.project_epoch.clone(),
-        revision: added.project_revision,
         object: added
             .object
             .clone()
@@ -2388,17 +2311,8 @@ fn check_edit_chain(
     {
         let next = altered_value(&item.value).expect("書き換えられる値を選んでいる");
         let selector = effect_selector.clone();
-        let changed = chain_outcome(&mut steps, "set_object_item", &state, |state, revision| {
-            harness.set_object_item(
-                &instance.id,
-                &selector,
-                &item.name,
-                &next,
-                ExpectedInput {
-                    project_epoch: state.epoch.clone(),
-                    project_revision: revision,
-                },
-            )
+        let changed = chain_outcome(&mut steps, "set_object_item", &state, |_state| {
+            harness.set_object_item(&instance.id, &selector, &item.name, &next)
         })?;
         effect_selector = changed
             .effect
@@ -2406,8 +2320,6 @@ fn check_edit_chain(
             .ok_or_else(|| "設定値変更の応答が effect を返しませんでした".to_string())?
             .selector;
         state = ChainState {
-            epoch: changed.project_epoch.clone(),
-            revision: changed.project_revision,
             object: changed
                 .object
                 .clone()
@@ -2419,17 +2331,8 @@ fn check_edit_chain(
 
     // 有効状態の変更。
     let selector = effect_selector.clone();
-    let disabled = chain_outcome(&mut steps, "set_effect_state", &state, |state, revision| {
-        harness.set_effect_state(
-            &instance.id,
-            &selector,
-            Some(false),
-            None,
-            ExpectedInput {
-                project_epoch: state.epoch.clone(),
-                project_revision: revision,
-            },
-        )
+    let disabled = chain_outcome(&mut steps, "set_effect_state", &state, |_state| {
+        harness.set_effect_state(&instance.id, &selector, Some(false), None)
     })?;
     let effect_selector = disabled
         .effect
@@ -2437,8 +2340,6 @@ fn check_edit_chain(
         .ok_or_else(|| "有効状態変更の応答が effect を返しませんでした".to_string())?
         .selector;
     state = ChainState {
-        epoch: disabled.project_epoch.clone(),
-        revision: disabled.project_revision,
         object: disabled
             .object
             .clone()
@@ -2447,28 +2348,14 @@ fn check_edit_chain(
 
     // effect の削除。
     let selector = effect_selector.clone();
-    state = chain_step(&mut steps, "delete_effect", &state, |state, revision| {
-        harness.delete_effect(
-            &instance.id,
-            &selector,
-            ExpectedInput {
-                project_epoch: state.epoch.clone(),
-                project_revision: revision,
-            },
-        )
+    state = chain_step(&mut steps, "delete_effect", &state, |_state| {
+        harness.delete_effect(&instance.id, &selector)
     })?;
 
     // オブジェクトの削除。後始末を兼ねる。
     let selector = state.object.selector.clone();
     harness
-        .delete_object(
-            &instance.id,
-            &selector,
-            ExpectedInput {
-                project_epoch: state.epoch.clone(),
-                project_revision: state.revision,
-            },
-        )
+        .delete_object(&instance.id, &selector)
         .map_err(|error| format!("delete_object に失敗しました: {}", describe_error(&error)))?;
     steps.push("delete_object=成功".to_string());
 
@@ -2485,9 +2372,10 @@ fn check_edit_chain(
 }
 
 /// 連続編集で持ち回る状態。
+///
+/// 要求はプロジェクトの世代を運ばないため、持ち回るのは応答が返した対象だけで
+/// ある。
 struct ChainState {
-    epoch: String,
-    revision: u64,
     object: ObjectSummary,
 }
 
@@ -2499,18 +2387,14 @@ fn chain_step<F>(
     call: F,
 ) -> Result<ChainState, String>
 where
-    F: Fn(&ChainState, u64) -> Result<EditOutcome, ErrorObject>,
+    F: Fn(&ChainState) -> Result<EditOutcome, ErrorObject>,
 {
     let outcome = chain_outcome(steps, label, state, call)?;
     let object = outcome
         .object
         .clone()
         .ok_or_else(|| format!("{label} の応答が対象を返しませんでした"))?;
-    Ok(ChainState {
-        epoch: outcome.project_epoch,
-        revision: outcome.project_revision,
-        object,
-    })
+    Ok(ChainState { object })
 }
 
 /// 1 手を実行して応答をそのまま返す。
@@ -2521,9 +2405,9 @@ fn chain_outcome<F>(
     call: F,
 ) -> Result<EditOutcome, String>
 where
-    F: Fn(&ChainState, u64) -> Result<EditOutcome, ErrorObject>,
+    F: Fn(&ChainState) -> Result<EditOutcome, ErrorObject>,
 {
-    let outcome = call(state, state.revision)
+    let outcome = call(state)
         .map_err(|error| format!("{label} に失敗しました: {}", describe_error(&error)))?;
     steps.push(format!("{label}=成功"));
     Ok(outcome)
@@ -2557,7 +2441,7 @@ fn section_undo(
         context,
         "alias からの作成",
         |state| {
-            let expected = state.expected.clone();
+            let expected = state.expected_project_epoch.clone();
             harness.create_object(
                 &instance.id,
                 ObjectSourceInput::ObjectAlias {
@@ -2589,7 +2473,7 @@ fn section_undo(
                     context,
                     "複数オブジェクトの作成",
                     |state| {
-                        let expected = state.expected.clone();
+                        let expected = state.expected_project_epoch.clone();
                         harness.create_object(
                             &instance.id,
                             ObjectSourceInput::ObjectAlias {
@@ -2638,7 +2522,7 @@ fn section_undo(
     }
 
     let outcome = check_undo(harness, instance, context, "対象の削除", |state| {
-        harness.delete_object(&instance.id, &state.object.selector, state.expected.clone())
+        harness.delete_object(&instance.id, &state.object.selector)
     });
     report.record(
         "5.2",
@@ -2649,12 +2533,7 @@ fn section_undo(
     );
 
     let outcome = check_undo(harness, instance, context, "effect の付与", |state| {
-        harness.add_effect(
-            &instance.id,
-            &state.object.selector,
-            &context.effect_name,
-            state.expected.clone(),
-        )
+        harness.add_effect(&instance.id, &state.object.selector, &context.effect_name)
     });
     report.record(
         "5.2",
@@ -2670,7 +2549,7 @@ fn section_undo(
 /// Undo の確認へ渡す、編集の直前に読み取った状態。
 struct UndoInput {
     object: ObjectSummary,
-    expected: ExpectedInput,
+    expected_project_epoch: String,
 }
 
 /// 編集 → 取り消し → 全件比較で、取り消しの範囲を確かめる。
@@ -2687,7 +2566,7 @@ where
     let before = snapshot(harness, instance, context.scene_id)?;
     let input = UndoInput {
         object: resolve_object(harness, instance, context.scene_id, context.target)?,
-        expected: precondition(harness, instance)?,
+        expected_project_epoch: precondition(harness, instance)?,
     };
     require(edit(&input), &format!("{label} を実行できません"))?;
 
@@ -2833,14 +2712,7 @@ fn check_output_item_enable(
     instance: &Instance,
     found: &FoundEffect,
 ) -> CheckResult {
-    let expected = precondition(harness, instance)?;
-    let result = harness.set_effect_state(
-        &instance.id,
-        &found.effect.selector,
-        Some(false),
-        None,
-        expected,
-    );
+    let result = harness.set_effect_state(&instance.id, &found.effect.selector, Some(false), None);
     match result {
         Ok(_) => Err(format!(
             "出力 item「{}」の enabled 変更が成功として返りました",
@@ -2874,13 +2746,11 @@ fn check_output_item_lock(
         .map(|effect| (effect.name.clone(), effect.locked))
         .collect();
 
-    let expected = precondition(harness, instance)?;
     let result = harness.set_effect_state(
         &instance.id,
         &found.effect.selector,
         None,
         Some(!found.effect.locked),
-        expected,
     );
 
     let after_object = resolve_object(
@@ -2977,13 +2847,11 @@ fn check_output_item_lock(
             .iter()
             .find(|effect| effect.name == found.effect.name)
         {
-            let expected = precondition(harness, instance)?;
             let _ = harness.set_effect_state(
                 &instance.id,
                 &effect.selector,
                 None,
                 Some(found.effect.locked),
-                expected,
             );
         }
     }
@@ -2997,13 +2865,11 @@ fn check_audio_effect_lock(
     instance: &Instance,
     found: &FoundEffect,
 ) -> CheckResult {
-    let expected = precondition(harness, instance)?;
     let result = harness.set_effect_state(
         &instance.id,
         &found.effect.selector,
         None,
         Some(!found.effect.locked),
-        expected,
     );
     match result {
         Ok(_) => Err(format!(
@@ -3093,9 +2959,8 @@ fn section_item_round_trip(
 
     // 後始末: 追加した effect ごと対象を削除する。
     let object = resolve_object(harness, instance, context.scene_id, scratch)?;
-    let expected = precondition(harness, instance)?;
     require(
-        harness.delete_object(&instance.id, &object.selector, expected),
+        harness.delete_object(&instance.id, &object.selector),
         "確認用オブジェクトを削除できません",
     )?;
 
@@ -3154,8 +3019,7 @@ fn round_trip_one(
         ));
     };
 
-    let expected = precondition(harness, instance)?;
-    let written = harness.set_object_item(&instance.id, &selector, item_name, &value, expected);
+    let written = harness.set_object_item(&instance.id, &selector, item_name, &value);
     if let Err(error) = written {
         return Ok(RoundTrip::Rejected(
             error.code.clone(),
@@ -3230,7 +3094,6 @@ fn create_scratch_object(
         "作成元の alias を取得できません",
     )?;
     let slot = context.free_slots[1];
-    let expected = precondition(harness, instance)?;
     let created = require(
         harness.create_object(
             &instance.id,
@@ -3242,7 +3105,7 @@ fn create_scratch_object(
                 layer: slot.layer as u32,
                 frame: slot.frame as u32,
             },
-            expected,
+            precondition(harness, instance)?,
         ),
         "確認用オブジェクトを作成できません",
     )?;
@@ -3285,8 +3148,7 @@ fn add_effects_for_coverage(
             continue;
         };
         let object = resolve_object(harness, instance, context.scene_id, at)?;
-        let expected = precondition(harness, instance)?;
-        match harness.add_effect(&instance.id, &object.selector, &candidate.name, expected) {
+        match harness.add_effect(&instance.id, &object.selector, &candidate.name) {
             Ok(_) => {
                 covered.extend(candidate.items.iter().map(|item| item.item_type.clone()));
                 added.push(candidate.name.clone());
@@ -3478,10 +3340,7 @@ fn check_track_item(
     else {
         return Ok(Err("trackbar 項目を再取得できません".to_string()));
     };
-    let expected = precondition(harness, instance)?;
-    if let Err(error) =
-        harness.set_object_item(&instance.id, &selector, &item.name, &next, expected)
-    {
+    if let Err(error) = harness.set_object_item(&instance.id, &selector, &item.name, &next) {
         return Ok(Err(format!(
             "trackbar 項目を変更できません: {}",
             describe_error(&error)
@@ -3630,7 +3489,6 @@ fn check_blocked(
 
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
     let destination = context.free_slots[0];
-    let expected = precondition(harness, instance)?;
     let blocked = harness.move_object(
         &instance.id,
         &object.selector,
@@ -3638,7 +3496,6 @@ fn check_blocked(
             layer: destination.layer as u32,
             frame: destination.frame as u32,
         },
-        expected,
     );
     let blocked_note = match &blocked {
         Ok(applied) => {
@@ -3674,7 +3531,6 @@ fn check_blocked(
     ));
 
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
-    let expected = precondition(harness, instance)?;
     let moved = require(
         harness.move_object(
             &instance.id,
@@ -3683,7 +3539,6 @@ fn check_blocked(
                 layer: destination.layer as u32,
                 frame: destination.frame as u32,
             },
-            expected,
         ),
         &format!("{label}の終了後に同じ要求が成功しません"),
     )?;
@@ -3714,7 +3569,6 @@ fn restore_position(
                 layer: home.layer as u32,
                 frame: home.frame as u32,
             },
-            outcome_precondition(moved),
         )
         .map_err(|error| format!("元の位置へ戻せません: {}", describe_error(&error)))?;
     Ok(())
@@ -3791,7 +3645,6 @@ fn check_cross_instance_selector(
     context: &Context,
 ) -> CheckResult {
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
-    let expected = precondition(harness, instance)?;
     let other_scene = scene_id(harness, other)?;
     let before = snapshot(harness, other, other_scene)?;
     let destination = free_slot(harness, other, other_scene)?;
@@ -3803,7 +3656,6 @@ fn check_cross_instance_selector(
             layer: destination.layer as u32,
             frame: destination.frame as u32,
         },
-        expected,
     );
     let mut outcome = expect_rejection(
         attempt,
@@ -3840,12 +3692,10 @@ fn check_stale_after_ui_item_change(
     ));
 
     // 前提条件は読み直す。revision の照合を通してから内容の照合へ到達させる。
-    let expected = precondition(harness, instance)?;
     let attempt = harness.set_object_name(
         &instance.id,
         &object.selector,
         Some("取り違え確認".to_string()),
-        expected,
     );
     let applied = attempt.as_ref().ok().cloned();
     let outcome = expect_rejection(
@@ -3872,12 +3722,10 @@ fn check_stale_after_ui_move(
         instance.label, context.target.layer, context.target.frame
     ));
 
-    let expected = precondition(harness, instance)?;
     let attempt = harness.set_object_name(
         &instance.id,
         &object.selector,
         Some("取り違え確認".to_string()),
-        expected,
     );
     let applied = attempt.as_ref().ok().cloned();
     let outcome = expect_rejection(attempt, ErrorCode::NotFound, ExpectedMismatch::Absent);
@@ -3904,7 +3752,7 @@ fn restore_default_name(
         .ok_or_else(|| "名前変更の応答が対象を返しませんでした".to_string())?
         .selector;
     harness
-        .set_object_name(&instance.id, &selector, None, outcome_precondition(applied))
+        .set_object_name(&instance.id, &selector, None)
         .map_err(|error| format!("名前を標準名へ戻せません: {}", describe_error(&error)))?;
     Ok(())
 }
@@ -3920,7 +3768,6 @@ fn check_stale_after_undo_redo(
     context: &Context,
 ) -> CheckResult {
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
-    let stale_expected = precondition(harness, instance)?;
 
     prompt(&format!(
         "AviUtl2 のインスタンス {} で、取り消し操作を 1 回行い、続けてやり直し操作を 1 回行ってください。\n\
@@ -3932,7 +3779,6 @@ fn check_stale_after_undo_redo(
         &instance.id,
         &object.selector,
         Some("取り違え確認".to_string()),
-        stale_expected,
     );
     let applied = attempt.as_ref().ok().cloned();
     let finding = match &attempt {
@@ -3966,8 +3812,6 @@ fn check_same_name_objects(
     )?;
     let alias = detail.alias.clone();
     let slot = context.free_slots[1];
-
-    let expected = precondition(harness, instance)?;
     let first = require(
         harness.create_object(
             &instance.id,
@@ -3979,7 +3823,7 @@ fn check_same_name_objects(
                 layer: slot.layer as u32,
                 frame: slot.frame as u32,
             },
-            expected,
+            precondition(harness, instance)?,
         ),
         "1 つ目のオブジェクトを作成できません",
     )?;
@@ -4025,14 +3869,8 @@ fn check_same_name_objects(
 
     // 2 つ目だけの名前を変える。
     let target = resolve_object(harness, instance, context.scene_id, second_at)?;
-    let expected = precondition(harness, instance)?;
     require(
-        harness.set_object_name(
-            &instance.id,
-            &target.selector,
-            Some("2 つ目".to_string()),
-            expected,
-        ),
+        harness.set_object_name(&instance.id, &target.selector, Some("2 つ目".to_string())),
         "2 つ目の名前を変更できません",
     )?;
 
@@ -4044,9 +3882,8 @@ fn check_same_name_objects(
     // 後始末: 作成した 2 件を削除する。
     for at in [second_at, first_at] {
         let object = resolve_object(harness, instance, context.scene_id, at)?;
-        let expected = precondition(harness, instance)?;
         require(
-            harness.delete_object(&instance.id, &object.selector, expected),
+            harness.delete_object(&instance.id, &object.selector),
             "作成したオブジェクトを削除できません",
         )?;
     }
@@ -4185,7 +4022,6 @@ fn check_destination_occupied(
     let create_note = expect_destination_occupied(created)?;
 
     let slot = context.free_slots[1];
-    let expected = precondition(harness, instance)?;
     let scratch = require(
         harness.create_object(
             &instance.id,
@@ -4197,7 +4033,7 @@ fn check_destination_occupied(
                 layer: slot.layer as u32,
                 frame: slot.frame as u32,
             },
-            expected,
+            precondition(harness, instance)?,
         ),
         "確認用オブジェクトを作成できません",
     )?;
@@ -4214,7 +4050,6 @@ fn check_destination_occupied(
             layer: context.target.layer as u32,
             frame: context.target.frame as u32,
         },
-        outcome_precondition(&scratch),
     );
     let move_note = expect_destination_occupied(moved)?;
 
@@ -4224,9 +4059,8 @@ fn check_destination_occupied(
         frame: scratch_object.frame_start,
     };
     let object = resolve_object(harness, instance, context.scene_id, at)?;
-    let expected = precondition(harness, instance)?;
     require(
-        harness.delete_object(&instance.id, &object.selector, expected),
+        harness.delete_object(&instance.id, &object.selector),
         "確認用オブジェクトを削除できません",
     )?;
 
@@ -4267,9 +4101,8 @@ fn check_wide_characters(harness: &Harness, instance: &Instance, context: &Conte
     let units = name.encode_utf16().count();
 
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
-    let expected = precondition(harness, instance)?;
     let renamed = require(
-        harness.set_object_name(&instance.id, &object.selector, Some(name.clone()), expected),
+        harness.set_object_name(&instance.id, &object.selector, Some(name.clone())),
         "名前を変更できません",
     )?;
     let applied = renamed
@@ -4283,12 +4116,7 @@ fn check_wide_characters(harness: &Harness, instance: &Instance, context: &Conte
     // 後始末: 標準名へ戻す。
     let selector = applied.selector.clone();
     harness
-        .set_object_name(
-            &instance.id,
-            &selector,
-            None,
-            outcome_precondition(&renamed),
-        )
+        .set_object_name(&instance.id, &selector, None)
         .map_err(|error| format!("名前を戻せません: {}", describe_error(&error)))?;
 
     if !matched {
@@ -4490,8 +4318,6 @@ fn check_no_secret_in_response(
     )?;
     let alias = detail.alias.clone();
     let slot = context.free_slots[1];
-
-    let expected = precondition(harness, instance)?;
     let created = require(
         harness.create_object(
             &instance.id,
@@ -4503,7 +4329,7 @@ fn check_no_secret_in_response(
                 layer: slot.layer as u32,
                 frame: slot.frame as u32,
             },
-            expected,
+            precondition(harness, instance)?,
         ),
         "確認用オブジェクトを作成できません",
     )?;
@@ -4547,12 +4373,11 @@ fn check_no_secret_in_response(
     });
     let mut checked_value = false;
     if let Some((selector, item_name)) = text_item {
-        let expected = precondition(harness, instance)?;
         let value = ItemValue::Text {
             value: secret.to_string(),
         };
         if harness
-            .set_object_item(&instance.id, &selector, &item_name, &value, expected)
+            .set_object_item(&instance.id, &selector, &item_name, &value)
             .is_ok()
         {
             checked_value = true;
@@ -4564,9 +4389,8 @@ fn check_no_secret_in_response(
 
     // 後始末: 確認用オブジェクトを削除する。
     let object = resolve_object(harness, instance, context.scene_id, at)?;
-    let expected = precondition(harness, instance)?;
     require(
-        harness.delete_object(&instance.id, &object.selector, expected),
+        harness.delete_object(&instance.id, &object.selector),
         "確認用オブジェクトを削除できません",
     )?;
 
@@ -4618,12 +4442,10 @@ fn section_scene_switch(
         return Ok(());
     }
 
-    let expected = precondition(harness, instance)?;
     let attempt = harness.set_object_name(
         &instance.id,
         &object.selector,
         Some("シーン確認".to_string()),
-        expected,
     );
     let applied = attempt.as_ref().ok().cloned();
     let outcome = expect_rejection(
@@ -4682,14 +4504,8 @@ fn check_client_disconnect(
 
     // AviUtl2 が応答し続け、以降の編集も受け付けることを自動で確かめる。
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
-    let expected = precondition(harness, instance)?;
     let renamed = require(
-        harness.set_object_name(
-            &instance.id,
-            &object.selector,
-            Some("切断確認".to_string()),
-            expected,
-        ),
+        harness.set_object_name(&instance.id, &object.selector, Some("切断確認".to_string())),
         "切断後に編集を受け付けません",
     )?;
     let selector = renamed
@@ -4698,12 +4514,7 @@ fn check_client_disconnect(
         .ok_or_else(|| "名前変更の応答が対象を返しませんでした".to_string())?
         .selector;
     harness
-        .set_object_name(
-            &instance.id,
-            &selector,
-            None,
-            outcome_precondition(&renamed),
-        )
+        .set_object_name(&instance.id, &selector, None)
         .map_err(|error| format!("名前を戻せません: {}", describe_error(&error)))?;
 
     if !confirm("plugin のログに、切断したクライアントへの応答送信の失敗が記録されていますか。")
@@ -4742,7 +4553,8 @@ fn section_completion(
         .first()
         .cloned()
         .ok_or_else(|| "インスタンス A の現在シーンにオブジェクトがありません".to_string())?;
-    let stale_expected = precondition(harness, a)?;
+    let observed_revision =
+        require(harness.edit_info(&a.id), "編集情報を取得できません")?.project_revision;
     let stale_selector = target.selector.clone();
     let home = Placement {
         layer: target.layer,
@@ -4758,7 +4570,7 @@ fn section_completion(
         Mode::Auto,
         passed_with(format!(
             "layer={} frame={} revision={}",
-            target.layer, target.frame_start, stale_expected.project_revision
+            target.layer, target.frame_start, observed_revision
         )),
     );
 
@@ -4771,7 +4583,6 @@ fn section_completion(
                 layer: destination.layer as u32,
                 frame: destination.frame as u32,
             },
-            stale_expected.clone(),
         ),
         "instance A の移動に失敗しました",
     )?;
@@ -4820,10 +4631,6 @@ fn section_completion(
     );
 
     // 手順 6: A の selector を B へ渡す。epoch で拒否されなければならない。
-    let expected_b = ExpectedInput {
-        project_epoch: stale_expected.project_epoch.clone(),
-        project_revision: stale_expected.project_revision,
-    };
     let attempt = harness.move_object(
         &b.id,
         &stale_selector,
@@ -4831,7 +4638,6 @@ fn section_completion(
             layer: destination.layer as u32,
             frame: destination.frame as u32,
         },
-        expected_b,
     );
     let mut outcome = expect_rejection(
         attempt,
@@ -4858,10 +4664,10 @@ fn section_completion(
         outcome,
     );
 
-    // 手順 7: 古くなった selector と前提条件を A へ渡す。手順 4 で対象は
-    // destination へ移っており、selector が指す layer / frame には何も無い。
-    // revision は照合しないので、拒否は対象の解決で起きる。どのガードも働いて
-    // いないことを、前提条件の食い違いを名乗らないことで固定する。
+    // 手順 7: 古くなった selector を A へ渡す。手順 4 で対象は destination へ
+    // 移っており、selector が指す layer / frame には何も無い。拒否は対象の解決で
+    // 起きる。どのガードも働いていないことを、前提条件の食い違いを名乗らないこと
+    // で固定する。
     let attempt = harness.move_object(
         &a.id,
         &stale_selector,
@@ -4869,7 +4675,6 @@ fn section_completion(
             layer: home.layer as u32,
             frame: home.frame as u32,
         },
-        stale_expected,
     );
     let mut outcome = expect_rejection(attempt, ErrorCode::NotFound, ExpectedMismatch::Absent);
     if outcome.is_ok() {
@@ -4898,7 +4703,6 @@ fn section_completion(
          位置と名前は変えないでください。変更したら Enter を押してください。",
         a.label, destination.layer, destination.frame
     ));
-    let expected = precondition(harness, a)?;
     let attempt = harness.move_object(
         &a.id,
         &fresh_selector,
@@ -4906,7 +4710,6 @@ fn section_completion(
             layer: home.layer as u32,
             frame: home.frame as u32,
         },
-        expected,
     );
     let outcome = expect_rejection(
         attempt,

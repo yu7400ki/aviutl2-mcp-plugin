@@ -13,7 +13,7 @@
 //! - `instance_id` の長さと書式: [`parse_instance_id`](crate::mcp::input::parse_instance_id)
 //! - selector の文字列長と fingerprint の書式:
 //!   [`ObjectSelectorInput::to_selector`] / [`EffectSelectorInput::to_selector`]
-//! - `expected.project_epoch` の長さ: [`ExpectedInput::to_expected`]
+//! - `expected_project_epoch` の長さ: [`expected_project_epoch`]
 //! - `layer` / `frame` の範囲、名前・パス・alias・設定値の長さと文字種:
 //!   各 `to_params` が呼ぶ core の検証（要求元と実行側が同じ実装を共有する）
 //!
@@ -29,10 +29,10 @@ use crate::mcp::input::{
 };
 use aviutl2_mcp_core::{
     AddEffectParams, CreateObjectParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
-    Destination, EditInputError, EffectSelector, ErrorObject, Expected, FiniteF64, FocusChange,
-    ItemValue, MAX_ALIAS_BYTES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MoveObjectParams,
-    ObjectSource, Placement, RangeChange, SetEffectStateParams, SetObjectItemParams,
-    SetObjectNameParams, SetSelectionParams,
+    Destination, EditInputError, EffectSelector, ErrorObject, FiniteF64, FocusChange, ItemValue,
+    MAX_ALIAS_BYTES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MoveObjectParams, ObjectSource,
+    Placement, RangeChange, SetEffectStateParams, SetObjectItemParams, SetObjectNameParams,
+    SetSelectionParams,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -51,36 +51,6 @@ const MAX_PATH_CHARS: u32 = MAX_PATH_UTF16_UNITS as u32;
 
 /// 設定項目の文字列値に許す最大文字数。
 const MAX_ITEM_VALUE_CHARS: u32 = MAX_ITEM_VALUE_BYTES as u32;
-
-/// 編集の前提条件。
-///
-/// 対象の同一性は selector の fingerprint が担うため、ここはプロジェクトの
-/// 世代だけを運ぶ。
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ExpectedInput {
-    /// 直前の読み取りまたは編集の応答が返した project_epoch。
-    #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
-    pub project_epoch: String,
-    /// 直前の読み取りまたは編集の応答が返した project_revision。
-    pub project_revision: u64,
-}
-
-impl ExpectedInput {
-    /// 前提条件へ変換する。文字数はここで検証される。
-    pub(crate) fn to_expected(&self) -> Result<Expected, ErrorObject> {
-        ensure_length(
-            "expected.project_epoch",
-            &self.project_epoch,
-            1,
-            MAX_EPOCH_CHARS,
-        )?;
-        Ok(Expected {
-            project_epoch: self.project_epoch.clone(),
-            project_revision: self.project_revision,
-        })
-    }
-}
 
 /// オブジェクト内の effect を再指定するセレクター。
 ///
@@ -386,8 +356,9 @@ pub struct CreateObjectInput {
     pub source: ObjectSourceInput,
     /// 配置先。
     pub placement: PlacementInput,
-    /// 前提条件。
-    pub expected: ExpectedInput,
+    /// 直前の読み取りまたは編集の応答が返した project_epoch。作成は対象を指す selector を持たないため、これがプロジェクト境界を照合する唯一の材料である。
+    #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
+    pub expected_project_epoch: String,
 }
 
 impl CreateObjectInput {
@@ -396,7 +367,7 @@ impl CreateObjectInput {
         let params = CreateObjectParams {
             source: self.source.to_source(),
             placement: self.placement.to_placement(),
-            expected: self.expected.to_expected()?,
+            expected_project_epoch: expected_project_epoch(&self.expected_project_epoch)?,
         };
         params.validate().map_err(from_input_error)?;
         Ok(params)
@@ -414,8 +385,6 @@ pub struct MoveObjectInput {
     pub selector: ObjectSelectorInput,
     /// 移動先。
     pub destination: DestinationInput,
-    /// 前提条件。
-    pub expected: ExpectedInput,
 }
 
 impl MoveObjectInput {
@@ -424,7 +393,6 @@ impl MoveObjectInput {
         let params = MoveObjectParams {
             selector: self.selector.to_selector()?,
             destination: self.destination.to_destination(),
-            expected: self.expected.to_expected()?,
         };
         params.validate().map_err(from_input_error)?;
         Ok(params)
@@ -440,8 +408,6 @@ pub struct DeleteObjectInput {
     pub instance_id: String,
     /// 対象オブジェクトのセレクター。
     pub selector: ObjectSelectorInput,
-    /// 前提条件。
-    pub expected: ExpectedInput,
 }
 
 impl DeleteObjectInput {
@@ -449,7 +415,6 @@ impl DeleteObjectInput {
     pub fn to_params(&self) -> Result<DeleteObjectParams, ErrorObject> {
         let params = DeleteObjectParams {
             selector: self.selector.to_selector()?,
-            expected: self.expected.to_expected()?,
         };
         params.validate().map_err(from_input_error)?;
         Ok(params)
@@ -469,8 +434,6 @@ pub struct SetObjectNameInput {
     #[serde(default)]
     #[schemars(length(max = MAX_NAME_CHARS))]
     pub name: Option<String>,
-    /// 前提条件。
-    pub expected: ExpectedInput,
 }
 
 impl SetObjectNameInput {
@@ -479,7 +442,6 @@ impl SetObjectNameInput {
         let params = SetObjectNameParams {
             selector: self.selector.to_selector()?,
             name: self.name.clone(),
-            expected: self.expected.to_expected()?,
         };
         params.validate().map_err(from_input_error)?;
         Ok(params)
@@ -500,8 +462,6 @@ pub struct SetObjectItemInput {
     pub item: String,
     /// 設定する値。
     pub value: ItemValueInput,
-    /// 前提条件。
-    pub expected: ExpectedInput,
 }
 
 impl SetObjectItemInput {
@@ -511,7 +471,6 @@ impl SetObjectItemInput {
             selector: self.selector.to_selector()?,
             item: self.item.clone(),
             value: self.value.to_value()?,
-            expected: self.expected.to_expected()?,
         };
         params.validate().map_err(from_input_error)?;
         Ok(params)
@@ -530,8 +489,6 @@ pub struct AddEffectInput {
     /// 付与する effect 名。aviutl2_list_available_effects が返す名前を指定する。
     #[schemars(length(max = MAX_NAME_CHARS))]
     pub effect_name: String,
-    /// 前提条件。
-    pub expected: ExpectedInput,
 }
 
 impl AddEffectInput {
@@ -540,7 +497,6 @@ impl AddEffectInput {
         let params = AddEffectParams {
             object: self.object.to_selector()?,
             effect_name: self.effect_name.clone(),
-            expected: self.expected.to_expected()?,
         };
         params.validate().map_err(from_input_error)?;
         Ok(params)
@@ -556,8 +512,6 @@ pub struct DeleteEffectInput {
     pub instance_id: String,
     /// 対象 effect のセレクター。
     pub selector: EffectSelectorInput,
-    /// 前提条件。
-    pub expected: ExpectedInput,
 }
 
 impl DeleteEffectInput {
@@ -565,7 +519,6 @@ impl DeleteEffectInput {
     pub fn to_params(&self) -> Result<DeleteEffectParams, ErrorObject> {
         let params = DeleteEffectParams {
             selector: self.selector.to_selector()?,
-            expected: self.expected.to_expected()?,
         };
         params.validate().map_err(from_input_error)?;
         Ok(params)
@@ -587,8 +540,6 @@ pub struct SetEffectStateInput {
     /// ロック状態。省略時は変更しない。
     #[serde(default)]
     pub locked: Option<bool>,
-    /// 前提条件。
-    pub expected: ExpectedInput,
 }
 
 impl SetEffectStateInput {
@@ -598,7 +549,6 @@ impl SetEffectStateInput {
             selector: self.selector.to_selector()?,
             enabled: self.enabled,
             locked: self.locked,
-            expected: self.expected.to_expected()?,
         };
         params.validate().map_err(from_input_error)?;
         Ok(params)
@@ -623,8 +573,9 @@ pub struct SetSelectionInput {
     /// フォーカス対象。省略時は変更しない。
     #[serde(default)]
     pub focus: Option<FocusChangeInput>,
-    /// 前提条件。
-    pub expected: ExpectedInput,
+    /// 直前の読み取りまたは編集の応答が返した project_epoch。focus を省略した要求は selector を 1 つも持たないため、これがプロジェクト境界を照合する材料である。
+    #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
+    pub expected_project_epoch: String,
 }
 
 impl SetSelectionInput {
@@ -640,11 +591,17 @@ impl SetSelectionInput {
             cursor: self.cursor.map(CursorPositionInput::to_position),
             selected_range: self.selected_range.map(RangeChangeInput::to_change),
             focus,
-            expected: self.expected.to_expected()?,
+            expected_project_epoch: expected_project_epoch(&self.expected_project_epoch)?,
         };
         params.validate().map_err(from_input_error)?;
         Ok(params)
     }
+}
+
+/// 前提の epoch が schema で宣言した文字数の範囲に収まることを確かめる。
+fn expected_project_epoch(value: &str) -> Result<String, ErrorObject> {
+    ensure_length("expected_project_epoch", value, 1, MAX_EPOCH_CHARS)?;
+    Ok(value.to_string())
 }
 
 /// core の入力検証の失敗を tool result のエラーへ写す。
@@ -692,33 +649,29 @@ mod tests {
         })
     }
 
-    fn expected_json() -> Value {
-        json!({ "project_epoch": SAMPLE_EPOCH, "project_revision": 42 })
-    }
-
     #[test]
-    fn expected_is_required_on_every_edit_input() {
-        // 前提条件の省略を認めると、対象の世代を確かめずに変更が通ってしまう。
-        let cases: Vec<Value> = vec![
-            json!({ "instance_id": SAMPLE_ID, "source": { "type": "object_alias", "alias": "a" }, "placement": { "scene_id": 3, "layer": 1, "frame": 0 } }),
-            json!({ "instance_id": SAMPLE_ID, "selector": object_selector_json(), "destination": { "layer": 1, "frame": 0 } }),
-            json!({ "instance_id": SAMPLE_ID, "selector": object_selector_json() }),
-            json!({ "instance_id": SAMPLE_ID, "selector": object_selector_json(), "name": "名前" }),
-            json!({ "instance_id": SAMPLE_ID, "selector": effect_selector_json(), "item": "X", "value": { "type": "integer", "value": 1 } }),
-            json!({ "instance_id": SAMPLE_ID, "object": object_selector_json(), "effect_name": "ぼかし" }),
-            json!({ "instance_id": SAMPLE_ID, "selector": effect_selector_json() }),
-            json!({ "instance_id": SAMPLE_ID, "selector": effect_selector_json(), "enabled": true }),
-            json!({ "instance_id": SAMPLE_ID, "expected_scene_id": 3, "cursor": { "layer": 1, "frame": 2 } }),
-        ];
-        assert!(serde_json::from_value::<CreateObjectInput>(cases[0].clone()).is_err());
-        assert!(serde_json::from_value::<MoveObjectInput>(cases[1].clone()).is_err());
-        assert!(serde_json::from_value::<DeleteObjectInput>(cases[2].clone()).is_err());
-        assert!(serde_json::from_value::<SetObjectNameInput>(cases[3].clone()).is_err());
-        assert!(serde_json::from_value::<SetObjectItemInput>(cases[4].clone()).is_err());
-        assert!(serde_json::from_value::<AddEffectInput>(cases[5].clone()).is_err());
-        assert!(serde_json::from_value::<DeleteEffectInput>(cases[6].clone()).is_err());
-        assert!(serde_json::from_value::<SetEffectStateInput>(cases[7].clone()).is_err());
-        assert!(serde_json::from_value::<SetSelectionInput>(cases[8].clone()).is_err());
+    fn the_expected_epoch_is_required_where_there_is_no_selector() {
+        // 対象を指す selector を持たない要求では、前提の epoch だけがプロジェクト
+        // 境界を照合する材料である。省略を認めると、別のプロジェクトへ作成や
+        // 選択の変更が通ってしまう。
+        assert!(
+            serde_json::from_value::<CreateObjectInput>(json!({
+                "instance_id": SAMPLE_ID,
+                "source": { "type": "object_alias", "alias": "a" },
+                "placement": { "scene_id": 3, "layer": 1, "frame": 0 },
+            }))
+            .is_err(),
+            "作成が前提の epoch なしで受理されました"
+        );
+        assert!(
+            serde_json::from_value::<SetSelectionInput>(json!({
+                "instance_id": SAMPLE_ID,
+                "expected_scene_id": 3,
+                "cursor": { "layer": 1, "frame": 2 },
+            }))
+            .is_err(),
+            "選択状態の変更が前提の epoch なしで受理されました"
+        );
     }
 
     #[test]
@@ -727,28 +680,20 @@ mod tests {
             "instance_id": SAMPLE_ID,
             "source": { "type": "object_alias", "alias": "a" },
             "placement": { "scene_id": 3, "layer": 1, "frame": 0 },
-            "expected": expected_json(),
+            "expected_project_epoch": SAMPLE_EPOCH,
         });
         create["future"] = json!(1);
         assert!(serde_json::from_value::<CreateObjectInput>(create).is_err());
 
-        let mut selection = json!({
+        let selection = json!({
             "instance_id": SAMPLE_ID,
             "expected_scene_id": 3,
             "cursor": { "layer": 1, "frame": 2, "future": 1 },
-            "expected": expected_json(),
+            "expected_project_epoch": SAMPLE_EPOCH,
         });
         assert!(
-            serde_json::from_value::<SetSelectionInput>(selection.clone()).is_err(),
-            "入れ子の未知フィールドが受理されました"
-        );
-
-        selection["cursor"] = json!({ "layer": 1, "frame": 2 });
-        selection["expected"] =
-            json!({ "project_epoch": SAMPLE_EPOCH, "project_revision": 42, "future": 1 });
-        assert!(
             serde_json::from_value::<SetSelectionInput>(selection).is_err(),
-            "expected の未知フィールドが受理されました"
+            "入れ子の未知フィールドが受理されました"
         );
     }
 
@@ -764,7 +709,6 @@ mod tests {
         let input: DeleteEffectInput = serde_json::from_value(json!({
             "instance_id": SAMPLE_ID,
             "selector": selector,
-            "expected": expected_json(),
         }))
         .expect("未知フィールドを含む selector を受理する");
 
@@ -782,7 +726,6 @@ mod tests {
         let input: DeleteEffectInput = serde_json::from_value(json!({
             "instance_id": SAMPLE_ID,
             "selector": selector,
-            "expected": expected_json(),
         }))
         .expect("入力型としては受理される");
         assert_eq!(
@@ -798,7 +741,6 @@ mod tests {
         let input: DeleteEffectInput = serde_json::from_value(json!({
             "instance_id": SAMPLE_ID,
             "selector": selector,
-            "expected": expected_json(),
         }))
         .expect("入力型としては受理される");
         assert_eq!(
@@ -812,14 +754,31 @@ mod tests {
 
     #[test]
     fn expected_epoch_is_bounded() {
-        let input: DeleteObjectInput = serde_json::from_value(json!({
+        let over = "e".repeat(MAX_EPOCH_CHARS as usize + 1);
+        let create: CreateObjectInput = serde_json::from_value(json!({
             "instance_id": SAMPLE_ID,
-            "selector": object_selector_json(),
-            "expected": { "project_epoch": "e".repeat(MAX_EPOCH_CHARS as usize + 1), "project_revision": 1 },
+            "source": { "type": "object_alias", "alias": "a" },
+            "placement": { "scene_id": 3, "layer": 1, "frame": 0 },
+            "expected_project_epoch": over,
         }))
         .expect("入力型としては受理される");
         assert_eq!(
-            input.to_params().expect_err("上限超過は拒否される").code,
+            create.to_params().expect_err("上限超過は拒否される").code,
+            ErrorCode::InvalidArgument
+        );
+
+        let selection: SetSelectionInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "expected_scene_id": 3,
+            "cursor": { "layer": 1, "frame": 2 },
+            "expected_project_epoch": over,
+        }))
+        .expect("入力型としては受理される");
+        assert_eq!(
+            selection
+                .to_params()
+                .expect_err("上限超過は拒否される")
+                .code,
             ErrorCode::InvalidArgument
         );
     }
@@ -833,7 +792,7 @@ mod tests {
             "instance_id": SAMPLE_ID,
             "source": { "type": "object_alias", "alias": "a" },
             "placement": { "scene_id": 3, "layer": over, "frame": 0 },
-            "expected": expected_json(),
+            "expected_project_epoch": SAMPLE_EPOCH,
         }))
         .expect("入力型としては受理される");
         assert_eq!(
@@ -845,7 +804,6 @@ mod tests {
             "instance_id": SAMPLE_ID,
             "selector": object_selector_json(),
             "destination": { "layer": 0, "frame": over },
-            "expected": expected_json(),
         }))
         .expect("入力型としては受理される");
         assert_eq!(
@@ -860,7 +818,7 @@ mod tests {
             "instance_id": SAMPLE_ID,
             "expected_scene_id": 3,
             "cursor": { "layer": 0, "frame": over },
-            "expected": expected_json(),
+            "expected_project_epoch": SAMPLE_EPOCH,
         }))
         .expect("入力型としては受理される");
         assert_eq!(
@@ -872,7 +830,7 @@ mod tests {
             "instance_id": SAMPLE_ID,
             "expected_scene_id": 3,
             "selected_range": { "type": "set", "start": 0, "end": over },
-            "expected": expected_json(),
+            "expected_project_epoch": SAMPLE_EPOCH,
         }))
         .expect("入力型としては受理される");
         assert_eq!(
@@ -887,7 +845,7 @@ mod tests {
             "instance_id": SAMPLE_ID,
             "source": { "type": "object_alias", "alias": "a".repeat(MAX_ALIAS_CHARS as usize + 1) },
             "placement": { "scene_id": 3, "layer": 1, "frame": 0 },
-            "expected": expected_json(),
+            "expected_project_epoch": SAMPLE_EPOCH,
         }))
         .expect("入力型としては受理される");
         assert_eq!(
@@ -911,7 +869,7 @@ mod tests {
                 "instance_id": SAMPLE_ID,
                 "source": { "type": "media_file", "path": path },
                 "placement": { "scene_id": 3, "layer": 1, "frame": 0 },
-                "expected": expected_json(),
+                "expected_project_epoch": SAMPLE_EPOCH,
             }))
             .expect("入力型としては受理される");
             let error = input
@@ -942,7 +900,6 @@ mod tests {
                     "selector": effect_selector_json(),
                     "item": "ファイル",
                     "value": value,
-                    "expected": expected_json(),
                 }))
                 .expect("入力型としては受理される");
                 let error = input
@@ -960,7 +917,7 @@ mod tests {
             "instance_id": SAMPLE_ID,
             "source": { "type": "media_file", "path": r"C:\movie.mp4" },
             "placement": { "scene_id": 3, "layer": 1, "frame": 0 },
-            "expected": expected_json(),
+            "expected_project_epoch": SAMPLE_EPOCH,
         }))
         .expect("入力型としては受理される");
         assert!(input.to_params().is_ok());
@@ -973,7 +930,6 @@ mod tests {
             "selector": effect_selector_json(),
             "item": "テキスト",
             "value": { "type": "unknown", "raw": "opaque" },
-            "expected": expected_json(),
         }))
         .expect("読み取りが返した形をそのまま受理する");
         assert_eq!(
@@ -994,7 +950,6 @@ mod tests {
                 "selector": effect_selector_json(),
                 "item": "項目",
                 "value": value,
-                "expected": expected_json(),
             }))
             .expect("入力型としては受理される");
             assert!(input.to_params().is_err(), "{value} が受理されました");
@@ -1009,7 +964,6 @@ mod tests {
             "selector": effect_selector_json(),
             "item": "テキスト",
             "value": { "type": "text", "value": "1 行目\n2 行目" },
-            "expected": expected_json(),
         }))
         .expect("入力型としては受理される");
         assert!(input.to_params().is_ok());
@@ -1119,7 +1073,6 @@ mod tests {
             "selector": effect_selector_json(),
             "item": "種類",
             "value": { "type": "choice", "value": "通常", "index": 2, "future": 1 },
-            "expected": expected_json(),
         }))
         .expect("未知フィールドを含む設定値を受理する");
 
@@ -1154,7 +1107,6 @@ mod tests {
         let input: SetEffectStateInput = serde_json::from_value(json!({
             "instance_id": SAMPLE_ID,
             "selector": effect_selector_json(),
-            "expected": expected_json(),
         }))
         .expect("入力型としては受理される");
         assert_eq!(
@@ -1168,7 +1120,7 @@ mod tests {
         let input: SetSelectionInput = serde_json::from_value(json!({
             "instance_id": SAMPLE_ID,
             "expected_scene_id": 3,
-            "expected": expected_json(),
+            "expected_project_epoch": SAMPLE_EPOCH,
         }))
         .expect("入力型としては受理される");
         assert_eq!(
@@ -1184,7 +1136,7 @@ mod tests {
             "expected_scene_id": 3,
             "focus": { "type": "set", "object": object_selector_json() },
             "selected_range": { "type": "clear" },
-            "expected": expected_json(),
+            "expected_project_epoch": SAMPLE_EPOCH,
         }))
         .expect("入力型としては受理される");
         let params = input.to_params().expect("params へ変換できる");
@@ -1204,7 +1156,6 @@ mod tests {
             "selector": effect_selector_json(),
             "item": too_long,
             "value": { "type": "integer", "value": 1 },
-            "expected": expected_json(),
         }))
         .expect("入力型としては受理される");
         assert_eq!(
@@ -1216,7 +1167,6 @@ mod tests {
             "instance_id": SAMPLE_ID,
             "object": object_selector_json(),
             "effect_name": too_long,
-            "expected": expected_json(),
         }))
         .expect("入力型としては受理される");
         assert_eq!(
@@ -1231,7 +1181,6 @@ mod tests {
             "instance_id": SAMPLE_ID,
             "selector": object_selector_json(),
             "name": "a".repeat(MAX_NAME_CHARS as usize + 1),
-            "expected": expected_json(),
         }))
         .expect("入力型としては受理される");
         assert_eq!(
@@ -1247,7 +1196,7 @@ mod tests {
             "instance_id": SAMPLE_ID,
             "source": { "type": "media_file", "path": r"C:\secret\movie.mp4:stream" },
             "placement": { "scene_id": 3, "layer": 1, "frame": 0 },
-            "expected": expected_json(),
+            "expected_project_epoch": SAMPLE_EPOCH,
         }))
         .expect("入力型としては受理される");
         let error = input.to_params().expect_err("拒否される");
