@@ -525,8 +525,9 @@ impl AviUtl2McpServer {
     /// いても拒否されない。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// 複数オブジェクトを含む alias は全てが作成され、created に全件、object に
-    /// その先頭が入る。長さと挿入位置はホストが自動調整し得るため、応答が返す
-    /// 位置が実際の配置である。
+    /// その先頭が入る。長さと挿入位置はホストが自動調整し得るため、
+    /// 応答が返す位置は要求した宛先と異なり得る。
+    /// 応答が返す selector が実際の配置であり、配置を確かめるには応答の値を見る。
     /// 同じ要求を再送すると重複して作成し得る。作成先に既存オブジェクトがあれば
     /// precondition_failed（destination_occupied）となるため通常は防がれるが、
     /// ホストが挿入位置を自動調整した場合はすり抜け得る。
@@ -579,6 +580,8 @@ impl AviUtl2McpServer {
     /// selector の project_epoch が拒否する。
     /// selector には応答が返した値をそのまま指定する。応答が返した selector は
     /// 読み直さずにそのまま次の編集へ渡せる。
+    /// 配置はホストが調整し得るため、応答が返す位置は要求した宛先と異なり得る。
+    /// 応答が返す selector が実際の配置であり、配置を確かめるには応答の値を見る。
     /// 宛先に既存オブジェクトがある場合は precondition_failed となる。
     /// 移動元または移動先のレイヤーがロックされている場合は
     /// precondition_failed（layer_locked）となる。aviutl2_set_layer_state で
@@ -1779,6 +1782,37 @@ mod tests {
             assert!(
                 !description_of(name).contains("同じ expected での再送"),
                 "{name} の説明が expected による重複防止を主張しています"
+            );
+        }
+    }
+
+    /// 応答が返す位置が要求した宛先と一致するとは限らない tool。
+    ///
+    /// ホストが配置を調整し得るため、成功を「要求どおりの位置」と読むと、
+    /// 呼び出し側が組み立てた次の要求は別の場所を指す。どちらの側に属するかを
+    /// 表で固定するので、tool を足したときに素通りしない。
+    const TOOLS_WHOSE_RESPONSE_CARRIES_THE_ACTUAL_PLACEMENT: &[&str] =
+        &["aviutl2_create_object", "aviutl2_move_object"];
+
+    #[test]
+    fn tools_that_can_land_elsewhere_say_the_response_carries_the_actual_placement() {
+        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+            let description = description_of(name);
+            if TOOLS_WHOSE_RESPONSE_CARRIES_THE_ACTUAL_PLACEMENT.contains(name) {
+                for keyword in [
+                    "応答が返す位置は要求した宛先と異なり得る",
+                    "配置を確かめるには応答の値を見る",
+                ] {
+                    assert!(
+                        description.contains(keyword),
+                        "{name} の説明に {keyword} がありません"
+                    );
+                }
+                continue;
+            }
+            assert!(
+                !description.contains("実際の配置"),
+                "{name} の説明が持たない性質を述べています"
             );
         }
     }
