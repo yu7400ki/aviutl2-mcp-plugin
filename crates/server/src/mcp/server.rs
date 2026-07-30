@@ -1787,6 +1787,38 @@ mod tests {
     }
 
     #[test]
+    fn input_schemas_declare_the_expected_epoch_only_where_it_is_used() {
+        // 要求から外したフィールドは受け取って読み捨てるが、schema へは宣言
+        // しない。宣言すると、要求元へ組み立てを勧めることになる。
+        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+            let tool = tool_named(name);
+            let properties = tool
+                .input_schema
+                .get("properties")
+                .and_then(|v| v.as_object())
+                .unwrap_or_else(|| panic!("{name} に properties がありません"));
+            assert!(
+                !properties.contains_key("expected"),
+                "{name} の入力 schema が外したフィールドを宣言しています"
+            );
+
+            let carries = TOOLS_CARRYING_AN_EXPECTED_EPOCH.contains(name);
+            assert_eq!(
+                properties.contains_key("expected_project_epoch"),
+                carries,
+                "{name} の入力 schema と前提の epoch の要否が食い違います"
+            );
+            let required = tool
+                .input_schema
+                .get("required")
+                .and_then(|v| v.as_array())
+                .map(|items| items.contains(&serde_json::json!("expected_project_epoch")))
+                .unwrap_or(false);
+            assert_eq!(required, carries, "{name} の必須指定が食い違います");
+        }
+    }
+
+    #[test]
     fn input_schemas_reject_unknown_fields() {
         for tool in tools() {
             assert_eq!(
