@@ -47,6 +47,9 @@ impl Default for RequestId {
 }
 
 /// IPC プロトコルバージョン MAJOR.MINOR。
+///
+/// plugin と server は互いに [`Self::CURRENT`] との完全一致を求め、異なる版を
+/// 名乗る相手は接続を拒否する。版をすり合わせる交渉は行わない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ProtocolVersion {
     pub major: u16,
@@ -55,7 +58,11 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
     /// 現行プロトコルバージョン。
-    pub const CURRENT: Self = Self { major: 1, minor: 0 };
+    ///
+    /// operation の追加は MINOR を、operation・フィールドの削除や意味の変更は
+    /// MAJOR を上げる。両端が完全一致を求めるため、どちらを上げても旧版とは
+    /// 接続できなくなる。
+    pub const CURRENT: Self = Self { major: 2, minor: 0 };
 
     /// 文字列表現を返す（例: "1.0"）。
     pub fn as_str(&self) -> String {

@@ -78,7 +78,11 @@ impl<'de> Deserialize<'de> for AuthSecret {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstanceDescriptor {
-    /// schema バージョン。現行 1。
+    /// registry ファイルの形式版。現行 1。
+    ///
+    /// [`ProtocolVersion`] とは独立に上げる。IPC の版を変えないまま
+    /// フィールドの意味だけを変える場合、形式の違いを表せるのはこの値だけである。
+    /// 既知でない値の descriptor は解釈せず、削除もしない。
     pub schema_version: u32,
     /// 対応プロトコルバージョン。
     pub protocol_version: ProtocolVersion,
