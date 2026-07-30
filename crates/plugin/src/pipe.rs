@@ -985,12 +985,35 @@ mod tests {
     }
 
     fn make_hello(instance_id: InstanceId, client_nonce: &aviutl2_mcp_core::Nonce) -> Vec<u8> {
+        make_hello_with_version(ProtocolVersion::CURRENT, instance_id, client_nonce)
+    }
+
+    fn make_hello_with_version(
+        version: ProtocolVersion,
+        instance_id: InstanceId,
+        client_nonce: &aviutl2_mcp_core::Nonce,
+    ) -> Vec<u8> {
         let hello = aviutl2_mcp_core::ClientHello {
-            protocol_version: ProtocolVersion::CURRENT,
+            protocol_version: version,
             instance_id,
             client_nonce: client_nonce.clone(),
         };
         serde_json::to_vec(&hello).unwrap()
+    }
+
+    /// 現行版と一致しないプロトコルバージョン。
+    fn mismatched_versions() -> [ProtocolVersion; 2] {
+        let current = ProtocolVersion::CURRENT;
+        [
+            ProtocolVersion {
+                major: current.major + 1,
+                minor: current.minor,
+            },
+            ProtocolVersion {
+                major: current.major,
+                minor: current.minor + 1,
+            },
+        ]
     }
 
     fn make_auth(
@@ -1505,12 +1528,11 @@ mod tests {
         cleanup(dir);
     }
 
-    /// MAJOR 不一致の要求には、切断ではなく `protocol_mismatch` 応答が返る。
+    /// 版が一致しない要求には、切断ではなく `protocol_mismatch` 応答が返る。
     ///
     /// 応答送信の直後にハンドルを破棄すると pipe バッファの未読データが
     /// 捨てられ、クライアントは応答を読めないまま切断だけを観測する。
-    #[test]
-    fn major_mismatch_request_receives_protocol_mismatch_response() {
+    fn assert_version_mismatch_request_is_rejected(mismatched: ProtocolVersion) {
         let (lifecycle, dir) = temp_lifecycle();
         let server = start_server(&lifecycle);
         let id = lifecycle.instance_id();
@@ -1520,19 +1542,15 @@ mod tests {
         let version = complete_handshake(&client, id, &secret);
         assert_eq!(version, ProtocolVersion::CURRENT);
 
-        let mismatched = ProtocolVersion {
-            major: version.major + 1,
-            minor: 0,
-        };
         let request_id = aviutl2_mcp_core::RequestId::new();
         send(
             &client,
             &make_ping(mismatched, request_id, id),
-            "MAJOR 不一致の要求",
+            "版が一致しない要求",
         );
 
         let response_body =
-            recv(&client, "MAJOR 不一致の応答").expect("MAJOR 不一致の応答が受信できません");
+            recv(&client, "版が一致しない応答").expect("版が一致しない要求の応答が受信できません");
         let response: aviutl2_mcp_core::ResponseEnvelope =
             serde_json::from_slice(&response_body).unwrap();
         assert_eq!(response.request_id, request_id);
@@ -1541,9 +1559,63 @@ mod tests {
                 assert_eq!(error.code, aviutl2_mcp_core::ErrorCode::ProtocolMismatch);
             }
             aviutl2_mcp_core::ResponseResult::Ok { result } => {
-                panic!("MAJOR 不一致が受理されました: {result:?}")
+                panic!("{} の要求が受理されました: {result:?}", mismatched.as_str())
             }
         }
+
+        drop(client);
+        server.stop(Duration::from_secs(5));
+        cleanup(dir);
+    }
+
+    #[test]
+    fn major_mismatch_request_receives_protocol_mismatch_response() {
+        assert_version_mismatch_request_is_rejected(ProtocolVersion {
+            major: ProtocolVersion::CURRENT.major + 1,
+            minor: ProtocolVersion::CURRENT.minor,
+        });
+    }
+
+    /// 版の交渉を行わないため、MINOR だけの差も要求として受理しない。
+    #[test]
+    fn minor_mismatch_request_receives_protocol_mismatch_response() {
+        assert_version_mismatch_request_is_rejected(ProtocolVersion {
+            major: ProtocolVersion::CURRENT.major,
+            minor: ProtocolVersion::CURRENT.minor + 1,
+        });
+    }
+
+    /// 版が一致しない ClientHello は、理由を返さずに切断される。
+    #[test]
+    fn handshake_with_a_mismatched_version_disconnects_without_response() {
+        let (lifecycle, dir) = temp_lifecycle();
+        let server = start_server(&lifecycle);
+        let id = lifecycle.instance_id();
+        let name = pipe_name_for(&id);
+
+        for version in mismatched_versions() {
+            let client = connect_client_within(&name, Duration::from_secs(10));
+            let client_nonce = aviutl2_mcp_core::Nonce::generate();
+            send(
+                &client,
+                &make_hello_with_version(version, id, &client_nonce),
+                "版が一致しない ClientHello",
+            );
+
+            let body = recv_or_disconnected(&client, "版が一致しない ClientHello の送信後");
+            assert!(
+                body.is_none(),
+                "{} を名乗る ClientHello に応答が返されました: {body:?}",
+                version.as_str()
+            );
+            drop(client);
+        }
+
+        // 拒否した接続は待受を止めない。現行版の相手はそのまま handshake できる。
+        let client = connect_client_within(&name, Duration::from_secs(10));
+        let secret = *lifecycle.auth_secret().as_bytes();
+        let version = complete_handshake(&client, id, &secret);
+        exchange_ping(&client, id, version);
 
         drop(client);
         server.stop(Duration::from_secs(5));

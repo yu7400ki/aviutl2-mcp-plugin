@@ -489,7 +489,7 @@ fn validate_descriptor_file(path: &Path) -> Result<InstanceDescriptor, Exclusion
         return Err(ExclusionReason::InvalidDescriptor);
     }
 
-    if descriptor.protocol_version.major != ProtocolVersion::CURRENT.major {
+    if descriptor.protocol_version != ProtocolVersion::CURRENT {
         return Err(ExclusionReason::ProtocolMismatch);
     }
 
@@ -1131,28 +1131,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 現行版と一致しないプロトコルバージョン。
+    fn mismatched_versions() -> [ProtocolVersion; 2] {
+        let current = ProtocolVersion::CURRENT;
+        [
+            ProtocolVersion {
+                major: current.major + 1,
+                minor: current.minor,
+            },
+            ProtocolVersion {
+                major: current.major,
+                minor: current.minor + 1,
+            },
+        ]
+    }
+
+    /// descriptor の版は現行版との完全一致を求める。MINOR だけの差も拒否する。
     #[test]
     fn resolve_instance_reports_protocol_mismatch() {
-        let dir = temp_registry_dir();
-        std::fs::create_dir_all(&dir).unwrap();
-        let id = InstanceId::new_v4();
-        let mut descriptor = sample_descriptor(id);
-        descriptor.protocol_version = ProtocolVersion {
-            major: ProtocolVersion::CURRENT.major + 1,
-            minor: 0,
-        };
-        std::fs::write(
-            dir.join(format!("{}.json", id)),
-            serde_json::to_string(&descriptor).unwrap(),
-        )
-        .unwrap();
+        for version in mismatched_versions() {
+            let dir = temp_registry_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            let id = InstanceId::new_v4();
+            let mut descriptor = sample_descriptor(id);
+            descriptor.protocol_version = version;
+            std::fs::write(
+                dir.join(format!("{}.json", id)),
+                serde_json::to_string(&descriptor).unwrap(),
+            )
+            .unwrap();
 
-        let error = resolve_instance(&dir, id, DiscoveryConfig::default())
-            .err()
-            .expect("MAJOR 不一致の descriptor では解決できない");
-        assert_eq!(error.error_code(), ErrorCode::ProtocolMismatch);
+            let error = resolve_instance(&dir, id, DiscoveryConfig::default())
+                .err()
+                .unwrap_or_else(|| panic!("{} の descriptor が解決されました", version.as_str()));
+            assert_eq!(error.error_code(), ErrorCode::ProtocolMismatch);
 
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
@@ -1269,26 +1284,29 @@ mod tests {
 
     #[test]
     fn protocol_mismatch_descriptor_is_not_removed() {
-        let dir = temp_registry_dir();
-        std::fs::create_dir_all(&dir).unwrap();
-        let id = InstanceId::new_v4();
-        let mut descriptor = sample_descriptor(id);
-        descriptor.protocol_version = ProtocolVersion {
-            major: ProtocolVersion::CURRENT.major + 1,
-            minor: 0,
-        };
+        for version in mismatched_versions() {
+            let dir = temp_registry_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            let id = InstanceId::new_v4();
+            let mut descriptor = sample_descriptor(id);
+            descriptor.protocol_version = version;
 
-        let path = dir.join(format!("{}.json", id));
-        std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
+            let path = dir.join(format!("{}.json", id));
+            std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
 
-        let instances = find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
-        assert!(instances.is_empty(), "MAJOR 不一致の候補は除外される");
-        assert!(
-            path.exists(),
-            "MAJOR 不一致は別版で稼働中のインスタンスであり得るため削除しない"
-        );
+            let instances = find_instances(&dir, DiscoveryConfig::default(), true).unwrap();
+            assert!(
+                instances.is_empty(),
+                "{} の候補が一覧に残りました",
+                version.as_str()
+            );
+            assert!(
+                path.exists(),
+                "版の不一致は別版で稼働中のインスタンスであり得るため削除しない"
+            );
 
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

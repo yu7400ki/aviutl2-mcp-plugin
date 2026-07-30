@@ -7,8 +7,8 @@ use aviutl2_mcp_core::{
     AuthSecret, ClientAuth, ClientHello, DescriptorProject, ErrorCode, ErrorObject,
     InstanceDescriptor, InstanceId, InstanceState, Nonce, PongProject, PongResult, ProtocolVersion,
     RequestEnvelope, ResponseEnvelope, ResponseKind, ResponseResult, ServerAuth,
-    compute_client_mac, compute_server_mac, encode_frame, format_utc_timestamp, negotiate,
-    pipe_name_for, verify_mac,
+    compute_client_mac, compute_server_mac, encode_frame, format_utc_timestamp, pipe_name_for,
+    verify_mac,
 };
 use aviutl2_mcp_server::win_io::{self, EventHandle, IoIssue, OverlappedOp, WaitAnyOutcome};
 use std::collections::HashMap;
@@ -346,18 +346,19 @@ fn serve_connection(handle: HANDLE, behavior: &MockBehavior, stop_event: HANDLE)
     let m1: ClientHello = serde_json::from_slice(&m1_body).unwrap();
     assert_eq!(m1.instance_id, behavior.instance_id);
 
+    assert_eq!(m1.protocol_version, ProtocolVersion::CURRENT);
+
     let server_nonce = Nonce::generate();
-    let negotiated = negotiate(ProtocolVersion::CURRENT, m1.protocol_version).unwrap();
     let server_mac = compute_server_mac(
         behavior.auth_secret.as_bytes(),
         &m1.client_nonce,
         &server_nonce,
         &behavior.instance_id,
-        &negotiated,
+        &ProtocolVersion::CURRENT,
     );
 
     let m2 = ServerAuth {
-        protocol_version: negotiated,
+        protocol_version: ProtocolVersion::CURRENT,
         instance_id: behavior.instance_id,
         server_nonce,
         pid: behavior.pid,
@@ -398,7 +399,7 @@ fn serve_connection(handle: HANDLE, behavior: &MockBehavior, stop_event: HANDLE)
         if request.operation != "ping" {
             std::thread::sleep(behavior.response_delay);
         }
-        let response = build_response(&request, behavior, negotiated);
+        let response = build_response(&request, behavior);
         let response_body = serde_json::to_vec(&response).unwrap();
         if write_frame(handle, &response_body, io_deadline()).is_err() {
             return;
@@ -407,16 +408,12 @@ fn serve_connection(handle: HANDLE, behavior: &MockBehavior, stop_event: HANDLE)
 }
 
 /// 要求の operation に応じた応答を組み立てる。
-pub fn build_response(
-    request: &RequestEnvelope,
-    behavior: &MockBehavior,
-    negotiated: ProtocolVersion,
-) -> ResponseEnvelope {
+pub fn build_response(request: &RequestEnvelope, behavior: &MockBehavior) -> ResponseEnvelope {
     let result = match behavior.responses.get(&request.operation) {
         Some(result) => result.clone(),
         None if request.operation == "ping" => {
             return ResponseEnvelope::pong(
-                negotiated,
+                ProtocolVersion::CURRENT,
                 request.request_id,
                 &PongResult::new(behavior.instance_id, behavior.state.clone())
                     .with_project(mock_project()),
@@ -431,7 +428,7 @@ pub fn build_response(
 
     ResponseEnvelope {
         kind: ResponseKind::Response,
-        protocol_version: negotiated,
+        protocol_version: ProtocolVersion::CURRENT,
         request_id: request.request_id,
         instance_id: behavior.instance_id,
         result,

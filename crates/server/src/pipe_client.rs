@@ -129,7 +129,6 @@ impl From<WinIoError> for PipeClientError {
 pub struct PipeClient {
     handle: HANDLE,
     instance_id: InstanceId,
-    protocol_version: ProtocolVersion,
     /// フレーム境界を見失った接続を再利用させないための印。
     ///
     /// 要求は `&self` で送るため内部可変性で持つ。本型は生ハンドルを持ち
@@ -152,10 +151,9 @@ impl PipeClient {
         let pipe_name = pipe_name_for(&descriptor_id);
         let handle = connect_pipe(&pipe_name, deadline)?;
 
-        let mut client = Self {
+        let client = Self {
             handle,
             instance_id: descriptor_id,
-            protocol_version: ProtocolVersion::CURRENT,
             desynced: Cell::new(false),
         };
 
@@ -172,7 +170,7 @@ impl PipeClient {
     /// 任意の operation を送信し、成功応答の `result` を返す。
     ///
     /// `request_id` の発番と期限の付与、応答の `request_id` / `instance_id` /
-    /// プロトコル MAJOR の整合検証をまとめて行う。接続先がエラー応答を返した場合は
+    /// `protocol_version` の整合検証をまとめて行う。接続先がエラー応答を返した場合は
     /// [`PipeClientError::Remote`] として `ErrorObject` をそのまま返す。
     #[instrument(skip_all, fields(instance = %redact::instance_id(&self.instance_id), operation = operation))]
     pub fn request(
@@ -183,7 +181,7 @@ impl PipeClient {
     ) -> Result<serde_json::Value, PipeClientError> {
         let request = RequestEnvelope {
             kind: RequestKind::Request,
-            protocol_version: self.protocol_version,
+            protocol_version: ProtocolVersion::CURRENT,
             request_id: RequestId::new(),
             instance_id: self.instance_id,
             deadline_unix_ms: deadline_to_unix_ms(deadline),
@@ -219,7 +217,7 @@ impl PipeClient {
     #[instrument(skip_all, fields(instance = %redact::instance_id(&self.instance_id)))]
     pub fn ping(&self, deadline: Instant) -> Result<PongResult, PipeClientError> {
         let request =
-            RequestEnvelope::ping(self.protocol_version, RequestId::new(), self.instance_id)
+            RequestEnvelope::ping(ProtocolVersion::CURRENT, RequestId::new(), self.instance_id)
                 .with_deadline(deadline_to_unix_ms(deadline));
 
         let result = self.exchange(request, deadline)?;
@@ -267,8 +265,8 @@ impl PipeClient {
             warn!("instance_id mismatch in response");
             return Err(PipeClientError::InstanceStale);
         }
-        if response.protocol_version.major != self.protocol_version.major {
-            warn!("protocol major mismatch in response");
+        if response.protocol_version != ProtocolVersion::CURRENT {
+            warn!("protocol version mismatch in response");
             return Err(PipeClientError::ProtocolMismatch);
         }
 
@@ -303,7 +301,7 @@ impl PipeClient {
     /// 解釈できないことと境界を取り違えたことは区別が付かない。`request_id` の
     /// 不一致は他の交換に属するフレームを読んだという最も明確な desync である。
     ///
-    /// `instance_id` や protocol MAJOR の不一致では印を付けない。フレームは 1 つ
+    /// `instance_id` や `protocol_version` の不一致では印を付けない。フレームは 1 つ
     /// 正しく読めており、相手が別のインスタンスであるか互換しない版であることを
     /// 示すだけで、境界は保たれている。
     fn poison_on_desync(&self, err: PipeClientError) -> PipeClientError {
@@ -322,8 +320,11 @@ impl PipeClient {
     }
 
     /// client 側 handshake を実行する。
+    ///
+    /// 接続先が名乗るプロトコルバージョンは [`ProtocolVersion::CURRENT`] との
+    /// 完全一致を求め、異なる版を名乗る相手は接続ごと拒否する。
     fn handshake(
-        &mut self,
+        &self,
         descriptor_id: InstanceId,
         descriptor_pid: u32,
         descriptor_created_at: &str,
@@ -331,9 +332,8 @@ impl PipeClient {
         deadline: Instant,
     ) -> Result<(), PipeClientError> {
         let client_nonce = Nonce::generate();
-        let client_max_version = ProtocolVersion::CURRENT;
         let m1 = ClientHello {
-            protocol_version: client_max_version,
+            protocol_version: ProtocolVersion::CURRENT,
             instance_id: descriptor_id,
             client_nonce: client_nonce.clone(),
         };
@@ -345,13 +345,8 @@ impl PipeClient {
 
         trace!("received server auth");
 
-        // 採用版は M2 の protocol_version そのものであり、client は妥当性のみを検証する。
-        // MAJOR 不一致、または client の対応最大 MINOR を超える MINOR は互換性がない。
-        let negotiated = m2.protocol_version;
-        if negotiated.major != client_max_version.major
-            || negotiated.minor > client_max_version.minor
-        {
-            warn!("negotiated protocol version is not acceptable");
+        if m2.protocol_version != ProtocolVersion::CURRENT {
+            warn!("protocol version mismatch in handshake");
             return Err(PipeClientError::ProtocolMismatch);
         }
 
@@ -374,14 +369,12 @@ impl PipeClient {
             &client_nonce,
             &m2.server_nonce,
             &m2.instance_id,
-            &negotiated,
+            &m2.protocol_version,
         );
         if !verify_mac(&expected_server_mac, &m2.server_mac) {
             warn!("server_mac verification failed");
             return Err(PipeClientError::AuthenticationFailed);
         }
-
-        self.protocol_version = negotiated;
 
         let client_mac =
             compute_client_mac(auth_secret.as_bytes(), &m2.server_nonce, &client_nonce);
@@ -389,7 +382,7 @@ impl PipeClient {
         let m3_body = serde_json::to_vec(&m3).map_err(|_| PipeClientError::Json)?;
         self.write_frame(&m3_body, deadline)?;
 
-        debug!(protocol_version = %self.protocol_version.as_str(), "handshake succeeded");
+        debug!(protocol_version = %m2.protocol_version.as_str(), "handshake succeeded");
         Ok(())
     }
 
@@ -708,7 +701,6 @@ mod tests {
             let client = PipeClient {
                 handle: client_handle,
                 instance_id: InstanceId::new_v4(),
-                protocol_version: ProtocolVersion::CURRENT,
                 desynced: Cell::new(false),
             };
             (Self { handle: peer }, client)
@@ -1025,34 +1017,125 @@ mod tests {
         );
     }
 
+    /// 応答が名乗る版は現行版との完全一致を求める。MINOR だけの差も拒否する。
     #[test]
-    fn request_rejects_protocol_major_mismatch() {
+    fn request_rejects_protocol_version_mismatch() {
+        for version in mismatched_versions() {
+            let (peer, client) = MockPeer::connected();
+            let instance_id = client.instance_id;
+
+            let responder = respond_once(&peer, move |request| {
+                let mut response = response_for(
+                    request,
+                    instance_id,
+                    ResponseResult::Ok {
+                        result: serde_json::json!({}),
+                    },
+                );
+                response.protocol_version = version;
+                serde_json::to_vec(&response).unwrap()
+            });
+
+            let failure = client
+                .request("get_edit_info", serde_json::json!({}), test_deadline())
+                .expect_err("版が異なる応答は拒否される");
+            responder.join().unwrap();
+            assert!(
+                matches!(failure, PipeClientError::ProtocolMismatch),
+                "{} の応答が受理されました: {failure:?}",
+                version.as_str()
+            );
+            assert_eq!(failure.error_code(), ErrorCode::ProtocolMismatch);
+        }
+    }
+
+    /// 現行版と一致しないプロトコルバージョン。
+    fn mismatched_versions() -> [ProtocolVersion; 3] {
+        let current = ProtocolVersion::CURRENT;
+        [
+            ProtocolVersion {
+                major: current.major + 1,
+                minor: current.minor,
+            },
+            ProtocolVersion {
+                major: current.major,
+                minor: current.minor + 1,
+            },
+            ProtocolVersion {
+                major: current.major.saturating_sub(1),
+                minor: current.minor,
+            },
+        ]
+    }
+
+    /// handshake の M2 を演じ、client 側の版検証の結果を返す。
+    fn handshake_against_advertised_version(
+        advertised: ProtocolVersion,
+    ) -> Result<(), PipeClientError> {
+        const PID: u32 = 4321;
+        const CREATED_AT: &str = "2026-01-01T00:00:00.0000000Z";
+
         let (peer, client) = MockPeer::connected();
         let instance_id = client.instance_id;
+        let auth_secret = AuthSecret::from_bytes([0x5A; 32]);
 
-        let responder = respond_once(&peer, move |request| {
-            let mut response = response_for(
-                request,
-                instance_id,
-                ResponseResult::Ok {
-                    result: serde_json::json!({}),
-                },
+        let handle = SendHandle(peer.raw());
+        let secret = *auth_secret.as_bytes();
+        let responder = std::thread::spawn(move || {
+            let handle = handle;
+            let hello: ClientHello = serde_json::from_slice(&recv_frame(handle.0)).unwrap();
+            let server_nonce = Nonce::generate();
+            let server_mac = compute_server_mac(
+                &secret,
+                &hello.client_nonce,
+                &server_nonce,
+                &instance_id,
+                &advertised,
             );
-            response.protocol_version = ProtocolVersion {
-                major: ProtocolVersion::CURRENT.major + 1,
-                minor: 0,
+            let m2 = ServerAuth {
+                protocol_version: advertised,
+                instance_id,
+                server_nonce,
+                pid: PID,
+                process_created_at: CREATED_AT.to_string(),
+                server_mac,
             };
-            serde_json::to_vec(&response).unwrap()
+            send_bytes(
+                handle.0,
+                &encode_frame(&serde_json::to_vec(&m2).unwrap()).unwrap(),
+            );
         });
 
-        let failure = client
-            .request("get_edit_info", serde_json::json!({}), test_deadline())
-            .expect_err("プロトコル MAJOR 不一致は拒否される");
-        responder.join().unwrap();
-        assert!(
-            matches!(failure, PipeClientError::ProtocolMismatch),
-            "実際のエラー: {failure:?}"
+        let result = client.handshake(
+            instance_id,
+            PID,
+            CREATED_AT,
+            &auth_secret,
+            Instant::now() + Duration::from_secs(5),
         );
+        responder.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn handshake_accepts_the_current_version() {
+        handshake_against_advertised_version(ProtocolVersion::CURRENT)
+            .expect("現行版を名乗る接続先とは handshake が成立する");
+    }
+
+    /// handshake は版の交渉を行わず、異なる版を名乗る接続先を拒否する。
+    #[test]
+    fn handshake_rejects_protocol_version_mismatch() {
+        for version in mismatched_versions() {
+            let failure = handshake_against_advertised_version(version)
+                .expect_err("版が異なる接続先とは handshake が成立しない");
+            assert!(
+                matches!(failure, PipeClientError::ProtocolMismatch),
+                "{} を名乗る接続先が受理されました: {failure:?}",
+                version.as_str()
+            );
+            assert_eq!(failure.error_code(), ErrorCode::ProtocolMismatch);
+        }
     }
 
     #[test]

@@ -35,7 +35,6 @@ pub mod page;
 pub mod selector;
 pub mod state;
 pub mod validation;
-pub mod version;
 pub mod wire_format;
 
 #[cfg(test)]
@@ -104,5 +103,4 @@ pub use validation::{
     validate_control_free_except_layout, validate_item_text, validate_multiline_item_text,
     validate_name, validate_path,
 };
-pub use version::negotiate;
 pub use wire_format::{format_hwnd, format_utc_timestamp, parse_utc_timestamp};

@@ -26,8 +26,8 @@ use aviutl2_mcp_core::{
     PLUGIN_WRITE_TIMEOUT, PageError, PageRequest, PongProject, PongResult, ProtocolVersion,
     RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult,
     SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSelectionParams, compute_client_mac, compute_server_mac, deserialize_json, negotiate,
-    take_page, verify_mac,
+    SetSelectionParams, compute_client_mac, compute_server_mac, deserialize_json, take_page,
+    verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -125,22 +125,19 @@ fn run_connection(
     read_adapter: &dyn ReadAdapter,
     edit_adapter: &dyn EditAdapter,
 ) -> Result<()> {
-    let negotiated_version = perform_handshake(stream, lifecycle)?;
-    run_request_loop(
-        stream,
-        lifecycle,
-        read_adapter,
-        edit_adapter,
-        negotiated_version,
-    )
+    perform_handshake(stream, lifecycle)?;
+    run_request_loop(stream, lifecycle, read_adapter, edit_adapter)
 }
 
-/// handshake を実行し、採用プロトコルバージョンを返す。
+/// handshake を実行する。
+///
+/// 相手が名乗るプロトコルバージョンは [`ProtocolVersion::CURRENT`] との完全一致を
+/// 求め、異なる版を名乗る相手は接続ごと拒否する。
 ///
 /// 検証に失敗した場合はエラー応答を返さずに `Err` を返し、呼び出し元が接続を
 /// 切断する。未認証の相手へ失敗理由を開示しないため、理由はローカルログにのみ
 /// 記録する。`auth_secret`・nonce・MAC はログに出さない。
-fn perform_handshake(stream: &PipeStream, lifecycle: &Lifecycle) -> Result<ProtocolVersion> {
+fn perform_handshake(stream: &PipeStream, lifecycle: &Lifecycle) -> Result<()> {
     let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
 
     let client_hello = read_frame_as::<ClientHello>(stream, deadline)
@@ -150,8 +147,9 @@ fn perform_handshake(stream: &PipeStream, lifecycle: &Lifecycle) -> Result<Proto
         anyhow::bail!("ClientHello の instance_id が一致しないため接続を切断します");
     }
 
-    let negotiated = negotiate(ProtocolVersion::CURRENT, client_hello.protocol_version)
-        .map_err(|_| anyhow::anyhow!("プロトコルバージョンが一致しないため接続を切断します"))?;
+    if client_hello.protocol_version != ProtocolVersion::CURRENT {
+        anyhow::bail!("プロトコルバージョンが一致しないため接続を切断します");
+    }
 
     let server_nonce = Nonce::generate();
     let server_mac = compute_server_mac(
@@ -159,11 +157,11 @@ fn perform_handshake(stream: &PipeStream, lifecycle: &Lifecycle) -> Result<Proto
         &client_hello.client_nonce,
         &server_nonce,
         &lifecycle.instance_id(),
-        &negotiated,
+        &ProtocolVersion::CURRENT,
     );
 
     let server_auth = aviutl2_mcp_core::ServerAuth {
-        protocol_version: negotiated,
+        protocol_version: ProtocolVersion::CURRENT,
         instance_id: lifecycle.instance_id(),
         server_nonce,
         pid: lifecycle.descriptor().pid,
@@ -189,7 +187,7 @@ fn perform_handshake(stream: &PipeStream, lifecycle: &Lifecycle) -> Result<Proto
         anyhow::bail!("ClientAuth の MAC 検証に失敗したため接続を切断します");
     }
 
-    Ok(negotiated)
+    Ok(())
 }
 
 /// 認証済み接続での要求処理ループ。
@@ -202,7 +200,6 @@ fn run_request_loop(
     lifecycle: &Lifecycle,
     read_adapter: &dyn ReadAdapter,
     edit_adapter: &dyn EditAdapter,
-    negotiated_version: ProtocolVersion,
 ) -> Result<()> {
     loop {
         if lifecycle.state() == InstanceState::Draining {
@@ -222,44 +219,26 @@ fn run_request_loop(
         let request: RequestEnvelope = deserialize_json(&body)
             .map_err(|e| anyhow::anyhow!("RequestEnvelope のデコードに失敗しました: {e}"))?;
 
-        match classify_version(negotiated_version, request.protocol_version) {
-            VersionCheck::Compatible => {}
-            VersionCheck::MinorTooHigh => {
-                send_error(
-                    stream,
-                    negotiated_version,
-                    request.request_id,
-                    request.instance_id,
-                    error_object(
-                        ErrorCode::ProtocolMismatch,
-                        "要求の MINOR が交渉結果を超えています",
-                    ),
-                )?;
-                continue;
-            }
-            VersionCheck::MajorMismatch => {
-                // MAJOR 不一致は互換性が無く接続を継続できない。handshake は
-                // 完了しているため理由を 1 度返し、以降の要求は処理せずに
-                // クライアントの切断を待ってから閉じる。
-                send_error(
-                    stream,
-                    negotiated_version,
-                    request.request_id,
-                    request.instance_id,
-                    error_object(
-                        ErrorCode::ProtocolMismatch,
-                        "要求の MAJOR が交渉結果と一致しません",
-                    ),
-                )?;
-                await_peer_close(stream);
-                break;
-            }
+        // 版が違えば要求の解釈そのものが保証されず、接続を継続できない。
+        // handshake は完了しているため理由を 1 度返し、以降の要求は処理せずに
+        // クライアントの切断を待ってから閉じる。
+        if request.protocol_version != ProtocolVersion::CURRENT {
+            send_error(
+                stream,
+                request.request_id,
+                request.instance_id,
+                error_object(
+                    ErrorCode::ProtocolMismatch,
+                    "要求の protocol_version が一致しません",
+                ),
+            )?;
+            await_peer_close(stream);
+            break;
         }
 
         if request.instance_id != lifecycle.instance_id() {
             send_error(
                 stream,
-                negotiated_version,
                 request.request_id,
                 request.instance_id,
                 error_object(
@@ -276,13 +255,7 @@ fn run_request_loop(
         let operation = match classify_operation(&request.operation) {
             Ok(operation) => operation,
             Err(error) => {
-                send_error(
-                    stream,
-                    negotiated_version,
-                    request.request_id,
-                    request.instance_id,
-                    error,
-                )?;
+                send_error(stream, request.request_id, request.instance_id, error)?;
                 continue;
             }
         };
@@ -304,7 +277,6 @@ fn run_request_loop(
                     RequestDeadline::Exceeded => {
                         send_error(
                             stream,
-                            negotiated_version,
                             request.request_id,
                             request.instance_id,
                             timeout_before_execution(),
@@ -313,7 +285,7 @@ fn run_request_loop(
                     }
                 };
                 let response = ResponseEnvelope::pong(
-                    negotiated_version,
+                    ProtocolVersion::CURRENT,
                     request.request_id,
                     &pong_result(lifecycle.instance_id(), lifecycle.state(), read_adapter),
                 );
@@ -360,7 +332,6 @@ fn run_request_loop(
                 }
 
                 let response = response_envelope(
-                    negotiated_version,
                     request.request_id,
                     lifecycle.instance_id(),
                     read_response.outcome,
@@ -393,12 +364,8 @@ fn run_request_loop(
 
                 // 期限を過ぎていても結果は捨てず、送信の持ち時間を丸ごと充てる。
                 let deadline = edit_send_deadline(Instant::now());
-                let response = response_envelope(
-                    negotiated_version,
-                    request.request_id,
-                    lifecycle.instance_id(),
-                    outcome,
-                );
+                let response =
+                    response_envelope(request.request_id, lifecycle.instance_id(), outcome);
                 send_response(stream, &response, deadline)?;
             }
         }
@@ -1057,28 +1024,6 @@ fn resolve_request_deadline(
     RequestDeadline::Within(now + remaining.min(server_limit))
 }
 
-/// 要求の `protocol_version` を交渉結果と照合した結果。
-#[derive(Debug, PartialEq, Eq)]
-enum VersionCheck {
-    /// MAJOR 一致かつ MINOR が交渉結果以下。
-    Compatible,
-    /// MAJOR は一致するが MINOR が交渉結果を超えている。
-    MinorTooHigh,
-    /// MAJOR が一致しない。
-    MajorMismatch,
-}
-
-/// 要求の `protocol_version` が交渉結果と互換かを判定する。
-fn classify_version(negotiated: ProtocolVersion, requested: ProtocolVersion) -> VersionCheck {
-    if requested.major != negotiated.major {
-        VersionCheck::MajorMismatch
-    } else if requested.minor > negotiated.minor {
-        VersionCheck::MinorTooHigh
-    } else {
-        VersionCheck::Compatible
-    }
-}
-
 fn read_frame_as<T>(stream: &PipeStream, deadline: Instant) -> Result<T>
 where
     T: for<'de> serde::Deserialize<'de>,
@@ -1107,14 +1052,13 @@ fn send_response(
 
 /// 要求の処理結果を応答 Envelope へ載せる。
 fn response_envelope(
-    protocol_version: ProtocolVersion,
     request_id: RequestId,
     instance_id: InstanceId,
     outcome: Result<serde_json::Value, ErrorObject>,
 ) -> ResponseEnvelope {
     ResponseEnvelope {
         kind: ResponseKind::Response,
-        protocol_version,
+        protocol_version: ProtocolVersion::CURRENT,
         request_id,
         instance_id,
         result: match outcome {
@@ -1132,12 +1076,11 @@ fn response_envelope(
 /// 崩せないようにしている。
 fn send_error(
     stream: &PipeStream,
-    protocol_version: ProtocolVersion,
     request_id: RequestId,
     instance_id: InstanceId,
     error: ErrorObject,
 ) -> Result<()> {
-    let response = response_envelope(protocol_version, request_id, instance_id, Err(error));
+    let response = response_envelope(request_id, instance_id, Err(error));
     send_response(stream, &response, Instant::now() + WRITE_TIMEOUT)
 }
 
@@ -1163,38 +1106,6 @@ mod tests {
         SectionRange, TRANSPORT_HEADROOM,
     };
     use std::sync::Mutex;
-
-    const NEGOTIATED: ProtocolVersion = ProtocolVersion { major: 1, minor: 3 };
-
-    #[test]
-    fn compatible_when_same_major_and_minor_within_negotiated() {
-        for minor in 0..=3 {
-            assert_eq!(
-                classify_version(NEGOTIATED, ProtocolVersion { major: 1, minor }),
-                VersionCheck::Compatible
-            );
-        }
-    }
-
-    #[test]
-    fn minor_above_negotiated_is_rejected() {
-        assert_eq!(
-            classify_version(NEGOTIATED, ProtocolVersion { major: 1, minor: 4 }),
-            VersionCheck::MinorTooHigh
-        );
-    }
-
-    #[test]
-    fn major_mismatch_is_rejected() {
-        assert_eq!(
-            classify_version(NEGOTIATED, ProtocolVersion { major: 2, minor: 3 }),
-            VersionCheck::MajorMismatch
-        );
-        assert_eq!(
-            classify_version(NEGOTIATED, ProtocolVersion { major: 0, minor: 0 }),
-            VersionCheck::MajorMismatch
-        );
-    }
 
     /// 期限判定の基準時刻。壁時計・単調時計いずれの絶対値にも依存しない。
     const NOW_UNIX_MS: i64 = 1_785_144_000_000;
