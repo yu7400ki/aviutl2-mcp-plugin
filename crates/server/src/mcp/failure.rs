@@ -135,7 +135,20 @@ pub fn structured(error: &ErrorObject) -> Value {
     })
 }
 
+/// レイヤーのロックで拒否された要求へ添える案内。
+///
+/// `retry_requires` は `none` である。同じ要求の再送でも対象の読み直しでも
+/// 解消しないが、**別の operation を挟めば解ける**。その手順を機械可読な分類へ
+/// 押し込むと値が増えるたびに要求元の分岐が増えるため、案内は text が担う。
+const LAYER_LOCKED_GUIDANCE: &str = "対象のレイヤーがロックされています。aviutl2_set_layer_state でロックを解除してから再実行してください";
+
+/// 対象の現在の姿を返した失敗へ添える案内。
+const CURRENT_OBJECT_GUIDANCE: &str = "details.current_object に対象の現在の値が入っています。読み直さずにそのまま次の要求の selector として使えます";
+
 /// エラーの text content を組み立てる。
+///
+/// 補助情報だけでは次に何をすればよいか分からない失敗には、取るべき操作を
+/// 添える。
 pub fn text(error: &ErrorObject) -> String {
     let retry = if error.retryable {
         "リトライ可能"
@@ -143,11 +156,28 @@ pub fn text(error: &ErrorObject) -> String {
         "リトライ不可"
     };
     let correlation_id = error.correlation_id.as_deref().unwrap_or("-");
-    format!(
+    let mut text = format!(
         "{} ({retry}): {}\ncorrelation_id={correlation_id}",
         error.code.as_snake_case(),
         clamp_chars(&error.message, MAX_MESSAGE_CHARS),
-    )
+    );
+    for line in guidance(error) {
+        text.push('\n');
+        text.push_str(line);
+    }
+    text
+}
+
+/// 補助情報から、次に取るべき操作の案内を引く。
+fn guidance(error: &ErrorObject) -> Vec<&'static str> {
+    let mut lines = Vec::new();
+    if error.details.get("reason").and_then(Value::as_str) == Some("layer_locked") {
+        lines.push(LAYER_LOCKED_GUIDANCE);
+    }
+    if error.details.get("current_object").is_some() {
+        lines.push(CURRENT_OBJECT_GUIDANCE);
+    }
+    lines
 }
 
 /// 接続先が返したエラーから、外部へ出してよい部分だけを残す。
@@ -521,6 +551,41 @@ mod tests {
         let text = text(&error);
         assert!(text.contains("invalid_argument"));
         assert!(text.contains("correlation"));
+    }
+
+    #[test]
+    fn a_locked_layer_is_told_how_to_unlock_it() {
+        // 再試行の分類は「この要求をどう扱うか」しか表せない。解決手段が別の
+        // operation であることは text が伝える。
+        let error = ErrorObject::new(ErrorCode::PreconditionFailed, "レイヤーがロック", true)
+            .with_details(serde_json::json!({
+                "reason": "layer_locked",
+                "layer": 3,
+                "retry_requires": "none",
+            }));
+        let text = text(&error);
+        assert!(text.contains("aviutl2_set_layer_state"), "{text}");
+        assert!(text.contains("ロックを解除"), "{text}");
+    }
+
+    #[test]
+    fn a_content_mismatch_is_told_that_it_can_reuse_the_current_object() {
+        // 現在の姿は応答に載っているが、tool schema からはその存在を知れない。
+        let error = ErrorObject::new(ErrorCode::PreconditionFailed, "対象が変化しました", true)
+            .with_details(serde_json::json!({
+                "mismatch": "fingerprint",
+                "current_object": { "layer": 2 },
+                "retry_requires": "refetch",
+            }));
+        let text = text(&error);
+        assert!(text.contains("details.current_object"), "{text}");
+    }
+
+    #[test]
+    fn failures_without_a_next_step_are_not_given_one() {
+        let text = text(&invalid_argument("limit が範囲外です"));
+        assert!(!text.contains("aviutl2_set_layer_state"), "{text}");
+        assert!(!text.contains("details.current_object"), "{text}");
     }
 
     #[test]

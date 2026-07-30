@@ -530,6 +530,8 @@ impl AviUtl2McpServer {
     /// 同じ要求を再送すると重複して作成し得る。作成先に既存オブジェクトがあれば
     /// precondition_failed（destination_occupied）となるため通常は防がれるが、
     /// ホストが挿入位置を自動調整した場合はすり抜け得る。
+    /// 配置先のレイヤーがロックされている場合は precondition_failed（layer_locked）と
+    /// なる。aviutl2_set_layer_state でロックを解除してから再実行する。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
@@ -578,8 +580,13 @@ impl AviUtl2McpServer {
     /// selector には応答が返した値をそのまま指定する。応答が返した selector は
     /// 読み直さずにそのまま次の編集へ渡せる。
     /// 宛先に既存オブジェクトがある場合は precondition_failed となる。
+    /// 移動元または移動先のレイヤーがロックされている場合は
+    /// precondition_failed（layer_locked）となる。aviutl2_set_layer_state で
+    /// ロックを解除してから再実行する。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// 対象が変化していた場合の precondition_failed では、details.current_object に
+    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "aviutl2_move_object",
@@ -627,6 +634,8 @@ impl AviUtl2McpServer {
     /// 読み直さずにそのまま次の編集へ渡せる。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// 対象が変化していた場合の precondition_failed では、details.current_object に
+    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "aviutl2_set_object_name",
@@ -679,6 +688,8 @@ impl AviUtl2McpServer {
     /// となる。種別は aviutl2_get_object の item_type で確認できる。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// 対象が変化していた場合の precondition_failed では、details.current_object に
+    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "aviutl2_set_object_item",
@@ -732,6 +743,8 @@ impl AviUtl2McpServer {
     /// なり防がれる。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// 対象が変化していた場合の precondition_failed では、details.current_object に
+    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "aviutl2_add_effect",
@@ -782,6 +795,8 @@ impl AviUtl2McpServer {
     /// selector で続けて編集すると precondition_failed となる。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// 対象が変化していた場合の precondition_failed では、details.current_object に
+    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "aviutl2_set_effect_enabled",
@@ -832,6 +847,8 @@ impl AviUtl2McpServer {
     /// selector で続けて編集すると precondition_failed となる。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// 対象が変化していた場合の precondition_failed では、details.current_object に
+    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "aviutl2_delete_effect",
@@ -879,8 +896,12 @@ impl AviUtl2McpServer {
     /// selector には応答が返した値をそのまま指定する。他の編集 tool では応答が
     /// 返した selector をそのまま次の編集へ渡せるが、削除した対象の selector は
     /// 以後どの編集にも使えない。
+    /// 対象のレイヤーがロックされている場合は precondition_failed（layer_locked）と
+    /// なる。aviutl2_set_layer_state でロックを解除してから再実行する。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// 対象が変化していた場合の precondition_failed では、details.current_object に
+    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "aviutl2_delete_object",
@@ -984,6 +1005,9 @@ impl AviUtl2McpServer {
     /// 変化していれば fingerprint が、別のプロジェクトであれば selector の
     /// project_epoch が拒否する。応答が返した selector は読み直さずにそのまま
     /// 次の編集へ渡せる。
+    /// focus の対象が変化していた場合の precondition_failed では、
+    /// details.current_object に対象の現在の値が入る。読み直さずにそのまま
+    /// 次の要求の selector として使える。
     /// この tool は他の編集 tool と異なり取り消し単位を作らない。実行後に取り消し
     /// 操作を行うと、カーソルや選択範囲ではなく、その前に行った編集が取り消される。
     /// 応答が返す反映値は編集と原子的に観測したものではなく、ホストが範囲外の値を
@@ -1860,6 +1884,97 @@ mod tests {
                     "{name} の説明に {keyword} がありません"
                 );
             }
+        }
+    }
+
+    /// tool の説明がレイヤーのロックについて述べる内容。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum LayerLockStatement {
+        /// ロックで拒否されることと、解除の手段を述べる。
+        StoppedAndNamesTheWayOut,
+        /// ロックが止める範囲と、自身が影響を受けないことを述べる。
+        DescribesTheScope,
+        /// ロックについて何も述べない。
+        Silent,
+    }
+
+    /// tool 名から、説明がレイヤーのロックについて述べる内容を引く。
+    ///
+    /// 未知の tool 名で落とす。ロックが止めるのはオブジェクトの削除と時間軸上の
+    /// 移動であり、対象を 1 か所へ置いて tool を足したときに素通りしないようにする。
+    fn layer_lock_statement(name: &str) -> LayerLockStatement {
+        match name {
+            "aviutl2_create_object" | "aviutl2_move_object" | "aviutl2_delete_object" => {
+                LayerLockStatement::StoppedAndNamesTheWayOut
+            }
+            "aviutl2_set_layer_state" => LayerLockStatement::DescribesTheScope,
+            "aviutl2_set_object_name"
+            | "aviutl2_set_object_item"
+            | "aviutl2_add_effect"
+            | "aviutl2_set_effect_enabled"
+            | "aviutl2_delete_effect"
+            | "aviutl2_set_selection" => LayerLockStatement::Silent,
+            other => panic!("{other} のレイヤーロックの説明が定義されていません"),
+        }
+    }
+
+    #[test]
+    fn tools_stopped_by_a_layer_lock_name_the_way_out() {
+        // layer_locked の retry_requires は none である。案内が無ければ、契約に
+        // 従う要求元は解ける状況で停止する。
+        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+            let description = description_of(name);
+            match layer_lock_statement(name) {
+                LayerLockStatement::StoppedAndNamesTheWayOut => {
+                    assert!(
+                        description.contains("layer_locked"),
+                        "{name} の説明がロックによる拒否を述べていません"
+                    );
+                    assert!(
+                        description.contains("aviutl2_set_layer_state"),
+                        "{name} の説明がロックの解除手段を示していません"
+                    );
+                }
+                LayerLockStatement::DescribesTheScope => {
+                    assert!(
+                        description.contains("この tool 自身はロックの影響を受けない"),
+                        "{name} の説明が自身にロックが掛からないことを述べていません"
+                    );
+                }
+                LayerLockStatement::Silent => assert!(
+                    !description.contains("layer_locked"),
+                    "{name} の説明が掛からないロックによる拒否を述べています"
+                ),
+            }
+        }
+    }
+
+    /// 失敗応答が対象の現在の姿を返し得る tool。
+    ///
+    /// 対象を指す selector を持つ tool に限る。作成は対象がまだ無く、レイヤーの
+    /// 状態変更は対象が selector も fingerprint も持たない。
+    const TOOLS_RETURNING_A_CURRENT_OBJECT: &[&str] = &[
+        "aviutl2_move_object",
+        "aviutl2_set_object_name",
+        "aviutl2_set_object_item",
+        "aviutl2_add_effect",
+        "aviutl2_set_effect_enabled",
+        "aviutl2_delete_effect",
+        "aviutl2_delete_object",
+        "aviutl2_set_selection",
+    ];
+
+    #[test]
+    fn tools_that_return_the_current_object_say_so() {
+        // 失敗応答に載る値は tool schema に現れない。説明が触れなければ、
+        // 呼び出し側はその存在を知る手段が無く読み直しに戻る。
+        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+            let description = description_of(name);
+            assert_eq!(
+                description.contains("details.current_object"),
+                TOOLS_RETURNING_A_CURRENT_OBJECT.contains(name),
+                "{name} の説明と現在の姿を返す tool の一覧が食い違います"
+            );
         }
     }
 
