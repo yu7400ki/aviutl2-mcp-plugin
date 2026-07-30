@@ -37,7 +37,7 @@
 //! |---|---|---|
 //! | `AVIUTL2_MCP_REGISTRY_DIR` | インスタンス登録ディレクトリ | 既定の場所 |
 //! | `AVIUTL2_MCP_LIVE_MEDIA_FILE` | メディアファイルからの作成に使う絶対パス | 該当項目を未実施にする |
-//! | `AVIUTL2_MCP_LIVE_MULTI_ALIAS_FILE` | 複数オブジェクトを含む alias ファイルのパス | 該当項目を未実施にする |
+//! | `AVIUTL2_MCP_LIVE_MULTI_ALIAS_FILE` | 複数オブジェクトを含む alias ファイルのパス。複数レイヤーへ展開するものが望ましい | 該当項目を未実施にする |
 //! | `AVIUTL2_MCP_LIVE_EFFECT_NAME` | 付与に用いる effect 名 | カタログから自動で選ぶ |
 //!
 //! # 分離方式
@@ -255,6 +255,17 @@ struct Observation {
 /// 確認の成否。`Ok` の要素は記録に残す観測値。
 type CheckResult = Result<Vec<String>, String>;
 
+/// 実施できたかどうかを含む確認の結果。
+///
+/// 前提が揃わなかった確認を合格として数えないために、実施しなかったことを
+/// 結果の一部として運ぶ。
+enum Attempt {
+    /// 実施し、合否が決まった。
+    Ran(CheckResult),
+    /// 前提が揃わず実施できなかった。
+    Unmet(String),
+}
+
 /// 観測値を 1 つ伴う合格。
 fn passed_with(note: impl Into<String>) -> CheckResult {
     Ok(vec![note.into()])
@@ -314,6 +325,21 @@ impl Report {
             verdict: Verdict::Skipped(reason.into()),
             notes: Vec::new(),
         });
+    }
+
+    /// 実施できたかどうかを含む結果を記録する。
+    fn record_attempt(
+        &mut self,
+        section: &'static str,
+        title: impl Into<String>,
+        verified: impl Into<String>,
+        mode: Mode,
+        attempt: Attempt,
+    ) {
+        match attempt {
+            Attempt::Ran(outcome) => self.record(section, title, verified, mode, outcome),
+            Attempt::Unmet(reason) => self.skip(section, title, verified, mode, reason),
+        }
     }
 
     /// 実機でのみ決着する事項の観測を記録する。
@@ -2673,6 +2699,27 @@ fn section_basic_edits(
         ),
     }
 
+    let verified = "複数オブジェクトを含む alias の作成が created に全件を返し、返った selector で 2 件目だけを個別に削除できる";
+    match multi_object_alias() {
+        Ok(alias) => {
+            let attempt = check_multi_object_created(harness, report, instance, context, &alias);
+            report.record_attempt(
+                "5.1",
+                "複数オブジェクトを含む alias の created",
+                verified,
+                Mode::Auto,
+                attempt,
+            );
+        }
+        Err(reason) => report.skip(
+            "5.1",
+            "複数オブジェクトを含む alias の created",
+            verified,
+            Mode::Auto,
+            reason,
+        ),
+    }
+
     let outcome = check_edit_chain(harness, report, instance, context);
     report.record(
         "5.1",
@@ -2682,6 +2729,144 @@ fn section_basic_edits(
         outcome,
     );
 
+    Ok(())
+}
+
+/// 複数オブジェクトを含む alias の本文を読み取る。
+fn multi_object_alias() -> Result<String, String> {
+    let Some(path) = env_value(MULTI_ALIAS_FILE_ENV) else {
+        return Err(format!("{MULTI_ALIAS_FILE_ENV} が設定されていません"));
+    };
+    std::fs::read_to_string(&path)
+        .map_err(|error| format!("{MULTI_ALIAS_FILE_ENV} のファイルを読めません: {error}"))
+}
+
+/// 作成が生んだ全オブジェクトが応答に載り、そのまま個別に削除できることを
+/// 確かめる。
+///
+/// 差分の範囲が配置先レイヤーに閉じていると、別レイヤーへ作られた 2 件目以降が
+/// `created` に現れず、要求元は自分が作ったものへ到達できない。到達性は「返った
+/// selector をそのまま次の要求へ渡せる」ことでしか確かめられないため、2 件目を
+/// 個別に削除するところまで行う。
+fn check_multi_object_created(
+    harness: &Harness,
+    report: &mut Report,
+    instance: &Instance,
+    context: &Context,
+    alias: &str,
+) -> Attempt {
+    let slot = context.free_slots[1];
+    let created = harness.create_object(
+        &instance.id,
+        ObjectSourceInput::ObjectAlias {
+            alias: alias.to_string(),
+        },
+        PlacementInput {
+            scene_id: context.scene_id,
+            layer: slot.layer as u32,
+            frame: slot.frame as u32,
+        },
+        match precondition(harness, instance) {
+            Ok(epoch) => epoch,
+            Err(reason) => return Attempt::Ran(Err(reason)),
+        },
+    );
+    let created = match created {
+        Ok(outcome) => outcome.created,
+        Err(error) => {
+            return Attempt::Ran(Err(format!(
+                "複数オブジェクトを含む alias から作成できません: {}",
+                describe_error(&error)
+            )));
+        }
+    };
+
+    let mut layers: Vec<usize> = created.iter().map(|object| object.layer).collect();
+    layers.sort_unstable();
+    layers.dedup();
+    report.observe(
+        "multi_object_alias_created",
+        "複数オブジェクトを含む alias の作成は、生まれた全オブジェクトを応答へ載せるか",
+        format!(
+            "created={} 件 / 展開先レイヤー数={}",
+            created.len(),
+            layers.len()
+        ),
+    );
+
+    let probed = probe_created_reachability(harness, instance, context, &created);
+    // 後始末: 作成したオブジェクトのうち残っているものを全て削除する。
+    let cleaned = cleanup_created(harness, instance, context, &created);
+    match cleaned {
+        Ok(()) => probed,
+        Err(reason) => Attempt::Ran(Err(match probed {
+            Attempt::Ran(Err(failure)) => {
+                format!("{failure}。さらに後始末に失敗しました: {reason}")
+            }
+            _ => format!("後始末に失敗しました: {reason}"),
+        })),
+    }
+}
+
+/// 応答が返した 2 件目の selector だけで、その 1 件を削除できることを確かめる。
+fn probe_created_reachability(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    created: &[ObjectSummary],
+) -> Attempt {
+    let Some(second) = created.get(1) else {
+        return Attempt::Unmet(format!(
+            "{MULTI_ALIAS_FILE_ENV} の alias が {} 件のオブジェクトしか作りませんでした",
+            created.len()
+        ));
+    };
+
+    if let Err(error) = harness.delete_object(&instance.id, &second.selector) {
+        return Attempt::Ran(Err(format!(
+            "created の 2 件目の selector での削除が拒否されました: {}",
+            describe_error(&error)
+        )));
+    }
+
+    let at = Placement {
+        layer: second.layer,
+        frame: second.frame_start,
+    };
+    if resolve_object(harness, instance, context.scene_id, at).is_ok() {
+        return Attempt::Ran(Err(format!(
+            "削除したはずの layer={} frame={} にオブジェクトが残っています",
+            at.layer, at.frame
+        )));
+    }
+    Attempt::Ran(Ok(vec![format!(
+        "created {} 件のうち 2 件目（layer={} frame={}）だけを個別に削除できた",
+        created.len(),
+        at.layer,
+        at.frame
+    )]))
+}
+
+/// 作成したオブジェクトのうち、まだ残っているものを削除する。
+fn cleanup_created(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    created: &[ObjectSummary],
+) -> Result<(), String> {
+    for object in created {
+        let at = Placement {
+            layer: object.layer,
+            frame: object.frame_start,
+        };
+        let Ok(current) = resolve_object(harness, instance, context.scene_id, at) else {
+            continue;
+        };
+        require(
+            harness.delete_object(&instance.id, &current.selector),
+            "作成したオブジェクトを削除できません",
+        )?;
+    }
     Ok(())
 }
 
@@ -2989,60 +3174,51 @@ fn section_undo(
         outcome,
     );
 
-    match env_value(MULTI_ALIAS_FILE_ENV) {
-        Some(path) => match std::fs::read_to_string(&path) {
-            Ok(multi_alias) => {
-                let outcome = check_undo(
-                    harness,
-                    instance,
-                    context,
-                    "複数オブジェクトの作成",
-                    |state| {
-                        let expected = state.expected_project_epoch.clone();
-                        harness.create_object(
-                            &instance.id,
-                            ObjectSourceInput::ObjectAlias {
-                                alias: multi_alias.clone(),
-                            },
-                            PlacementInput {
-                                scene_id: context.scene_id,
-                                layer: slot.layer as u32,
-                                frame: slot.frame as u32,
-                            },
-                            expected,
-                        )
-                    },
-                );
-                report.observe(
-                    "multi_object_alias_undo_unit",
-                    "複数オブジェクトを含む alias の作成は 1 Undo 単位になるか",
-                    match &outcome {
-                        Ok(notes) => format!("1 回の取り消しで完全に戻った: {}", notes.join(" ")),
-                        Err(reason) => format!("完全には戻らなかった: {reason}"),
-                    },
-                );
-                report.record(
-                    "5.2",
-                    "複数オブジェクトを含む alias の Undo 単位",
-                    "複数オブジェクトを含む alias の作成が、全オブジェクトまとめて 1 回の取り消しで元へ戻る",
-                    Mode::Operator,
-                    outcome,
-                );
-            }
-            Err(error) => report.skip(
+    match multi_object_alias() {
+        Ok(multi_alias) => {
+            let outcome = check_undo(
+                harness,
+                instance,
+                context,
+                "複数オブジェクトの作成",
+                |state| {
+                    let expected = state.expected_project_epoch.clone();
+                    harness.create_object(
+                        &instance.id,
+                        ObjectSourceInput::ObjectAlias {
+                            alias: multi_alias.clone(),
+                        },
+                        PlacementInput {
+                            scene_id: context.scene_id,
+                            layer: slot.layer as u32,
+                            frame: slot.frame as u32,
+                        },
+                        expected,
+                    )
+                },
+            );
+            report.observe(
+                "multi_object_alias_undo_unit",
+                "複数オブジェクトを含む alias の作成は 1 Undo 単位になるか",
+                match &outcome {
+                    Ok(notes) => format!("1 回の取り消しで完全に戻った: {}", notes.join(" ")),
+                    Err(reason) => format!("完全には戻らなかった: {reason}"),
+                },
+            );
+            report.record(
                 "5.2",
                 "複数オブジェクトを含む alias の Undo 単位",
-                "複数オブジェクトを含む alias の作成が 1 回の取り消しで元へ戻る",
+                "複数オブジェクトを含む alias の作成が、全オブジェクトまとめて 1 回の取り消しで元へ戻る",
                 Mode::Operator,
-                format!("{MULTI_ALIAS_FILE_ENV} のファイルを読めません: {error}"),
-            ),
-        },
-        None => report.skip(
+                outcome,
+            );
+        }
+        Err(reason) => report.skip(
             "5.2",
             "複数オブジェクトを含む alias の Undo 単位",
             "複数オブジェクトを含む alias の作成が 1 回の取り消しで元へ戻る",
             Mode::Operator,
-            format!("{MULTI_ALIAS_FILE_ENV} が設定されていません"),
+            reason,
         ),
     }
 
