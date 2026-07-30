@@ -4127,7 +4127,7 @@ fn section_item_round_trip(
     )?;
 
     report_round_trip(report, &results, &added);
-    report.record(
+    report.record_attempt(
         "5.4",
         "trackbar 項目の変更",
         "trackbar を持つ設定項目の値を同じ経路で変更できる",
@@ -4671,12 +4671,16 @@ fn restore_multiline_item(
 }
 
 /// trackbar を持つ項目の値を同じ経路で変更できることを確かめる。
+///
+/// 確認対象に trackbar を持つ項目が 1 つも無い場合は前提が揃わない。同じ区間の
+/// 種別ごとの round-trip が「該当種別の設定項目がありません」を未実施として
+/// 扱うのと同じ形で返す。
 fn check_track_item(
     harness: &Harness,
     instance: &Instance,
     context: &Context,
     at: Placement,
-) -> Result<CheckResult, String> {
+) -> Result<Attempt, String> {
     let object = resolve_object(harness, instance, context.scene_id, at)?;
     let detail = require(
         harness.object(&instance.id, &object.selector),
@@ -4690,7 +4694,9 @@ fn check_track_item(
             .map(|item| (effect.name.clone(), effect.index, item.clone()))
     });
     let Some((effect_name, effect_index, item)) = target else {
-        return Ok(Err("trackbar を持つ設定項目が見つかりません".to_string()));
+        return Ok(Attempt::Unmet(
+            "確認対象に trackbar を持つ設定項目がありません".to_string(),
+        ));
     };
     let next = altered_value(&item.value).expect("書き換えられる値を選んでいる");
 
@@ -4704,13 +4710,15 @@ fn check_track_item(
         &item.name,
     )?
     else {
-        return Ok(Err("trackbar 項目を再取得できません".to_string()));
+        return Ok(Attempt::Ran(Err(
+            "trackbar 項目を再取得できません".to_string()
+        )));
     };
     if let Err(error) = harness.set_object_item(&instance.id, &selector, &item.name, &next) {
-        return Ok(Err(format!(
+        return Ok(Attempt::Ran(Err(format!(
             "trackbar 項目を変更できません: {}",
             describe_error(&error)
-        )));
+        ))));
     }
 
     let Some((_, after)) = locate_item(
@@ -4723,18 +4731,20 @@ fn check_track_item(
         &item.name,
     )?
     else {
-        return Ok(Err("変更後に trackbar 項目を再取得できません".to_string()));
+        return Ok(Attempt::Ran(Err(
+            "変更後に trackbar 項目を再取得できません".to_string(),
+        )));
     };
     if after == before {
-        return Ok(Err(format!(
+        return Ok(Attempt::Ran(Err(format!(
             "{effect_name}.{} の値が変わりませんでした",
             item.name
-        )));
+        ))));
     }
-    Ok(Ok(vec![format!(
+    Ok(Attempt::Ran(Ok(vec![format!(
         "{effect_name}.{} を変更できた",
         item.name
-    )]))
+    )])))
 }
 
 // ---------------------------------------------------------------------------
