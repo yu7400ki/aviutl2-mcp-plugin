@@ -717,6 +717,45 @@ fn a_silently_ignored_effect_state_change_is_not_reported_as_success() {
     assert_eq!(error.details()["mutation_issued"], json!(true));
 }
 
+/// effect のロックを変えると、応答が返す概要も変化後の fingerprint を持つことを
+/// 確かめる。
+///
+/// ロックは alias へ書き出されるため、オブジェクトの同一性も動く。読み直しが
+/// 効いていなければ、要求元は次の要求で必ず拒否される selector を受け取る。
+#[test]
+fn locking_an_effect_changes_the_object_fingerprint() {
+    let harness = Harness::new();
+    let selector = harness.effect_selector(1, 100, "ぼかし", 0);
+    let before = selector.object.clone();
+
+    let outcome = harness
+        .edit
+        .set_effect_state(&SetEffectStateParams {
+            selector,
+            enabled: None,
+            locked: Some(true),
+            expected: harness.expected(),
+        })
+        .expect("ロックの変更に失敗しました");
+
+    let after = outcome.object.expect("変更後の概要").selector;
+    assert_ne!(
+        before.fingerprint, after.fingerprint,
+        "effect のロックを変えてもオブジェクトの fingerprint が変わりません"
+    );
+
+    // 応答が返した selector はそのまま次の要求へ渡せる。変更前の selector は
+    // もう一致しない。
+    harness
+        .read
+        .get_object(&after)
+        .expect("応答が返した selector で引けません");
+    assert_eq!(
+        harness.read.get_object(&before).unwrap_err().error_code(),
+        ErrorCode::PreconditionFailed
+    );
+}
+
 #[test]
 fn an_output_effect_is_rejected_before_the_section_when_the_type_is_known() {
     let harness = Harness::with(|host| {
