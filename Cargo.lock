@@ -147,6 +147,7 @@ version = "0.1.0"
 dependencies = [
  "aviutl2-mcp-core",
  "chrono",
+ "proptest",
  "rmcp",
  "schemars",
  "serde",
