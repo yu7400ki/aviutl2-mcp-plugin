@@ -2599,7 +2599,30 @@ mod edit_tests {
             let error = decode_request(operation, &unknown)
                 .expect_err(&format!("{name} が未知フィールドを受理しました"));
             assert_eq!(error.code, ErrorCode::InvalidArgument, "{name}");
+
+            // 入れ子の未知フィールドも拒否する。往復型は対象から外す。
+            for key in current.as_object().expect("params は object").keys() {
+                if is_round_trip_field(key) {
+                    continue;
+                }
+                let mut nested = current.clone();
+                let Some(inner) = nested[key].as_object_mut() else {
+                    continue;
+                };
+                inner.insert("unknown_field".to_string(), json!(1));
+                let error = decode_request(operation, &nested)
+                    .expect_err(&format!("{name} の {key} が未知フィールドを受理しました"));
+                assert_eq!(error.code, ErrorCode::InvalidArgument, "{name}.{key}");
+            }
         }
+    }
+
+    /// 応答が返した値をそのまま送り返す往復型のフィールドか。
+    ///
+    /// 往復型は応答へ optional field が増えても往復が壊れないよう、未知
+    /// フィールドを拒否しない。
+    fn is_round_trip_field(key: &str) -> bool {
+        matches!(key, "selector" | "object" | "value")
     }
 
     #[test]

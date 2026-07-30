@@ -750,7 +750,32 @@ mod tests {
                 Err(ErrorCode::InvalidArgument),
                 "{name} が未知フィールドを受理しました"
             );
+
+            // 入れ子の未知フィールドも拒否する。往復型は対象から外す。
+            for key in current.as_object().expect("入力は object").keys() {
+                if is_round_trip_field(key) {
+                    continue;
+                }
+                let mut nested = current.clone();
+                let Some(inner) = nested[key].as_object_mut() else {
+                    continue;
+                };
+                inner.insert("unknown_field".to_string(), json!(1));
+                assert_eq!(
+                    decode_input(operation, &nested),
+                    Err(ErrorCode::InvalidArgument),
+                    "{name} の {key} が未知フィールドを受理しました"
+                );
+            }
         }
+    }
+
+    /// 応答が返した値をそのまま送り返す往復型のフィールドか。
+    ///
+    /// 往復型は応答へ optional field が増えても往復が壊れないよう、未知
+    /// フィールドを拒否しない。
+    fn is_round_trip_field(key: &str) -> bool {
+        matches!(key, "selector" | "object" | "value")
     }
 
     #[test]
@@ -831,26 +856,31 @@ mod tests {
     }
 
     #[test]
-    fn edit_inputs_reject_unknown_fields() {
-        let mut create = json!({
-            "instance_id": SAMPLE_ID,
-            "source": { "type": "object_alias", "alias": "a" },
-            "placement": { "scene_id": 3, "layer": 1, "frame": 0 },
-            "expected_project_epoch": SAMPLE_EPOCH,
-        });
-        create["future"] = json!(1);
-        assert!(serde_json::from_value::<CreateObjectInput>(create).is_err());
-
-        let selection = json!({
-            "instance_id": SAMPLE_ID,
-            "expected_scene_id": 3,
-            "cursor": { "layer": 1, "frame": 2, "future": 1 },
-            "expected_project_epoch": SAMPLE_EPOCH,
-        });
-        assert!(
-            serde_json::from_value::<SetSelectionInput>(selection).is_err(),
-            "入れ子の未知フィールドが受理されました"
-        );
+    fn the_optional_members_of_selection_reject_unknown_fields() {
+        // 表が引く現在の形は `cursor` だけを持つ。省略できる残りも同じ扱いで
+        // あることを、種別ごとに確かめる。
+        for member in [
+            json!({ "selected_range": { "type": "set", "start": 0, "end": 1, "future": 1 } }),
+            json!({ "selected_range": { "type": "clear", "future": 1 } }),
+            json!({ "focus": { "type": "set", "object": object_selector_json(), "future": 1 } }),
+            json!({ "focus": { "type": "clear", "future": 1 } }),
+        ] {
+            let mut selection = json!({
+                "instance_id": SAMPLE_ID,
+                "expected_scene_id": 3,
+                "expected_project_epoch": SAMPLE_EPOCH,
+            });
+            let (key, value) = member
+                .as_object()
+                .and_then(|map| map.iter().next())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .expect("変更は 1 つ");
+            selection[&key] = value;
+            assert!(
+                serde_json::from_value::<SetSelectionInput>(selection).is_err(),
+                "{member} の未知フィールドが受理されました"
+            );
+        }
     }
 
     #[test]
