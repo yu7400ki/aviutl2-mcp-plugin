@@ -323,7 +323,7 @@ impl EditError {
             EditError::Read(ReadError::FingerprintAlgorithmMismatch { .. }) => {
                 Some(Mismatch::FingerprintAlgorithm)
             }
-            EditError::Read(ReadError::FingerprintMismatch) => Some(Mismatch::Fingerprint),
+            EditError::Read(ReadError::FingerprintMismatch { .. }) => Some(Mismatch::Fingerprint),
             EditError::AfterMutation { source, .. } => source.mismatch(),
             _ => None,
         }
@@ -460,6 +460,7 @@ fn truncate(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::read::EditState;
+    use crate::test_support::sample_object_summary;
     use aviutl2_mcp_core::{EffectItemType, PathSyntaxError, TextSyntaxError};
 
     /// 全 variant の代表値。新しい variant を足したらここへも足す。
@@ -478,7 +479,9 @@ mod tests {
                 requested: "sha256-future-v9".to_string(),
                 supported: "sha256-raw-v1".to_string(),
             }),
-            EditError::Read(ReadError::FingerprintMismatch),
+            EditError::Read(ReadError::FingerprintMismatch {
+                current_object: Box::new(sample_object_summary()),
+            }),
             EditError::Read(ReadError::ObjectNotFound {
                 detected_by: "find_object",
             }),
@@ -817,7 +820,9 @@ mod tests {
                 "fingerprint_algorithm",
             ),
             (
-                EditError::Read(ReadError::FingerprintMismatch),
+                EditError::Read(ReadError::FingerprintMismatch {
+                    current_object: Box::new(sample_object_summary()),
+                }),
                 "fingerprint",
             ),
         ];
@@ -849,6 +854,35 @@ mod tests {
                 error.details().get("mismatch").is_none(),
                 "{error} が前提条件の食い違いを名乗りました"
             );
+        }
+    }
+
+    #[test]
+    fn a_content_mismatch_reaches_the_edit_response_with_the_current_object() {
+        // 読み取り経路が組み立てた補助情報は編集経路が併合する。写し替えの層を
+        // 挟まないため、現在の姿はそのまま要求元へ届く。
+        let summary = sample_object_summary();
+        let error = EditError::Read(ReadError::FingerprintMismatch {
+            current_object: Box::new(summary.clone()),
+        });
+        let details = error.details();
+        assert_eq!(details["mismatch"], json!("fingerprint"));
+        assert_eq!(details["retry_requires"], json!("refetch"));
+        assert_eq!(
+            details["current_object"],
+            serde_json::to_value(&summary).unwrap()
+        );
+    }
+
+    #[test]
+    fn only_a_content_mismatch_carries_the_current_object() {
+        for error in all_errors() {
+            let carried = error.details().get("current_object").is_some();
+            let expected = matches!(
+                error,
+                EditError::Read(ReadError::FingerprintMismatch { .. })
+            );
+            assert_eq!(carried, expected, "{error}");
         }
     }
 
@@ -902,6 +936,15 @@ mod tests {
             "mutation_issued",
             "change_applied",
             "mutation_origin",
+            // 読み直した対象の概要と、それが内包するセレクター。概要は要約で
+            // あり alias も設定値もパスも持たない。
+            "current_object",
+            "name",
+            "selector",
+            "fingerprint",
+            "fingerprint_algorithm",
+            "project_epoch",
+            "scene_id",
         ];
         /// 入れ子を含む全てのキーを集める。
         fn keys(value: &Value, into: &mut Vec<String>) {

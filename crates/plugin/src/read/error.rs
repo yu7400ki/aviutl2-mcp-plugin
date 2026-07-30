@@ -1,7 +1,7 @@
 //! 読み取りの失敗を表す型と、応答へ載せる安全な補助情報。
 
 use crate::read::host::EditState;
-use aviutl2_mcp_core::ErrorCode;
+use aviutl2_mcp_core::{ErrorCode, ObjectSummary};
 use serde_json::{Value, json};
 
 /// 編集ハンドルが読み取りを受け付けられない場合に案内する再試行間隔（ミリ秒）。
@@ -50,7 +50,17 @@ pub enum ReadError {
     },
     /// 候補の fingerprint が要求と一致しない。
     #[error("対象の fingerprint が要求と一致しません")]
-    FingerprintMismatch,
+    FingerprintMismatch {
+        /// 解決済み対象を読み直した現在の概要。
+        ///
+        /// 食い違いを判定する時点で対象は既に読み直されており、載せるのに
+        /// 追加の SDK 呼び出しは要らない。概要はセレクターと fingerprint を
+        /// 内包するため、要求元はこれだけで次の要求を組み立てられる。
+        ///
+        /// 概要は alias も設定値もパスも持たない。載せても秘匿の方針は変わら
+        /// ない。
+        current_object: Box<ObjectSummary>,
+    },
     /// セレクターに一致する対象が存在しない。
     #[error("セレクターに一致するオブジェクトがありません")]
     ObjectNotFound {
@@ -87,7 +97,7 @@ impl ReadError {
             ReadError::SceneMismatch { .. }
             | ReadError::EpochMismatch
             | ReadError::FingerprintAlgorithmMismatch { .. }
-            | ReadError::FingerprintMismatch => ErrorCode::PreconditionFailed,
+            | ReadError::FingerprintMismatch { .. } => ErrorCode::PreconditionFailed,
             ReadError::ObjectNotFound { .. } => ErrorCode::NotFound,
             ReadError::AmbiguousObject { .. } => ErrorCode::AmbiguousSelector,
             ReadError::Sdk { .. } => ErrorCode::SdkError,
@@ -111,8 +121,9 @@ impl ReadError {
 
     /// 応答へ載せる補助情報を組み立てる。
     ///
-    /// 含めるのは要求の前提と実際の食い違い、再試行の案内、失敗した SDK 関数名の
-    /// いずれかであり、ハンドル・生ポインタ・秘匿値は含めない。
+    /// 含めるのは要求の前提と実際の食い違い、再試行の案内、失敗した SDK 関数名、
+    /// 読み直した対象の概要のいずれかであり、ハンドル・生ポインタ・秘匿値は
+    /// 含めない。
     pub fn details(&self) -> Value {
         match self {
             ReadError::NotReady => json!({ "retry_after_ms": NOT_READY_RETRY_AFTER_MS }),
@@ -132,7 +143,9 @@ impl ReadError {
                 "requested_fingerprint_algorithm": requested,
                 "supported_fingerprint_algorithm": supported,
             }),
-            ReadError::FingerprintMismatch => json!({}),
+            ReadError::FingerprintMismatch { current_object } => {
+                json!({ "current_object": current_object })
+            }
             ReadError::ObjectNotFound { .. } => json!({}),
             ReadError::AmbiguousObject { candidate_count } => {
                 json!({ "candidate_count": candidate_count })
@@ -146,6 +159,7 @@ impl ReadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::sample_object_summary;
 
     /// 全 variant の代表値。新しい variant を足したらここへも足す。
     fn all_errors() -> Vec<ReadError> {
@@ -166,7 +180,9 @@ mod tests {
                 requested: "sha256-future-v9".to_string(),
                 supported: "sha256-raw-v1".to_string(),
             },
-            ReadError::FingerprintMismatch,
+            ReadError::FingerprintMismatch {
+                current_object: Box::new(sample_object_summary()),
+            },
             ReadError::ObjectNotFound {
                 detected_by: "find_object",
             },
@@ -236,8 +252,10 @@ mod tests {
 
     #[test]
     fn details_only_use_allowed_keys() {
-        // 補助情報のキーはここで列挙したものに限る。新しいキーを足す際は
-        // ハンドル・生ポインタ・秘匿値でないことを確かめた上で追加する。
+        // 補助情報のキーはここで列挙したものに限る。入れ子の内側まで見る。
+        // トップレベルだけを見ると、値をオブジェクトで包んだ瞬間に検査が
+        // 素通りする。新しいキーを足す際はハンドル・生ポインタ・秘匿値で
+        // ないことを確かめた上で追加する。
         const ALLOWED: &[&str] = &[
             "retry_after_ms",
             "edit_state",
@@ -247,19 +265,100 @@ mod tests {
             "supported_fingerprint_algorithm",
             "candidate_count",
             "sdk_operation",
+            // 読み直した対象の概要と、それが内包するセレクター。
+            "current_object",
+            "layer",
+            "frame_start",
+            "frame_end",
+            "name",
+            "selector",
+            "fingerprint",
+            "fingerprint_algorithm",
+            "project_epoch",
+            "scene_id",
+            "frame",
         ];
         for error in all_errors() {
             let details = error.details();
-            let object = details
-                .as_object()
-                .unwrap_or_else(|| panic!("{error} の補助情報がオブジェクトではありません"));
-            for key in object.keys() {
+            assert!(
+                details.is_object(),
+                "{error} の補助情報がオブジェクトではありません"
+            );
+            for key in nested_keys(&details) {
                 assert!(
                     ALLOWED.contains(&key.as_str()),
                     "{error} の補助情報に未許可のキー {key} が含まれています"
                 );
             }
         }
+    }
+
+    /// 入れ子を含む全てのキーを集める。
+    fn nested_keys(value: &Value) -> Vec<String> {
+        let mut found = Vec::new();
+        collect_keys(value, &mut found);
+        found
+    }
+
+    fn collect_keys(value: &Value, into: &mut Vec<String>) {
+        match value {
+            Value::Object(object) => {
+                for (key, value) in object {
+                    into.push(key.clone());
+                    collect_keys(value, into);
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| collect_keys(item, into)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn only_a_content_mismatch_carries_the_current_object() {
+        // 現在の姿を載せられるのは、対象を読み直したうえで内容が食い違った
+        // 場合だけである。他の失敗は対象を読み直していない。
+        for error in all_errors() {
+            let carried = error.details().get("current_object").is_some();
+            let expected = matches!(error, ReadError::FingerprintMismatch { .. });
+            assert_eq!(carried, expected, "{error}");
+        }
+    }
+
+    #[test]
+    fn the_current_object_carries_a_selector_that_can_be_sent_back() {
+        // 概要はセレクターと fingerprint を内包する。要求元はこれだけで次の
+        // 要求を組み立てられる。
+        let summary = sample_object_summary();
+        let error = ReadError::FingerprintMismatch {
+            current_object: Box::new(summary.clone()),
+        };
+        let details = error.details();
+        let current = &details["current_object"];
+        assert_eq!(
+            current["selector"],
+            serde_json::to_value(&summary.selector).unwrap()
+        );
+        assert_eq!(
+            current["fingerprint"],
+            serde_json::to_value(&summary.fingerprint).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_current_object_does_not_carry_an_alias_or_settings() {
+        // 概要は要約であり alias も設定値もパスも持たない。秘匿の方針は
+        // 補助情報へ載せても変わらない。
+        let details = ReadError::FingerprintMismatch {
+            current_object: Box::new(sample_object_summary()),
+        }
+        .details();
+        for forbidden in ["alias", "path", "value", "item"] {
+            assert!(
+                !nested_keys(&details).iter().any(|key| key == forbidden),
+                "補助情報に {forbidden} が現れました: {details}"
+            );
+        }
+        assert!(!details.to_string().contains(r"C:\"), "{details}");
     }
 
     #[test]

@@ -160,7 +160,12 @@ pub(crate) fn resolve_effect_of<'sec>(
             operation: "get_effect_list",
         })?;
     if info.fingerprint != selector.fingerprint {
-        return Err(crate::read::ReadError::FingerprintMismatch.into());
+        // 所属オブジェクトは解決済みであり、その概要から effect の一覧を
+        // 引き直せる。effect の食い違いでも、要求元が次に読む対象は変わらない。
+        return Err(crate::read::ReadError::FingerprintMismatch {
+            current_object: Box::new(object.summary().clone()),
+        }
+        .into());
     }
     let slot = editor.bind_effect(object.slot(), position)?;
     Ok(ResolvedEffect {

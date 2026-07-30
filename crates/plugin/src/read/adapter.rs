@@ -394,6 +394,9 @@ fn resolve_candidate_of(
 }
 
 /// 読み直した対象の概要を、セレクターの fingerprint と照合してから返す。
+///
+/// 食い違った場合は読み直した概要をそのまま失敗へ載せる。この時点で対象は既に
+/// 読み直されており、要求元へ現在の姿を渡すのに追加の読み取りは要らない。
 fn verified_summary(
     epoch: &str,
     scene_id: i32,
@@ -402,7 +405,9 @@ fn verified_summary(
 ) -> Result<ObjectSummary, ReadError> {
     let summary = object_summary(epoch, scene_id, object);
     if summary.fingerprint != selector.fingerprint {
-        return Err(ReadError::FingerprintMismatch);
+        return Err(ReadError::FingerprintMismatch {
+            current_object: Box::new(summary),
+        });
     }
     Ok(summary)
 }
@@ -1788,9 +1793,44 @@ mod tests {
         let error = renamed.get_object(&selector).unwrap_err();
         assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
         assert!(
-            matches!(error, ReadError::FingerprintMismatch),
+            matches!(error, ReadError::FingerprintMismatch { .. }),
             "{error} が内容の食い違いとして返っていません"
         );
+    }
+
+    /// 食い違いの応答が返したセレクターで読み直せることを確かめる。
+    ///
+    /// 現在の姿を返さなければ、要求元は列挙まで戻って対象を探し直すほかない。
+    #[test]
+    fn a_content_mismatch_returns_a_selector_that_resolves() {
+        let project = Arc::new(ProjectState::new());
+        let stale = HostReadAdapter::new(FakeHost::new(), Arc::clone(&project));
+        let selector = sample_selector(&stale);
+
+        let adapter = HostReadAdapter::new(
+            FakeHost {
+                layers: {
+                    let mut layers = fake_layers();
+                    layers[1].objects[0] =
+                        object_with_effects(1, 100, 200, Some("改名後"), fake_effects());
+                    layers
+                },
+                ..FakeHost::new()
+            },
+            Arc::clone(&project),
+        );
+
+        let ReadError::FingerprintMismatch { current_object } =
+            adapter.get_object(&selector).unwrap_err()
+        else {
+            panic!("内容の食い違いとして返っていません");
+        };
+        assert_eq!(current_object.name.as_deref(), Some("改名後"));
+
+        let detail = adapter
+            .get_object(&current_object.selector)
+            .expect("失敗が返したセレクターで読み直せません");
+        assert_eq!(detail.summary, *current_object);
     }
 
     /// 名前を名乗らないセレクターでも対象が特定できることを確かめる。
@@ -1929,7 +1969,7 @@ mod tests {
 
         let error = adapter.get_object(&selector).unwrap_err();
         assert!(
-            matches!(error, ReadError::FingerprintMismatch),
+            matches!(error, ReadError::FingerprintMismatch { .. }),
             "{error} が fingerprint の食い違いとして返っていません"
         );
     }
@@ -2448,7 +2488,9 @@ mod tests {
             assert_eq!(folded.details()["sdk_operation"], detected_by);
         }
         // 不在以外の失敗は分類を変えない。
-        let untouched = enumeration_failure(ReadError::FingerprintMismatch);
+        let untouched = enumeration_failure(ReadError::FingerprintMismatch {
+            current_object: Box::new(crate::test_support::sample_object_summary()),
+        });
         assert_eq!(untouched.error_code(), ErrorCode::PreconditionFailed);
     }
 

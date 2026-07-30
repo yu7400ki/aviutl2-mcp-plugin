@@ -1,7 +1,26 @@
 //! テストが共有する補助。
 
 use crate::read::host::HostEffect;
+use aviutl2_mcp_core::{ObjectFingerprintInput, ObjectSummary};
 use std::sync::{Mutex, MutexGuard};
+
+/// fingerprint の食い違いが運ぶ「読み直した対象の概要」の代表値。
+///
+/// 失敗の代表値を組み立てる箇所が複数あり、そのたびに材料を書き並べると、
+/// 概要の形が変わったときに直す箇所が散らばる。
+pub(crate) fn sample_object_summary() -> ObjectSummary {
+    ObjectSummary::new(
+        "78be92d1-c8c9-44c6-ae52-387548971468",
+        ObjectFingerprintInput {
+            scene_id: 0,
+            layer: 1,
+            frame_start: 100,
+            frame_end: 200,
+            name: Some("立ち絵"),
+            alias: "[1:100]",
+        },
+    )
+}
 
 /// 配下 effect の設定値とロック状態を含む alias を組み立てる。
 ///

@@ -2089,7 +2089,9 @@ mod tests {
                 requested: "sha256-future-v9".to_string(),
                 supported: "sha256-alias-v1".to_string(),
             },
-            || ReadError::FingerprintMismatch,
+            || ReadError::FingerprintMismatch {
+                current_object: Box::new(crate::test_support::sample_object_summary()),
+            },
             || ReadError::ObjectNotFound {
                 detected_by: "find_object",
             },

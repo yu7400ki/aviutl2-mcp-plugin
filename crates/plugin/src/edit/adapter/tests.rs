@@ -417,6 +417,41 @@ fn a_renamed_target_is_rejected_as_a_content_mismatch() {
     harness.assert_untouched();
 }
 
+/// 内容が食い違った応答が返した対象を、そのまま次の要求へ渡せることを確かめる。
+///
+/// 応答が現在の姿を返さなければ、要求元は列挙まで戻って対象を探し直すほかない。
+/// 失敗と再要求の 2 呼び出しで済むことを、呼び出し回数ごと固定する。
+#[test]
+fn the_current_object_of_a_content_mismatch_is_accepted_as_is() {
+    let harness = Harness::new();
+    let params = move_params(&harness);
+    harness.host.scene.lock().unwrap().layers[1].objects[0]
+        .placement
+        .name = Some("改名後".to_string());
+
+    let error = harness
+        .edit
+        .move_object(&params)
+        .expect_err("改名された対象への編集が受理されました");
+    let details = error.details();
+    assert_eq!(details["mismatch"], json!("fingerprint"));
+
+    let selector: ObjectSelector =
+        serde_json::from_value(details["current_object"]["selector"].clone())
+            .expect("応答が返したセレクターを読み取れません");
+    let outcome = harness
+        .edit
+        .move_object(&MoveObjectParams {
+            selector,
+            destination: params.destination,
+        })
+        .expect("応答が返したセレクターでの再要求が拒否されました");
+
+    let object = outcome.object.expect("移動の応答が対象を返しませんでした");
+    assert_eq!(object.frame_start, params.destination.frame as usize);
+    assert_eq!(object.name.as_deref(), Some("改名後"));
+}
+
 /// 名前を名乗らないセレクターでも対象が特定できることを確かめる。
 #[test]
 fn a_selector_without_a_name_still_resolves_the_target() {

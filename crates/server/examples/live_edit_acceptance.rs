@@ -3592,6 +3592,15 @@ fn section_target_confusion(
         outcome,
     );
 
+    let outcome = check_stale_after_rename(harness, instance, context);
+    report.record(
+        "5.7",
+        "名前を変えた後の古い selector",
+        "名前を変えた対象への古い selector での編集が precondition_failed（mismatch=fingerprint / retry_requires=refetch）で拒否され、details.current_object の値で再要求すると成功する",
+        Mode::Auto,
+        outcome,
+    );
+
     let outcome = check_stale_after_undo_redo(harness, report, instance, context);
     report.record(
         "5.7",
@@ -3709,6 +3718,87 @@ fn check_stale_after_ui_move(
 
     prompt("UI で行った移動を取り消し、元の位置へ戻してから Enter を押してください。");
     outcome
+}
+
+/// 名前を変えた対象への古い selector が、読み直せば作り直せる失敗になり、
+/// 応答が返した対象でそのまま再要求できることを確かめる。
+///
+/// 名前で候補を絞ると、この状況は候補 0 件になり「再試行しても解消しない」と
+/// して返る。要求元は復帰できるのに停止する。
+fn check_stale_after_rename(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+) -> CheckResult {
+    let object = resolve_object(harness, instance, context.scene_id, context.target)?;
+    let stale = object.selector.clone();
+    require(
+        harness.set_object_name(&instance.id, &stale, Some("改名後".to_string())),
+        "対象の名前を変更できません",
+    )?;
+
+    let rejected = harness
+        .set_object_name(&instance.id, &stale, Some("再要求".to_string()))
+        .err();
+    let outcome = match rejected {
+        None => Err("改名後も古い selector が受理されました".to_string()),
+        Some(error) if error.code != ErrorCode::PreconditionFailed => Err(format!(
+            "precondition_failed を期待しましたが {}",
+            describe_error(&error)
+        )),
+        Some(error) if detail_str(&error, "mismatch").as_deref() != Some("fingerprint") => {
+            Err(format!(
+                "mismatch=fingerprint を期待しましたが {}",
+                describe_error(&error)
+            ))
+        }
+        Some(error) if detail_str(&error, "retry_requires").as_deref() != Some("refetch") => {
+            Err(format!(
+                "retry_requires=refetch を期待しましたが {}",
+                describe_error(&error)
+            ))
+        }
+        Some(error) => current_object_of(&error).and_then(|current| {
+            // 応答が返した対象をそのまま次の要求へ渡す。読み直しの往復を
+            // 挟まずに標準名へ戻せることが、この補助情報の価値そのものである。
+            harness
+                .set_object_name(&instance.id, &current.selector, None)
+                .map(|_| {
+                    vec![format!(
+                        "拒否が返した current_object（name={:?}）で再要求が通った",
+                        current.name
+                    )]
+                })
+                .map_err(|error| {
+                    format!(
+                        "current_object の値での再要求が拒否されました: {}",
+                        describe_error(&error)
+                    )
+                })
+        }),
+    };
+
+    // 後始末: 再要求が通らなかった場合も標準名へ戻す。
+    let current = resolve_object(harness, instance, context.scene_id, context.target)?;
+    if current.name.is_some() {
+        require(
+            harness.set_object_name(&instance.id, &current.selector, None),
+            "名前を標準名へ戻せません",
+        )?;
+    }
+    outcome
+}
+
+/// 拒否が返した「現在の対象」を読み取る。
+fn current_object_of(error: &ErrorObject) -> Result<ObjectSummary, String> {
+    let value = error.details.get("current_object").ok_or_else(|| {
+        format!(
+            "拒否が現在の対象を返しませんでした: {}",
+            describe_error(error)
+        )
+    })?;
+    serde_json::from_value(value.clone())
+        .map_err(|e| format!("current_object を読み取れません: {e}"))
 }
 
 /// 拒否されるはずの名前変更が通っていた場合に、標準名へ戻す。

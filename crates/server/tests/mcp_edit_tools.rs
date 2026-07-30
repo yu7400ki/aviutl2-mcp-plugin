@@ -5,7 +5,8 @@ mod support;
 use aviutl2_mcp_core::{
     AuthSecret, Cursor, EditOutcome, EffectFingerprintInput, EffectInfo, EffectItem,
     EffectItemType, ErrorCode, ErrorObject, FrameRange, InstanceId, InstanceState, ItemValue,
-    ObjectFingerprintInput, ObjectSummary, RequestEnvelope, SelectionField, SelectionState,
+    ObjectFingerprintInput, ObjectSelector, ObjectSummary, RequestEnvelope, SelectionField,
+    SelectionState,
 };
 use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, CreateObjectInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
@@ -757,6 +758,50 @@ async fn precondition_failure_reaches_the_tool_result_with_the_current_revision(
     assert_eq!(structured["details"]["mismatch"], json!("fingerprint"));
     assert_eq!(structured["details"]["retry_requires"], json!("refetch"));
     assert!(structured["correlation_id"].is_string());
+}
+
+#[tokio::test]
+async fn a_content_mismatch_delivers_the_current_object_whole() {
+    // 概要はセレクターを内包するため入れ子が深い。秘匿の選別・深さ・文字数の
+    // どれかに掛かると、要求元はそのまま送り返せる値を失い、列挙まで戻ることに
+    // なる。
+    let summary = sample_summary();
+    let error = ErrorObject::new(ErrorCode::PreconditionFailed, "対象が変化しました", true)
+        .with_details(json!({
+            "mismatch": "fingerprint",
+            "retry_requires": "refetch",
+            "current_object": summary,
+        }));
+    let harness = Harness::start(OperationResponses::from([(
+        "move_object".to_string(),
+        err_result(error),
+    )]));
+
+    let result = harness
+        .server
+        .aviutl2_move_object(Parameters(MoveObjectInput {
+            instance_id: harness.instance_id(),
+            selector: selector_input(),
+            destination: DestinationInput { layer: 5, frame: 0 },
+        }))
+        .await;
+
+    let structured = structured(&result);
+    let current = &structured["details"]["current_object"];
+    assert_eq!(*current, serde_json::to_value(&summary).unwrap());
+
+    // 応答が返した値がそのまま次の要求の入力になる。
+    let input: ObjectSelectorInput = serde_json::from_value(current["selector"].clone())
+        .expect("tool の入力としてそのまま受け取れます");
+    assert_eq!(input.frame, summary.selector.frame as u32);
+    let selector: ObjectSelector =
+        serde_json::from_value(current["selector"].clone()).expect("セレクターを読み取れます");
+    assert_eq!(selector, summary.selector);
+
+    // 概要は alias も設定値もパスも持たない。
+    let text = serde_json::to_string(&structured).unwrap();
+    assert!(!text.contains("秘密の立ち絵"), "{text}");
+    assert!(!text.contains(SECRET_PATH), "{text}");
 }
 
 #[tokio::test]

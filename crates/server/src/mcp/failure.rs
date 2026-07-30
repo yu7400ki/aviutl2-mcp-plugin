@@ -444,6 +444,37 @@ mod tests {
     }
 
     #[test]
+    fn a_current_object_reaches_the_caller_intact() {
+        // 内容の食い違いは対象の現在の概要を返す。概要はセレクターを内包する
+        // ため入れ子が深く、鍵の断片・深さ・文字数のどれかに掛かると、要求元は
+        // そのまま送り返せる値を失う。
+        let summary = aviutl2_mcp_core::ObjectSummary::new(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            aviutl2_mcp_core::ObjectFingerprintInput {
+                scene_id: 0,
+                layer: 2,
+                frame_start: 120,
+                frame_end: 240,
+                name: Some("立ち絵"),
+                alias: "[vo]",
+            },
+        );
+        let remote = ErrorObject::new(ErrorCode::PreconditionFailed, "対象が変化しました", true)
+            .with_details(serde_json::json!({
+                "mismatch": "fingerprint",
+                "current_object": summary,
+            }));
+        let error = from_pipe_error(
+            &PipeClientError::Remote(Box::new(remote)),
+            OPERATION_MOVE_OBJECT,
+        );
+        assert_eq!(
+            error.details["current_object"],
+            serde_json::to_value(&summary).expect("直列化できる")
+        );
+    }
+
+    #[test]
     fn long_detail_arrays_are_truncated() {
         let items: Vec<Value> = (0..MAX_DETAIL_ARRAY_ITEMS * 3)
             .map(|i| serde_json::json!(i))
