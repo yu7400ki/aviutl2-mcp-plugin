@@ -32,13 +32,22 @@ pub struct RegistryWriter {
     lock: Mutex<()>,
 }
 
+/// registry と一時成果物が共有する基底ディレクトリ（`%LOCALAPPDATA%\AviUtl2Mcp`）。
+///
+/// 探索の入口である descriptor も、プロセス外へ渡す一時成果物も、ここを起点に
+/// 置く。基底を 2 か所で別々に求めると、片方だけが移ったときに server が
+/// 成果物を見つけられなくなる。
+pub fn discovery_root() -> Result<PathBuf> {
+    let local_app_data =
+        std::env::var("LOCALAPPDATA").context("LOCALAPPDATA 環境変数が取得できませんでした")?;
+    Ok(PathBuf::from(local_app_data).join("AviUtl2Mcp"))
+}
+
 impl RegistryWriter {
     /// 既定の registry ディレクトリ（`%LOCALAPPDATA%\AviUtl2Mcp\instances`）を使用して
     /// 新しい `RegistryWriter` を作成する。
     pub fn new() -> Result<Self> {
-        let local_app_data =
-            std::env::var("LOCALAPPDATA").context("LOCALAPPDATA 環境変数が取得できませんでした")?;
-        let root_dir = PathBuf::from(local_app_data).join("AviUtl2Mcp");
+        let root_dir = discovery_root()?;
         let registry_dir = root_dir.join("instances");
 
         let writer = Self {

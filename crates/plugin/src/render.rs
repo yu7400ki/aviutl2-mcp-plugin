@@ -19,13 +19,24 @@
 //! レンダリングの投入と待機は、読み取り区間・編集区間の内側では行わない。
 //! 完了待ちは参照ロック・編集ロックの下で呼ぶとデッドロックし得るためであり、
 //! 必要な編集情報は区間の外で取る。
+//!
+//! # 構成
+//!
+//! | モジュール | 担当 |
+//! |---|---|
+//! | [`error`] | 失敗の分類と、応答へ載せる安全な補助情報 |
+//! | [`buffer`] | ホストが渡す pixel buffer の検証と詰め直し |
+//! | [`slot`] | 完了コールバックと要求元が共有する受け皿、投入したタスクの在庫 |
+//! | [`handoff`] | 成果物の符号化・原子的な書き出し・掃除 |
 
 pub mod buffer;
 pub mod error;
+pub mod handoff;
 pub mod slot;
 
 pub use buffer::{ExtractedFrame, FrameLayout, MAX_RENDER_FRAME_BYTES};
 pub use error::{ArtifactStage, BufferRule, RenderError, RenderStage};
+pub use handoff::{ARTIFACT_MEDIA_TYPE, HANDOFF_TTL, HandoffArtifact, HandoffDir, HandoffToken};
 pub use slot::{
     ABANDONED_ENTRY_TTL, MAX_ABANDONED_RENDERS, RENDER_WAIT_TICK, RenderInventory, RenderSlot,
     RenderedFrame, SlotWait, deliver_frame, deliver_frame_guarded, guard_callback,

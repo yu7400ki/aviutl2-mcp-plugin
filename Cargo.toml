@@ -15,6 +15,7 @@ aviutl2-mcp-core = { path = "crates/core" }
 base64 = "0.23.0"
 chrono = { version = "0.4.39", features = ["serde"] }
 hmac = "0.13.0"
+png = "0.18.1"
 rand = "0.10.2"
 raw-window-handle = "0.6.2"
 rmcp = { version = "2.2.0", default-features = false, features = [
