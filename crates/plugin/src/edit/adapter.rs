@@ -153,7 +153,7 @@ impl<H: EditHost> HostEditAdapter<H> {
         })
     }
 
-    /// 有効・ロックを変更できないと分かる対象を、編集区間へ入る前に弾く。
+    /// 有効・無効を変更できないと分かる対象を、編集区間へ入る前に弾く。
     ///
     /// 種別による判定は「早く分かる場合に早く返す」ためだけに用いる。ホストが
     /// 無言で拒否したかどうかの最終的な判定は read-back に委ねる。列挙時に
@@ -163,32 +163,13 @@ impl<H: EditHost> HostEditAdapter<H> {
     /// 入った側へ倒して revision を進めるほかない。呼ぶ前に分かる対象は呼ばずに
     /// 弾けば、何も変わっていないのに revision が進むことを避けられる。
     ///
-    /// 出力項目は有効・無効を変更できない。ロックを変更できないのは、音声だけを
-    /// 扱う effect と出力項目である。フラグは画像と音声が同時に立ち得るため、
-    /// 音声のフラグが立っていることだけでは音声 effect と断定できない。画像を
-    /// 扱わないことまで確かめる。
-    ///
-    /// 出力項目のロックについては、ここが唯一の防波堤になる。ロックは入力項目と
-    /// 出力項目をまとめた単位で掛かるのに、読み直しは出力項目について常に偽を
-    /// 返す。要求値も偽であれば read-back は一致と見なし、何も変わっていない
-    /// 変更を成功として報告してしまう。
-    fn ensure_effect_state_writable(
-        &self,
-        effect_name: &str,
-        params: &SetEffectStateParams,
-    ) -> Result<(), EditError> {
-        if params.enabled.is_none() && params.locked.is_none() {
-            return Ok(());
-        }
+    /// 出力項目は有効・無効を変更できない。
+    fn ensure_effect_state_writable(&self, effect_name: &str) -> Result<(), EditError> {
         let catalog = guard(|| self.host.effect_catalog())?;
         let Some(effect) = catalog.iter().find(|effect| effect.name == effect_name) else {
             return Ok(());
         };
-        let output = effect.effect_type == EffectType::Output;
-        let audio_only = effect.flags.audio && !effect.flags.video;
-        let immutable_enabled = params.enabled.is_some() && output;
-        let immutable_locked = params.locked.is_some() && (audio_only || output);
-        if immutable_enabled || immutable_locked {
+        if effect.effect_type == EffectType::Output {
             return Err(EditError::UnsupportedTarget {
                 reason: UnsupportedReason::EffectStateImmutable,
             });
@@ -783,7 +764,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
 
     fn set_effect_state(&self, params: &SetEffectStateParams) -> Result<EditOutcome, EditError> {
         self.ensure_editable()?;
-        self.ensure_effect_state_writable(&params.selector.effect_name, params)?;
+        self.ensure_effect_state_writable(&params.selector.effect_name)?;
         let project = self.project.as_ref();
 
         self.edit_section(move |editor| {
@@ -798,27 +779,18 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let (object, effect) = resolve_effect(editor, &boundary, &params.selector)?;
 
             let permit = boundary.issue_permit(project)?;
-            if let Some(enabled) = params.enabled {
-                permit.issue(&boundary, |ticket| {
-                    editor.set_effect_enabled(ticket, &effect, enabled)
-                })?;
-            }
-            if let Some(locked) = params.locked {
-                permit.issue(&boundary, |ticket| {
-                    editor.set_effect_locked(ticket, &effect, locked)
-                })?;
-            }
+            permit.issue(&boundary, |ticket| {
+                editor.set_effect_enabled(ticket, &effect, params.enabled)
+            })?;
 
-            // 有効・ロックの設定は戻り値を持たず、対象によっては無言で無視される。
+            // 有効・無効の設定は戻り値を持たず、対象によっては無言で無視される。
             // 読み直しが可否の最終的な判定になる。
             let (summary, info) = attribute(
                 &permit,
                 &boundary,
                 reread_effect(editor, &boundary, &object, effect.position()),
             )?;
-            let applied = params.enabled.is_none_or(|enabled| info.enabled == enabled)
-                && params.locked.is_none_or(|locked| info.locked == locked);
-            if !applied {
+            if info.enabled != params.enabled {
                 return Err(permit.attribute(
                     &boundary,
                     EditError::UnsupportedTarget {

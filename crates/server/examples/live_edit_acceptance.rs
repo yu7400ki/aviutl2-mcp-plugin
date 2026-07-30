@@ -749,8 +749,7 @@ impl Harness {
         &self,
         instance: &str,
         selector: &EffectSelector,
-        enabled: Option<bool>,
-        locked: Option<bool>,
+        enabled: bool,
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
@@ -760,7 +759,6 @@ impl Harness {
                         instance_id: instance.to_string(),
                         selector: effect_selector_input(selector),
                         enabled,
-                        locked,
                     })),
             );
         self.decode(result)
@@ -1580,7 +1578,7 @@ fn check_alias_covers_effects(
         .find(|effect| effect.name == selector.effect_name)
         .map(|effect| effect.selector.clone())
         .ok_or_else(|| "変更した effect を再取得できませんでした".to_string())?;
-    let toggled = harness.set_effect_state(&instance.id, &effect_selector, Some(false), None);
+    let toggled = harness.set_effect_state(&instance.id, &effect_selector, false);
     let (enabled_changed_fingerprint, enabled_changed_alias, toggled_object) = match &toggled {
         Ok(outcome) => {
             let object = outcome.object.clone();
@@ -1619,7 +1617,7 @@ fn check_alias_covers_effects(
         .iter()
         .find(|effect| effect.name == selector.effect_name)
     {
-        let _ = harness.set_effect_state(&instance.id, &effect.selector, Some(true), None);
+        let _ = harness.set_effect_state(&instance.id, &effect.selector, true);
     }
     restore_item(
         harness,
@@ -1746,7 +1744,7 @@ fn check_effect_index_shift(
         effect_index: front.effect_index,
         fingerprint: front.fingerprint.clone(),
     };
-    let attempt = harness.set_effect_state(&instance.id, &stale, Some(false), None);
+    let attempt = harness.set_effect_state(&instance.id, &stale, false);
     let outcome = expect_rejection(
         attempt,
         ErrorCode::PreconditionFailed,
@@ -2334,7 +2332,7 @@ fn check_edit_chain(
     // 有効状態の変更。
     let selector = effect_selector.clone();
     let disabled = chain_outcome(&mut steps, "set_effect_state", &state, |_state| {
-        harness.set_effect_state(&instance.id, &selector, Some(false), None)
+        harness.set_effect_state(&instance.id, &selector, false)
     })?;
     let effect_selector = disabled
         .effect
@@ -2606,7 +2604,7 @@ fn section_silent_rejection(
         effect_type_of(context, &effect.name) == Some(EffectType::Output)
     })? {
         Some(found) => {
-            let outcome = check_output_item_enable(harness, instance, &found);
+            let outcome = check_output_item_enable(harness, instance, context, &found);
             report.record(
                 "5.3",
                 "出力 item の有効状態の変更",
@@ -2614,59 +2612,13 @@ fn section_silent_rejection(
                 Mode::Auto,
                 outcome,
             );
-
-            let outcome = check_output_item_lock(harness, report, instance, context, &found);
-            report.record(
-                "5.3",
-                "出力 item のロック",
-                "出力 item に対する locked の変更が unsupported_operation になり、成功として返らない",
-                Mode::Auto,
-                outcome,
-            );
-        }
-        None => {
-            for (title, verified) in [
-                (
-                    "出力 item の有効状態の変更",
-                    "出力 item に対する enabled の変更が unsupported_operation になる",
-                ),
-                (
-                    "出力 item のロック",
-                    "出力 item に対する locked の変更が unsupported_operation になる",
-                ),
-            ] {
-                report.skip(
-                    "5.3",
-                    title,
-                    verified,
-                    Mode::Auto,
-                    "現在シーンのオブジェクトに出力種別の effect が見つかりません",
-                );
-            }
-        }
-    }
-
-    match find_effect(harness, instance, context, |context, effect| {
-        context
-            .effect_def(&effect.name)
-            .is_some_and(|def| def.flags.audio && !def.flags.video)
-    })? {
-        Some(found) => {
-            let outcome = check_audio_effect_lock(harness, instance, &found);
-            report.record(
-                "5.3",
-                "audio effect のロック",
-                "audio effect に対する locked の変更が unsupported_operation になり、成功として返らない",
-                Mode::Auto,
-                outcome,
-            );
         }
         None => report.skip(
             "5.3",
-            "audio effect のロック",
-            "audio effect に対する locked の変更が unsupported_operation になる",
+            "出力 item の有効状態の変更",
+            "出力 item に対する enabled の変更が unsupported_operation になる",
             Mode::Auto,
-            "現在シーンのオブジェクトに音声のみの effect が見つかりません",
+            "現在シーンのオブジェクトに出力種別の effect が見つかりません",
         ),
     }
 
@@ -2708,56 +2660,22 @@ where
     Ok(None)
 }
 
-/// 出力 item の有効状態を変えられないことを確かめる。
+/// 出力 item の有効状態を変えられず、何も変わらないことを確かめる。
+///
+/// 拒否は SDK を呼ぶ前に済ませる。呼んでしまえば、何も変わっていないのに
+/// revision が進む。
 fn check_output_item_enable(
     harness: &Harness,
-    instance: &Instance,
-    found: &FoundEffect,
-) -> CheckResult {
-    let result = harness.set_effect_state(&instance.id, &found.effect.selector, Some(false), None);
-    match result {
-        Ok(_) => Err(format!(
-            "出力 item「{}」の enabled 変更が成功として返りました",
-            found.effect.name
-        )),
-        Err(error) if error.code == ErrorCode::UnsupportedOperation => {
-            Ok(vec![describe_error(&error)])
-        }
-        Err(error) => Err(format!(
-            "unsupported_operation を期待しましたが {}",
-            describe_error(&error)
-        )),
-    }
-}
-
-/// 出力 item のロック変更が拒否され、何も変わらないことを確かめる。
-///
-/// ロックは入力 item と出力 item をまとめた単位で掛かるのに、読み直しは出力
-/// item について常に偽を返す。読み直しでは捕まえられないため、事前確認が唯一の
-/// 防波堤になる。
-fn check_output_item_lock(
-    harness: &Harness,
-    report: &mut Report,
     instance: &Instance,
     context: &Context,
     found: &FoundEffect,
 ) -> CheckResult {
     let before = require(
         harness.object(&instance.id, &found.object.selector),
-        "ロック変更前の詳細を取得できません",
+        "有効状態の変更前の詳細を取得できません",
     )?;
-    let before_locks: Vec<(String, bool)> = before
-        .effects
-        .iter()
-        .map(|effect| (effect.name.clone(), effect.locked))
-        .collect();
 
-    let result = harness.set_effect_state(
-        &instance.id,
-        &found.effect.selector,
-        None,
-        Some(!found.effect.locked),
-    );
+    let result = harness.set_effect_state(&instance.id, &found.effect.selector, false);
 
     let after_object = resolve_object(
         harness,
@@ -2770,47 +2688,23 @@ fn check_output_item_lock(
     )?;
     let after = require(
         harness.object(&instance.id, &after_object.selector),
-        "ロック変更後の詳細を取得できません",
+        "有効状態の変更後の詳細を取得できません",
     )?;
-    let after_locks: Vec<(String, bool)> = after
-        .effects
-        .iter()
-        .map(|effect| (effect.name.clone(), effect.locked))
-        .collect();
-    let synced: Vec<String> = before_locks
-        .iter()
-        .zip(after_locks.iter())
-        .filter(|(before, after)| before.1 != after.1 && before.0 != found.effect.name)
-        .map(|(before, after)| format!("{}: {} -> {}", before.0, before.1, after.1))
-        .collect();
-
-    report.observe(
-        "output_item_lock_sync",
-        "拒否された出力 item の locked 変更で他の effect が動くか",
-        if synced.is_empty() {
-            "対象以外の effect のロック状態は変わらなかった".to_string()
-        } else {
-            format!("対象以外も変化した: {}", synced.join(", "))
-        },
-    );
-
     let target_after = after
         .effects
         .iter()
         .find(|effect| effect.name == found.effect.name)
-        .map(|effect| effect.locked);
+        .map(|effect| effect.enabled);
 
-    let note = match &result {
-        Ok(_) => {
-            return Err(format!(
-                "出力 item「{}」の locked 変更が成功として返りました",
-                found.effect.name
-            ));
-        }
+    match result {
+        Ok(_) => Err(format!(
+            "出力 item「{}」の enabled 変更が成功として返りました",
+            found.effect.name
+        )),
         Err(error) if error.code == ErrorCode::UnsupportedOperation => {
-            if target_after != Some(found.effect.locked) {
+            if target_after != Some(found.effect.enabled) {
                 return Err(format!(
-                    "拒否されたのに locked が {target_after:?} へ変わっています"
+                    "拒否されたのに enabled が {target_after:?} へ変わっています"
                 ));
             }
             if before.project_revision != after.project_revision {
@@ -2819,40 +2713,6 @@ fn check_output_item_lock(
                     before.project_revision, after.project_revision
                 ));
             }
-            format!(
-                "unsupported_operation で拒否された: {}",
-                describe_error(error)
-            )
-        }
-        Err(error) => {
-            return Err(format!(
-                "unsupported_operation を期待しましたが {}",
-                describe_error(error)
-            ));
-        }
-    };
-
-    Ok(vec![note])
-}
-
-/// audio effect のロックを変えられないことを確かめる。
-fn check_audio_effect_lock(
-    harness: &Harness,
-    instance: &Instance,
-    found: &FoundEffect,
-) -> CheckResult {
-    let result = harness.set_effect_state(
-        &instance.id,
-        &found.effect.selector,
-        None,
-        Some(!found.effect.locked),
-    );
-    match result {
-        Ok(_) => Err(format!(
-            "audio effect「{}」の locked 変更が成功として返りました",
-            found.effect.name
-        )),
-        Err(error) if error.code == ErrorCode::UnsupportedOperation => {
             Ok(vec![describe_error(&error)])
         }
         Err(error) => Err(format!(

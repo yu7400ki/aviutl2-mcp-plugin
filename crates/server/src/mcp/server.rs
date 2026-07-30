@@ -767,10 +767,8 @@ impl AviUtl2McpServer {
         .await
     }
 
-    /// effect の有効・無効とロック状態を変更する。
-    /// enabled と locked の両方を省略した要求は受け付けない。
-    /// 出力 item の有効化と、audio effect / 出力 item のロックは変更できず
-    /// unsupported_operation となる。
+    /// effect の有効・無効を変更する。
+    /// 出力 item の有効・無効は変更できず unsupported_operation となる。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
     /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
@@ -1735,10 +1733,7 @@ mod tests {
                 "aviutl2_set_object_item",
                 &["fingerprint", "公開していない設定項目種別", "item_type"],
             ),
-            (
-                "aviutl2_set_effect_state",
-                &["fingerprint", "出力 item", "audio effect", "両方を省略"],
-            ),
+            ("aviutl2_set_effect_state", &["fingerprint", "出力 item"]),
             ("aviutl2_delete_effect", &["fingerprint", "not_found"]),
             ("aviutl2_delete_object", &["not_found"]),
             (

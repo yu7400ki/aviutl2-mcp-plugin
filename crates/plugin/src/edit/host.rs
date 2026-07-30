@@ -210,14 +210,6 @@ pub trait SceneEditor {
         enabled: bool,
     ) -> Result<(), EditError>;
 
-    /// effect のロック状態を設定する。
-    fn set_effect_locked(
-        &self,
-        ticket: MutationTicket<'_>,
-        effect: &ResolvedEffect<'_>,
-        locked: bool,
-    ) -> Result<(), EditError>;
-
     /// effect の設定項目へ値を書き込む。
     fn set_effect_item(
         &self,

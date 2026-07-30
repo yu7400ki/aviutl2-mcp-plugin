@@ -40,7 +40,7 @@ pub(crate) enum Fault {
     Mutation,
     /// 変更後の読み直しが失敗する。
     ReadBack,
-    /// 有効・ロックの変更を無言で無視する。
+    /// 有効・無効の変更を無言で無視する。
     IgnoreEffectState,
     /// 名前の変更を無言で無視する。
     IgnoreObjectName,
@@ -339,7 +339,6 @@ pub(crate) const MUTATIONS: &[&str] = &[
     "create_effect",
     "delete_effect",
     "set_effect_enable",
-    "set_effect_lock",
     "set_effect_item_value",
     "set_cursor_layer_frame",
     "set_select_range",
@@ -955,19 +954,6 @@ impl SceneEditor for FakeSceneEditor<'_> {
             return Ok(());
         }
         self.with_effect(effect, |effect| effect.enabled = enabled)
-    }
-
-    fn set_effect_locked(
-        &self,
-        _ticket: MutationTicket<'_>,
-        effect: &ResolvedEffect<'_>,
-        locked: bool,
-    ) -> Result<(), EditError> {
-        self.mutation("set_effect_lock")?;
-        if self.host.knobs().fault == Some(Fault::IgnoreEffectState) {
-            return Ok(());
-        }
-        self.with_effect(effect, |effect| effect.locked = locked)
     }
 
     fn set_effect_item(

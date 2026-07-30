@@ -412,17 +412,6 @@ impl SceneEditor for SdkSceneEditor<'_> {
             .map_err(|error| mutation_failure("set_effect_enable", &error))
     }
 
-    fn set_effect_locked(
-        &self,
-        _ticket: MutationTicket<'_>,
-        effect: &ResolvedEffect<'_>,
-        locked: bool,
-    ) -> Result<(), EditError> {
-        self.section
-            .set_effect_lock(self.effect(effect.slot())?, locked)
-            .map_err(|error| mutation_failure("set_effect_lock", &error))
-    }
-
     fn set_effect_item(
         &self,
         _ticket: MutationTicket<'_>,

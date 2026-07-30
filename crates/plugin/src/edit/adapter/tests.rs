@@ -931,8 +931,7 @@ fn a_silently_ignored_effect_state_change_is_not_reported_as_success() {
         .edit
         .set_effect_state(&SetEffectStateParams {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
-            enabled: Some(false),
-            locked: None,
+            enabled: false,
         })
         .expect_err("無言で無視された変更が成功として返りました");
 
@@ -941,38 +940,29 @@ fn a_silently_ignored_effect_state_change_is_not_reported_as_success() {
     assert_eq!(error.details()["mutation_issued"], json!(true));
 }
 
-/// effect のロックを変えると、応答が返す概要も変化後の fingerprint を持つことを
-/// 確かめる。
+/// effect のロックが変わると、対象の同一性も動くことを確かめる。
 ///
-/// ロックは alias へ書き出されるため、オブジェクトの同一性も動く。読み直しが
-/// 効いていなければ、要求元は次の要求で必ず拒否される selector を受け取る。
+/// ロックは alias へ書き出されるため、オブジェクトの fingerprint も追随する。
+/// 追随しなければ、要求元はロックの前後を見分けられない selector を握り続ける。
 #[test]
 fn locking_an_effect_changes_the_object_fingerprint() {
     let harness = Harness::new();
-    let selector = harness.effect_selector(1, 100, "ぼかし", 0);
-    let before = selector.object.clone();
+    let before = harness.selector(1, 100);
 
-    let outcome = harness
-        .edit
-        .set_effect_state(&SetEffectStateParams {
-            selector,
-            enabled: None,
-            locked: Some(true),
-        })
-        .expect("ロックの変更に失敗しました");
+    harness.host.scene.lock().unwrap().layers[1].objects[0].effects[1].locked = true;
 
-    let after = outcome.object.expect("変更後の概要").selector;
+    let after = harness.selector(1, 100);
     assert_ne!(
         before.fingerprint, after.fingerprint,
         "effect のロックを変えてもオブジェクトの fingerprint が変わりません"
     );
 
-    // 応答が返した selector はそのまま次の要求へ渡せる。変更前の selector は
+    // 読み直した selector はそのまま次の要求へ渡せる。ロック前の selector は
     // もう一致しない。
     harness
         .read
         .get_object(&after)
-        .expect("応答が返した selector で引けません");
+        .expect("読み直した selector で引けません");
     assert_eq!(
         harness.read.get_object(&before).unwrap_err().error_code(),
         ErrorCode::PreconditionFailed
@@ -981,11 +971,8 @@ fn locking_an_effect_changes_the_object_fingerprint() {
 
 /// 変更を受け付けない状態変更が、SDK を呼ぶ前に弾かれることを確かめる。
 ///
-/// 3 つを 1 つのテストへ並べる。1 つだけ直して他が回帰しても気付けない形にすると、
-/// 「SDK が無言で拒否する変更を成功として返さない」という約束が片側から崩れる。
-///
-/// **出力項目のロックはここが唯一の防波堤である。** 読み直しは出力項目について
-/// 常に偽を返すため、偽への変更は read-back で一致と見なされてしまう。
+/// 表で駆動する。無言で拒否される軸が増えたら行を足すだけで、同じ主張
+/// （SDK を呼ばない・revision を進めない・成功として返さない）がそのまま掛かる。
 #[test]
 fn changes_the_host_never_applies_are_refused_before_the_sdk_is_called() {
     /// 変更を受け付けない対象と、それへ要求する状態変更。
@@ -997,9 +984,7 @@ fn changes_the_host_never_applies_are_refused_before_the_sdk_is_called() {
         /// 差し替える effect 列の位置。
         position: usize,
         /// 要求する有効・無効。
-        enabled: Option<bool>,
-        /// 要求するロック状態。
-        locked: Option<bool>,
+        enabled: bool,
     }
 
     let scenarios = [
@@ -1008,25 +993,7 @@ fn changes_the_host_never_applies_are_refused_before_the_sdk_is_called() {
             label: "出力項目の enabled",
             effect_name: "標準描画",
             position: 0,
-            enabled: Some(false),
-            locked: None,
-        },
-        // 音声だけを扱う effect のロック。
-        Immutable {
-            label: "音声 effect の locked",
-            effect_name: "音声フェード",
-            position: 1,
-            enabled: None,
-            locked: Some(true),
-        },
-        // 出力項目のロック。読み直しは常に偽を返すため、偽への変更は
-        // read-back では捕まえられない。
-        Immutable {
-            label: "出力項目の locked",
-            effect_name: "標準描画",
-            position: 0,
-            enabled: None,
-            locked: Some(false),
+            enabled: false,
         },
     ];
 
@@ -1035,7 +1002,6 @@ fn changes_the_host_never_applies_are_refused_before_the_sdk_is_called() {
         effect_name,
         position,
         enabled,
-        locked,
     } in scenarios
     {
         let name = effect_name.to_string();
@@ -1045,11 +1011,10 @@ fn changes_the_host_never_applies_are_refused_before_the_sdk_is_called() {
             drop(scene);
         });
         let selector = harness.effect_selector(1, 100, effect_name, 0);
-        let Err(error) = harness.edit.set_effect_state(&SetEffectStateParams {
-            selector,
-            enabled,
-            locked,
-        }) else {
+        let Err(error) = harness
+            .edit
+            .set_effect_state(&SetEffectStateParams { selector, enabled })
+        else {
             panic!("{label} が変更できました");
         };
 
@@ -1394,9 +1359,7 @@ fn issuing_a_mutation_advances_the_revision_once() {
         .edit
         .set_effect_state(&SetEffectStateParams {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
-            // 2 つの変更 API を発行しても加算は 1 度きりである。
-            enabled: Some(false),
-            locked: Some(true),
+            enabled: false,
         })
         .expect("状態の変更に失敗しました");
 
@@ -1716,8 +1679,7 @@ fn each_operation_fills_the_outcome_it_is_defined_to_fill() {
         .edit
         .set_effect_state(&SetEffectStateParams {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
-            enabled: Some(false),
-            locked: None,
+            enabled: false,
         })
         .expect("set_effect_state");
     assert!(outcome.object.is_some());
@@ -2345,8 +2307,7 @@ fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
         EditOperation::SetEffectState => |harness: &Harness, target| {
             harness.edit.set_effect_state(&SetEffectStateParams {
                 selector: harness.effect_selector_of(target, "ぼかし", 0),
-                enabled: Some(false),
-                locked: None,
+                enabled: false,
             })
         },
         // 選択状態はプロジェクトの内容ではない。revision を進めない。
@@ -2699,43 +2660,17 @@ fn the_response_revision_comes_from_the_increment_not_from_a_reread() {
 }
 
 #[test]
-fn an_audio_only_effect_refuses_a_lock_change_before_the_section() {
-    // 音声だけを扱う effect はロックを変更できない。SDK を呼んでしまえば、
-    // 届いた以上は変更が入った側へ倒すほかなく、何も変わっていないのに
-    // revision が進む。呼ぶ前に分かる対象は呼ばずに弾く。
-    let harness = Harness::with(|host| {
-        let mut scene = host.scene.lock().unwrap();
-        scene.layers[1].objects[0].effects[1].name = "音声フェード".to_string();
-        drop(scene);
-    });
-    let error = harness
-        .edit
-        .set_effect_state(&SetEffectStateParams {
-            selector: harness.effect_selector(1, 100, "音声フェード", 0),
-            enabled: None,
-            locked: Some(true),
-        })
-        .expect_err("音声 effect のロックが変更できました");
-
-    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
-    assert_eq!(error.details()["reason"], json!("effect_state_immutable"));
-    assert_eq!(harness.host.enter_calls(), 0);
-    harness.assert_untouched();
-}
-
-#[test]
-fn an_effect_that_handles_video_as_well_is_not_refused_by_the_flags_alone() {
-    // フラグは画像と音声が同時に立ち得る。音声のフラグだけを見て弾くと、
-    // 変更できる対象まで拒否する。入力項目のロックは変更できる。
+fn disabling_an_input_item_is_reported_with_the_reread_state() {
+    // 入力項目は有効・無効を変更できる。応答が返す effect は読み直した値であり、
+    // 要求値をそのまま echo したものではない。
     let harness = Harness::new();
     let outcome = harness
         .edit
         .set_effect_state(&SetEffectStateParams {
-            selector: harness.effect_selector(1, 100, "動画ファイル", 0),
-            enabled: None,
-            locked: Some(true),
+            selector: harness.effect_selector(1, 100, "ぼかし", 0),
+            enabled: false,
         })
-        .expect("画像も扱う effect のロック変更が拒否されました");
+        .expect("入力項目の無効化が拒否されました");
 
-    assert!(outcome.effect.expect("変更後の effect").locked);
+    assert!(!outcome.effect.expect("変更後の effect").enabled);
 }

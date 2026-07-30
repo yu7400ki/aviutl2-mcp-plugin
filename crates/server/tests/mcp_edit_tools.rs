@@ -484,8 +484,7 @@ async fn set_effect_state_tool_sends_only_the_requested_changes() {
         .aviutl2_set_effect_state(Parameters(SetEffectStateInput {
             instance_id: harness.instance_id(),
             selector: effect_selector_input(),
-            enabled: Some(false),
-            locked: None,
+            enabled: false,
         }))
         .await;
 
@@ -497,7 +496,6 @@ async fn set_effect_state_tool_sends_only_the_requested_changes() {
         json!({
             "selector": effect_selector_json(),
             "enabled": false,
-            "locked": null,
         }),
     );
 }
@@ -1013,8 +1011,7 @@ async fn edit_tool_reports_an_unsupported_operation_from_the_instance() {
         .aviutl2_set_effect_state(Parameters(SetEffectStateInput {
             instance_id: harness.instance_id(),
             selector: effect_selector_input(),
-            enabled: Some(true),
-            locked: None,
+            enabled: true,
         }))
         .await;
 

@@ -334,25 +334,16 @@ impl DeleteEffectParams {
 pub struct SetEffectStateParams {
     /// 対象 effect。
     pub selector: EffectSelector,
-    /// 有効・無効。省略時は変更しない。
-    #[serde(default)]
-    pub enabled: Option<bool>,
-    /// ロック状態。省略時は変更しない。
-    #[serde(default)]
-    pub locked: Option<bool>,
+    /// 有効・無効。
+    pub enabled: bool,
 }
 
 impl SetEffectStateParams {
     /// 要求内容だけで決まる検証を行う。
     ///
-    /// `enabled` と `locked` の両方を省略した要求は拒否する。何も変更しない
-    /// 編集要求は、成功したのか無視されたのかをクライアントが区別できない。
+    /// 見るのは [`DeleteEffectParams::validate`] と同じく、セレクターが持つ
+    /// 位置指定の範囲だけである。
     pub fn validate(&self) -> Result<(), EditInputError> {
-        if self.enabled.is_none() && self.locked.is_none() {
-            return Err(EditInputError::NoChangeRequested {
-                fields: &[FIELD_ENABLED, FIELD_LOCKED],
-            });
-        }
         validate_effect_selector_position(&self.selector)
     }
 }
@@ -386,8 +377,8 @@ pub struct SetSelectionParams {
 impl SetSelectionParams {
     /// 要求内容だけで決まる検証を行う。
     ///
-    /// 3 つ全ての省略は拒否する。理由は
-    /// [`SetEffectStateParams::validate`] と同じである。
+    /// 3 つ全ての省略は拒否する。何も変更しない編集要求は、成功したのか
+    /// 無視されたのかをクライアントが区別できない。
     pub fn validate(&self) -> Result<(), EditInputError> {
         if self.cursor.is_none() && self.selected_range.is_none() && self.focus.is_none() {
             return Err(EditInputError::NoChangeRequested {
@@ -588,10 +579,6 @@ const FIELD_NAME: &str = "name";
 const FIELD_ITEM: &str = "item";
 /// `effect_name` フィールド名。
 const FIELD_EFFECT_NAME: &str = "effect_name";
-/// `enabled` フィールド名。
-const FIELD_ENABLED: &str = "enabled";
-/// `locked` フィールド名。
-const FIELD_LOCKED: &str = "locked";
 /// `cursor` フィールド名。
 const FIELD_CURSOR: &str = "cursor";
 /// `selected_range` フィールド名。
@@ -882,8 +869,7 @@ mod tests {
         });
         assert_roundtrip(SetEffectStateParams {
             selector: sample_effect_selector(),
-            enabled: Some(false),
-            locked: None,
+            enabled: false,
         });
         assert_roundtrip(sample_set_selection());
         assert_roundtrip(SetSelectionParams {
@@ -938,8 +924,7 @@ mod tests {
             SetEffectStateParams,
             SetEffectStateParams {
                 selector: sample_effect_selector(),
-                enabled: Some(true),
-                locked: Some(false),
+                enabled: true,
             }
         );
         assert_rejects_unknown!(SetSelectionParams, sample_set_selection());
@@ -995,6 +980,20 @@ mod tests {
                 "{key} の欠落が受理されました"
             );
         }
+        let set_effect_state = SetEffectStateParams {
+            selector: sample_effect_selector(),
+            enabled: false,
+        };
+        for key in ["selector", "enabled"] {
+            assert!(
+                serde_json::from_value::<SetEffectStateParams>(without_field(
+                    &set_effect_state,
+                    key
+                ))
+                .is_err(),
+                "{key} の欠落が受理されました"
+            );
+        }
         for key in ["expected_scene_id", "expected_project_epoch"] {
             assert!(
                 serde_json::from_value::<SetSelectionParams>(without_field(
@@ -1009,14 +1008,6 @@ mod tests {
 
     #[test]
     fn optional_fields_may_be_omitted() {
-        let params: SetEffectStateParams = serde_json::from_value(json!({
-            "selector": serde_json::to_value(sample_effect_selector()).unwrap(),
-            "enabled": true,
-        }))
-        .unwrap();
-        assert_eq!(params.enabled, Some(true));
-        assert_eq!(params.locked, None);
-
         // 省略と null の明示はどちらも標準名へ戻すことを意味する。
         let omitted: SetObjectNameParams = serde_json::from_value(json!({
             "selector": serde_json::to_value(sample_object_selector()).unwrap(),
@@ -1210,39 +1201,6 @@ mod tests {
             .validate(),
             Ok(())
         );
-    }
-
-    #[test]
-    fn set_effect_state_rejects_omitting_every_change() {
-        let params = SetEffectStateParams {
-            selector: sample_effect_selector(),
-            enabled: None,
-            locked: None,
-        };
-        let error = params.validate().unwrap_err();
-        assert_eq!(
-            error,
-            EditInputError::NoChangeRequested {
-                fields: &["enabled", "locked"],
-            }
-        );
-        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
-
-        for (enabled, locked) in [
-            (Some(true), None),
-            (None, Some(true)),
-            (Some(true), Some(true)),
-        ] {
-            assert_eq!(
-                SetEffectStateParams {
-                    selector: sample_effect_selector(),
-                    enabled,
-                    locked,
-                }
-                .validate(),
-                Ok(())
-            );
-        }
     }
 
     #[test]
@@ -1782,8 +1740,7 @@ mod tests {
             .validate(),
             SetEffectStateParams {
                 selector: effect,
-                enabled: Some(true),
-                locked: None,
+                enabled: true,
             }
             .validate(),
             SetSelectionParams {

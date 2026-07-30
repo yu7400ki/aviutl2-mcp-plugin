@@ -48,7 +48,7 @@ pub const OPERATION_ADD_EFFECT: &str = "add_effect";
 /// オブジェクトから effect を削除する operation 名。
 pub const OPERATION_DELETE_EFFECT: &str = "delete_effect";
 
-/// effect の有効・ロック状態を変更する operation 名。
+/// effect の有効・無効を変更する operation 名。
 pub const OPERATION_SET_EFFECT_STATE: &str = "set_effect_state";
 
 /// カーソル・選択範囲・フォーカスを変更する operation 名。

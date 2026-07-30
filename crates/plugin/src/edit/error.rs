@@ -42,7 +42,7 @@ impl RetryRequires {
 pub enum UnsupportedReason {
     /// 登録されていない effect 名。
     EffectNotRegistered,
-    /// 出力項目・音声 effect で有効・ロックを変更できない。
+    /// 出力項目で有効・無効を変更できない。
     EffectStateImmutable,
     /// SDK が対応しないメディアファイル。
     MediaNotSupported,
@@ -74,9 +74,7 @@ impl std::fmt::Display for UnsupportedReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let text = match self {
             UnsupportedReason::EffectNotRegistered => "指定された effect は登録されていません",
-            UnsupportedReason::EffectStateImmutable => {
-                "対象 effect の有効・ロック状態は変更できません"
-            }
+            UnsupportedReason::EffectStateImmutable => "対象 effect の有効・無効は変更できません",
             UnsupportedReason::MediaNotSupported => "対応していないメディアファイルです",
             UnsupportedReason::ItemTypeNotWritable => {
                 "この種別の設定項目への書き込みには対応していません"

@@ -55,7 +55,7 @@ pub trait EditAdapter: Send + Sync {
     /// オブジェクトから effect を削除する。
     fn delete_effect(&self, params: &DeleteEffectParams) -> Result<EditOutcome, EditError>;
 
-    /// effect の有効・ロック状態を変更する。
+    /// effect の有効・無効を変更する。
     fn set_effect_state(&self, params: &SetEffectStateParams) -> Result<EditOutcome, EditError>;
 
     /// カーソル・選択範囲・フォーカスを変更する。

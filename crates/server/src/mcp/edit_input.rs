@@ -534,12 +534,8 @@ pub struct SetEffectStateInput {
     pub instance_id: String,
     /// 対象 effect のセレクター。
     pub selector: EffectSelectorInput,
-    /// 有効・無効。省略時は変更しない。
-    #[serde(default)]
-    pub enabled: Option<bool>,
-    /// ロック状態。省略時は変更しない。
-    #[serde(default)]
-    pub locked: Option<bool>,
+    /// 有効・無効。
+    pub enabled: bool,
 }
 
 impl SetEffectStateInput {
@@ -548,7 +544,6 @@ impl SetEffectStateInput {
         let params = SetEffectStateParams {
             selector: self.selector.to_selector()?,
             enabled: self.enabled,
-            locked: self.locked,
         };
         params.validate().map_err(from_input_error)?;
         Ok(params)
@@ -1289,15 +1284,14 @@ mod tests {
     }
 
     #[test]
-    fn effect_state_requires_at_least_one_change() {
-        let input: SetEffectStateInput = serde_json::from_value(json!({
-            "instance_id": SAMPLE_ID,
-            "selector": effect_selector_json(),
-        }))
-        .expect("入力型としては受理される");
-        assert_eq!(
-            input.to_params().expect_err("全省略は拒否される").code,
-            ErrorCode::InvalidArgument
+    fn effect_state_requires_the_enabled_field() {
+        assert!(
+            serde_json::from_value::<SetEffectStateInput>(json!({
+                "instance_id": SAMPLE_ID,
+                "selector": effect_selector_json(),
+            }))
+            .is_err(),
+            "enabled の欠落が受理されました"
         );
     }
 
