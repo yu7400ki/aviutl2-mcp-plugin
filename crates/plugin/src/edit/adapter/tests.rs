@@ -554,6 +554,15 @@ fn an_occupied_destination_is_rejected() {
     assert_eq!(error.details()["reason"], json!("destination_occupied"));
     assert_eq!(error.details()["layer"], json!(1));
     assert_eq!(error.details()["frame"], json!(350));
+    // 塞いでいる範囲が返るため、次の宛先を選ぶのに読み直しが要らない。
+    assert_eq!(
+        error.details()["occupied_by"],
+        json!({"frame_start": 300, "frame_end": 400})
+    );
+    // 塞いでいる対象の名前と fingerprint は載せない。
+    let text = error.details().to_string();
+    assert!(!text.contains("字幕"), "{text}");
+    assert!(!text.contains("fingerprint"), "{text}");
     harness.assert_untouched();
 }
 

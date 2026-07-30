@@ -111,6 +111,18 @@ impl std::fmt::Display for NotIssuedReason {
     }
 }
 
+/// 宛先を塞いでいる既存オブジェクトが占めるフレーム範囲。
+///
+/// 名前も fingerprint も持たない。要求元に要るのは「どこまで塞がっているか」
+/// だけであり、他人の対象の同一性を渡す理由が無い。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OccupiedRange {
+    /// 塞いでいる対象の開始フレーム番号。
+    pub frame_start: usize,
+    /// 塞いでいる対象の終了フレーム番号。
+    pub frame_end: usize,
+}
+
 /// 前提条件のうち、どれが食い違ったか。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mismatch {
@@ -156,6 +168,8 @@ pub enum EditError {
         layer: usize,
         /// 宛先の開始フレーム番号。
         frame: usize,
+        /// 宛先を塞いでいる既存オブジェクトが占める範囲。
+        occupied_by: OccupiedRange,
     },
     /// 対象または宛先のレイヤーがロックされている。
     #[error("レイヤーがロックされています")]
@@ -316,10 +330,21 @@ impl EditError {
     fn fill_details(&self, details: &mut Map<String, Value>) {
         match self {
             EditError::Read(error) => merge(details, error.details()),
-            EditError::DestinationOccupied { layer, frame } => {
+            EditError::DestinationOccupied {
+                layer,
+                frame,
+                occupied_by,
+            } => {
                 details.insert("reason".to_string(), json!("destination_occupied"));
                 details.insert("layer".to_string(), json!(layer));
                 details.insert("frame".to_string(), json!(frame));
+                details.insert(
+                    "occupied_by".to_string(),
+                    json!({
+                        "frame_start": occupied_by.frame_start,
+                        "frame_end": occupied_by.frame_end,
+                    }),
+                );
             }
             EditError::LayerLocked { layer } => {
                 details.insert("reason".to_string(), json!("layer_locked"));
@@ -423,6 +448,10 @@ mod tests {
             EditError::DestinationOccupied {
                 layer: 3,
                 frame: 240,
+                occupied_by: OccupiedRange {
+                    frame_start: 200,
+                    frame_end: 260,
+                },
             },
             EditError::LayerLocked { layer: 3 },
             EditError::EffectNotFound {
@@ -654,11 +683,43 @@ mod tests {
     }
 
     #[test]
+    fn an_occupied_destination_reports_how_far_it_is_blocked() {
+        // 塞いでいる範囲を返さないと、要求元は次の宛先を選ぶために読み直す
+        // ほかない。走査は事前確認で済んでおり、追加の呼び出しは要らない。
+        let error = EditError::DestinationOccupied {
+            layer: 3,
+            frame: 240,
+            occupied_by: OccupiedRange {
+                frame_start: 200,
+                frame_end: 260,
+            },
+        };
+        let details = error.details();
+        assert_eq!(
+            details["occupied_by"],
+            json!({"frame_start": 200, "frame_end": 260})
+        );
+        // 塞いでいる対象の同一性は渡さない。要求元に要るのは範囲だけである。
+        let mut keys: Vec<&str> = details["occupied_by"]
+            .as_object()
+            .expect("occupied_by がオブジェクトではありません")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["frame_end", "frame_start"]);
+    }
+
+    #[test]
     fn an_occupied_destination_still_asks_for_a_refetch() {
         // 宛先の空きは読み直せば分かる。ロックと同じ扱いにはしない。
         let error = EditError::DestinationOccupied {
             layer: 3,
             frame: 240,
+            occupied_by: OccupiedRange {
+                frame_start: 200,
+                frame_end: 260,
+            },
         };
         assert_eq!(error.details()["retry_requires"], json!("refetch"));
     }
@@ -769,6 +830,7 @@ mod tests {
             "reason",
             "layer",
             "frame",
+            "occupied_by",
             "effect_name",
             "effect_index",
             "item",

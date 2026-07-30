@@ -13,7 +13,7 @@
 //! 所有型へのコピーに限る。
 
 use crate::edit::EditAdapter;
-use crate::edit::error::{EditError, UnsupportedReason};
+use crate::edit::error::{EditError, OccupiedRange, UnsupportedReason};
 use crate::edit::host::{EditHost, HostSelection, SceneEditor};
 use crate::edit::precondition::{Boundary, EditKind, MutationPermit, verify_boundary};
 use crate::edit::resolve::{
@@ -243,18 +243,29 @@ fn ensure_layer_unlocked(editor: &dyn SceneEditor, layer: usize) -> Result<(), E
 /// オブジェクトの長さはホストが決めるため、開始位置が空いていても後続の対象と
 /// 重なり得る。SDK の失敗だけでも足りない——失敗は理由を区別しないため、何が
 /// 起きたのかを要求元へ伝えられない。
+///
+/// 塞いでいた対象の範囲は失敗へ載せる。要求元は「どこまで塞がっているか」を
+/// 知らなければ次の宛先を選べず、走査済みの値を捨てると読み直しを強いることに
+/// なる。
 fn ensure_destination_free(
     occupants: &[HostObjectPlacement],
     layer: usize,
     frame: usize,
     moving_from: Option<usize>,
 ) -> Result<(), EditError> {
-    let occupied = occupants
+    let occupant = occupants
         .iter()
         .filter(|placement| Some(placement.frame_start) != moving_from)
-        .any(|placement| placement.frame_start <= frame && frame <= placement.frame_end);
-    if occupied {
-        return Err(EditError::DestinationOccupied { layer, frame });
+        .find(|placement| placement.frame_start <= frame && frame <= placement.frame_end);
+    if let Some(occupant) = occupant {
+        return Err(EditError::DestinationOccupied {
+            layer,
+            frame,
+            occupied_by: OccupiedRange {
+                frame_start: occupant.frame_start,
+                frame_end: occupant.frame_end,
+            },
+        });
     }
     Ok(())
 }
