@@ -69,6 +69,10 @@ pub(crate) enum Fault {
     AdjustMoveDestination,
     /// 解決済みトークンから位置を読めない。
     PositionUnreadable,
+    /// 設定項目の値を項目名から読めない。
+    ///
+    /// 逆操作の材料が揃わない状況を作る。
+    ItemValueUnreadable,
 }
 
 /// panic させる位置。
@@ -86,6 +90,10 @@ pub(crate) enum PanicPoint {
     InClosure,
     /// クロージャの内側。変更を発行した後の読み直しで落ちる。
     AfterMutation,
+    /// クロージャの内側。変更を発行した後のレイヤー走査で落ちる。
+    ///
+    /// 一括適用は宛先の確認をここで行うため、適用の途中で落ちる状況を作れる。
+    AfterMutationScan,
 }
 
 /// 配下 effect の一覧を引いたことを表す記録。
@@ -247,6 +255,12 @@ pub(crate) struct Knobs {
     /// 2 回目以降の編集状態。区間の失敗後の読み直しに使う。
     pub(crate) later_state: Option<EditState>,
     pub(crate) fault: Option<Fault>,
+    /// 指定した位置の変更 API 呼び出しにだけ差し込む失敗。
+    ///
+    /// 位置は編集区間へ入ってからの変更 API の呼び出し回数（0 始まり）である。
+    /// 一括適用では巻き戻しも同じ区間で発行されるため、適用と巻き戻しのどちらか
+    /// 一方だけを失敗させられる。
+    pub(crate) fault_at: Option<(usize, Fault)>,
     pub(crate) panic_at: Option<PanicPoint>,
     /// 次の詳細の読み取りで進めるプロジェクト revision の回数。
     ///
@@ -272,6 +286,7 @@ impl Default for Knobs {
             state: EditState::Edit,
             later_state: None,
             fault: None,
+            fault_at: None,
             panic_at: None,
             bump_on_detail: 0,
             renew_on_detail: false,
@@ -290,9 +305,12 @@ pub(crate) struct FakeEditHost {
     knobs: Mutex<Knobs>,
     enter_calls: AtomicUsize,
     edit_state_calls: AtomicUsize,
+    mutation_calls: AtomicUsize,
     calls: Mutex<Vec<&'static str>>,
     /// レイヤー名の設定へ渡された引数を、渡された順に覚える。
     layer_names: Mutex<Vec<Option<String>>>,
+    /// 設定項目の書き込みへ渡された値を、渡された順に覚える。
+    item_values: Mutex<Vec<String>>,
 }
 
 impl FakeEditHost {
@@ -306,8 +324,10 @@ impl FakeEditHost {
             knobs: Mutex::new(Knobs::default()),
             enter_calls: AtomicUsize::new(0),
             edit_state_calls: AtomicUsize::new(0),
+            mutation_calls: AtomicUsize::new(0),
             calls: Mutex::new(Vec::new()),
             layer_names: Mutex::new(Vec::new()),
+            item_values: Mutex::new(Vec::new()),
         }
     }
 
@@ -359,6 +379,14 @@ impl FakeEditHost {
     /// 標準名へ戻す指定が前者であることを、この記録で確かめられる。
     pub(crate) fn layer_name_arguments(&self) -> Vec<Option<String>> {
         self.layer_names.lock().unwrap().clone()
+    }
+
+    /// 設定項目の書き込みへ渡された値を、渡された順に返す。
+    ///
+    /// 逆操作が書き戻す文字列をそのまま検査できる。読み取り経路が解釈した値を
+    /// 組み立て直していれば、ここに現れる文字列が元値と一致しなくなる。
+    pub(crate) fn item_value_arguments(&self) -> Vec<String> {
+        self.item_values.lock().unwrap().clone()
     }
 
     /// レイヤーのロック状態を切り替える。
@@ -577,10 +605,18 @@ impl FakeSceneEditor<'_> {
     }
 
     /// 変更 API の失敗を差し込む。
+    ///
+    /// 位置を指定した仕込みがあり、位置が一致する呼び出しではそちらを優先する。
+    /// 一致しない呼び出しには、区間全体へ掛けた仕込みがそのまま働く。
     fn mutation(&self, call: &'static str) -> Result<(), EditError> {
         self.host.record(call);
+        let position = self.host.mutation_calls.fetch_add(1, Ordering::Relaxed);
         let knobs = self.host.knobs();
-        match knobs.fault {
+        let injected = match knobs.fault_at {
+            Some((at, fault)) if at == position => Some(fault),
+            _ => knobs.fault,
+        };
+        match injected {
             Some(Fault::Mutation) => Err(EditError::Sdk { operation: call }),
             Some(Fault::TargetGone) => Err(EditError::NotIssued {
                 reason: NotIssuedReason::TargetMissing,
@@ -632,6 +668,14 @@ impl SceneReader for FakeSceneEditor<'_> {
 
     fn object_placements(&self, layer: usize) -> Result<Vec<HostObjectPlacement>, ReadError> {
         self.host.record("object_placements");
+        if self.host.mutated() {
+            // 一括適用は宛先の確認をここで行う。適用の途中で落ちる状況を作れる。
+            assert_ne!(
+                self.host.knobs().panic_at,
+                Some(PanicPoint::AfterMutationScan),
+                "変更を発行した後のレイヤー走査で panic させます"
+            );
+        }
         let scene = self.host.scene.lock().unwrap();
         Ok(scene
             .layers
@@ -817,6 +861,11 @@ impl SceneEditor for FakeSceneEditor<'_> {
         item: &str,
     ) -> Result<String, EditError> {
         self.host.record(ITEM_VALUE);
+        if self.host.knobs().fault == Some(Fault::ItemValueUnreadable) {
+            return Err(EditError::Sdk {
+                operation: "get_effect_item_value",
+            });
+        }
         let (id, position) = self.effect_ref(effect.slot())?;
         let scene = self.host.scene.lock().unwrap();
         scene
@@ -890,6 +939,24 @@ impl SceneEditor for FakeSceneEditor<'_> {
         };
         let id = self.object_id(object.slot())?;
         let mut scene = self.host.scene.lock().unwrap();
+        // 移動先に別のオブジェクトが居れば失敗する。巻き戻しは宛先を事前に
+        // 確かめないため、順序を誤った巻き戻しはここで落ちる。
+        let occupied = scene
+            .layers
+            .get(layer)
+            .map(|target| {
+                target.objects.iter().any(|other| {
+                    other.id != id
+                        && other.placement.frame_start <= frame
+                        && frame <= other.placement.frame_end
+                })
+            })
+            .unwrap_or_default();
+        if occupied {
+            return Err(EditError::Sdk {
+                operation: "move_object",
+            });
+        }
         let mut moved = scene
             .by_id(id)
             .ok_or(EditError::Sdk {
@@ -1011,6 +1078,13 @@ impl SceneEditor for FakeSceneEditor<'_> {
         value: &str,
     ) -> Result<(), EditError> {
         self.mutation("set_effect_item_value")?;
+        // 渡された文字列をそのまま覚える。逆操作が書き戻す値が、ホストが返した
+        // 文字列そのものであることを検査できる。
+        self.host
+            .item_values
+            .lock()
+            .unwrap()
+            .push(value.to_string());
         let item = item.to_string();
         // ホストは値を正規化し得る。上限を超える指定は丸めて書き込まれる。
         let normalized = value.parse::<i64>().unwrap_or_default().min(MAX_ITEM_VALUE);
@@ -1251,7 +1325,7 @@ pub(crate) fn fake_edit_info() -> HostEditInfo {
 }
 
 /// 設定項目を 1 つ持つ effect。
-fn blur(index: usize, range: i64) -> HostEffect {
+pub(crate) fn blur(index: usize, range: i64) -> HostEffect {
     HostEffect {
         name: "ぼかし".to_string(),
         index,

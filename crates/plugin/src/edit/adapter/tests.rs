@@ -3128,3 +3128,6 @@ fn disabling_an_input_item_is_reported_with_the_reread_state() {
 
     assert!(!outcome.effect.expect("変更後の effect").enabled);
 }
+
+/// 一括適用の統合テスト。
+mod apply_batch;
