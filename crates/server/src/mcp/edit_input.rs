@@ -1013,7 +1013,7 @@ mod tests {
 
     #[test]
     fn multiline_text_item_value_is_accepted() {
-        // 読み取りが返した複数行のテキストを書き戻せる。
+        // 複数行のテキストを 1 回の書き込みで設定できる。
         let input: SetObjectItemInput = serde_json::from_value(json!({
             "instance_id": SAMPLE_ID,
             "selector": effect_selector_json(),

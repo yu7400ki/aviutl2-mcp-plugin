@@ -157,15 +157,8 @@ pub fn validate_item_text(value: &str) -> Result<(), TextSyntaxError> {
 ///
 /// 改行とタブを許すほかは [`validate_item_text`] と同じである。
 ///
-/// 読み取りが返した値をそのまま書き戻せることを保つための緩和である。
-/// 複数行のテキストを持つ設定項目では、読み取りが改行を含む値を返し得る。
-/// これを拒否すると、読める値が書き戻せないという非対称が生じ、複数行の
-/// テキストを設定する経路が丸ごと失われる。
-///
-/// 値の中で改行が実際の改行として現れるか、エスケープされた表記として
-/// 現れるかは経路によって異なり得る。エスケープ表記なら本緩和は何も
-/// 変えず、実際の改行なら本緩和が無ければ書き戻せない。**どちらであっても
-/// 許す側が安全である。**
+/// 複数行のテキストを書く直接の手段を残すための緩和である。改行を拒否すると、
+/// 複数行の値は要求元がエスケープ表記を自分で組み立てるしか書けなくなる。
 pub fn validate_multiline_item_text(value: &str) -> Result<(), TextSyntaxError> {
     validate_control_free_except_layout(value)?;
     limit_bytes(value, MAX_ITEM_VALUE_BYTES)
