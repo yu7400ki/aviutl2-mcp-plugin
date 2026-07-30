@@ -394,6 +394,43 @@ fn a_fingerprint_mismatch_is_checked_before_the_operation_preconditions() {
     harness.assert_untouched();
 }
 
+/// 名前を変えられた対象への編集が、読み直せば作り直せる失敗として返ることを
+/// 確かめる。
+///
+/// 名前で候補を絞ると、この状況は候補 0 件になり「再試行しても解消しない」
+/// として返る。要求元は復帰できるのに停止する。
+#[test]
+fn a_renamed_target_is_rejected_as_a_content_mismatch() {
+    let harness = Harness::new();
+    let params = move_params(&harness);
+    harness.host.scene.lock().unwrap().layers[1].objects[0]
+        .placement
+        .name = Some("改名後".to_string());
+
+    let error = harness
+        .edit
+        .move_object(&params)
+        .expect_err("改名された対象への編集が受理されました");
+    assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+    assert_eq!(error.details()["mismatch"], json!("fingerprint"));
+    assert_eq!(error.details()["retry_requires"], json!("refetch"));
+    harness.assert_untouched();
+}
+
+/// 名前を名乗らないセレクターでも対象が特定できることを確かめる。
+#[test]
+fn a_selector_without_a_name_still_resolves_the_target() {
+    let harness = Harness::new();
+    let mut params = move_params(&harness);
+    params.selector.name = None;
+
+    harness
+        .edit
+        .move_object(&params)
+        .expect("名前を持たない指定が拒否されました");
+    assert!(harness.host.mutated());
+}
+
 #[test]
 fn a_revision_change_during_the_resolution_does_not_stop_the_mutation() {
     // 対象の解決と fingerprint の再計算の間に revision が進む状況を作る。

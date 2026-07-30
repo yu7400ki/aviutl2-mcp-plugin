@@ -383,18 +383,14 @@ pub(crate) fn resolve_selected_detail(
 
 /// セレクターが指す候補を 1 件へ絞る。
 ///
-/// 絞り込みは位置と名前だけで決まる。ここでレイヤー内の全対象の alias まで
-/// 読むと、無関係な対象の読み取り失敗が要求全体を巻き込み、対象自体は健全なのに
-/// 取得できなくなる。
+/// 絞り込みは位置だけで決まる。ここでレイヤー内の全対象の alias まで読むと、
+/// 無関係な対象の読み取り失敗が要求全体を巻き込み、対象自体は健全なのに取得
+/// できなくなる。
 fn resolve_candidate_of(
     scene: &dyn SceneReader,
     selector: &ObjectSelector,
 ) -> Result<HostObjectPlacement, ReadError> {
-    resolve_candidate(
-        scene.object_placements(selector.layer)?,
-        selector.frame,
-        selector.name.as_deref(),
-    )
+    resolve_candidate(scene.object_placements(selector.layer)?, selector.frame)
 }
 
 /// 読み直した対象の概要を、セレクターの fingerprint と照合してから返す。
@@ -430,18 +426,26 @@ pub(crate) fn ensure_fingerprint_algorithm(
     })
 }
 
-/// 開始フレームの完全一致と名前の一致で候補を 1 件へ絞る。
+/// 開始フレームの完全一致で候補を 1 件へ絞る。
 ///
 /// 「指定フレーム以降」の探索結果をそのまま候補にしない。セレクターの `frame` は
 /// 対象の開始フレームであり、途中フレームでの重なりを表さない。
+///
+/// セレクターの `name` は絞り込みに使わない。レイヤー内の走査は対象の終端の次へ
+/// 厳密に前進するため開始フレームは相異なり、名前は候補を減らさない。一方で
+/// 名前は fingerprint の材料であり、名前が変わった対象は fingerprint の照合が
+/// 捕まえる。絞り込みに使うと、読み直せば作り直せる要求が「一致する対象なし」
+/// として返り、要求元は復帰する手立てを失う。
+///
+/// 候補が複数になる分岐は残す。走査の実装が変わったときに、黙って別の対象を
+/// 選ぶより型付きの失敗で止まる方が安全である。
 fn resolve_candidate(
     objects: Vec<HostObjectPlacement>,
     frame: usize,
-    required_name: Option<&str>,
 ) -> Result<HostObjectPlacement, ReadError> {
     let mut candidates: Vec<HostObjectPlacement> = objects
         .into_iter()
-        .filter(|object| object.frame_start == frame && matches_name(required_name, object))
+        .filter(|object| object.frame_start == frame)
         .collect();
 
     match candidates.len() {
@@ -450,14 +454,6 @@ fn resolve_candidate(
         }),
         1 => Ok(candidates.remove(0)),
         candidate_count => Err(ReadError::AmbiguousObject { candidate_count }),
-    }
-}
-
-/// 名前が指定されている場合に一致を必須とする。
-fn matches_name(required_name: Option<&str>, object: &HostObjectPlacement) -> bool {
-    match required_name {
-        None => true,
-        Some(name) => object.name.as_deref() == Some(name),
     }
 }
 
@@ -1765,15 +1761,65 @@ mod tests {
         );
     }
 
+    /// 名前が変わった対象が、一致する対象なしではなく内容の食い違いとして
+    /// 返ることを確かめる。
+    ///
+    /// 名前で候補を絞ると、この状況は候補 0 件になり「再試行しても解消しない」
+    /// として返る。実際には読み直せば要求を作り直せる。
     #[test]
-    fn get_object_reports_not_found_when_name_differs() {
+    fn get_object_reports_precondition_failed_after_the_target_is_renamed() {
+        let project = Arc::new(ProjectState::new());
+        let before = HostReadAdapter::new(FakeHost::new(), Arc::clone(&project));
+        let selector = sample_selector(&before);
+
+        let renamed = HostReadAdapter::new(
+            FakeHost {
+                layers: {
+                    let mut layers = fake_layers();
+                    layers[1].objects[0] =
+                        object_with_effects(1, 100, 200, Some("改名後"), fake_effects());
+                    layers
+                },
+                ..FakeHost::new()
+            },
+            Arc::clone(&project),
+        );
+
+        let error = renamed.get_object(&selector).unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+        assert!(
+            matches!(error, ReadError::FingerprintMismatch),
+            "{error} が内容の食い違いとして返っていません"
+        );
+    }
+
+    /// 名前を名乗らないセレクターでも対象が特定できることを確かめる。
+    #[test]
+    fn get_object_resolves_a_selector_without_a_name() {
+        let adapter = adapter();
+        let mut selector = sample_selector(&adapter);
+        selector.name = None;
+
+        let detail = adapter
+            .get_object(&selector)
+            .expect("名前を持たない指定が拒否されました");
+        assert_eq!(detail.summary.frame_start, 100);
+    }
+
+    /// 名前だけが食い違うセレクターが、位置と内容で解決されることを確かめる。
+    ///
+    /// 名前は fingerprint の材料であり、対象が実際に改名されていれば
+    /// fingerprint が捕まえる。セレクターの名前欄そのものは絞り込みに使わない。
+    #[test]
+    fn get_object_ignores_the_name_carried_by_the_selector() {
         let adapter = adapter();
         let mut selector = sample_selector(&adapter);
         selector.name = Some("別の名前".to_string());
-        assert_eq!(
-            adapter.get_object(&selector).unwrap_err().error_code(),
-            ErrorCode::NotFound
-        );
+
+        let detail = adapter
+            .get_object(&selector)
+            .expect("名前の食い違いで対象を見失いました");
+        assert_eq!(detail.summary.name.as_deref(), Some("立ち絵"));
     }
 
     #[test]
@@ -2410,13 +2456,10 @@ mod tests {
     fn resolve_candidate_requires_exact_start_frame() {
         let objects = vec![object(1, 100, 200, None).identity.placement];
         assert!(matches!(
-            resolve_candidate(objects.clone(), 150, None),
+            resolve_candidate(objects.clone(), 150),
             Err(ReadError::ObjectNotFound { .. })
         ));
-        assert_eq!(
-            resolve_candidate(objects, 100, None).unwrap().frame_start,
-            100
-        );
+        assert_eq!(resolve_candidate(objects, 100).unwrap().frame_start, 100);
     }
 
     #[test]
