@@ -22,7 +22,7 @@ use crate::edit_info::{Cursor, FrameRange};
 use crate::effect::EffectInfo;
 use crate::error::ErrorCode;
 use crate::item_value::{ItemValue, ItemWriteError, validate_item_value};
-use crate::object::ObjectSummary;
+use crate::object::{LayerInfo, ObjectSummary};
 use crate::selector::{EffectSelector, ObjectSelector};
 use crate::validation::{
     PathSyntaxError, TextSyntaxError, validate_alias, validate_control_free, validate_name,
@@ -172,6 +172,101 @@ pub enum FocusChange {
     /// 解決できない対象を指定したときに黙って解除することはない。解除は
     /// この指定があるときだけ行う。
     Clear {},
+}
+
+/// レイヤー名の変更。
+///
+/// 標準名へ戻す指定は値を持たないが、判別子だけを持つ**構造体 variant**として
+/// 表す。理由は [`RangeChange`] と同じで、unit variant は判別子以外の
+/// フィールドを黙って読み飛ばす。ワイヤ表現はどちらも `{"type":"reset"}` で
+/// 変わらない。
+///
+/// 「省略」と「標準名へ戻す」を二重の [`Option`] で表さない。ワイヤ上では
+/// どちらも同じ形になり、区別が付かなくなる。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LayerNameChange {
+    /// 指定した名前にする。
+    Set {
+        /// 新しいレイヤー名。
+        name: String,
+    },
+    /// 標準の名前へ戻す。
+    Reset {},
+}
+
+impl LayerNameChange {
+    /// 名前の文字種と長さを検証する。
+    pub fn validate(&self) -> Result<(), EditInputError> {
+        match self {
+            LayerNameChange::Set { name } => {
+                validate_name(name).map_err(|source| EditInputError::Text {
+                    field: FIELD_NAME,
+                    source,
+                })
+            }
+            LayerNameChange::Reset {} => Ok(()),
+        }
+    }
+
+    /// 設定する名前。標準名へ戻す指定では `None`。
+    pub fn requested(&self) -> Option<&str> {
+        match self {
+            LayerNameChange::Set { name } => Some(name),
+            LayerNameChange::Reset {} => None,
+        }
+    }
+}
+
+/// `set_layer_state` の params。
+///
+/// レイヤーは selector も fingerprint も持たない。守れるのはプロジェクト境界と
+/// 現在シーンとレイヤー番号の範囲だけであり、「読み取った時点と同じ状態の
+/// レイヤーか」は確かめられない。応答は read-back で得た実際の状態を返すため、
+/// 要求元はそれを見て判断する。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetLayerStateParams {
+    /// 現在シーンの一致確認に使う guard。
+    ///
+    /// レイヤーはシーンに属し、対象を指す selector を持たない。guard が無いと、
+    /// 要求が想定したシーンと現在シーンの一致を確かめる手段が無い。
+    pub expected_scene_id: i32,
+    /// 0 始まりのレイヤー番号。
+    pub layer: u32,
+    /// レイヤー名。省略時は変更しない。
+    #[serde(default)]
+    pub name: Option<LayerNameChange>,
+    /// 表示の有効・無効。省略時は変更しない。
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// ロックの有無。省略時は変更しない。
+    #[serde(default)]
+    pub locked: Option<bool>,
+    /// 応答が返した `project_epoch`。
+    ///
+    /// レイヤーは selector を持たないため、プロジェクト境界を照合する唯一の
+    /// 材料である。
+    pub expected_project_epoch: String,
+}
+
+impl SetLayerStateParams {
+    /// 要求内容だけで決まる検証を行う。
+    ///
+    /// 3 つ全ての省略は拒否する。何も変更しない編集要求は、成功したのか
+    /// 無視されたのかをクライアントが区別できない。
+    pub fn validate(&self) -> Result<(), EditInputError> {
+        if self.name.is_none() && self.enabled.is_none() && self.locked.is_none() {
+            return Err(EditInputError::NoChangeRequested {
+                fields: &[FIELD_NAME, FIELD_ENABLED, FIELD_LOCKED],
+            });
+        }
+        validate_position(FIELD_LAYER, self.layer)?;
+        match &self.name {
+            Some(name) => name.validate(),
+            None => Ok(()),
+        }
+    }
 }
 
 /// `create_object` の params。
@@ -486,6 +581,23 @@ impl EditOutcome {
     }
 }
 
+/// レイヤーの状態変更の結果。
+///
+/// [`LayerInfo`] は読み取りの DTO をそのまま用いる。編集専用の対称型を作ると、
+/// クライアントが読み取りと編集の結果を同じ経路で扱えなくなる。
+///
+/// レイヤーの名前・表示・ロックはプロジェクトへ保存される内容であるため、
+/// この変更は revision を進める。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayerStateOutcome {
+    /// 変更後のプロジェクトの epoch。
+    pub project_epoch: String,
+    /// 変更を反映したあとの revision。
+    pub project_revision: u64,
+    /// 変更後に読み直したレイヤーの状態。
+    pub layer: LayerInfo,
+}
+
 /// カーソル・選択範囲・フォーカスの状態。
 ///
 /// `set_selection` だけが返す。プロジェクトの内容を変えないため
@@ -579,6 +691,10 @@ const FIELD_NAME: &str = "name";
 const FIELD_ITEM: &str = "item";
 /// `effect_name` フィールド名。
 const FIELD_EFFECT_NAME: &str = "effect_name";
+/// `enabled` フィールド名。
+const FIELD_ENABLED: &str = "enabled";
+/// `locked` フィールド名。
+const FIELD_LOCKED: &str = "locked";
 /// `cursor` フィールド名。
 const FIELD_CURSOR: &str = "cursor";
 /// `selected_range` フィールド名。
@@ -793,6 +909,19 @@ mod tests {
         }
     }
 
+    fn sample_set_layer_state() -> SetLayerStateParams {
+        SetLayerStateParams {
+            expected_scene_id: 0,
+            layer: 2,
+            name: Some(LayerNameChange::Set {
+                name: "背景".to_string(),
+            }),
+            enabled: Some(false),
+            locked: Some(true),
+            expected_project_epoch: EPOCH.to_string(),
+        }
+    }
+
     fn sample_set_selection() -> SetSelectionParams {
         SetSelectionParams {
             expected_scene_id: 0,
@@ -877,6 +1006,13 @@ mod tests {
             focus: Some(FocusChange::Clear {}),
             ..sample_set_selection()
         });
+        assert_roundtrip(sample_set_layer_state());
+        assert_roundtrip(SetLayerStateParams {
+            name: Some(LayerNameChange::Reset {}),
+            enabled: None,
+            locked: None,
+            ..sample_set_layer_state()
+        });
     }
 
     #[test]
@@ -928,6 +1064,14 @@ mod tests {
             }
         );
         assert_rejects_unknown!(SetSelectionParams, sample_set_selection());
+        assert_rejects_unknown!(SetLayerStateParams, sample_set_layer_state());
+        assert_rejects_unknown!(
+            LayerNameChange,
+            LayerNameChange::Set {
+                name: "背景".to_string(),
+            }
+        );
+        assert_rejects_unknown!(LayerNameChange, LayerNameChange::Reset {});
         assert_rejects_unknown!(
             Placement,
             Placement {
@@ -998,6 +1142,16 @@ mod tests {
             assert!(
                 serde_json::from_value::<SetSelectionParams>(without_field(
                     &sample_set_selection(),
+                    key
+                ))
+                .is_err(),
+                "{key} の欠落が受理されました"
+            );
+        }
+        for key in ["expected_scene_id", "layer", "expected_project_epoch"] {
+            assert!(
+                serde_json::from_value::<SetLayerStateParams>(without_field(
+                    &sample_set_layer_state(),
                     key
                 ))
                 .is_err(),
@@ -1232,6 +1386,157 @@ mod tests {
             .validate(),
             Ok(())
         );
+    }
+
+    #[test]
+    fn set_layer_state_rejects_omitting_every_change() {
+        let params = SetLayerStateParams {
+            name: None,
+            enabled: None,
+            locked: None,
+            ..sample_set_layer_state()
+        };
+        let error = params.validate().unwrap_err();
+        assert_eq!(
+            error,
+            EditInputError::NoChangeRequested {
+                fields: &["name", "enabled", "locked"],
+            }
+        );
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+
+        // 3 つの軸は個別にも組み合わせても指定できる。
+        for params in [
+            SetLayerStateParams {
+                name: Some(LayerNameChange::Reset {}),
+                enabled: None,
+                locked: None,
+                ..sample_set_layer_state()
+            },
+            SetLayerStateParams {
+                name: None,
+                enabled: Some(true),
+                locked: None,
+                ..sample_set_layer_state()
+            },
+            SetLayerStateParams {
+                name: None,
+                enabled: None,
+                locked: Some(false),
+                ..sample_set_layer_state()
+            },
+            sample_set_layer_state(),
+        ] {
+            assert_eq!(params.validate(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn the_layer_name_change_is_a_struct_variant() {
+        // internally tagged 表現では unit variant が deny_unknown_fields を
+        // 無視し、未知フィールドを黙って読み飛ばす。
+        assert_eq!(
+            serde_json::to_value(LayerNameChange::Reset {}).unwrap(),
+            json!({"type": "reset"})
+        );
+        assert_eq!(
+            serde_json::to_value(LayerNameChange::Set {
+                name: "背景".to_string(),
+            })
+            .unwrap(),
+            json!({"type": "set", "name": "背景"})
+        );
+        assert!(
+            serde_json::from_value::<LayerNameChange>(json!({"type": "reset", "name": "x"}))
+                .is_err(),
+            "標準名へ戻す指定が名前を読み飛ばしました"
+        );
+        assert!(
+            serde_json::from_value::<LayerNameChange>(json!({"type": "set"})).is_err(),
+            "名前を持たない設定が受理されました"
+        );
+
+        // params の内側でも同じ扱いになる。
+        let mut value = serde_json::to_value(sample_set_layer_state()).unwrap();
+        value["name"] = json!({"type": "reset", "name": "x"});
+        assert!(serde_json::from_value::<SetLayerStateParams>(value).is_err());
+    }
+
+    #[test]
+    fn set_layer_state_validates_the_layer_and_the_name() {
+        let over = MAX_POSITION + 1;
+        assert_eq!(
+            SetLayerStateParams {
+                layer: over,
+                ..sample_set_layer_state()
+            }
+            .validate(),
+            Err(EditInputError::PositionOutOfRange {
+                field: FIELD_LAYER,
+                value: over,
+                max: MAX_POSITION,
+            })
+        );
+
+        // 名前の規則はオブジェクト名と共有する。
+        assert_eq!(
+            SetLayerStateParams {
+                name: Some(LayerNameChange::Set {
+                    name: "名\0前".to_string(),
+                }),
+                ..sample_set_layer_state()
+            }
+            .validate(),
+            Err(EditInputError::Text {
+                field: FIELD_NAME,
+                source: TextSyntaxError::ContainsNul,
+            })
+        );
+
+        let over = "🎬".repeat(MAX_NAME_UTF16_UNITS / 2 + 1);
+        assert!(matches!(
+            SetLayerStateParams {
+                name: Some(LayerNameChange::Set { name: over }),
+                ..sample_set_layer_state()
+            }
+            .validate(),
+            Err(EditInputError::Text {
+                field: FIELD_NAME,
+                source: TextSyntaxError::TooLongUtf16 { .. },
+            })
+        ));
+    }
+
+    #[test]
+    fn the_layer_state_outcome_reuses_the_read_dto() {
+        let outcome = LayerStateOutcome {
+            project_epoch: EPOCH.to_string(),
+            project_revision: 43,
+            layer: LayerInfo {
+                index: 2,
+                name: Some("背景".to_string()),
+                enabled: false,
+                locked: true,
+                object_count: 3,
+            },
+        };
+        let value = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(value["project_epoch"], json!(EPOCH));
+        assert_eq!(value["project_revision"], json!(43));
+        assert_eq!(
+            value["layer"],
+            serde_json::to_value(&outcome.layer).unwrap()
+        );
+
+        let s = serde_json::to_string(&outcome).unwrap();
+        assert_eq!(
+            serde_json::from_str::<LayerStateOutcome>(&s).unwrap(),
+            outcome
+        );
+        // 応答型は将来の optional field を受け入れる。
+        let restored: LayerStateOutcome =
+            serde_json::from_value(with_unknown_field(&outcome)).unwrap();
+        assert_eq!(restored, outcome);
     }
 
     #[test]
