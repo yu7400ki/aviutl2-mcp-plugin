@@ -511,7 +511,13 @@ mod tests {
                 Completion::Immediate => self.delivery.deliver(&slot, frame),
                 Completion::Twice => {
                     self.delivery.deliver(&slot, frame);
-                    self.delivery.deliver(&slot, frame);
+                    // 2 度目は要求と違うフレームを返す。上書きされれば、成功では
+                    // なく規則の破れが観測される。
+                    Delivery {
+                        frame: Some(frame.wrapping_add(1)),
+                        ..self.delivery.clone()
+                    }
+                    .deliver(&slot, frame);
                 }
                 Completion::Never => {}
             }
