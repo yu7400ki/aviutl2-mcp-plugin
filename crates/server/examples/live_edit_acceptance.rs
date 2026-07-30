@@ -1056,6 +1056,20 @@ impl LayerStateChange {
             ..Self::default()
         }
     }
+
+    /// 名前だけを変える。`None` は標準名へ戻す。
+    fn name(name: Option<&str>) -> Self {
+        let change = match name {
+            Some(name) => LayerNameChangeInput::Set {
+                name: name.to_string(),
+            },
+            None => LayerNameChangeInput::Reset {},
+        };
+        Self {
+            name: Some(change),
+            ..Self::default()
+        }
+    }
 }
 
 /// `aviutl2_set_selection` へ渡す変更内容。
@@ -1660,6 +1674,104 @@ fn set_layer_locked(
             epoch,
         ),
         "レイヤーのロック状態を設定できません",
+    )?;
+    Ok(())
+}
+
+/// 取り消しの単位を尋ねる直前に置く、レイヤー名の一時的な変更。
+const UNDO_PROBE_LAYER_NAME: &str = "undo-test";
+
+/// 列挙から 1 つのレイヤーの状態を取り出す。
+fn layer_state(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    layer: usize,
+) -> Result<LayerInfo, String> {
+    require(
+        harness.layers(&instance.id, context.scene_id),
+        "レイヤーを列挙できません",
+    )?
+    .into_iter()
+    .find(|listed| listed.index == layer)
+    .ok_or_else(|| format!("レイヤー {layer} が列挙に現れません"))
+}
+
+/// 空きレイヤーへ一時的な名前を付け、値が実際に変わったことを確かめる。
+///
+/// **値の変わらない要求は取り消しの単位を尋ねる材料にならない。** 既に同じ値
+/// である軸へ同じ値を要求すると、ホストが取り消し履歴を作らない場合に、実行者
+/// が押した取り消しは 1 つ前の編集に当たる。答えはレイヤー系 setter の取り消し
+/// 単位ではなく、その前の編集の取り消しを表すことになる。
+///
+/// 名前を選ぶのは、変化が読み直しでも UI でも確かめられるためである。読み直して
+/// 変わっていなければ、尋ねる前に打ち切る。
+fn name_layer_for_undo_probe(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    layer: usize,
+) -> Result<(), String> {
+    let before = layer_state(harness, instance, context, layer)?;
+    if before.name.as_deref() == Some(UNDO_PROBE_LAYER_NAME) {
+        return Err(format!(
+            "レイヤー {layer} は既に {UNDO_PROBE_LAYER_NAME} という名前であり、変更が空振りになります"
+        ));
+    }
+
+    let epoch = precondition(harness, instance)?;
+    let renamed = require(
+        harness.set_layer_state(
+            &instance.id,
+            context.scene_id,
+            layer,
+            LayerStateChange::name(Some(UNDO_PROBE_LAYER_NAME)),
+            epoch,
+        ),
+        "レイヤー名を変更できません",
+    )?;
+    if renamed.layer.name.as_deref() != Some(UNDO_PROBE_LAYER_NAME) {
+        return Err(format!(
+            "名前の変更を要求したのに応答が {:?} を返しました",
+            renamed.layer.name
+        ));
+    }
+
+    let after = layer_state(harness, instance, context, layer)?;
+    if after.name.as_deref() != Some(UNDO_PROBE_LAYER_NAME) {
+        return Err(format!(
+            "読み直したレイヤー {layer} の名前が {:?} であり、変更が入っていません",
+            after.name
+        ));
+    }
+    Ok(())
+}
+
+/// 一時的に付けた名前を、控えた値へ戻す。
+///
+/// 実行者が取り消しを行えば名前は既に戻っている。押さなかった場合や、別の編集
+/// が取り消された場合に備え、**現在の名前を読んでから必要なときだけ要求する。**
+fn restore_layer_name(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    layer: usize,
+    original: Option<&str>,
+) -> Result<(), String> {
+    let current = layer_state(harness, instance, context, layer)?;
+    if current.name.as_deref() == original {
+        return Ok(());
+    }
+    let epoch = precondition(harness, instance)?;
+    require(
+        harness.set_layer_state(
+            &instance.id,
+            context.scene_id,
+            layer,
+            LayerStateChange::name(original),
+            epoch,
+        ),
+        "レイヤー名を元へ戻せません",
     )?;
     Ok(())
 }
@@ -2839,11 +2951,25 @@ fn check_layer_lock_release(
         .find(|listed| listed.index == layer)
         .map(|listed| listed.locked)
         .ok_or_else(|| format!("レイヤー {layer} が列挙に現れません"))?;
+    // 取り消しの単位は空きレイヤーの名前で尋ねる。控えた名前は後始末で戻す。
+    let original_name = layers
+        .iter()
+        .find(|listed| listed.index == away.layer)
+        .map(|listed| listed.name.clone())
+        .ok_or_else(|| format!("レイヤー {} が列挙に現れません", away.layer))?;
 
     let probed = probe_layer_lock_release(harness, report, instance, context, away, original);
-    // 後始末: 対象を元の位置へ戻し、ロックも元の状態へ戻す。実行者へ取り消し
-    // 操作を求めた後であるため、対象が元の位置に居るとは限らない。
-    let cleaned = cleanup_layer_lock_release(harness, instance, context, away, original);
+    // 後始末: 対象を元の位置へ戻し、ロックと空きレイヤーの名前も元の状態へ戻す。
+    // 実行者へ取り消し操作を求めた後であるため、対象が元の位置に居るとは限らず、
+    // 名前が戻っているとも限らない。
+    let cleaned = cleanup_layer_lock_release(
+        harness,
+        instance,
+        context,
+        away,
+        original,
+        original_name.as_deref(),
+    );
     match (probed, cleaned) {
         (Ok(notes), Ok(())) => Ok(notes),
         (Ok(_), Err(reason)) => Err(format!("後始末に失敗しました: {reason}")),
@@ -2909,17 +3035,23 @@ fn probe_layer_lock_release(
         .object
         .ok_or_else(|| "移動の応答が対象を返しません".to_string())?;
 
-    // 取り消しの単位を尋ねる前に、対象の位置とロック状態を戻しておく。直前の
-    // 編集をレイヤー状態の変更にしておかないと、実行者が取り消すのは別の編集に
-    // なり、問いへの答えが取り消し単位を表さない。
+    // 取り消しの単位を尋ねる前に、対象の位置とロック状態を戻しておく。
     move_home(harness, instance, &moved_to.selector, context.target)?;
     set_layer_locked(harness, instance, context, layer, original)?;
 
-    let undo = ask(
-        "直前のレイヤー状態の変更に対して AviUtl2 で「元に戻す」を 1 回実行すると、何が戻りますか。\n\
+    // 直前の編集をレイヤー状態の変更にしておかないと、実行者が取り消すのは別の
+    // 編集になり、問いへの答えが取り消し単位を表さない。上の 2 つは既に同じ値
+    // であれば空振りになり得るため、値が確実に変わる変更をここで 1 つ置く。
+    name_layer_for_undo_probe(harness, instance, context, away.layer)?;
+
+    let undo = ask(&format!(
+        "直前に、空きレイヤー {} の名前を「{UNDO_PROBE_LAYER_NAME}」へ変更しました。\n\
+         AviUtl2 で「元に戻す」を 1 回実行すると、何が戻りますか。\n\
+         レイヤー {} の名前が標準名へ戻るか、その前の編集（対象オブジェクトの移動）が戻るかを見てください。\n\
          レイヤー系 setter が取り消し単位を作るかの記録に使います\n\
          （レイヤーの状態が戻る / その前の編集が戻る / 何も戻らない / 未確認 で回答）。",
-    );
+        away.layer, away.layer
+    ));
     report.observe(
         "layer_setter_undo_unit",
         "レイヤー系 setter は取り消し単位を作るか",
@@ -2934,21 +3066,24 @@ fn probe_layer_lock_release(
     )])
 }
 
-/// 対象の位置とレイヤーのロック状態を、確認を始める前の状態へ戻す。
+/// 対象の位置と、変更した 2 つのレイヤーの状態を、確認を始める前へ戻す。
 ///
 /// 取り消し操作は対象を移動先へ戻し得る。ロックが掛かったままだと戻す移動が
 /// 通らないため、先に解除してから位置を直し、最後にロック状態を合わせる。
+/// 取り消しの単位を尋ねるために付けた名前も、実行者が取り消していなければ戻す。
 fn cleanup_layer_lock_release(
     harness: &Harness,
     instance: &Instance,
     context: &Context,
     away: Placement,
     original: bool,
+    original_name: Option<&str>,
 ) -> Result<(), String> {
     let layer = context.target.layer;
     set_layer_locked(harness, instance, context, layer, false)?;
     restore_target(harness, instance, context, away)?;
-    set_layer_locked(harness, instance, context, layer, original)
+    set_layer_locked(harness, instance, context, layer, original)?;
+    restore_layer_name(harness, instance, context, away.layer, original_name)
 }
 
 /// ロックされたレイヤーに対する拒否であることを確かめる。
