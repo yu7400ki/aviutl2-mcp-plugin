@@ -15,7 +15,7 @@ use aviutl2_mcp_core::{
     AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFingerprintInput, EffectInfo,
     EffectType, Extent, FiniteF64, FrameRange, LayerInfo, ObjectDetail, ObjectFilter,
     ObjectFingerprintInput, ObjectSelector, ObjectSummary, PageError, PageRequest, SceneInfo,
-    effect_fingerprint, take_page,
+    take_page,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -443,13 +443,10 @@ pub(crate) fn effect_fingerprint_inputs(
 
 /// オブジェクトの概要を組み立てる。
 ///
-/// 配下 effect の fingerprint 列もオブジェクトの材料であるため、ここで
-/// 併せて算出する。入力になる [`HostObject`] は詳細の読み取りだけが返すため、
-/// 一覧も詳細も同じ材料から同じ fingerprint を得る。
+/// 入力になる [`HostObject`] は同一性の材料を読む経路だけが返すため、一覧も
+/// 詳細も同じ材料から同じ fingerprint を得る。位置と名前だけの軽量走査の結果は
+/// この関数へ渡せない。
 pub(crate) fn object_summary(epoch: &str, scene_id: i32, object: &HostObject) -> ObjectSummary {
-    let effect_fingerprints: Vec<_> = effect_fingerprint_inputs(&object.effects)
-        .map(effect_fingerprint)
-        .collect();
     ObjectSummary::new(
         epoch,
         ObjectFingerprintInput {
@@ -459,7 +456,6 @@ pub(crate) fn object_summary(epoch: &str, scene_id: i32, object: &HostObject) ->
             frame_end: object.placement.frame_end,
             name: object.placement.name.as_deref(),
             alias: &object.alias,
-            effect_fingerprints: &effect_fingerprints,
         },
     )
 }
@@ -512,7 +508,7 @@ fn selected_range(info: &HostEditInfo) -> Option<FrameRange> {
 mod tests {
     use super::*;
     use crate::read::host::HostLayer;
-    use crate::test_support::with_silent_panic_hook;
+    use crate::test_support::{alias_with_effects, with_silent_panic_hook};
     use aviutl2_mcp_core::{
         AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
         ItemValue, MAX_PAGE_LIMIT, SectionRange,
@@ -829,6 +825,10 @@ mod tests {
     }
 
     /// 配下 effect を持つオブジェクト。
+    ///
+    /// alias は配下 effect の設定値を含む。ホストが返す alias と同じ性質を
+    /// 持たせなければ、effect を変えても対象の同一性が変わらないフェイクに
+    /// なってしまう。
     fn object_with_effects(
         layer: usize,
         frame_start: usize,
@@ -836,9 +836,11 @@ mod tests {
         name: Option<&str>,
         effects: Vec<HostEffect>,
     ) -> HostObject {
+        let base = object(layer, frame_start, frame_end, name);
         HostObject {
+            alias: alias_with_effects(&base.alias, &effects),
             effects,
-            ..object(layer, frame_start, frame_end, name)
+            ..base
         }
     }
 
@@ -1575,7 +1577,13 @@ mod tests {
 
         assert_eq!(detail.summary.layer, 1);
         assert_eq!(detail.summary.frame_start, 100);
-        assert_eq!(detail.alias, "[1:100]");
+        // alias は配下 effect の設定値を含むため、位置だけの表記では終わらない。
+        assert!(detail.alias.starts_with("[1:100]"), "{}", detail.alias);
+        assert!(
+            detail.alias.contains("動画ファイル"),
+            "alias に配下 effect が現れません: {}",
+            detail.alias
+        );
         assert_eq!(detail.sections.len(), 1);
         assert_eq!(detail.effects.len(), 1);
         assert_eq!(detail.effects[0].name, "動画ファイル");

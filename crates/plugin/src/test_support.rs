@@ -1,6 +1,30 @@
 //! テストが共有する補助。
 
+use crate::read::host::HostEffect;
 use std::sync::{Mutex, MutexGuard};
+
+/// 配下 effect の設定値を含む alias を組み立てる。
+///
+/// ホストが返す alias は配下 effect の設定値を本文へ含み、effect を変えれば
+/// alias も追随する。オブジェクトの fingerprint は alias だけを材料にするため、
+/// フェイクの alias がこの性質を持たなければ「effect を変えると対象の同一性が
+/// 変わる」ことを検証できない。
+///
+/// effect の各値は表示のためだけに文字列へ写す。求める性質は「値が変われば
+/// alias も変わる」ことだけであり、書式そのものに意味は無い。
+pub(crate) fn alias_with_effects(base: &str, effects: &[HostEffect]) -> String {
+    let mut alias = base.to_string();
+    for (position, effect) in effects.iter().enumerate() {
+        alias.push_str(&format!(
+            "\n[Object.{position}] effect.name={}",
+            effect.name
+        ));
+        for item in &effect.items {
+            alias.push_str(&format!(" / {}={:?}", item.name, item.value));
+        }
+    }
+    alias
+}
 
 /// panic フックの差し替えを直列化する。
 ///

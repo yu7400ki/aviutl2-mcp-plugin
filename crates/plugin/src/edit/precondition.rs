@@ -326,7 +326,6 @@ mod tests {
                 frame_end: 200,
                 name: None,
                 alias: "alias",
-                effect_fingerprints: &[],
             },
         )
         .selector

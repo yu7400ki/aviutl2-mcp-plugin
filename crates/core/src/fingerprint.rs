@@ -316,15 +316,10 @@ pub struct ObjectFingerprintInput<'a> {
     /// オブジェクト名。標準名のままなら None。
     pub name: Option<&'a str>,
     /// 正規化前の alias。
-    pub alias: &'a str,
-    /// 配下 effect の fingerprint を、付与された順に並べた列。
     ///
-    /// alias に配下 effect の設定値と有効・ロック状態が現れるかは確認できて
-    /// いない。現れない場合、effect だけを変えてもオブジェクトの fingerprint が
-    /// 変わらず、変更前に得たセレクターが一致し続ける。これは変更を通してしまう
-    /// 側の破れであるため、alias とは独立した材料として明示的に混ぜる。alias に
-    /// 現れることを確認できたら、この材料は取り除いてよい。
-    pub effect_fingerprints: &'a [Fingerprint],
+    /// alias は配下 effect の設定値を含む。effect だけを変えた場合も alias が
+    /// 追随するため、effect を独立した材料として混ぜる必要はない。
+    pub alias: &'a str,
 }
 
 /// [`effect_fingerprint`] の入力。
@@ -367,7 +362,6 @@ pub struct EffectFingerprintInput<'a> {
 ///     frame_end: 240,
 ///     name: Some("立ち絵"),
 ///     alias: "alias",
-///     effect_fingerprints: &[],
 /// };
 /// let fingerprint = object_fingerprint(input);
 /// assert!(fingerprint.as_str().starts_with("sha256:"));
@@ -382,11 +376,6 @@ pub fn object_fingerprint(input: ObjectFingerprintInput<'_>) -> Fingerprint {
     bytes.count("frame_end", input.frame_end);
     bytes.optional_text("name", input.name);
     bytes.text("alias", input.alias);
-    // 件数を先に書くため、0 件と空の値 1 件が同じバイト列にならない。
-    bytes.count("effect_fingerprint_count", input.effect_fingerprints.len());
-    for fingerprint in input.effect_fingerprints {
-        bytes.text("effect_fingerprint", fingerprint.as_str());
-    }
     bytes.finish()
 }
 
@@ -430,16 +419,7 @@ mod tests {
             frame_end: 240,
             name,
             alias,
-            effect_fingerprints: &[],
         })
-    }
-
-    /// 任意の文字列を持つ fingerprint を組み立てる。
-    ///
-    /// 逆直列化は正準形しか受け付けないため、材料の書き方を検証するための値は
-    /// モジュール内で直接組み立てる。
-    fn raw_fingerprint(value: &str) -> Fingerprint {
-        Fingerprint(value.to_string())
     }
 
     fn sample_items() -> Vec<EffectItem> {
@@ -546,7 +526,6 @@ mod tests {
 
     #[test]
     fn object_fingerprint_depends_on_every_input() {
-        let effects = [raw_fingerprint("sha256:00")];
         let base = ObjectFingerprintInput {
             scene_id: 0,
             layer: 2,
@@ -554,9 +533,7 @@ mod tests {
             frame_end: 240,
             name: Some("立ち絵"),
             alias: "alias",
-            effect_fingerprints: &effects,
         };
-        let other_effects = [raw_fingerprint("sha256:01")];
         for changed in [
             ObjectFingerprintInput {
                 scene_id: 1,
@@ -579,59 +556,9 @@ mod tests {
                 alias: "alias2",
                 ..base
             },
-            ObjectFingerprintInput {
-                effect_fingerprints: &other_effects,
-                ..base
-            },
-            ObjectFingerprintInput {
-                effect_fingerprints: &[],
-                ..base
-            },
         ] {
             assert_ne!(object_fingerprint(base), object_fingerprint(changed));
         }
-    }
-
-    #[test]
-    fn object_fingerprint_distinguishes_no_effect_from_one_empty_effect() {
-        // 件数を前置しなければ、0 件と「空の値 1 件」が同じバイト列になる。
-        let empty = [raw_fingerprint("")];
-        let with_empty = ObjectFingerprintInput {
-            scene_id: 0,
-            layer: 2,
-            frame_start: 120,
-            frame_end: 240,
-            name: Some("立ち絵"),
-            alias: "alias",
-            effect_fingerprints: &empty,
-        };
-        assert_ne!(
-            object_fingerprint(ObjectFingerprintInput {
-                effect_fingerprints: &[],
-                ..with_empty
-            }),
-            object_fingerprint(with_empty)
-        );
-    }
-
-    #[test]
-    fn object_fingerprint_depends_on_the_order_of_effects() {
-        // 列の並び替えは effect ごとの位置を変えるが、オブジェクト側でも
-        // 並びが材料になっていることを確かめる。
-        let effects = [raw_fingerprint("sha256:00"), raw_fingerprint("sha256:01")];
-        let reversed = [effects[1].clone(), effects[0].clone()];
-        let input = |effect_fingerprints: &[Fingerprint]| {
-            object_fingerprint(ObjectFingerprintInput {
-                scene_id: 0,
-                layer: 2,
-                frame_start: 120,
-                frame_end: 240,
-                name: Some("立ち絵"),
-                alias: "alias",
-                effect_fingerprints,
-            })
-        };
-        assert_ne!(input(&effects), input(&reversed));
     }
 
     #[test]

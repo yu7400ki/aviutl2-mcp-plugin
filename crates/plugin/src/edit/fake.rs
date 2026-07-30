@@ -17,6 +17,7 @@ use crate::read::host::{
     EditState, HostEditInfo, HostEffect, HostLayer, HostObject, HostObjectDetail,
     HostObjectPlacement, ReadHost, SceneReader,
 };
+use crate::test_support::alias_with_effects;
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, Cursor, EffectFlags, EffectItem, EffectItemType,
     EffectType, FiniteF64, FrameRange, ItemValue, SectionRange,
@@ -96,10 +97,14 @@ pub(crate) struct FakeObject {
 }
 
 impl FakeObject {
+    /// 読み取りが返す形へ写す。
+    ///
+    /// alias は配下 effect の設定値を含む。effect を変える編集の後に読み直せば
+    /// alias も変わり、対象の同一性が追随する。
     fn host(&self) -> HostObject {
         HostObject {
             placement: self.placement.clone(),
-            alias: self.alias.clone(),
+            alias: alias_with_effects(&self.alias, &self.effects),
             effects: self.effects.clone(),
         }
     }

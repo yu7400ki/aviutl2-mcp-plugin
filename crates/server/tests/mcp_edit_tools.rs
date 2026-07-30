@@ -154,7 +154,6 @@ fn sample_summary() -> ObjectSummary {
             frame_end: 240,
             name: Some("立ち絵"),
             alias: SECRET_ALIAS,
-            effect_fingerprints: &[],
         },
     )
 }
