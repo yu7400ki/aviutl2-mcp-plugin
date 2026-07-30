@@ -7,6 +7,7 @@
 //! 1 要求は 1 回の編集区間で完結し、SDK 上では 1 つの取り消し単位になる。
 
 pub mod adapter;
+pub(crate) mod batch;
 pub mod error;
 #[cfg(test)]
 pub(crate) mod fake;
@@ -17,9 +18,10 @@ pub mod sdk;
 
 use crate::project::ProjectState;
 use aviutl2_mcp_core::{
-    AddEffectParams, CreateObjectParams, DeleteEffectParams, DeleteObjectParams, EditOutcome,
-    LayerStateOutcome, MoveObjectParams, SelectionState, SetEffectEnabledParams,
-    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+    AddEffectParams, ApplyBatchParams, BatchOutcome, CreateObjectParams, DeleteEffectParams,
+    DeleteObjectParams, EditOutcome, LayerStateOutcome, MoveObjectParams, SelectionState,
+    SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
+    SetSelectionParams,
 };
 use std::sync::Arc;
 
@@ -71,6 +73,16 @@ pub trait EditAdapter: Send + Sync {
     ///
     /// プロジェクトの内容を変えないため、revision を進めない。
     fn set_selection(&self, params: &SetSelectionParams) -> Result<SelectionState, EditError>;
+
+    /// 複数の変更を 1 つの取り消し単位としてまとめて適用する。
+    ///
+    /// 変更を 1 つも発行する前に、全 sub-operation の対象解決・前提条件の照合・
+    /// 逆操作の構築を終える。途中で失敗したら、既に適用した分を同一区間内で
+    /// 逆順に巻き戻す。巻き戻しに失敗した場合、その事実を隠さず要求元へ伝える。
+    ///
+    /// **巻き戻しが保証するのは「戻せなかったことを黙認しない」ことだけである。**
+    /// 戻したあとの状態が元と一字一句同じであることは保証しない。
+    fn apply_batch(&self, params: &ApplyBatchParams) -> Result<BatchOutcome, EditError>;
 }
 
 /// SDK を実際に呼び出す edit adapter を作る。

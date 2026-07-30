@@ -1870,6 +1870,13 @@ mod tests {
             Err(Self::unavailable())
         }
 
+        fn apply_batch(
+            &self,
+            _: &aviutl2_mcp_core::ApplyBatchParams,
+        ) -> Result<aviutl2_mcp_core::BatchOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
         fn set_selection(
             &self,
             _: &aviutl2_mcp_core::SetSelectionParams,

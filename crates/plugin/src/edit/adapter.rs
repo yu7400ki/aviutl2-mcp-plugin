@@ -13,6 +13,7 @@
 //! 所有型へのコピーに限る。
 
 use crate::edit::EditAdapter;
+use crate::edit::batch;
 use crate::edit::error::{EditError, OccupiedRange, UnsupportedReason};
 use crate::edit::host::{EditHost, HostSelection, SceneEditor};
 use crate::edit::precondition::{
@@ -27,11 +28,12 @@ use crate::read::ReadError;
 use crate::read::adapter::object_summary;
 use crate::read::host::{EditState, HostEffect, HostLayer, HostObjectPlacement};
 use aviutl2_mcp_core::{
-    AddEffectParams, CreateObjectParams, Cursor, DeleteEffectParams, DeleteObjectParams,
-    EditOutcome, EffectInfo, EffectType, FocusChange, FrameRange, ItemWriteError, LayerInfo,
-    LayerStateOutcome, MoveObjectParams, ObjectSource, ObjectSummary, RangeChange, SelectionField,
-    SelectionState, SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams,
-    SetObjectNameParams, SetSelectionParams, prepare_item_write,
+    AddEffectParams, ApplyBatchParams, BatchOperation, BatchOutcome, CreateObjectParams, Cursor,
+    DeleteEffectParams, DeleteObjectParams, EditOutcome, EffectInfo, EffectType, FocusChange,
+    FrameRange, ItemWriteError, LayerInfo, LayerStateOutcome, MoveObjectParams, ObjectSelector,
+    ObjectSource, ObjectSummary, RangeChange, SelectionField, SelectionState,
+    SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
+    SetSelectionParams, prepare_item_write,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -193,7 +195,7 @@ fn guard<T>(f: impl FnOnce() -> Result<T, EditError>) -> Result<T, EditError> {
 ///
 /// 値の範囲は要求の復号時に検証済みであり、対応するプラットフォームでは必ず
 /// 収まる。収まらない場合も上限へ丸めれば SDK が範囲外として失敗させる。
-fn index(value: u32) -> usize {
+pub(crate) fn index(value: u32) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
@@ -209,7 +211,10 @@ fn index(value: u32) -> usize {
 ///
 /// 読むのはロック状態だけである。ここで使うのは 1 ビットであり、名前と表示の
 /// 読み取り失敗が移動や削除の可否を左右する理由が無い。
-fn ensure_layers_unlocked(editor: &dyn SceneEditor, layers: [usize; 2]) -> Result<(), EditError> {
+pub(crate) fn ensure_layers_unlocked(
+    editor: &dyn SceneEditor,
+    layers: [usize; 2],
+) -> Result<(), EditError> {
     let [first, second] = layers;
     ensure_layer_unlocked(editor, first)?;
     if second != first {
@@ -239,7 +244,7 @@ fn ensure_layer_unlocked(editor: &dyn SceneEditor, layer: usize) -> Result<(), E
 /// 塞いでいた対象の範囲は失敗へ載せる。要求元は「どこまで塞がっているか」を
 /// 知らなければ次の宛先を選べず、走査済みの値を捨てると読み直しを強いることに
 /// なる。
-fn ensure_destination_free(
+pub(crate) fn ensure_destination_free(
     occupants: &[HostObjectPlacement],
     layer: usize,
     frame: usize,
@@ -282,7 +287,7 @@ fn reread(
 }
 
 /// 変更後の対象を、配下 effect の列とともに読み直す。
-fn reread_with_effects(
+pub(crate) fn reread_with_effects(
     editor: &dyn SceneEditor,
     boundary: &Boundary,
     layer: usize,
@@ -402,7 +407,11 @@ fn created_placements(
 /// ことになるからである。取り違えの向きは、要求元が名前を疑う側に留まる。
 ///
 /// 追加の呼び出しはこの失敗経路でだけ 1 回行う。成功する要求の費用は変わらない。
-fn unlisted_item(editor: &dyn SceneEditor, effect: &ResolvedEffect<'_>, item: &str) -> EditError {
+pub(crate) fn unlisted_item(
+    editor: &dyn SceneEditor,
+    effect: &ResolvedEffect<'_>,
+    item: &str,
+) -> EditError {
     match editor.effect_item_value(effect, item) {
         Ok(_) => EditError::UnsupportedTarget {
             reason: UnsupportedReason::ItemTypeNotWritable,
@@ -959,10 +968,41 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
         let observed = guard(|| self.host.observed_selection())?;
         Ok(selection_state(epoch, revision, observed, outcome))
     }
+
+    fn apply_batch(&self, params: &ApplyBatchParams) -> Result<BatchOutcome, EditError> {
+        self.ensure_editable()?;
+        let project = self.project.as_ref();
+
+        let applied = self.edit_section(move |editor| {
+            // 全 sub-operation のセレクターをまとめて渡す。判定は段ごとに全対象へ
+            // 適用されるため、ある sub-operation だけが照合を免れることがない。
+            let selectors: Vec<&ObjectSelector> = params
+                .operations
+                .iter()
+                .map(BatchOperation::object_selector)
+                .collect();
+            let boundary = verify_boundary(
+                project,
+                editor.entry_edit_info(),
+                // 全 sub-operation がセレクターを運ぶため、前提の epoch を
+                // 別に受け取らない。同じ意味の値を 2 か所へ置くと、不整合な組を
+                // 作れる余地だけが増える。
+                ExpectedEpoch::Absent,
+                EditKind::Content,
+                &[],
+                &selectors,
+            )
+            .map_err(|error| {
+                batch::locate_boundary_failure(&params.operations, &project.epoch(), error)
+            })?;
+            batch::apply_batch(editor, project, &boundary, &params.operations)
+        });
+        applied.map_err(batch::mark_lost_section)
+    }
 }
 
 /// 変更 API の呼び出し結果を、発行後の失敗として印を付ける。
-fn attribute<T>(
+pub(crate) fn attribute<T>(
     permit: &MutationPermit<'_>,
     boundary: &Boundary,
     result: Result<T, impl Into<EditError>>,

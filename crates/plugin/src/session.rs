@@ -804,8 +804,9 @@ enum EditRequest {
 /// 決まり、ライフサイクル状態にも期限にも編集口の応答にも依存しない。検証の
 /// 実体は core と共有し、server と plugin が同じ判定を行う。
 ///
-/// **一括適用は編集 operation として分類されるが、編集口に対応するメソッドが
-/// 無い。** 復号の段で未対応として返し、実行できないことをこの層で明示する。
+/// **一括適用は編集 operation として分類されるが、この層がまだ要求を編集口へ
+/// 渡していない。** 復号の段で未対応として返し、受け付けられないことをこの層で
+/// 明示する。
 fn decode_edit_request(
     operation: EditOperation,
     params: &Value,
@@ -2360,6 +2361,18 @@ mod edit_tests {
             })
         }
 
+        fn apply_batch(
+            &self,
+            _: &aviutl2_mcp_core::ApplyBatchParams,
+        ) -> Result<aviutl2_mcp_core::BatchOutcome, EditError> {
+            self.calls.lock().unwrap().push("apply_batch");
+            Ok(aviutl2_mcp_core::BatchOutcome {
+                project_epoch: EPOCH.to_string(),
+                project_revision: 1,
+                results: Vec::new(),
+            })
+        }
+
         fn set_selection(&self, _: &SetSelectionParams) -> Result<SelectionState, EditError> {
             self.calls.lock().unwrap().push("set_selection");
             Ok(SelectionState::observed(
@@ -2426,8 +2439,8 @@ mod edit_tests {
                 "expected_project_epoch": EPOCH,
             }),
             EditOperation::SetSelection => selection_params(),
-            // 一括適用は編集口にメソッドを持たず、復号の段で未対応として
-            // 返る。実行できるようになったときに現在の形をここへ書く。
+            // 一括適用は復号の段で未対応として返る。要求を渡せるようになった
+            // ときに現在の形をここへ書く。
             EditOperation::ApplyBatch => return None,
         })
     }
