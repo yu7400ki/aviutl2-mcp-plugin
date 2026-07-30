@@ -2741,6 +2741,9 @@ fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
         },
         // 選択状態はプロジェクトの内容ではない。revision を進めない。
         EditOperation::SetSelection => return None,
+        // 一括適用に対応する編集口のメソッドはまだ無い。実装を足すときに
+        // ここへ手続きを書き、下の表から自動的に検査される。
+        EditOperation::ApplyBatch => return None,
     })
 }
 
@@ -2758,17 +2761,23 @@ fn content_edits() -> Vec<(&'static str, ContentEdit)> {
 }
 
 #[test]
-fn only_the_selection_change_is_left_out_of_the_content_edits() {
+fn the_content_edit_table_leaves_out_only_the_declared_operations() {
     // 網羅 match は operation の追加を止めるが、既存の枝を除外へ書き換えても
-    // 止まらない。内容を変えないのが選択状態の変更だけであることを併せて固定
-    // することで、追加も除外も見逃さない。
+    // 止まらない。表から外れているものを併せて固定することで、追加も除外も
+    // 見逃さない。
     let excluded: Vec<&str> = EditOperation::ALL
         .into_iter()
         .filter(|operation| content_edit(*operation).is_none())
         .map(EditOperation::as_str)
         .collect();
 
-    assert_eq!(excluded, vec![EditOperation::SetSelection.as_str()]);
+    assert_eq!(
+        excluded,
+        vec![
+            EditOperation::SetSelection.as_str(),
+            EditOperation::ApplyBatch.as_str(),
+        ]
+    );
 }
 
 #[test]
@@ -2836,7 +2845,7 @@ enum LockedLayer {
 /// 拒否するのは、レイヤーのロックが UI で止めるもの——オブジェクトの削除と
 /// 時間軸上の移動——に限る。設定値の変更も effect の増減も UI の設定パネルから
 /// 行えるため、MCP からだけ拒む理由が無い。選択状態の変更は対象を書き換えない
-/// ため表に載らない。
+/// ため表に載らない。実行できない operation も同じく載らない。
 fn locked_layer(operation: EditOperation) -> Option<LockedLayer> {
     Some(match operation {
         EditOperation::CreateObject | EditOperation::MoveObject | EditOperation::DeleteObject => {
@@ -2850,6 +2859,9 @@ fn locked_layer(operation: EditOperation) -> Option<LockedLayer> {
         // ロックを外す手段そのものをロックで止めると、行き止まりが解けなくなる。
         | EditOperation::SetLayerState => LockedLayer::Allowed,
         EditOperation::SetSelection => return None,
+        // 一括適用に対応する編集口のメソッドはまだ無い。実装を足すときに
+        // 可否をここへ書く。
+        EditOperation::ApplyBatch => return None,
     })
 }
 
@@ -2890,16 +2902,22 @@ fn the_layer_lock_stops_exactly_the_declared_operations() {
 }
 
 #[test]
-fn only_the_selection_change_is_left_out_of_the_layer_lock_table() {
+fn the_layer_lock_table_leaves_out_only_the_declared_operations() {
     // 網羅 match は operation の追加を止めるが、既存の枝を除外へ書き換えても
-    // 止まらない。表に載らないのが選択状態の変更だけであることを併せて固定する。
+    // 止まらない。表に載らないものを併せて固定する。
     let excluded: Vec<&str> = EditOperation::ALL
         .into_iter()
         .filter(|operation| locked_layer(*operation).is_none())
         .map(EditOperation::as_str)
         .collect();
 
-    assert_eq!(excluded, vec![EditOperation::SetSelection.as_str()]);
+    assert_eq!(
+        excluded,
+        vec![
+            EditOperation::SetSelection.as_str(),
+            EditOperation::ApplyBatch.as_str(),
+        ]
+    );
 }
 
 #[test]

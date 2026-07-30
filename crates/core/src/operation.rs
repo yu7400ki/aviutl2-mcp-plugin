@@ -1,7 +1,9 @@
-//! read operation の名前と params / result、および編集 operation の名前。
+//! read operation の名前と params / result、および編集・render operation の名前。
 //!
-//! 編集 operation の params / result 型は本モジュールでは定義しない。
+//! 編集 operation と render operation の params / result 型は本モジュールでは
+//! 定義しない。
 
+use crate::budget::RequestBudgetKind;
 use crate::edit_info::SceneInfo;
 use crate::effect::{AvailableEffect, EffectType};
 use crate::object::{LayerInfo, ObjectSummary};
@@ -57,6 +59,69 @@ pub const OPERATION_SET_LAYER_STATE: &str = "set_layer_state";
 /// カーソル・選択範囲・フォーカスを変更する operation 名。
 pub const OPERATION_SET_SELECTION: &str = "set_selection";
 
+/// 複数の変更を 1 つの取り消し単位で適用する operation 名。
+pub const OPERATION_APPLY_BATCH: &str = "apply_batch";
+
+/// 現在シーンの 1 フレームを描画する operation 名。
+pub const OPERATION_RENDER_FRAME: &str = "render_frame";
+
+/// read operation の種別。
+///
+/// 役割は [`EditOperation`] と同じで、read operation の名前一覧をこの型へ
+/// 一本化する。名前を定数の列としてだけ持つと、束ねる型が無いために
+/// 「全 read operation を漏れなく数える」テストが書けず、追加した名前が
+/// 一部の判定処理から抜け落ちても気付けない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOperation {
+    /// [`OPERATION_GET_EDIT_INFO`]。
+    GetEditInfo,
+    /// [`OPERATION_GET_CURRENT_SCENE`]。
+    GetCurrentScene,
+    /// [`OPERATION_LIST_LAYERS`]。
+    ListLayers,
+    /// [`OPERATION_LIST_OBJECTS`]。
+    ListObjects,
+    /// [`OPERATION_GET_OBJECT`]。
+    GetObject,
+    /// [`OPERATION_LIST_AVAILABLE_EFFECTS`]。
+    ListAvailableEffects,
+}
+
+impl ReadOperation {
+    /// 全 variant。
+    ///
+    /// 要素数と内容は `read_operation_all_is_exhaustive` テストで固定する。
+    pub const ALL: [ReadOperation; 6] = [
+        ReadOperation::GetEditInfo,
+        ReadOperation::GetCurrentScene,
+        ReadOperation::ListLayers,
+        ReadOperation::ListObjects,
+        ReadOperation::GetObject,
+        ReadOperation::ListAvailableEffects,
+    ];
+
+    /// operation 名の文字列表現を返す。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ReadOperation::GetEditInfo => OPERATION_GET_EDIT_INFO,
+            ReadOperation::GetCurrentScene => OPERATION_GET_CURRENT_SCENE,
+            ReadOperation::ListLayers => OPERATION_LIST_LAYERS,
+            ReadOperation::ListObjects => OPERATION_LIST_OBJECTS,
+            ReadOperation::GetObject => OPERATION_GET_OBJECT,
+            ReadOperation::ListAvailableEffects => OPERATION_LIST_AVAILABLE_EFFECTS,
+        }
+    }
+
+    /// operation 名から variant を引く。read operation でなければ `None`。
+    ///
+    /// [`ReadOperation::ALL`] を線形探索するだけであり、一覧を別に持たない。
+    pub fn from_operation_name(name: &str) -> Option<Self> {
+        ReadOperation::ALL
+            .into_iter()
+            .find(|op| op.as_str() == name)
+    }
+}
+
 /// 編集 operation の種別。
 ///
 /// 編集 operation の名前一覧はこの型へ一本化する。文字列表現は
@@ -89,13 +154,19 @@ pub enum EditOperation {
     SetLayerState,
     /// [`OPERATION_SET_SELECTION`]。
     SetSelection,
+    /// [`OPERATION_APPLY_BATCH`]。
+    ///
+    /// 複数の変更をまとめて発行するが、区間の入り方も失敗の写し方も他の編集
+    /// operation と同じであるため、別の族を作らずここへ並べる。要求予算だけは
+    /// 他の編集より長い区分を持つ（[`KnownOperation::budget_kind`]）。
+    ApplyBatch,
 }
 
 impl EditOperation {
     /// 全 variant。
     ///
     /// 要素数と内容は `edit_operation_all_is_exhaustive` テストで固定する。
-    pub const ALL: [EditOperation; 10] = [
+    pub const ALL: [EditOperation; 11] = [
         EditOperation::CreateObject,
         EditOperation::MoveObject,
         EditOperation::DeleteObject,
@@ -106,6 +177,7 @@ impl EditOperation {
         EditOperation::SetEffectEnabled,
         EditOperation::SetLayerState,
         EditOperation::SetSelection,
+        EditOperation::ApplyBatch,
     ];
 
     /// operation 名の文字列表現を返す。
@@ -121,6 +193,7 @@ impl EditOperation {
             EditOperation::SetEffectEnabled => OPERATION_SET_EFFECT_ENABLED,
             EditOperation::SetLayerState => OPERATION_SET_LAYER_STATE,
             EditOperation::SetSelection => OPERATION_SET_SELECTION,
+            EditOperation::ApplyBatch => OPERATION_APPLY_BATCH,
         }
     }
 
@@ -131,6 +204,119 @@ impl EditOperation {
         EditOperation::ALL
             .into_iter()
             .find(|op| op.as_str() == name)
+    }
+}
+
+/// render operation の種別。
+///
+/// 役割は [`EditOperation`] と同じである。variant が 1 つしか無い段階から型を
+/// 置くのは、後から名前の一覧を定数の列として増やし始めると、束ねる型を持つ
+/// 他の族と扱いが分かれてしまうためである。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderOperation {
+    /// [`OPERATION_RENDER_FRAME`]。
+    RenderFrame,
+}
+
+impl RenderOperation {
+    /// 全 variant。
+    ///
+    /// 要素数と内容は `render_operation_all_is_exhaustive` テストで固定する。
+    pub const ALL: [RenderOperation; 1] = [RenderOperation::RenderFrame];
+
+    /// operation 名の文字列表現を返す。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RenderOperation::RenderFrame => OPERATION_RENDER_FRAME,
+        }
+    }
+
+    /// operation 名から variant を引く。render operation でなければ `None`。
+    ///
+    /// [`RenderOperation::ALL`] を線形探索するだけであり、一覧を別に持たない。
+    pub fn from_operation_name(name: &str) -> Option<Self> {
+        RenderOperation::ALL
+            .into_iter()
+            .find(|op| op.as_str() == name)
+    }
+}
+
+/// 実行できる operation の全体。
+///
+/// read・編集・render の 3 族を 1 つの型で束ねる。族ごとに分かれた判定を持つと、
+/// **どの族にも当たらなかった名前**と**まだ束ねていない族の名前**が同じ既定へ
+/// 落ちる。既定は最も短い予算である [`RequestBudgetKind::Read`] であり、
+/// 落ちたことはコンパイルエラーにもテストの失敗にもならないまま、実行時に
+/// 「投入した瞬間に予算が尽きる operation」として現れる。
+///
+/// この型を経由すれば、族を増やしたときに [`KnownOperation::budget_kind`] の
+/// 網羅 `match` が腕の不足でコンパイルを止める。塞ぎたいのは
+/// **実行する operation の分類漏れ**だけであり、未知の名前が既定へ落ちること
+/// 自体は無害である（受理する前に拒否されるため、予算を使う処理へ進まない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnownOperation {
+    /// read operation。
+    Read(ReadOperation),
+    /// 編集 operation。
+    Edit(EditOperation),
+    /// render operation。
+    Render(RenderOperation),
+}
+
+impl KnownOperation {
+    /// operation 名から variant を引く。いずれの族にも属さなければ `None`。
+    pub fn from_operation_name(name: &str) -> Option<Self> {
+        if let Some(operation) = ReadOperation::from_operation_name(name) {
+            return Some(KnownOperation::Read(operation));
+        }
+        if let Some(operation) = EditOperation::from_operation_name(name) {
+            return Some(KnownOperation::Edit(operation));
+        }
+        RenderOperation::from_operation_name(name).map(KnownOperation::Render)
+    }
+
+    /// operation 名の文字列表現を返す。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            KnownOperation::Read(operation) => operation.as_str(),
+            KnownOperation::Edit(operation) => operation.as_str(),
+            KnownOperation::Render(operation) => operation.as_str(),
+        }
+    }
+
+    /// 要求予算の区分を返す。
+    ///
+    /// **`_` を使わない網羅 `match` である。** variant を足すと腕が足りず
+    /// コンパイルが落ちるため、予算区分を決めないまま新しい operation を
+    /// 受け付ける状態にはならない。族と区分は 1 対 1 ではなく、編集 operation
+    /// のうち一括適用だけが別の区分を持つ。
+    pub const fn budget_kind(self) -> RequestBudgetKind {
+        match self {
+            KnownOperation::Read(operation) => match operation {
+                ReadOperation::GetEditInfo
+                | ReadOperation::GetCurrentScene
+                | ReadOperation::ListLayers
+                | ReadOperation::ListObjects
+                | ReadOperation::GetObject
+                | ReadOperation::ListAvailableEffects => RequestBudgetKind::Read,
+            },
+            KnownOperation::Edit(operation) => match operation {
+                EditOperation::CreateObject
+                | EditOperation::MoveObject
+                | EditOperation::DeleteObject
+                | EditOperation::SetObjectName
+                | EditOperation::SetObjectItem
+                | EditOperation::AddEffect
+                | EditOperation::DeleteEffect
+                | EditOperation::SetEffectEnabled
+                | EditOperation::SetLayerState
+                | EditOperation::SetSelection => RequestBudgetKind::Edit,
+                EditOperation::ApplyBatch => RequestBudgetKind::Batch,
+            },
+            KnownOperation::Render(operation) => match operation {
+                RenderOperation::RenderFrame => RequestBudgetKind::Render,
+            },
+        }
     }
 }
 
@@ -313,6 +499,12 @@ mod tests {
     }
 
     #[test]
+    fn batch_and_render_operation_names_are_snake_case() {
+        assert_eq!(OPERATION_APPLY_BATCH, "apply_batch");
+        assert_eq!(OPERATION_RENDER_FRAME, "render_frame");
+    }
+
+    #[test]
     fn edit_operation_names_are_snake_case() {
         assert_eq!(OPERATION_CREATE_OBJECT, "create_object");
         assert_eq!(OPERATION_MOVE_OBJECT, "move_object");
@@ -324,6 +516,7 @@ mod tests {
         assert_eq!(OPERATION_SET_EFFECT_ENABLED, "set_effect_enabled");
         assert_eq!(OPERATION_SET_LAYER_STATE, "set_layer_state");
         assert_eq!(OPERATION_SET_SELECTION, "set_selection");
+        assert_eq!(OPERATION_APPLY_BATCH, "apply_batch");
     }
 
     #[test]
@@ -362,6 +555,51 @@ mod tests {
             EditOperation::SetSelection.as_str(),
             OPERATION_SET_SELECTION
         );
+        assert_eq!(EditOperation::ApplyBatch.as_str(), OPERATION_APPLY_BATCH);
+    }
+
+    #[test]
+    fn read_operation_as_str_matches_the_operation_constants() {
+        assert_eq!(ReadOperation::GetEditInfo.as_str(), OPERATION_GET_EDIT_INFO);
+        assert_eq!(
+            ReadOperation::GetCurrentScene.as_str(),
+            OPERATION_GET_CURRENT_SCENE
+        );
+        assert_eq!(ReadOperation::ListLayers.as_str(), OPERATION_LIST_LAYERS);
+        assert_eq!(ReadOperation::ListObjects.as_str(), OPERATION_LIST_OBJECTS);
+        assert_eq!(ReadOperation::GetObject.as_str(), OPERATION_GET_OBJECT);
+        assert_eq!(
+            ReadOperation::ListAvailableEffects.as_str(),
+            OPERATION_LIST_AVAILABLE_EFFECTS
+        );
+    }
+
+    #[test]
+    fn render_operation_as_str_matches_the_operation_constants() {
+        assert_eq!(
+            RenderOperation::RenderFrame.as_str(),
+            OPERATION_RENDER_FRAME
+        );
+    }
+
+    #[test]
+    fn read_operation_from_operation_name_round_trips_through_all() {
+        for op in ReadOperation::ALL {
+            assert_eq!(ReadOperation::from_operation_name(op.as_str()), Some(op));
+        }
+        for name in ["", "ping", OPERATION_MOVE_OBJECT, OPERATION_RENDER_FRAME] {
+            assert_eq!(ReadOperation::from_operation_name(name), None);
+        }
+    }
+
+    #[test]
+    fn render_operation_from_operation_name_round_trips_through_all() {
+        for op in RenderOperation::ALL {
+            assert_eq!(RenderOperation::from_operation_name(op.as_str()), Some(op));
+        }
+        for name in ["", "ping", OPERATION_GET_EDIT_INFO, OPERATION_APPLY_BATCH] {
+            assert_eq!(RenderOperation::from_operation_name(name), None);
+        }
     }
 
     #[test]
@@ -395,7 +633,8 @@ mod tests {
                 | EditOperation::DeleteEffect
                 | EditOperation::SetEffectEnabled
                 | EditOperation::SetLayerState
-                | EditOperation::SetSelection => {}
+                | EditOperation::SetSelection
+                | EditOperation::ApplyBatch => {}
             }
             assert!(
                 EditOperation::ALL.contains(&op),
@@ -413,7 +652,127 @@ mod tests {
         assert_listed(EditOperation::SetEffectEnabled);
         assert_listed(EditOperation::SetLayerState);
         assert_listed(EditOperation::SetSelection);
-        assert_eq!(EditOperation::ALL.len(), 10);
+        assert_listed(EditOperation::ApplyBatch);
+        assert_eq!(EditOperation::ALL.len(), 11);
+    }
+
+    /// [`ReadOperation::ALL`] が全 variant を含むことを固定する。
+    ///
+    /// 仕組みは `edit_operation_all_is_exhaustive` と同じである。
+    #[test]
+    fn read_operation_all_is_exhaustive() {
+        fn assert_listed(op: ReadOperation) {
+            match op {
+                ReadOperation::GetEditInfo
+                | ReadOperation::GetCurrentScene
+                | ReadOperation::ListLayers
+                | ReadOperation::ListObjects
+                | ReadOperation::GetObject
+                | ReadOperation::ListAvailableEffects => {}
+            }
+            assert!(
+                ReadOperation::ALL.contains(&op),
+                "{op:?} が ReadOperation::ALL に含まれていません"
+            );
+        }
+
+        assert_listed(ReadOperation::GetEditInfo);
+        assert_listed(ReadOperation::GetCurrentScene);
+        assert_listed(ReadOperation::ListLayers);
+        assert_listed(ReadOperation::ListObjects);
+        assert_listed(ReadOperation::GetObject);
+        assert_listed(ReadOperation::ListAvailableEffects);
+        assert_eq!(ReadOperation::ALL.len(), 6);
+    }
+
+    /// [`RenderOperation::ALL`] が全 variant を含むことを固定する。
+    ///
+    /// 仕組みは `edit_operation_all_is_exhaustive` と同じである。
+    #[test]
+    fn render_operation_all_is_exhaustive() {
+        fn assert_listed(op: RenderOperation) {
+            match op {
+                RenderOperation::RenderFrame => {}
+            }
+            assert!(
+                RenderOperation::ALL.contains(&op),
+                "{op:?} が RenderOperation::ALL に含まれていません"
+            );
+        }
+
+        assert_listed(RenderOperation::RenderFrame);
+        assert_eq!(RenderOperation::ALL.len(), 1);
+    }
+
+    #[test]
+    fn known_operation_classifies_every_operation_name() {
+        for op in ReadOperation::ALL {
+            assert_eq!(
+                KnownOperation::from_operation_name(op.as_str()),
+                Some(KnownOperation::Read(op))
+            );
+        }
+        for op in EditOperation::ALL {
+            assert_eq!(
+                KnownOperation::from_operation_name(op.as_str()),
+                Some(KnownOperation::Edit(op))
+            );
+        }
+        for op in RenderOperation::ALL {
+            assert_eq!(
+                KnownOperation::from_operation_name(op.as_str()),
+                Some(KnownOperation::Render(op))
+            );
+        }
+        for name in ["", "ping", "future_operation"] {
+            assert_eq!(KnownOperation::from_operation_name(name), None);
+        }
+    }
+
+    #[test]
+    fn known_operation_as_str_round_trips() {
+        for name in ReadOperation::ALL
+            .into_iter()
+            .map(ReadOperation::as_str)
+            .chain(EditOperation::ALL.into_iter().map(EditOperation::as_str))
+            .chain(
+                RenderOperation::ALL
+                    .into_iter()
+                    .map(RenderOperation::as_str),
+            )
+        {
+            let operation = KnownOperation::from_operation_name(name).expect("分類できる名前");
+            assert_eq!(operation.as_str(), name);
+        }
+    }
+
+    #[test]
+    fn known_operation_budget_kind_separates_batch_and_render() {
+        for op in ReadOperation::ALL {
+            assert_eq!(
+                KnownOperation::Read(op).budget_kind(),
+                RequestBudgetKind::Read,
+                "{op:?} が read の予算区分になっていません"
+            );
+        }
+        for op in EditOperation::ALL {
+            let expected = match op {
+                EditOperation::ApplyBatch => RequestBudgetKind::Batch,
+                _ => RequestBudgetKind::Edit,
+            };
+            assert_eq!(
+                KnownOperation::Edit(op).budget_kind(),
+                expected,
+                "{op:?} の予算区分が想定と異なります"
+            );
+        }
+        for op in RenderOperation::ALL {
+            assert_eq!(
+                KnownOperation::Render(op).budget_kind(),
+                RequestBudgetKind::Render,
+                "{op:?} が render の予算区分になっていません"
+            );
+        }
     }
 
     #[test]

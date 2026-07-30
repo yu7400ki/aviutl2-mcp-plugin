@@ -28,8 +28,9 @@ use aviutl2_mcp_core::{
     OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT,
     OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
     OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail, RequestBudgetKind,
-    SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, SelectionState,
-    request_budget_kind,
+    SERVER_ARTIFACT_INGEST_BUDGET, SERVER_BATCH_REQUEST_BUDGET, SERVER_EDIT_REQUEST_BUDGET,
+    SERVER_READ_REQUEST_BUDGET, SERVER_RENDER_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET,
+    SelectionState, request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -64,7 +65,7 @@ const RESOURCE_MIME_TYPE: &str = "application/json";
 /// 内側に収めるため、既定値を延ばす分には安全だが、縮めると接続先が上限まで
 /// 使った段の途中で予算が尽きる。
 ///
-/// 要求フェーズの予算は read と edit で異なる。どちらを使うかは
+/// 要求フェーズの予算は operation の区分ごとに異なる。どれを使うかは
 /// [`request_budget`](CallLimits::request_budget) が operation 名から選ぶ。
 #[derive(Debug, Clone, Copy)]
 pub struct CallLimits {
@@ -74,6 +75,16 @@ pub struct CallLimits {
     pub request: Duration,
     /// 編集 operation 1 件の期限。
     pub edit_request: Duration,
+    /// 一括適用 1 件の期限。
+    pub batch_request: Duration,
+    /// render operation 1 件の期限。
+    pub render_request: Duration,
+    /// 描画成果物の引き取りの期限。
+    ///
+    /// 引き取りは応答を受けてから始まり、[`render_request`](Self::render_request)
+    /// の内側で起きる。したがって render の要求へ載せる期限は、
+    /// `render_request` から本値を差し引いた残りから算出する。
+    pub artifact_ingest: Duration,
 }
 
 impl Default for CallLimits {
@@ -82,6 +93,9 @@ impl Default for CallLimits {
             resolve: SERVER_RESOLVE_BUDGET,
             request: SERVER_READ_REQUEST_BUDGET,
             edit_request: SERVER_EDIT_REQUEST_BUDGET,
+            batch_request: SERVER_BATCH_REQUEST_BUDGET,
+            render_request: SERVER_RENDER_REQUEST_BUDGET,
+            artifact_ingest: SERVER_ARTIFACT_INGEST_BUDGET,
         }
     }
 }
@@ -89,13 +103,18 @@ impl Default for CallLimits {
 impl CallLimits {
     /// operation 名に応じた要求フェーズの期限を返す。
     ///
-    /// read か edit かの判定は core の選択規則（[`request_budget_kind`]）に
-    /// 委ねる。判定基準を server が独自に持たないことで、片方だけ取り違えた
-    /// ときに検出できない状態を避ける。
+    /// 区分の判定は core の選択規則（[`request_budget_kind`]）に委ねる。判定
+    /// 基準を server が独自に持たないことで、片方だけ取り違えたときに検出
+    /// できない状態を避ける。
+    ///
+    /// **区分ごとの `match` に `_` を使わない。** 既定の腕を置くと、区分が
+    /// 増えたときに新しい operation が黙って別の予算で走る。
     pub fn request_budget(&self, operation: &str) -> Duration {
         match request_budget_kind(operation) {
             RequestBudgetKind::Read => self.request,
             RequestBudgetKind::Edit => self.edit_request,
+            RequestBudgetKind::Batch => self.batch_request,
+            RequestBudgetKind::Render => self.render_request,
         }
     }
 }
@@ -2392,6 +2411,9 @@ mod tests {
         assert_eq!(limits.resolve, SERVER_RESOLVE_BUDGET);
         assert_eq!(limits.request, SERVER_READ_REQUEST_BUDGET);
         assert_eq!(limits.edit_request, SERVER_EDIT_REQUEST_BUDGET);
+        assert_eq!(limits.batch_request, SERVER_BATCH_REQUEST_BUDGET);
+        assert_eq!(limits.render_request, SERVER_RENDER_REQUEST_BUDGET);
+        assert_eq!(limits.artifact_ingest, SERVER_ARTIFACT_INGEST_BUDGET);
         assert_eq!(
             DiscoveryConfig::default().per_candidate_deadline,
             SERVER_RESOLVE_BUDGET
@@ -2404,11 +2426,17 @@ mod tests {
             resolve: Duration::from_millis(120),
             request: Duration::from_millis(340),
             edit_request: Duration::from_millis(560),
+            batch_request: Duration::from_millis(780),
+            render_request: Duration::from_millis(910),
+            artifact_ingest: Duration::from_millis(130),
         };
         let server = AviUtl2McpServer::with_limits(PathBuf::from("registry"), limits);
         assert_eq!(server.limits.resolve, Duration::from_millis(120));
         assert_eq!(server.limits.request, Duration::from_millis(340));
         assert_eq!(server.limits.edit_request, Duration::from_millis(560));
+        assert_eq!(server.limits.batch_request, Duration::from_millis(780));
+        assert_eq!(server.limits.render_request, Duration::from_millis(910));
+        assert_eq!(server.limits.artifact_ingest, Duration::from_millis(130));
     }
 
     #[test]
@@ -2417,18 +2445,16 @@ mod tests {
             resolve: Duration::from_millis(1),
             request: Duration::from_millis(2),
             edit_request: Duration::from_millis(3),
+            batch_request: Duration::from_millis(4),
+            render_request: Duration::from_millis(5),
+            artifact_ingest: Duration::from_millis(6),
         };
 
-        for name in [
-            OPERATION_GET_EDIT_INFO,
-            OPERATION_GET_CURRENT_SCENE,
-            OPERATION_LIST_LAYERS,
-            OPERATION_LIST_OBJECTS,
-            OPERATION_GET_OBJECT,
-            OPERATION_LIST_AVAILABLE_EFFECTS,
-            "ping",
-            "future_operation",
-        ] {
+        for name in aviutl2_mcp_core::ReadOperation::ALL
+            .into_iter()
+            .map(aviutl2_mcp_core::ReadOperation::as_str)
+            .chain(["ping", "future_operation"])
+        {
             assert_eq!(
                 limits.request_budget(name),
                 limits.request,
@@ -2437,10 +2463,23 @@ mod tests {
         }
 
         for op in aviutl2_mcp_core::EditOperation::ALL {
+            // 一括適用は編集の族に属するが、費用の主項が違うため別の予算を持つ。
+            let expected = match op {
+                aviutl2_mcp_core::EditOperation::ApplyBatch => limits.batch_request,
+                _ => limits.edit_request,
+            };
             assert_eq!(
                 limits.request_budget(op.as_str()),
-                limits.edit_request,
-                "{op:?} が edit 予算を使っていません"
+                expected,
+                "{op:?} の予算が想定と異なります"
+            );
+        }
+
+        for op in aviutl2_mcp_core::RenderOperation::ALL {
+            assert_eq!(
+                limits.request_budget(op.as_str()),
+                limits.render_request,
+                "{op:?} が render 予算を使っていません"
             );
         }
     }

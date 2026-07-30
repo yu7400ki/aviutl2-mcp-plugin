@@ -708,13 +708,13 @@ mod tests {
         })
     }
 
-    /// tool ごとの、現在の形の入力を引く。
+    /// tool ごとの、現在の形の入力を引く。入力型を持たない operation は `None`。
     ///
     /// **`_` を使わない網羅 match で書く。** 編集 operation を足すとここが
     /// コンパイルエラーになるため、入力の形を確かめる一連のテストから漏れる
     /// ことがない。手書きの一覧にすると、足し忘れても全て緑のまま通ってしまう。
-    fn current_input(operation: EditOperation) -> Value {
-        match operation {
+    fn current_input(operation: EditOperation) -> Option<Value> {
+        Some(match operation {
             EditOperation::CreateObject => json!({
                 "instance_id": SAMPLE_ID,
                 "source": { "type": "object_alias", "alias": "a" },
@@ -768,7 +768,10 @@ mod tests {
                 "cursor": { "layer": 1, "frame": 2 },
                 "expected_project_epoch": SAMPLE_EPOCH,
             }),
-        }
+            // 一括適用に対応する tool の入力型はまだ無い。型を足すときに
+            // ここへ現在の形を書き、下の表から自動的に検査される。
+            EditOperation::ApplyBatch => return None,
+        })
     }
 
     /// 入力を復元し、IPC の params へ写して返す。
@@ -794,6 +797,9 @@ mod tests {
             EditOperation::SetEffectEnabled => decoded!(SetEffectEnabledInput),
             EditOperation::SetLayerState => decoded!(SetLayerStateInput),
             EditOperation::SetSelection => decoded!(SetSelectionInput),
+            // 入力型を持たない operation は `current_input` が表から外すため、
+            // ここへは到達しない。到達したら表と復号の対応が食い違っている。
+            EditOperation::ApplyBatch => return Err(ErrorCode::UnsupportedOperation),
         })
     }
 
@@ -803,7 +809,9 @@ mod tests {
         // 網羅 match から引いて同じ表に掛ける。
         for operation in EditOperation::ALL {
             let name = operation.as_str();
-            let current = current_input(operation);
+            let Some(current) = current_input(operation) else {
+                continue;
+            };
             decode_input(operation, &current)
                 .unwrap_or_else(|code| panic!("{name} の現在の形が拒否されました: {code:?}"));
 
@@ -851,7 +859,9 @@ mod tests {
         // 値を接続先へ渡さずに捨てる。
         for operation in EditOperation::ALL {
             let name = operation.as_str();
-            let mut input = current_input(operation);
+            let Some(mut input) = current_input(operation) else {
+                continue;
+            };
             add_algorithms(&mut input);
             let params = decode_input(operation, &input)
                 .unwrap_or_else(|_| panic!("{name} がセレクターの算出方式を拒否しました"));

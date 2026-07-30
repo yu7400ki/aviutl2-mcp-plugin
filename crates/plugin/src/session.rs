@@ -18,13 +18,11 @@ use aviutl2_mcp_core::{
     AddEffectParams, ClientAuth, ClientHello, CreateObjectParams, DeleteEffectParams,
     DeleteObjectParams, EditInputError, EditOperation, ErrorCode, ErrorObject,
     GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GetObjectParams, InstanceId,
-    InstanceState, ListAvailableEffectsParams, ListAvailableEffectsResult, ListLayersParams,
-    ListLayersResult, ListObjectsParams, ListObjectsResult, MoveObjectParams, Nonce,
-    OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_OBJECT,
-    OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS,
-    ObjectFilterError, PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT,
+    InstanceState, KnownOperation, ListAvailableEffectsParams, ListAvailableEffectsResult,
+    ListLayersParams, ListLayersResult, ListObjectsParams, ListObjectsResult, MoveObjectParams,
+    Nonce, ObjectFilterError, PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT,
     PLUGIN_WRITE_TIMEOUT, PageError, PageRequest, PongProject, PongResult, ProtocolVersion,
-    RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult,
+    ReadOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult,
     SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
     SetSelectionParams, compute_client_mac, compute_server_mac, deserialize_json, take_page,
     verify_mac,
@@ -406,39 +404,27 @@ enum Operation {
     Edit(EditOperation),
 }
 
-/// 読み取り operation。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReadOperation {
-    GetEditInfo,
-    GetCurrentScene,
-    ListLayers,
-    ListObjects,
-    GetObject,
-    ListAvailableEffects,
-}
-
 /// operation 名を処理経路へ対応付ける。
 ///
-/// 編集 operation の一覧は [`EditOperation`] から導く。名前の一覧をここへ書き
-/// 写すと、operation を増やしたときに片方だけへ足し忘れても検出できない。
+/// 名前の一覧は [`KnownOperation`] から導く。族ごとの照合をここへ書き写すと、
+/// operation を増やしたときに片方だけへ足し忘れても検出できない。
+///
+/// **分類できても実行口があるとは限らない。** 描画は本接続処理が呼び出す
+/// adapter を持たないため、名前としては分類できても未対応として返す。
 fn classify_operation(name: &str) -> Result<Operation, ErrorObject> {
-    let operation = match name {
-        "ping" => return Ok(Operation::Ping),
-        OPERATION_GET_EDIT_INFO => ReadOperation::GetEditInfo,
-        OPERATION_GET_CURRENT_SCENE => ReadOperation::GetCurrentScene,
-        OPERATION_LIST_LAYERS => ReadOperation::ListLayers,
-        OPERATION_LIST_OBJECTS => ReadOperation::ListObjects,
-        OPERATION_GET_OBJECT => ReadOperation::GetObject,
-        OPERATION_LIST_AVAILABLE_EFFECTS => ReadOperation::ListAvailableEffects,
-        _ => {
-            return EditOperation::from_operation_name(name)
-                .map(Operation::Edit)
-                .ok_or_else(|| {
-                    error_object(ErrorCode::UnsupportedOperation, "未対応の operation です")
-                });
-        }
-    };
-    Ok(Operation::Read(operation))
+    if name == "ping" {
+        return Ok(Operation::Ping);
+    }
+    match KnownOperation::from_operation_name(name) {
+        Some(KnownOperation::Read(operation)) => Ok(Operation::Read(operation)),
+        Some(KnownOperation::Edit(operation)) => Ok(Operation::Edit(operation)),
+        Some(KnownOperation::Render(_)) | None => Err(unsupported_operation()),
+    }
+}
+
+/// 実行口を持たない operation へ返すエラー。
+fn unsupported_operation() -> ErrorObject {
+    error_object(ErrorCode::UnsupportedOperation, "未対応の operation です")
 }
 
 /// params の復号・受付判定・期限判定を通してから読み取りを実行する。
@@ -812,6 +798,9 @@ enum EditRequest {
 /// 値の種別整合・パス構文・文字列長・変更内容の全省略はいずれも要求内容だけで
 /// 決まり、ライフサイクル状態にも期限にも編集口の応答にも依存しない。検証の
 /// 実体は core と共有し、server と plugin が同じ判定を行う。
+///
+/// **一括適用は編集 operation として分類されるが、編集口に対応するメソッドが
+/// 無い。** 復号の段で未対応として返し、実行できないことをこの層で明示する。
 fn decode_edit_request(
     operation: EditOperation,
     params: &Value,
@@ -845,6 +834,7 @@ fn decode_edit_request(
             decoded!(SetLayerStateParams, EditRequest::SetLayerState)
         }
         EditOperation::SetSelection => decoded!(SetSelectionParams, EditRequest::SetSelection),
+        EditOperation::ApplyBatch => return Err(unsupported_operation()),
     })
 }
 
@@ -1485,7 +1475,7 @@ mod tests {
 
     #[test]
     fn unknown_operation_is_unsupported() {
-        for name in ["", "Ping", "apply_batch", "list_layer"] {
+        for name in ["", "Ping", "future_operation", "list_layer"] {
             let error = classify_operation(name).unwrap_err();
             assert_eq!(
                 error.code,
@@ -2387,13 +2377,14 @@ mod edit_tests {
         })
     }
 
-    /// operation ごとの、現在の形の要求 params を引く。
+    /// operation ごとの、現在の形の要求 params を引く。実行口を持たない
+    /// operation は `None`。
     ///
     /// **`_` を使わない網羅 match で書く。** 編集 operation を足すとここが
     /// コンパイルエラーになるため、要求の形を確かめる一連のテストから漏れる
     /// ことがない。手書きの一覧にすると、足し忘れても全て緑のまま通ってしまう。
-    fn current_request(operation: EditOperation) -> Value {
-        match operation {
+    fn current_request(operation: EditOperation) -> Option<Value> {
+        Some(match operation {
             EditOperation::CreateObject => json!({
                 "source": { "type": "object_alias", "alias": "[1:100]" },
                 "placement": { "scene_id": SCENE_ID, "layer": 1, "frame": 0 },
@@ -2429,7 +2420,10 @@ mod edit_tests {
                 "expected_project_epoch": EPOCH,
             }),
             EditOperation::SetSelection => selection_params(),
-        }
+            // 一括適用は編集口にメソッドを持たず、復号の段で未対応として
+            // 返る。実行できるようになったときに現在の形をここへ書く。
+            EditOperation::ApplyBatch => return None,
+        })
     }
 
     /// 要求を復号し、成功したら params を JSON へ写して返す。
@@ -2505,7 +2499,9 @@ mod edit_tests {
         // operation を網羅 match から引いて同じ表に掛ける。
         for operation in EditOperation::ALL {
             let name = operation.as_str();
-            let current = current_request(operation);
+            let Some(current) = current_request(operation) else {
+                continue;
+            };
             decode_request(operation, &current)
                 .unwrap_or_else(|error| panic!("{name} の現在の形が拒否されました: {error:?}"));
 
@@ -2563,7 +2559,9 @@ mod edit_tests {
         // 持つ要求ではその欠落が拒否になり、持たない要求ではフィールド自体が無い。
         let mut carriers = Vec::new();
         for operation in EditOperation::ALL {
-            let current = current_request(operation);
+            let Some(current) = current_request(operation) else {
+                continue;
+            };
             let mut without = current.clone();
             if without
                 .as_object_mut()
@@ -2601,6 +2599,23 @@ mod edit_tests {
                 operation.as_str()
             );
         }
+    }
+
+    #[test]
+    fn operations_without_an_adapter_are_answered_as_unsupported() {
+        // 分類できることと実行できることは別である。実行口を持たない
+        // operation は、状態にも期限にも依らず未対応として返す。
+        for operation in aviutl2_mcp_core::RenderOperation::ALL {
+            let error = classify_operation(operation.as_str()).expect_err(&format!(
+                "{} が実行経路へ振り分けられました",
+                operation.as_str()
+            ));
+            assert_eq!(error.code, ErrorCode::UnsupportedOperation);
+        }
+
+        let error = decode_edit_request(EditOperation::ApplyBatch, &json!({ "operations": [] }))
+            .expect_err("一括適用が復号されました");
+        assert_eq!(error.code, ErrorCode::UnsupportedOperation);
     }
 
     #[test]

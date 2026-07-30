@@ -10,13 +10,13 @@
 //! 真に小さいことを本モジュールのテストで固定する。差分は [`TRANSPORT_HEADROOM`]
 //! として明示的に残す。
 //!
-//! 要求フェーズの予算は read と edit の 2 つが並ぶ。operation 名がどちらに
-//! 属するかの判定基準は [`crate::operation::EditOperation`] へ一本化してあり、
-//! [`request_budget_kind`] はその判定を要求予算の区分へ変換するだけの薄い層
-//! である。read/edit を分岐する必要がある処理は、`EditOperation` を経由する
+//! 要求フェーズの予算は read・edit・batch・render の 4 つが並ぶ。operation 名が
+//! どれに属するかの判定基準は [`crate::operation::KnownOperation`] へ一本化して
+//! あり、[`request_budget_kind`] はその判定を要求予算の区分へ変換するだけの
+//! 薄い層である。区分で分岐する必要がある処理は、`KnownOperation` を経由する
 //! ことで判断根拠を複数箇所に手書きせずに済む。
 
-use crate::operation::EditOperation;
+use crate::operation::KnownOperation;
 use std::time::Duration;
 
 /// server がインスタンス解決フェーズ全体に許す上限。
@@ -35,6 +35,35 @@ pub const SERVER_READ_REQUEST_BUDGET: Duration = Duration::from_secs(5);
 /// [`SERVER_READ_REQUEST_BUDGET`] と同じ役割を編集について持つ。編集は
 /// `call_edit_section` の実行に read より長い上限を要するため、別の値を持つ。
 pub const SERVER_EDIT_REQUEST_BUDGET: Duration = Duration::from_secs(10);
+
+/// server が一括適用 1 件の要求フェーズ全体に許す上限。
+///
+/// 一括適用の費用は「異なるレイヤー数 × レイヤー内オブジェクト数」に比例し、
+/// 変更の件数だけでは決まらない。単一の編集と同じ予算では、変更を 1 つも
+/// 発行しないうちに予算が尽き得るため、編集より長い値を持つ。
+///
+/// **上限であって目標ではない。** 編集区間はホストのメインスレッドを占有する
+/// ため、この上限まで費やす一括適用は同じ時間だけ UI を止める。
+pub const SERVER_BATCH_REQUEST_BUDGET: Duration = Duration::from_secs(20);
+
+/// server が render operation 1 件の要求フェーズ全体に許す上限。
+///
+/// 描画の完了はホスト側の非同期タスクを待つため、他のどの operation よりも
+/// 長い。応答を受けたあとの成果物の引き取り
+/// （[`SERVER_ARTIFACT_INGEST_BUDGET`]）もこの予算の内側で起きる。
+pub const SERVER_RENDER_REQUEST_BUDGET: Duration = Duration::from_secs(30);
+
+/// server が描画成果物の引き取りに許す上限。
+///
+/// 引き取りは応答の受信後に始まり、ファイルの読み込み・ダイジェストの計算・
+/// 保管・元ファイルの削除を含む。**応答を受けてからさらに仕事をするのは
+/// render だけである。**
+///
+/// この段を [`SERVER_RENDER_REQUEST_BUDGET`] の内側に数え忘れると、plugin が
+/// 予算いっぱいまで費やした直後に引き取りが始まり、要求フェーズの予算を
+/// 超えてから成功する経路ができる。したがって render の要求へ載せる期限は
+/// 要求フェーズの予算そのものではなく、本値を差し引いた残りから算出する。
+pub const SERVER_ARTIFACT_INGEST_BUDGET: Duration = Duration::from_secs(4);
 
 /// server が 1 候補の pipe 接続待ちに許す上限。
 ///
@@ -62,6 +91,25 @@ pub const PLUGIN_READ_TIMEOUT: Duration = Duration::from_secs(3);
 /// 区間へ入った後の超過は制御できず、ホストが応答するまで待つ。
 pub const PLUGIN_EDIT_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// plugin が一括適用の実行に許す上限。
+///
+/// [`PLUGIN_EDIT_TIMEOUT`] と同じ役割を一括適用について持ち、効くのが編集区間
+/// へ入る前の判定に限られることも同じである。
+pub const PLUGIN_BATCH_TIMEOUT: Duration = Duration::from_secs(18);
+
+/// plugin が描画の完了通知を待つ上限。
+///
+/// 描画はホスト側の別スレッドで進み、取り消す手段も完了の保証も無い。上限を
+/// 過ぎた要求は待機を諦めて失敗を返すため、この値は「戻らない描画に付き合う
+/// 時間」の上限である。
+pub const PLUGIN_RENDER_WAIT_TIMEOUT: Duration = Duration::from_secs(18);
+
+/// plugin が描画結果の符号化と受け渡しファイルの書き出しに許す上限。
+///
+/// 完了通知を受けてから応答を送るまでの取り分であり、
+/// [`PLUGIN_RENDER_WAIT_TIMEOUT`] とは別枠で確保する。
+pub const PLUGIN_RENDER_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// plugin が応答 1 フレームの送信に許す上限。
 ///
 /// 実行が上限を使い切っても送信の持ち時間が残るよう、実行とは別枠で確保する。
@@ -78,24 +126,30 @@ pub const TRANSPORT_HEADROOM: Duration = Duration::from_secs(1);
 /// 要求フェーズの予算区分。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestBudgetKind {
-    /// [`EditOperation`] に含まれない operation 名。read operation 群のほか、
-    /// `ping` や未知の名前もここに区分される（[`request_budget_kind`] の既定）。
+    /// read operation 群。`ping` や未知の名前もここに区分される
+    /// （[`request_budget_kind`] の既定）。
     Read,
-    /// 編集 operation 群。
+    /// 一括適用を除く編集 operation 群。
     Edit,
+    /// 一括適用。
+    Batch,
+    /// render operation 群。
+    Render,
 }
 
 /// operation 名から要求予算の区分を引く。
 ///
-/// 判定は [`EditOperation::from_operation_name`] に委ね、独自の一覧は持たない。
-/// `EditOperation` に無い operation 名（read operation・`ping`・未知の名前）は
-/// [`RequestBudgetKind::Read`] とする。編集 operation は plugin 側で編集区間へ
-/// 踏み込む権限を伴い、read よりも長い予算を持つ。判別できない operation 名を
-/// 安全側の短い予算へ倒すことで、想定外の operation 名が編集と同等の
-/// 長時間実行を許されることを避ける。
+/// 判定は [`KnownOperation::budget_kind`] に委ね、独自の一覧は持たない。
+/// いずれの族にも属さない operation 名（`ping`・未知の名前）は
+/// [`RequestBudgetKind::Read`] とする。
+///
+/// **未知の名前が最も短い予算へ落ちることは無害である。** 未知の operation は
+/// 実行される前に「未対応」として拒否され、予算を使う処理へ進まない。塞ぐ
+/// 必要があるのは実行される operation の分類漏れであり、それは
+/// `KnownOperation` の網羅性が塞ぐ。
 pub fn request_budget_kind(operation: &str) -> RequestBudgetKind {
-    match EditOperation::from_operation_name(operation) {
-        Some(_) => RequestBudgetKind::Edit,
+    match KnownOperation::from_operation_name(operation) {
+        Some(operation) => operation.budget_kind(),
         None => RequestBudgetKind::Read,
     }
 }
@@ -109,10 +163,16 @@ mod tests {
         assert_eq!(SERVER_RESOLVE_BUDGET, Duration::from_secs(5));
         assert_eq!(SERVER_READ_REQUEST_BUDGET, Duration::from_secs(5));
         assert_eq!(SERVER_EDIT_REQUEST_BUDGET, Duration::from_secs(10));
+        assert_eq!(SERVER_BATCH_REQUEST_BUDGET, Duration::from_secs(20));
+        assert_eq!(SERVER_RENDER_REQUEST_BUDGET, Duration::from_secs(30));
+        assert_eq!(SERVER_ARTIFACT_INGEST_BUDGET, Duration::from_secs(4));
         assert_eq!(SERVER_CONNECT_WAIT_CAP, Duration::from_secs(1));
         assert_eq!(PLUGIN_HANDSHAKE_TIMEOUT, Duration::from_secs(2));
         assert_eq!(PLUGIN_READ_TIMEOUT, Duration::from_secs(3));
         assert_eq!(PLUGIN_EDIT_TIMEOUT, Duration::from_secs(8));
+        assert_eq!(PLUGIN_BATCH_TIMEOUT, Duration::from_secs(18));
+        assert_eq!(PLUGIN_RENDER_WAIT_TIMEOUT, Duration::from_secs(18));
+        assert_eq!(PLUGIN_RENDER_ARTIFACT_TIMEOUT, Duration::from_secs(5));
         assert_eq!(PLUGIN_WRITE_TIMEOUT, Duration::from_secs(1));
         assert_eq!(TRANSPORT_HEADROOM, Duration::from_secs(1));
     }
@@ -140,6 +200,52 @@ mod tests {
         assert!(
             stages + TRANSPORT_HEADROOM <= SERVER_EDIT_REQUEST_BUDGET,
             "編集要求フェーズに余白 {TRANSPORT_HEADROOM:?} が残らない"
+        );
+    }
+
+    #[test]
+    fn plugin_batch_stages_fit_within_the_server_batch_request_budget() {
+        let stages = PLUGIN_BATCH_TIMEOUT + PLUGIN_WRITE_TIMEOUT;
+        assert!(
+            stages < SERVER_BATCH_REQUEST_BUDGET,
+            "一括適用 {stages:?} が要求フェーズ予算 {SERVER_BATCH_REQUEST_BUDGET:?} を残さない"
+        );
+        assert!(
+            stages + TRANSPORT_HEADROOM <= SERVER_BATCH_REQUEST_BUDGET,
+            "一括適用の要求フェーズに余白 {TRANSPORT_HEADROOM:?} が残らない"
+        );
+    }
+
+    #[test]
+    fn render_stages_fit_within_the_server_render_request_budget() {
+        // 応答を受けたあとに続く成果物の引き取りも、要求フェーズ予算の内側で
+        // 起きる段として数える。数え忘れると、plugin が上限まで費やした直後に
+        // 引き取りが始まり、どの段の上限にも掛からないまま予算を超える。
+        let stages = PLUGIN_RENDER_WAIT_TIMEOUT
+            + PLUGIN_RENDER_ARTIFACT_TIMEOUT
+            + PLUGIN_WRITE_TIMEOUT
+            + SERVER_ARTIFACT_INGEST_BUDGET;
+        assert!(
+            stages < SERVER_RENDER_REQUEST_BUDGET,
+            "描画 {stages:?} が要求フェーズ予算 {SERVER_RENDER_REQUEST_BUDGET:?} を残さない"
+        );
+        assert!(
+            stages + TRANSPORT_HEADROOM <= SERVER_RENDER_REQUEST_BUDGET,
+            "描画の要求フェーズに余白 {TRANSPORT_HEADROOM:?} が残らない"
+        );
+    }
+
+    #[test]
+    fn artifact_ingest_leaves_room_for_the_ipc_round_trip() {
+        // 引き取りの取り分を差し引いた残りが、plugin の各段の合計を覆う。
+        // 差し引いた値が要求の期限になるため、覆えなければ成功した描画が
+        // 期限超過として捨てられる。
+        let ipc = SERVER_RENDER_REQUEST_BUDGET - SERVER_ARTIFACT_INGEST_BUDGET;
+        let stages =
+            PLUGIN_RENDER_WAIT_TIMEOUT + PLUGIN_RENDER_ARTIFACT_TIMEOUT + PLUGIN_WRITE_TIMEOUT;
+        assert!(
+            stages + TRANSPORT_HEADROOM <= ipc,
+            "引き取りを差し引いた残り {ipc:?} に描画の各段 {stages:?} が収まらない"
         );
     }
 
@@ -184,28 +290,37 @@ mod tests {
 
     #[test]
     fn request_budget_kind_routes_edit_operations() {
-        for op in EditOperation::ALL {
+        for op in crate::operation::EditOperation::ALL {
+            let expected = match op {
+                crate::operation::EditOperation::ApplyBatch => RequestBudgetKind::Batch,
+                _ => RequestBudgetKind::Edit,
+            };
             assert_eq!(
                 request_budget_kind(op.as_str()),
-                RequestBudgetKind::Edit,
-                "{op:?} が編集として区分されていません"
+                expected,
+                "{op:?} の予算区分が想定と異なります"
+            );
+        }
+    }
+
+    #[test]
+    fn request_budget_kind_routes_render_operations() {
+        for op in crate::operation::RenderOperation::ALL {
+            assert_eq!(
+                request_budget_kind(op.as_str()),
+                RequestBudgetKind::Render,
+                "{op:?} が描画として区分されていません"
             );
         }
     }
 
     #[test]
     fn request_budget_kind_routes_read_operations_and_unknown_names_to_read() {
-        for name in [
-            crate::operation::OPERATION_GET_EDIT_INFO,
-            crate::operation::OPERATION_GET_CURRENT_SCENE,
-            crate::operation::OPERATION_LIST_LAYERS,
-            crate::operation::OPERATION_LIST_OBJECTS,
-            crate::operation::OPERATION_GET_OBJECT,
-            crate::operation::OPERATION_LIST_AVAILABLE_EFFECTS,
-            "ping",
-            "",
-            "future_operation",
-        ] {
+        for name in crate::operation::ReadOperation::ALL
+            .into_iter()
+            .map(crate::operation::ReadOperation::as_str)
+            .chain(["ping", "", "future_operation"])
+        {
             assert_eq!(
                 request_budget_kind(name),
                 RequestBudgetKind::Read,
