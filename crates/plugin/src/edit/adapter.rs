@@ -29,8 +29,9 @@ use crate::read::host::{EditState, HostEffect, HostObjectPlacement};
 use aviutl2_mcp_core::{
     AddEffectParams, CreateObjectParams, Cursor, DeleteEffectParams, DeleteObjectParams,
     EditOutcome, EffectInfo, EffectType, FocusChange, FrameRange, ItemWriteError, MoveObjectParams,
-    ObjectSource, ObjectSummary, RangeChange, SelectionField, SelectionState, SetEffectStateParams,
-    SetObjectItemParams, SetObjectNameParams, SetSelectionParams, prepare_item_write,
+    ObjectSource, ObjectSummary, RangeChange, SelectionField, SelectionState,
+    SetEffectEnabledParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+    prepare_item_write,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -164,7 +165,7 @@ impl<H: EditHost> HostEditAdapter<H> {
     /// 弾けば、何も変わっていないのに revision が進むことを避けられる。
     ///
     /// 出力項目は有効・無効を変更できない。
-    fn ensure_effect_state_writable(&self, effect_name: &str) -> Result<(), EditError> {
+    fn ensure_effect_enabled_writable(&self, effect_name: &str) -> Result<(), EditError> {
         let catalog = guard(|| self.host.effect_catalog())?;
         let Some(effect) = catalog.iter().find(|effect| effect.name == effect_name) else {
             return Ok(());
@@ -762,9 +763,12 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
         })
     }
 
-    fn set_effect_state(&self, params: &SetEffectStateParams) -> Result<EditOutcome, EditError> {
+    fn set_effect_enabled(
+        &self,
+        params: &SetEffectEnabledParams,
+    ) -> Result<EditOutcome, EditError> {
         self.ensure_editable()?;
-        self.ensure_effect_state_writable(&params.selector.effect_name)?;
+        self.ensure_effect_enabled_writable(&params.selector.effect_name)?;
         let project = self.project.as_ref();
 
         self.edit_section(move |editor| {

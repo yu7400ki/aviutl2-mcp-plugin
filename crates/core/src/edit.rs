@@ -328,17 +328,17 @@ impl DeleteEffectParams {
     }
 }
 
-/// `set_effect_state` の params。
+/// `set_effect_enabled` の params。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SetEffectStateParams {
+pub struct SetEffectEnabledParams {
     /// 対象 effect。
     pub selector: EffectSelector,
     /// 有効・無効。
     pub enabled: bool,
 }
 
-impl SetEffectStateParams {
+impl SetEffectEnabledParams {
     /// 要求内容だけで決まる検証を行う。
     ///
     /// 見るのは [`DeleteEffectParams::validate`] と同じく、セレクターが持つ
@@ -455,7 +455,7 @@ impl EditOutcome {
     }
 
     /// effect を伴う変更の結果を組み立てる
-    /// （`set_object_item` / `add_effect` / `set_effect_state`）。
+    /// （`set_object_item` / `add_effect` / `set_effect_enabled`）。
     ///
     /// `effect` には読み直した値を載せる。ホスト側の正規化により要求値と
     /// 異なり得るが、それは失敗ではない。
@@ -867,7 +867,7 @@ mod tests {
         assert_roundtrip(DeleteEffectParams {
             selector: sample_effect_selector(),
         });
-        assert_roundtrip(SetEffectStateParams {
+        assert_roundtrip(SetEffectEnabledParams {
             selector: sample_effect_selector(),
             enabled: false,
         });
@@ -921,8 +921,8 @@ mod tests {
             }
         );
         assert_rejects_unknown!(
-            SetEffectStateParams,
-            SetEffectStateParams {
+            SetEffectEnabledParams,
+            SetEffectEnabledParams {
                 selector: sample_effect_selector(),
                 enabled: true,
             }
@@ -980,14 +980,14 @@ mod tests {
                 "{key} の欠落が受理されました"
             );
         }
-        let set_effect_state = SetEffectStateParams {
+        let set_effect_enabled = SetEffectEnabledParams {
             selector: sample_effect_selector(),
             enabled: false,
         };
         for key in ["selector", "enabled"] {
             assert!(
-                serde_json::from_value::<SetEffectStateParams>(without_field(
-                    &set_effect_state,
+                serde_json::from_value::<SetEffectEnabledParams>(without_field(
+                    &set_effect_enabled,
                     key
                 ))
                 .is_err(),
@@ -1521,7 +1521,7 @@ mod tests {
                 0,
             ),
             (
-                "set_effect_state",
+                "set_effect_enabled",
                 EditOutcome::effect_changed(EPOCH, 43, sample_summary(), sample_effect_info()),
                 true,
                 true,
@@ -1738,7 +1738,7 @@ mod tests {
                 selector: effect.clone(),
             }
             .validate(),
-            SetEffectStateParams {
+            SetEffectEnabledParams {
                 selector: effect,
                 enabled: true,
             }

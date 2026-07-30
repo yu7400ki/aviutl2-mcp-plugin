@@ -11,7 +11,7 @@ use aviutl2_mcp_core::{
 use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, CreateObjectInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
     DestinationInput, EffectSelectorInput, FocusChangeInput, ItemValueInput, MoveObjectInput,
-    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectStateInput, SetObjectItemInput,
+    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetObjectItemInput,
     SetObjectNameInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::ObjectSelectorInput;
@@ -475,13 +475,13 @@ async fn add_effect_tool_sends_the_effect_name() {
 }
 
 #[tokio::test]
-async fn set_effect_state_tool_sends_only_the_requested_changes() {
+async fn set_effect_enabled_tool_sends_set_effect_enabled_operation() {
     let expected = effect_changed();
-    let harness = Harness::start(responses("set_effect_state", expected.clone()));
+    let harness = Harness::start(responses("set_effect_enabled", expected.clone()));
 
     let result = harness
         .server
-        .aviutl2_set_effect_state(Parameters(SetEffectStateInput {
+        .aviutl2_set_effect_enabled(Parameters(SetEffectEnabledInput {
             instance_id: harness.instance_id(),
             selector: effect_selector_input(),
             enabled: false,
@@ -490,7 +490,7 @@ async fn set_effect_state_tool_sends_only_the_requested_changes() {
 
     assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
     let request = harness.only_request();
-    assert_eq!(request.operation, "set_effect_state");
+    assert_eq!(request.operation, "set_effect_enabled");
     assert_eq!(
         request.params,
         json!({
@@ -1008,7 +1008,7 @@ async fn edit_tool_reports_an_unsupported_operation_from_the_instance() {
 
     let result = harness
         .server
-        .aviutl2_set_effect_state(Parameters(SetEffectStateInput {
+        .aviutl2_set_effect_enabled(Parameters(SetEffectEnabledInput {
             instance_id: harness.instance_id(),
             selector: effect_selector_input(),
             enabled: true,

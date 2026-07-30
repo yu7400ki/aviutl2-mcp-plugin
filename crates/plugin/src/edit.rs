@@ -18,7 +18,7 @@ pub mod sdk;
 use crate::project::ProjectState;
 use aviutl2_mcp_core::{
     AddEffectParams, CreateObjectParams, DeleteEffectParams, DeleteObjectParams, EditOutcome,
-    MoveObjectParams, SelectionState, SetEffectStateParams, SetObjectItemParams,
+    MoveObjectParams, SelectionState, SetEffectEnabledParams, SetObjectItemParams,
     SetObjectNameParams, SetSelectionParams,
 };
 use std::sync::Arc;
@@ -56,7 +56,8 @@ pub trait EditAdapter: Send + Sync {
     fn delete_effect(&self, params: &DeleteEffectParams) -> Result<EditOutcome, EditError>;
 
     /// effect の有効・無効を変更する。
-    fn set_effect_state(&self, params: &SetEffectStateParams) -> Result<EditOutcome, EditError>;
+    fn set_effect_enabled(&self, params: &SetEffectEnabledParams)
+    -> Result<EditOutcome, EditError>;
 
     /// カーソル・選択範囲・フォーカスを変更する。
     ///

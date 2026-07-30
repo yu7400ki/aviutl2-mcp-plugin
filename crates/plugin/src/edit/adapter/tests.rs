@@ -924,12 +924,12 @@ fn a_creation_that_produces_nothing_reports_the_mutation() {
 // ------------------------------------------------------------------ read-back
 
 #[test]
-fn a_silently_ignored_effect_state_change_is_not_reported_as_success() {
+fn a_silently_ignored_enable_change_is_not_reported_as_success() {
     let harness =
         Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::IgnoreEffectState)));
     let error = harness
         .edit
-        .set_effect_state(&SetEffectStateParams {
+        .set_effect_enabled(&SetEffectEnabledParams {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
             enabled: false,
         })
@@ -1013,7 +1013,7 @@ fn changes_the_host_never_applies_are_refused_before_the_sdk_is_called() {
         let selector = harness.effect_selector(1, 100, effect_name, 0);
         let Err(error) = harness
             .edit
-            .set_effect_state(&SetEffectStateParams { selector, enabled })
+            .set_effect_enabled(&SetEffectEnabledParams { selector, enabled })
         else {
             panic!("{label} が変更できました");
         };
@@ -1357,7 +1357,7 @@ fn issuing_a_mutation_advances_the_revision_once() {
     let harness = Harness::new();
     let outcome = harness
         .edit
-        .set_effect_state(&SetEffectStateParams {
+        .set_effect_enabled(&SetEffectEnabledParams {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
             enabled: false,
         })
@@ -1677,11 +1677,11 @@ fn each_operation_fills_the_outcome_it_is_defined_to_fill() {
     let harness = Harness::new();
     let outcome = harness
         .edit
-        .set_effect_state(&SetEffectStateParams {
+        .set_effect_enabled(&SetEffectEnabledParams {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
             enabled: false,
         })
-        .expect("set_effect_state");
+        .expect("set_effect_enabled");
     assert!(outcome.object.is_some());
     assert!(outcome.effect.is_some());
     assert!(outcome.created.is_empty());
@@ -2304,8 +2304,8 @@ fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
                 selector: harness.effect_selector_of(target, "ぼかし", 0),
             })
         },
-        EditOperation::SetEffectState => |harness: &Harness, target| {
-            harness.edit.set_effect_state(&SetEffectStateParams {
+        EditOperation::SetEffectEnabled => |harness: &Harness, target| {
+            harness.edit.set_effect_enabled(&SetEffectEnabledParams {
                 selector: harness.effect_selector_of(target, "ぼかし", 0),
                 enabled: false,
             })
@@ -2412,7 +2412,7 @@ fn locked_layer(operation: EditOperation) -> Option<LockedLayer> {
         | EditOperation::SetObjectItem
         | EditOperation::AddEffect
         | EditOperation::DeleteEffect
-        | EditOperation::SetEffectState => LockedLayer::Allowed,
+        | EditOperation::SetEffectEnabled => LockedLayer::Allowed,
         EditOperation::SetSelection => return None,
     })
 }
@@ -2666,7 +2666,7 @@ fn disabling_an_input_item_is_reported_with_the_reread_state() {
     let harness = Harness::new();
     let outcome = harness
         .edit
-        .set_effect_state(&SetEffectStateParams {
+        .set_effect_enabled(&SetEffectEnabledParams {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
             enabled: false,
         })

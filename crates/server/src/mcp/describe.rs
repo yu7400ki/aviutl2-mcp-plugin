@@ -247,9 +247,9 @@ pub fn add_effect(outcome: &EditOutcome) -> String {
     changed_effect("effect を付与しました", outcome)
 }
 
-/// `aviutl2_set_effect_state` の text content。
-pub fn set_effect_state(outcome: &EditOutcome) -> String {
-    changed_effect("effect の状態を変更しました", outcome)
+/// `aviutl2_set_effect_enabled` の text content。
+pub fn set_effect_enabled(outcome: &EditOutcome) -> String {
+    changed_effect("effect の有効・無効を変更しました", outcome)
 }
 
 /// `aviutl2_delete_effect` の text content。
@@ -802,8 +802,8 @@ mod tests {
             ("aviutl2_set_object_item", set_object_item(&effect_changed)),
             ("aviutl2_add_effect", add_effect(&effect_changed)),
             (
-                "aviutl2_set_effect_state",
-                set_effect_state(&effect_changed),
+                "aviutl2_set_effect_enabled",
+                set_effect_enabled(&effect_changed),
             ),
             ("aviutl2_delete_effect", delete_effect(&object_changed)),
             ("aviutl2_delete_object", delete_object(&deleted)),
@@ -892,7 +892,7 @@ mod tests {
         for text in [
             set_object_item(&outcome),
             add_effect(&outcome),
-            set_effect_state(&outcome),
+            set_effect_enabled(&outcome),
         ] {
             assert!(text.contains("fingerprint"), "{text}");
         }

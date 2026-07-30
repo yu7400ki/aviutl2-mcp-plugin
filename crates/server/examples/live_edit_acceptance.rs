@@ -60,7 +60,7 @@ use aviutl2_mcp_server::discovery::default_registry_dir;
 use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, CreateObjectInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
     DestinationInput, EffectSelectorInput, FocusChangeInput, ItemValueInput, MoveObjectInput,
-    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectStateInput, SetObjectItemInput,
+    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetObjectItemInput,
     SetObjectNameInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::{
@@ -745,22 +745,21 @@ impl Harness {
         self.decode(result)
     }
 
-    fn set_effect_state(
+    fn set_effect_enabled(
         &self,
         instance: &str,
         selector: &EffectSelector,
         enabled: bool,
     ) -> Result<EditOutcome, ErrorObject> {
-        let result = self
-            .runtime
-            .block_on(
-                self.server
-                    .aviutl2_set_effect_state(Parameters(SetEffectStateInput {
+        let result =
+            self.runtime
+                .block_on(self.server.aviutl2_set_effect_enabled(Parameters(
+                    SetEffectEnabledInput {
                         instance_id: instance.to_string(),
                         selector: effect_selector_input(selector),
                         enabled,
-                    })),
-            );
+                    },
+                )));
         self.decode(result)
     }
 
@@ -1578,7 +1577,7 @@ fn check_alias_covers_effects(
         .find(|effect| effect.name == selector.effect_name)
         .map(|effect| effect.selector.clone())
         .ok_or_else(|| "変更した effect を再取得できませんでした".to_string())?;
-    let toggled = harness.set_effect_state(&instance.id, &effect_selector, false);
+    let toggled = harness.set_effect_enabled(&instance.id, &effect_selector, false);
     let (enabled_changed_fingerprint, enabled_changed_alias, toggled_object) = match &toggled {
         Ok(outcome) => {
             let object = outcome.object.clone();
@@ -1617,7 +1616,7 @@ fn check_alias_covers_effects(
         .iter()
         .find(|effect| effect.name == selector.effect_name)
     {
-        let _ = harness.set_effect_state(&instance.id, &effect.selector, true);
+        let _ = harness.set_effect_enabled(&instance.id, &effect.selector, true);
     }
     restore_item(
         harness,
@@ -1744,7 +1743,7 @@ fn check_effect_index_shift(
         effect_index: front.effect_index,
         fingerprint: front.fingerprint.clone(),
     };
-    let attempt = harness.set_effect_state(&instance.id, &stale, false);
+    let attempt = harness.set_effect_enabled(&instance.id, &stale, false);
     let outcome = expect_rejection(
         attempt,
         ErrorCode::PreconditionFailed,
@@ -2331,8 +2330,8 @@ fn check_edit_chain(
 
     // 有効状態の変更。
     let selector = effect_selector.clone();
-    let disabled = chain_outcome(&mut steps, "set_effect_state", &state, |_state| {
-        harness.set_effect_state(&instance.id, &selector, false)
+    let disabled = chain_outcome(&mut steps, "set_effect_enabled", &state, |_state| {
+        harness.set_effect_enabled(&instance.id, &selector, false)
     })?;
     let effect_selector = disabled
         .effect
@@ -2675,7 +2674,7 @@ fn check_output_item_enable(
         "有効状態の変更前の詳細を取得できません",
     )?;
 
-    let result = harness.set_effect_state(&instance.id, &found.effect.selector, false);
+    let result = harness.set_effect_enabled(&instance.id, &found.effect.selector, false);
 
     let after_object = resolve_object(
         harness,

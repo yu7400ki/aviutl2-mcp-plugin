@@ -1757,9 +1757,9 @@ mod tests {
             Err(Self::unavailable())
         }
 
-        fn set_effect_state(
+        fn set_effect_enabled(
             &self,
-            _: &aviutl2_mcp_core::SetEffectStateParams,
+            _: &aviutl2_mcp_core::SetEffectEnabledParams,
         ) -> Result<aviutl2_mcp_core::EditOutcome, crate::edit::EditError> {
             Err(Self::unavailable())
         }

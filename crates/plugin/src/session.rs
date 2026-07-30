@@ -25,7 +25,7 @@ use aviutl2_mcp_core::{
     ObjectFilterError, PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT,
     PLUGIN_WRITE_TIMEOUT, PageError, PageRequest, PongProject, PongResult, ProtocolVersion,
     RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult,
-    SetEffectStateParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+    SetEffectEnabledParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
     compute_client_mac, compute_server_mac, deserialize_json, negotiate, take_page, verify_mac,
 };
 use chrono::Utc;
@@ -834,7 +834,7 @@ enum EditRequest {
     SetObjectItem(Box<SetObjectItemParams>),
     AddEffect(Box<AddEffectParams>),
     DeleteEffect(Box<DeleteEffectParams>),
-    SetEffectState(Box<SetEffectStateParams>),
+    SetEffectEnabled(Box<SetEffectEnabledParams>),
     SetSelection(Box<SetSelectionParams>),
 }
 
@@ -869,8 +869,8 @@ fn decode_edit_request(
         }
         EditOperation::AddEffect => decoded!(AddEffectParams, EditRequest::AddEffect),
         EditOperation::DeleteEffect => decoded!(DeleteEffectParams, EditRequest::DeleteEffect),
-        EditOperation::SetEffectState => {
-            decoded!(SetEffectStateParams, EditRequest::SetEffectState)
+        EditOperation::SetEffectEnabled => {
+            decoded!(SetEffectEnabledParams, EditRequest::SetEffectEnabled)
         }
         EditOperation::SetSelection => decoded!(SetSelectionParams, EditRequest::SetSelection),
     })
@@ -903,8 +903,8 @@ fn dispatch_edit(adapter: &dyn EditAdapter, request: EditRequest) -> Result<Valu
         EditRequest::DeleteEffect(params) => {
             to_result(&adapter.delete_effect(&params).map_err(edit_error)?)
         }
-        EditRequest::SetEffectState(params) => {
-            to_result(&adapter.set_effect_state(&params).map_err(edit_error)?)
+        EditRequest::SetEffectEnabled(params) => {
+            to_result(&adapter.set_effect_enabled(&params).map_err(edit_error)?)
         }
         EditRequest::SetSelection(params) => {
             to_result(&adapter.set_selection(&params).map_err(edit_error)?)
@@ -2430,8 +2430,8 @@ mod edit_tests {
             Ok(self.enter("delete_effect"))
         }
 
-        fn set_effect_state(&self, _: &SetEffectStateParams) -> Result<EditOutcome, EditError> {
-            Ok(self.enter("set_effect_state"))
+        fn set_effect_enabled(&self, _: &SetEffectEnabledParams) -> Result<EditOutcome, EditError> {
+            Ok(self.enter("set_effect_enabled"))
         }
 
         fn set_selection(&self, _: &SetSelectionParams) -> Result<SelectionState, EditError> {
@@ -2488,7 +2488,7 @@ mod edit_tests {
                 "effect_name": "ぼかし",
             }),
             EditOperation::DeleteEffect => json!({ "selector": fake_effect_selector() }),
-            EditOperation::SetEffectState => json!({
+            EditOperation::SetEffectEnabled => json!({
                 "selector": fake_effect_selector(),
                 "enabled": true,
             }),
@@ -2507,7 +2507,7 @@ mod edit_tests {
             EditRequest::SetObjectItem(params) => serde_json::to_value(params),
             EditRequest::AddEffect(params) => serde_json::to_value(params),
             EditRequest::DeleteEffect(params) => serde_json::to_value(params),
-            EditRequest::SetEffectState(params) => serde_json::to_value(params),
+            EditRequest::SetEffectEnabled(params) => serde_json::to_value(params),
             EditRequest::SetSelection(params) => serde_json::to_value(params),
         };
         Ok(encoded.expect("params は直列化できる"))

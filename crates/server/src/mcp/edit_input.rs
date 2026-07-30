@@ -31,7 +31,7 @@ use aviutl2_mcp_core::{
     AddEffectParams, CreateObjectParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
     Destination, EditInputError, EffectSelector, ErrorObject, FiniteF64, FocusChange, ItemValue,
     MAX_ALIAS_BYTES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MoveObjectParams, ObjectSource,
-    Placement, RangeChange, SetEffectStateParams, SetObjectItemParams, SetObjectNameParams,
+    Placement, RangeChange, SetEffectEnabledParams, SetObjectItemParams, SetObjectNameParams,
     SetSelectionParams,
 };
 use schemars::JsonSchema;
@@ -525,10 +525,10 @@ impl DeleteEffectInput {
     }
 }
 
-/// `aviutl2_set_effect_state` の入力。
+/// `aviutl2_set_effect_enabled` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SetEffectStateInput {
+pub struct SetEffectEnabledInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
     pub instance_id: String,
@@ -538,10 +538,10 @@ pub struct SetEffectStateInput {
     pub enabled: bool,
 }
 
-impl SetEffectStateInput {
+impl SetEffectEnabledInput {
     /// IPC の params へ変換する。
-    pub fn to_params(&self) -> Result<SetEffectStateParams, ErrorObject> {
-        let params = SetEffectStateParams {
+    pub fn to_params(&self) -> Result<SetEffectEnabledParams, ErrorObject> {
+        let params = SetEffectEnabledParams {
             selector: self.selector.to_selector()?,
             enabled: self.enabled,
         };
@@ -686,7 +686,7 @@ mod tests {
                 "instance_id": SAMPLE_ID,
                 "selector": effect_selector_json(),
             }),
-            EditOperation::SetEffectState => json!({
+            EditOperation::SetEffectEnabled => json!({
                 "instance_id": SAMPLE_ID,
                 "selector": effect_selector_json(),
                 "enabled": true,
@@ -720,7 +720,7 @@ mod tests {
             EditOperation::SetObjectItem => decoded!(SetObjectItemInput),
             EditOperation::AddEffect => decoded!(AddEffectInput),
             EditOperation::DeleteEffect => decoded!(DeleteEffectInput),
-            EditOperation::SetEffectState => decoded!(SetEffectStateInput),
+            EditOperation::SetEffectEnabled => decoded!(SetEffectEnabledInput),
             EditOperation::SetSelection => decoded!(SetSelectionInput),
         })
     }
@@ -1284,9 +1284,9 @@ mod tests {
     }
 
     #[test]
-    fn effect_state_requires_the_enabled_field() {
+    fn set_effect_enabled_requires_the_enabled_field() {
         assert!(
-            serde_json::from_value::<SetEffectStateInput>(json!({
+            serde_json::from_value::<SetEffectEnabledInput>(json!({
                 "instance_id": SAMPLE_ID,
                 "selector": effect_selector_json(),
             }))

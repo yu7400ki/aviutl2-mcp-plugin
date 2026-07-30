@@ -49,7 +49,7 @@ pub const OPERATION_ADD_EFFECT: &str = "add_effect";
 pub const OPERATION_DELETE_EFFECT: &str = "delete_effect";
 
 /// effect の有効・無効を変更する operation 名。
-pub const OPERATION_SET_EFFECT_STATE: &str = "set_effect_state";
+pub const OPERATION_SET_EFFECT_ENABLED: &str = "set_effect_enabled";
 
 /// カーソル・選択範囲・フォーカスを変更する operation 名。
 pub const OPERATION_SET_SELECTION: &str = "set_selection";
@@ -80,8 +80,8 @@ pub enum EditOperation {
     AddEffect,
     /// [`OPERATION_DELETE_EFFECT`]。
     DeleteEffect,
-    /// [`OPERATION_SET_EFFECT_STATE`]。
-    SetEffectState,
+    /// [`OPERATION_SET_EFFECT_ENABLED`]。
+    SetEffectEnabled,
     /// [`OPERATION_SET_SELECTION`]。
     SetSelection,
 }
@@ -98,7 +98,7 @@ impl EditOperation {
         EditOperation::SetObjectItem,
         EditOperation::AddEffect,
         EditOperation::DeleteEffect,
-        EditOperation::SetEffectState,
+        EditOperation::SetEffectEnabled,
         EditOperation::SetSelection,
     ];
 
@@ -112,7 +112,7 @@ impl EditOperation {
             EditOperation::SetObjectItem => OPERATION_SET_OBJECT_ITEM,
             EditOperation::AddEffect => OPERATION_ADD_EFFECT,
             EditOperation::DeleteEffect => OPERATION_DELETE_EFFECT,
-            EditOperation::SetEffectState => OPERATION_SET_EFFECT_STATE,
+            EditOperation::SetEffectEnabled => OPERATION_SET_EFFECT_ENABLED,
             EditOperation::SetSelection => OPERATION_SET_SELECTION,
         }
     }
@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(OPERATION_SET_OBJECT_ITEM, "set_object_item");
         assert_eq!(OPERATION_ADD_EFFECT, "add_effect");
         assert_eq!(OPERATION_DELETE_EFFECT, "delete_effect");
-        assert_eq!(OPERATION_SET_EFFECT_STATE, "set_effect_state");
+        assert_eq!(OPERATION_SET_EFFECT_ENABLED, "set_effect_enabled");
         assert_eq!(OPERATION_SET_SELECTION, "set_selection");
     }
 
@@ -343,8 +343,8 @@ mod tests {
             OPERATION_DELETE_EFFECT
         );
         assert_eq!(
-            EditOperation::SetEffectState.as_str(),
-            OPERATION_SET_EFFECT_STATE
+            EditOperation::SetEffectEnabled.as_str(),
+            OPERATION_SET_EFFECT_ENABLED
         );
         assert_eq!(
             EditOperation::SetSelection.as_str(),
@@ -381,7 +381,7 @@ mod tests {
                 | EditOperation::SetObjectItem
                 | EditOperation::AddEffect
                 | EditOperation::DeleteEffect
-                | EditOperation::SetEffectState
+                | EditOperation::SetEffectEnabled
                 | EditOperation::SetSelection => {}
             }
             assert!(
@@ -397,7 +397,7 @@ mod tests {
         assert_listed(EditOperation::SetObjectItem);
         assert_listed(EditOperation::AddEffect);
         assert_listed(EditOperation::DeleteEffect);
-        assert_listed(EditOperation::SetEffectState);
+        assert_listed(EditOperation::SetEffectEnabled);
         assert_listed(EditOperation::SetSelection);
         assert_eq!(EditOperation::ALL.len(), 9);
     }

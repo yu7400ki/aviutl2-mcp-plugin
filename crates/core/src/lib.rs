@@ -52,7 +52,7 @@ pub use descriptor::{
 pub use edit::{
     AddEffectParams, CreateObjectParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
     Destination, EditInputError, EditOutcome, FocusChange, MoveObjectParams, ObjectSource,
-    Placement, RangeChange, SelectionField, SelectionState, SetEffectStateParams,
+    Placement, RangeChange, SelectionField, SelectionState, SetEffectEnabledParams,
     SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
 };
 pub use edit_info::{Cursor, DisplayRange, EditInfo, Extent, FrameRange, SceneInfo, SceneRef};
@@ -90,7 +90,7 @@ pub use operation::{
     OPERATION_CREATE_OBJECT, OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT,
     OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_OBJECT,
     OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS,
-    OPERATION_MOVE_OBJECT, OPERATION_SET_EFFECT_STATE, OPERATION_SET_OBJECT_ITEM,
+    OPERATION_MOVE_OBJECT, OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_OBJECT_ITEM,
     OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectFilter, ObjectFilterError,
 };
 pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};

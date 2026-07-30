@@ -269,7 +269,7 @@ fn expected_annotations(name: &str) -> (bool, bool, bool) {
         "aviutl2_move_object"
         | "aviutl2_set_object_name"
         | "aviutl2_set_object_item"
-        | "aviutl2_set_effect_state"
+        | "aviutl2_set_effect_enabled"
         | "aviutl2_set_selection" => (false, false, true),
         other => panic!("{other} の annotation が定義されていません"),
     }

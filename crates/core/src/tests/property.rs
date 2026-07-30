@@ -2,7 +2,7 @@
 
 use crate::edit::{
     AddEffectParams, CreateObjectParams, DeleteEffectParams, DeleteObjectParams, MoveObjectParams,
-    SetEffectStateParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+    SetEffectEnabledParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
 };
 use crate::effect::{EffectItem, EffectItemType, TrackInfo};
 use crate::fingerprint::{
@@ -773,7 +773,7 @@ proptest! {
         assert_decodes_or_errors!(SetObjectItemParams);
         assert_decodes_or_errors!(AddEffectParams);
         assert_decodes_or_errors!(DeleteEffectParams);
-        assert_decodes_or_errors!(SetEffectStateParams);
+        assert_decodes_or_errors!(SetEffectEnabledParams);
         assert_decodes_or_errors!(SetSelectionParams);
     }
 
@@ -795,7 +795,7 @@ proptest! {
         assert_decodes_or_errors!(SetObjectItemParams);
         assert_decodes_or_errors!(AddEffectParams);
         assert_decodes_or_errors!(DeleteEffectParams);
-        assert_decodes_or_errors!(SetEffectStateParams);
+        assert_decodes_or_errors!(SetEffectEnabledParams);
         assert_decodes_or_errors!(SetSelectionParams);
     }
 }

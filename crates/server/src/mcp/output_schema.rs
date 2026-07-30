@@ -113,8 +113,8 @@ pub fn add_effect() -> Value {
     edit_outcome(object_summary(), effect_info(), nothing_created())
 }
 
-/// `aviutl2_set_effect_state` の出力。
-pub fn set_effect_state() -> Value {
+/// `aviutl2_set_effect_enabled` の出力。
+pub fn set_effect_enabled() -> Value {
     edit_outcome(object_summary(), effect_info(), nothing_created())
 }
 
@@ -956,7 +956,7 @@ mod tests {
             sample_effect_info(),
         );
         let value = to_value(&outcome);
-        for schema in [set_object_item(), add_effect(), set_effect_state()] {
+        for schema in [set_object_item(), add_effect(), set_effect_enabled()] {
             assert_conforms(schema, &value);
         }
     }
@@ -1018,7 +1018,7 @@ mod tests {
             ("delete_effect", delete_effect()),
             ("set_object_item", set_object_item()),
             ("add_effect", add_effect()),
-            ("set_effect_state", set_effect_state()),
+            ("set_effect_enabled", set_effect_enabled()),
             ("set_selection", set_selection()),
         ] {
             if name == "set_selection" {
@@ -1054,7 +1054,7 @@ mod tests {
             sample_object_summary(),
         );
         let value = to_value(&outcome);
-        for schema in [set_object_item(), add_effect(), set_effect_state()] {
+        for schema in [set_object_item(), add_effect(), set_effect_enabled()] {
             assert!(
                 check(&schema, &value, "$").is_err(),
                 "effect の欠落を検出できていません"

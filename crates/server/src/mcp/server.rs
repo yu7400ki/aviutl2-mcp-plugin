@@ -9,7 +9,7 @@ use crate::api::{ListInstancesResponse, aviutl2_list_instances};
 use crate::discovery::{DiscoveryConfig, list_registered_instances, resolve_instance};
 use crate::mcp::edit_input::{
     AddEffectInput, CreateObjectInput, DeleteEffectInput, DeleteObjectInput, MoveObjectInput,
-    SetEffectStateInput, SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
+    SetEffectEnabledInput, SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
 };
 use crate::mcp::input::{
     GetObjectInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput, ListLayersInput,
@@ -24,7 +24,7 @@ use aviutl2_mcp_core::{
     MAX_PAGE_LIMIT, OPERATION_ADD_EFFECT, OPERATION_CREATE_OBJECT, OPERATION_DELETE_EFFECT,
     OPERATION_DELETE_OBJECT, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
     OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
-    OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT, OPERATION_SET_EFFECT_STATE,
+    OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT, OPERATION_SET_EFFECT_ENABLED,
     OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail,
     RequestBudgetKind, SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET,
     SERVER_RESOLVE_BUDGET, SelectionState, request_budget_kind,
@@ -782,7 +782,7 @@ impl AviUtl2McpServer {
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
-        name = "aviutl2_set_effect_state",
+        name = "aviutl2_set_effect_enabled",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -790,27 +790,27 @@ impl AviUtl2McpServer {
             open_world_hint = false
         ),
         output_schema = crate::mcp::output_schema::as_tool_schema(
-            crate::mcp::output_schema::set_effect_state()
+            crate::mcp::output_schema::set_effect_enabled()
         )
     )]
-    pub async fn aviutl2_set_effect_state(
+    pub async fn aviutl2_set_effect_enabled(
         &self,
-        Parameters(input): Parameters<SetEffectStateInput>,
+        Parameters(input): Parameters<SetEffectEnabledInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits;
-        self.run("aviutl2_set_effect_state", move || {
+        self.run("aviutl2_set_effect_enabled", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: EditOutcome = request_operation(
                 &registry_dir,
                 instance_id,
                 limits,
-                OPERATION_SET_EFFECT_STATE,
+                OPERATION_SET_EFFECT_ENABLED,
                 &params,
             )?;
             Ok(ToolSuccess {
-                text: describe::set_effect_state(&result),
+                text: describe::set_effect_enabled(&result),
                 structured: to_structured(&result)?,
             })
         })
@@ -1428,7 +1428,7 @@ mod tests {
         "aviutl2_set_object_name",
         "aviutl2_set_object_item",
         "aviutl2_add_effect",
-        "aviutl2_set_effect_state",
+        "aviutl2_set_effect_enabled",
         "aviutl2_delete_effect",
         "aviutl2_delete_object",
         "aviutl2_set_selection",
@@ -1459,7 +1459,7 @@ mod tests {
         ("aviutl2_set_object_name", false, true),
         ("aviutl2_set_object_item", false, true),
         ("aviutl2_add_effect", false, false),
-        ("aviutl2_set_effect_state", false, true),
+        ("aviutl2_set_effect_enabled", false, true),
         ("aviutl2_delete_effect", true, true),
         ("aviutl2_delete_object", true, true),
         ("aviutl2_set_selection", false, true),
@@ -1549,7 +1549,7 @@ mod tests {
             "aviutl2_set_object_name" => schema::set_object_name(),
             "aviutl2_set_object_item" => schema::set_object_item(),
             "aviutl2_add_effect" => schema::add_effect(),
-            "aviutl2_set_effect_state" => schema::set_effect_state(),
+            "aviutl2_set_effect_enabled" => schema::set_effect_enabled(),
             "aviutl2_delete_effect" => schema::delete_effect(),
             "aviutl2_delete_object" => schema::delete_object(),
             "aviutl2_set_selection" => schema::set_selection(),
@@ -1733,7 +1733,7 @@ mod tests {
                 "aviutl2_set_object_item",
                 &["fingerprint", "公開していない設定項目種別", "item_type"],
             ),
-            ("aviutl2_set_effect_state", &["fingerprint", "出力 item"]),
+            ("aviutl2_set_effect_enabled", &["fingerprint", "出力 item"]),
             ("aviutl2_delete_effect", &["fingerprint", "not_found"]),
             ("aviutl2_delete_object", &["not_found"]),
             (
