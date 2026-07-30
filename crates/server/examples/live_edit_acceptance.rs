@@ -100,6 +100,12 @@ const STABILITY_READS: usize = 10;
 const REVISION_CHAIN_STEPS: usize = 10;
 /// 作業用レイヤーを空へ戻すときに削除を試みる上限。
 const CLEAR_LAYER_LIMIT: usize = 32;
+/// 列挙されたレイヤーの末尾から、明らかに範囲外と言える位置までの隔たり。
+const OUT_OF_RANGE_LAYER_OFFSET: usize = 1_000;
+/// 実改行を含む設定値の観測に用いる 1 行目。
+const MULTILINE_FIRST: &str = "実改行確認の1行目";
+/// 同じく 2 行目。
+const MULTILINE_SECOND: &str = "実改行確認の2行目";
 
 fn main() {
     let mut report = Report::new();
@@ -149,6 +155,8 @@ fn run(report: &mut Report) -> Result<(), String> {
     record_section_failure_if_any(report, "5.7", outcome);
     let outcome = section_misc(&harness, report, &a, &context);
     record_section_failure_if_any(report, "5.8", outcome);
+    let outcome = section_layer_bounds(&harness, report, &a, &context);
+    record_section_failure_if_any(report, "5.10", outcome);
     let outcome = section_completion(&harness, report, &a, &b);
     record_section_failure_if_any(report, "6", outcome);
 
@@ -2206,24 +2214,9 @@ fn check_layer_lock_scope(
     let work = context.free_slots[1];
     let away = context.free_slots[2];
     let alias = target_alias(harness, instance, context)?;
-    let inside = create_object_at(harness, instance, context, &alias, work)?;
-    let outside = create_object_at(harness, instance, context, &alias, away)?;
-
-    let epoch = precondition(harness, instance)?;
-    let locked = require(
-        harness.set_layer_state(
-            &instance.id,
-            context.scene_id,
-            work.layer,
-            LayerStateChange::locked(true),
-            epoch,
-        ),
-        "作業レイヤーをロックできません",
-    );
-    let probed = match locked {
-        Ok(_) => probe_locked_operations(harness, instance, context, &alias, inside, outside),
-        Err(reason) => Err(reason),
-    };
+    // 準備の途中で落ちても後始末へ進む。ロックを掛けたまま抜けると、以降の
+    // 確認がそのレイヤーを使えなくなる。
+    let probed = prepare_and_probe_lock_scope(harness, instance, context, &alias, work, away);
 
     // 後始末: ロックを解いてから、作業に使った 2 つのレイヤーを空へ戻す。
     // 解除を先に行わないと、作業用オブジェクトの削除がロックに阻まれる。
@@ -2233,6 +2226,31 @@ fn check_layer_lock_scope(
         (Ok(_), Err(reason)) => Err(format!("後始末に失敗しました: {reason}")),
         (Err(reason), _) => Err(reason),
     }
+}
+
+/// 対象を用意し、レイヤーをロックしてから可否を確かめる。
+fn prepare_and_probe_lock_scope(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    alias: &str,
+    work: Placement,
+    away: Placement,
+) -> CheckResult {
+    let inside = create_object_at(harness, instance, context, alias, work)?;
+    let outside = create_object_at(harness, instance, context, alias, away)?;
+    let epoch = precondition(harness, instance)?;
+    require(
+        harness.set_layer_state(
+            &instance.id,
+            context.scene_id,
+            work.layer,
+            LayerStateChange::locked(true),
+            epoch,
+        ),
+        "作業レイヤーをロックできません",
+    )?;
+    probe_locked_operations(harness, instance, context, alias, inside, outside)
 }
 
 /// ロック中の各 operation を実行し、可否の表を組み立てる。
@@ -2388,30 +2406,43 @@ fn probe_locked_operations(
 }
 
 /// 表の全行が期待どおりであることを確かめる。
+///
+/// 最初の食い違いで打ち切らない。1 行目が落ちた回に残りが分からないと、直した
+/// 後に別の行が落ちていることへ気付けない。
 fn verify_locked_operations(rows: Vec<LockedOperation>) -> CheckResult {
     let mut notes = Vec::new();
+    let mut failures = Vec::new();
     for row in rows {
         let label = row.label;
         if row.allowed {
             match row.outcome {
                 Ok(()) => notes.push(format!("{label}: ロック中でも成功した")),
-                Err(error) => {
-                    return Err(format!(
-                        "{label} がロック中に拒否されました: {}",
-                        describe_error(&error)
-                    ));
-                }
+                Err(error) => failures.push(format!(
+                    "{label} がロック中に拒否されました: {}",
+                    describe_error(&error)
+                )),
             }
             continue;
         }
         match expect_layer_locked(row.outcome) {
             Ok(observed) => notes.push(format!("{label}: {}", observed.join(" "))),
             Err(reason) => {
-                return Err(format!("{label} がロックで拒否されませんでした: {reason}"));
+                failures.push(format!("{label} がロックで拒否されませんでした: {reason}"))
             }
         }
     }
-    Ok(notes)
+    if failures.is_empty() {
+        return Ok(notes);
+    }
+    Err(format!(
+        "{}（期待どおりだったのは {}）",
+        failures.join(" / "),
+        if notes.is_empty() {
+            "無し".to_string()
+        } else {
+            notes.join(" / ")
+        }
+    ))
 }
 
 /// ロックを解除し、作業に使った 2 つのレイヤーを空へ戻す。
@@ -2771,14 +2802,21 @@ fn check_multi_object_created(
             Err(reason) => return Attempt::Ran(Err(reason)),
         },
     );
-    let created = match created {
-        Ok(outcome) => outcome.created,
+    let (created, first) = match created {
+        Ok(outcome) => (outcome.created, outcome.object),
         Err(error) => {
             return Attempt::Ran(Err(format!(
                 "複数オブジェクトを含む alias から作成できません: {}",
                 describe_error(&error)
             )));
         }
+    };
+    // created が空でも作成そのものは起きている。後始末は応答が返した対象まで
+    // 含めて行う。
+    let leftovers: Vec<ObjectSummary> = if created.is_empty() {
+        first.into_iter().collect()
+    } else {
+        created.clone()
     };
 
     let mut layers: Vec<usize> = created.iter().map(|object| object.layer).collect();
@@ -2796,7 +2834,7 @@ fn check_multi_object_created(
 
     let probed = probe_created_reachability(harness, instance, context, &created);
     // 後始末: 作成したオブジェクトのうち残っているものを全て削除する。
-    let cleaned = cleanup_created(harness, instance, context, &created);
+    let cleaned = cleanup_created(harness, instance, context, &leftovers);
     match cleaned {
         Ok(()) => probed,
         Err(reason) => Attempt::Ran(Err(match probed {
@@ -2816,10 +2854,16 @@ fn probe_created_reachability(
     created: &[ObjectSummary],
 ) -> Attempt {
     let Some(second) = created.get(1) else {
-        return Attempt::Unmet(format!(
-            "{MULTI_ALIAS_FILE_ENV} の alias が {} 件のオブジェクトしか作りませんでした",
-            created.len()
-        ));
+        // 1 件だけなら、与えられた alias が複数オブジェクトを含んでいない。
+        // 0 件は別である——作成は成功しており、差分がそれを取りこぼしている。
+        return match created.len() {
+            0 => Attempt::Ran(Err(
+                "作成が成功したのに created が 1 件も返りませんでした".to_string()
+            )),
+            _ => Attempt::Unmet(format!(
+                "{MULTI_ALIAS_FILE_ENV} の alias が 1 件のオブジェクトしか作りませんでした"
+            )),
+        };
     };
 
     if let Err(error) = harness.delete_object(&instance.id, &second.selector) {
@@ -3493,6 +3537,7 @@ fn section_item_round_trip(
     }
 
     let track = check_track_item(harness, instance, context, scratch)?;
+    observe_multiline_text_write(harness, report, instance, context, scratch);
 
     // 後始末: 追加した effect ごと対象を削除する。
     let object = resolve_object(harness, instance, context.scene_id, scratch)?;
@@ -3813,6 +3858,236 @@ fn summarize_write_support(results: &[TypeResult]) -> String {
         }
     }
     lines.join(" / ")
+}
+
+/// 設定項目の在り処。
+struct ItemLocation {
+    /// 積まれている effect の名前。
+    effect_name: String,
+    /// 同名 effect の中での位置。
+    effect_index: usize,
+    /// 設定項目の名前。
+    item_name: String,
+}
+
+/// 実改行を含む設定値の write が何をもたらすかを観測する。
+///
+/// 実改行が通って正しい複数行テキストになるなら、文字列種別の制御文字の緩和は
+/// 複数行を書く直接の手段であり維持する。行構造が壊れるか値が欠けるなら撤回する。
+/// **どちらへ転んでも誤りではないため合否を付けない。** 観測できなかった場合だけ
+/// 未実施として残す。
+///
+/// 途中で落ちても区間を止めない。ここで打ち切ると、対象の削除まで届かない。
+fn observe_multiline_text_write(
+    harness: &Harness,
+    report: &mut Report,
+    instance: &Instance,
+    context: &Context,
+    at: Placement,
+) {
+    let title = "実改行を含む設定値の write";
+    let verified = "実改行（U+000A）を含む値を書き込んだときの挙動を観測する";
+    let (location, original, before_lines) = match text_item_of(harness, instance, context, at) {
+        Ok(Some(found)) => found,
+        Ok(None) => {
+            report.skip(
+                "5.4",
+                title,
+                verified,
+                Mode::Auto,
+                "確認対象に文字列種別の設定項目がありません",
+            );
+            return;
+        }
+        Err(reason) => {
+            report.skip(
+                "5.4",
+                title,
+                verified,
+                Mode::Auto,
+                format!("確認対象を読み取れません: {reason}"),
+            );
+            return;
+        }
+    };
+
+    let selector = match locate_item(
+        harness,
+        instance,
+        context,
+        at,
+        &location.effect_name,
+        location.effect_index,
+        &location.item_name,
+    ) {
+        Ok(Some((selector, _))) => selector,
+        Ok(None) => {
+            report.skip(
+                "5.4",
+                title,
+                verified,
+                Mode::Auto,
+                "書き込む設定項目を再取得できません",
+            );
+            return;
+        }
+        Err(reason) => {
+            report.skip(
+                "5.4",
+                title,
+                verified,
+                Mode::Auto,
+                format!("書き込む設定項目を再取得できません: {reason}"),
+            );
+            return;
+        }
+    };
+
+    let multiline = ItemValue::Text {
+        value: format!("{MULTILINE_FIRST}\n{MULTILINE_SECOND}"),
+    };
+    let written = harness.set_object_item(&instance.id, &selector, &location.item_name, &multiline);
+    let finding = match written {
+        Err(error) => format!("write が拒否された: {}", describe_error(&error)),
+        Ok(_) => {
+            match describe_multiline_read_back(
+                harness,
+                instance,
+                context,
+                at,
+                &location,
+                before_lines,
+            ) {
+                Ok(finding) => finding,
+                Err(reason) => {
+                    format!("write は成功したが、書き込み後の読み直しに失敗した: {reason}")
+                }
+            }
+        }
+    };
+
+    // 後始末: 元の値へ戻す。戻せたかどうかも観測に残す。対象そのものは区間の
+    // 最後に削除されるため、戻せなくても後続の確認へは波及しない。
+    let restored = restore_multiline_item(harness, instance, context, at, &location, &original);
+    report.observe(
+        "multiline_text_write",
+        "実改行（U+000A）を含む設定値の write は通り、正しい複数行テキストになるか",
+        format!("{finding}。{restored}"),
+    );
+}
+
+/// 対象から文字列種別の設定項目を 1 つ探し、alias の行数と併せて返す。
+fn text_item_of(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    at: Placement,
+) -> Result<Option<(ItemLocation, ItemValue, usize)>, String> {
+    let object = resolve_object(harness, instance, context.scene_id, at)?;
+    let detail = require(
+        harness.object(&instance.id, &object.selector),
+        "確認対象の詳細を取得できません",
+    )?;
+    let lines = detail.alias.lines().count();
+    Ok(detail.effects.iter().find_map(|effect| {
+        effect
+            .items
+            .iter()
+            .find(|item| {
+                matches!(
+                    item.item_type,
+                    EffectItemType::Text | EffectItemType::String
+                )
+            })
+            .map(|item| {
+                (
+                    ItemLocation {
+                        effect_name: effect.name.clone(),
+                        effect_index: effect.index,
+                        item_name: item.name.clone(),
+                    },
+                    item.value.clone(),
+                    lines,
+                )
+            })
+    }))
+}
+
+/// 実改行を書いた後の値と alias の様子を 1 行にまとめる。
+///
+/// 値そのものは記録へ残さない。行が保たれたか、書いた 2 行が残ったか、alias の
+/// 行構造が動いたかは、真偽と件数だけで判る。
+fn describe_multiline_read_back(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    at: Placement,
+    location: &ItemLocation,
+    before_lines: usize,
+) -> Result<String, String> {
+    let object = resolve_object(harness, instance, context.scene_id, at)?;
+    let detail = require(
+        harness.object(&instance.id, &object.selector),
+        "書き込み後の詳細を取得できません",
+    )?;
+    let after_lines = detail.alias.lines().count();
+    let read_back = detail
+        .effects
+        .iter()
+        .find(|effect| effect.name == location.effect_name && effect.index == location.effect_index)
+        .and_then(|effect| {
+            effect
+                .items
+                .iter()
+                .find(|item| item.name == location.item_name)
+        })
+        .map(|item| item.value.clone());
+    Ok(match read_back {
+        Some(ItemValue::Text { value }) => format!(
+            "write は成功。読み直した値は 実改行を含む={} / バックスラッシュと n の 2 文字を含む={} / 1 行目が残る={} / 2 行目が残る={} / 行数={}。alias の行数は 前={before_lines} 後={after_lines}",
+            value.contains('\n'),
+            value.contains("\\n"),
+            value.contains(MULTILINE_FIRST),
+            value.contains(MULTILINE_SECOND),
+            value.lines().count(),
+        ),
+        Some(other) => format!(
+            "write は成功したが、読み直した値の種別が {} へ変わった。alias の行数は 前={before_lines} 後={after_lines}",
+            other.kind()
+        ),
+        None => format!(
+            "write は成功したが、書き込んだ項目を読み直せない。alias の行数は 前={before_lines} 後={after_lines}"
+        ),
+    })
+}
+
+/// 観測で書き換えた設定値を元へ戻す。
+fn restore_multiline_item(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    at: Placement,
+    location: &ItemLocation,
+    original: &ItemValue,
+) -> String {
+    match locate_item(
+        harness,
+        instance,
+        context,
+        at,
+        &location.effect_name,
+        location.effect_index,
+        &location.item_name,
+    ) {
+        Ok(Some((selector, _))) => {
+            match harness.set_object_item(&instance.id, &selector, &location.item_name, original) {
+                Ok(_) => "元の値へ戻した".to_string(),
+                Err(error) => format!("元の値へ戻せなかった: {}", describe_error(&error)),
+            }
+        }
+        Ok(None) => "戻す項目を再取得できなかった".to_string(),
+        Err(reason) => format!("戻す項目を再取得できなかった: {reason}"),
+    }
 }
 
 /// trackbar を持つ項目の値を同じ経路で変更できることを確かめる。
@@ -5123,6 +5398,308 @@ fn check_client_disconnect(
         return Err("切断時の送信失敗がログに残っていないと回答された".to_string());
     }
     Ok(vec!["切断後も読み取りと編集を受け付けた".to_string()])
+}
+
+// ---------------------------------------------------------------------------
+// 5.10 空レイヤーと範囲外レイヤー
+// ---------------------------------------------------------------------------
+
+/// 空レイヤーと範囲外レイヤーで、レイヤー属性の読み取りと編集が何を返すかを
+/// 観測する。
+///
+/// 何を返すかが分かっていないため期待値を書けない。返った内容は観測として残し、
+/// 判定は 1 点に絞る——**レイヤー属性を読めないことを、原因を取り違えた
+/// `sdk_error` として返さないこと。** 作成・移動の宛先にはロック確認が入るため、
+/// 属性の読み取りが失敗すると、宛先そのものの問題が SDK の失敗として現れ得る。
+fn section_layer_bounds(
+    harness: &Harness,
+    report: &mut Report,
+    instance: &Instance,
+    context: &Context,
+) -> Result<(), String> {
+    println!();
+    println!("### 5.10 空レイヤーと範囲外レイヤー");
+
+    let layers = require(
+        harness.layers(&instance.id, context.scene_id),
+        "レイヤーを列挙できません",
+    )?;
+    let last = layers
+        .last()
+        .ok_or_else(|| "レイヤーが 1 つも列挙されません".to_string())?;
+    let listed = layers.len();
+    let empty = layers.iter().find(|layer| layer.object_count == 0);
+    report.observe(
+        "empty_layer_attributes",
+        "空レイヤーのレイヤー属性の読み取りは何を返すか",
+        match empty {
+            Some(layer) => format!(
+                "列挙は 0..={} の {listed} 件を返し、空レイヤーも含む。layer={} は name={} enabled={} locked={} object_count={}",
+                last.index,
+                layer.index,
+                layer.name.as_deref().unwrap_or("（標準名）"),
+                layer.enabled,
+                layer.locked,
+                layer.object_count,
+            ),
+            None => format!(
+                "列挙は 0..={} の {listed} 件を返したが、空レイヤーが 1 つも無い",
+                last.index
+            ),
+        },
+    );
+
+    // 列挙の範囲を超えたレイヤーの属性は、read-back を持つ tool でしか覗けない。
+    let beyond = last.index + 1;
+    let far = last.index + OUT_OF_RANGE_LAYER_OFFSET;
+    let epoch = precondition(harness, instance)?;
+    let probed = harness.set_layer_state(
+        &instance.id,
+        context.scene_id,
+        far,
+        LayerStateChange::locked(false),
+        epoch,
+    );
+    report.observe(
+        "out_of_range_layer_attributes",
+        "列挙の範囲を超えたレイヤーの属性の読み取りは何を返すか",
+        match &probed {
+            Ok(outcome) => format!(
+                "layer={far} への aviutl2_set_layer_state が成功し、name={} enabled={} locked={} object_count={} を返した",
+                outcome.layer.name.as_deref().unwrap_or("（標準名）"),
+                outcome.layer.enabled,
+                outcome.layer.locked,
+                outcome.layer.object_count,
+            ),
+            Err(error) => format!(
+                "layer={far} への aviutl2_set_layer_state は {}",
+                describe_error(error)
+            ),
+        },
+    );
+
+    let outcome = check_layer_bound_destinations(
+        harness,
+        instance,
+        context,
+        &[("列挙範囲の直後", beyond), ("明らかに範囲外", far)],
+    );
+    report.record(
+        "5.10",
+        "空レイヤー・範囲外レイヤーを宛先とする作成と移動",
+        "空レイヤーを宛先とする作成と移動が成功し、範囲外レイヤーを宛先とする要求が原因を取り違えた sdk_error にならない",
+        Mode::Auto,
+        outcome,
+    );
+
+    Ok(())
+}
+
+/// 空レイヤーと範囲外レイヤーを宛先として、作成と移動が何を返すかを確かめる。
+fn check_layer_bound_destinations(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    probes: &[(&'static str, usize)],
+) -> CheckResult {
+    let mut latest = None;
+    let probed = probe_layer_bounds(harness, instance, context, probes, &mut latest);
+
+    // 後始末: 最後に受け取った対象を消し、作業に使った 2 つのレイヤーを空へ戻す。
+    let cleaned = cleanup_layer_bounds(harness, instance, context, latest.as_ref());
+    match (probed, cleaned) {
+        (Ok(notes), Ok(())) => Ok(notes),
+        (Ok(_), Err(reason)) => Err(format!("後始末に失敗しました: {reason}")),
+        (Err(reason), _) => Err(reason),
+    }
+}
+
+/// 宛先ごとに作成と移動を試み、返った内容を並べる。
+fn probe_layer_bounds(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    probes: &[(&'static str, usize)],
+    latest: &mut Option<ObjectSummary>,
+) -> CheckResult {
+    let home = context.free_slots[0];
+    let other = context.free_slots[1];
+    let alias = target_alias(harness, instance, context)?;
+    let mut notes = Vec::new();
+    let mut misattributed = Vec::new();
+
+    let created = harness.create_object(
+        &instance.id,
+        ObjectSourceInput::ObjectAlias {
+            alias: alias.clone(),
+        },
+        PlacementInput {
+            scene_id: context.scene_id,
+            layer: home.layer as u32,
+            frame: home.frame as u32,
+        },
+        precondition(harness, instance)?,
+    );
+    let mut object = match created {
+        Ok(outcome) => outcome
+            .object
+            .ok_or_else(|| "作成の応答が対象を返しませんでした".to_string())?,
+        Err(error) => {
+            return Err(format!(
+                "空レイヤー layer={} への create_object が拒否されました: {}",
+                home.layer,
+                describe_error(&error)
+            ));
+        }
+    };
+    notes.push(format!(
+        "空レイヤー layer={} への create_object: 成功",
+        home.layer
+    ));
+    *latest = Some(object.clone());
+
+    let moved = harness.move_object(
+        &instance.id,
+        &object.selector,
+        DestinationInput {
+            layer: other.layer as u32,
+            frame: other.frame as u32,
+        },
+    );
+    object = match moved {
+        Ok(outcome) => outcome
+            .object
+            .ok_or_else(|| "移動の応答が対象を返しませんでした".to_string())?,
+        Err(error) => {
+            return Err(format!(
+                "空レイヤー layer={} への move_object が拒否されました: {}",
+                other.layer,
+                describe_error(&error)
+            ));
+        }
+    };
+    notes.push(format!(
+        "空レイヤー layer={} への move_object: 成功",
+        other.layer
+    ));
+    *latest = Some(object.clone());
+
+    for (label, layer) in probes {
+        let moved = harness.move_object(
+            &instance.id,
+            &object.selector,
+            DestinationInput {
+                layer: *layer as u32,
+                frame: 0,
+            },
+        );
+        notes.push(format!(
+            "{label}（layer={layer}）への move_object: {}",
+            describe_attempt(&moved)
+        ));
+        if is_sdk_error(&moved) {
+            misattributed.push(format!("{label}（layer={layer}）への move_object"));
+        }
+        if let Ok(outcome) = moved {
+            let landed = outcome
+                .object
+                .ok_or_else(|| "移動の応答が対象を返しませんでした".to_string())?;
+            *latest = Some(landed.clone());
+            // 通ってしまった場合は元の空レイヤーへ戻す。以降の試行を範囲外の
+            // 位置から始めない。
+            let back = harness.move_object(
+                &instance.id,
+                &landed.selector,
+                DestinationInput {
+                    layer: other.layer as u32,
+                    frame: other.frame as u32,
+                },
+            );
+            object = match back {
+                Ok(outcome) => outcome
+                    .object
+                    .ok_or_else(|| "移動の応答が対象を返しませんでした".to_string())?,
+                Err(error) => {
+                    return Err(format!(
+                        "{label}（layer={layer}）から元のレイヤーへ戻せません: {}",
+                        describe_error(&error)
+                    ));
+                }
+            };
+            *latest = Some(object.clone());
+        }
+
+        let created = harness.create_object(
+            &instance.id,
+            ObjectSourceInput::ObjectAlias {
+                alias: alias.clone(),
+            },
+            PlacementInput {
+                scene_id: context.scene_id,
+                layer: *layer as u32,
+                frame: 0,
+            },
+            precondition(harness, instance)?,
+        );
+        notes.push(format!(
+            "{label}（layer={layer}）への create_object: {}",
+            describe_attempt(&created)
+        ));
+        if is_sdk_error(&created) {
+            misattributed.push(format!("{label}（layer={layer}）への create_object"));
+        }
+        if let Ok(outcome) = created {
+            // 通ってしまった場合は作られたものを全て消す。差分が取れていない
+            // ときのために、応答が返した対象も対象に含める。
+            let made = if outcome.created.is_empty() {
+                outcome.object.into_iter().collect()
+            } else {
+                outcome.created
+            };
+            for made in made {
+                require(
+                    harness.delete_object(&instance.id, &made.selector),
+                    "範囲外のレイヤーへ作成したオブジェクトを削除できません",
+                )?;
+            }
+        }
+    }
+
+    if !misattributed.is_empty() {
+        return Err(format!(
+            "次の要求が sdk_error を返しました。宛先のロック確認がレイヤー属性を読めないことを、原因を取り違えた失敗として返している可能性があります: {}",
+            misattributed.join(" / ")
+        ));
+    }
+    Ok(notes)
+}
+
+/// 作業用の対象を消し、使った 2 つのレイヤーを空へ戻す。
+fn cleanup_layer_bounds(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    latest: Option<&ObjectSummary>,
+) -> Result<(), String> {
+    // 最後に受け取った selector で消す。列挙の範囲外に残っていても届く。
+    if let Some(object) = latest {
+        let _ = harness.delete_object(&instance.id, &object.selector);
+    }
+    clear_layer(harness, instance, context, context.free_slots[0].layer)?;
+    clear_layer(harness, instance, context, context.free_slots[1].layer)
+}
+
+/// 試行の結果を記録用の 1 行に写す。
+fn describe_attempt<T>(result: &Result<T, ErrorObject>) -> String {
+    match result {
+        Ok(_) => "成功".to_string(),
+        Err(error) => describe_error(error),
+    }
+}
+
+/// SDK の失敗として返ったか。
+fn is_sdk_error<T>(result: &Result<T, ErrorObject>) -> bool {
+    matches!(result, Err(error) if error.code == ErrorCode::SdkError)
 }
 
 // ---------------------------------------------------------------------------
