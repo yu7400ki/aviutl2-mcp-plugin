@@ -424,13 +424,14 @@ mod tests {
         assert_eq!(value["type"], json!("set_object_item"));
     }
 
-    /// 一括適用に入れない編集 operation が復号の段で落ちることを固定する。
+    /// sub-operation になれない編集 operation が復号の段で落ちることを固定する。
     ///
-    /// 一覧は編集 operation のうち一括適用の対象でないものを網羅する。
-    /// `assert_eq!` の件数比較により、編集 operation が増えたときに一覧の
-    /// 更新を促す。
+    /// 一覧は編集 operation のうち sub-operation として受け付けない全てを
+    /// 網羅する。`assert_eq!` の件数比較により、編集 operation が増えたときに
+    /// 一覧の更新を促す。
     #[test]
-    fn excluded_operation_types_are_rejected_by_the_decoder() {
+    fn operation_types_that_cannot_be_sub_operations_are_rejected_by_the_decoder() {
+        // 逆操作を事前に組み立てられないため対象から外した 8 種。
         let excluded = [
             crate::operation::OPERATION_CREATE_OBJECT,
             crate::operation::OPERATION_DELETE_OBJECT,
@@ -441,25 +442,33 @@ mod tests {
             crate::operation::OPERATION_SET_LAYER_STATE,
             crate::operation::OPERATION_SET_SELECTION,
         ];
-
-        // 一括適用の対象 2 種と、一括適用そのものを除いた残りが除外対象である。
+        // 一括適用そのものも sub-operation にはなれない。入れ子にできると、
+        // 1 つの取り消し単位に収まる範囲を要求元が入れ子の深さで変えられる。
+        let nested = [crate::operation::OPERATION_APPLY_BATCH];
+        // sub-operation として受け付ける 2 種。
         let accepted = [
             crate::operation::OPERATION_MOVE_OBJECT,
             crate::operation::OPERATION_SET_OBJECT_ITEM,
-            crate::operation::OPERATION_APPLY_BATCH,
         ];
         assert_eq!(
-            excluded.len() + accepted.len(),
+            excluded.len() + nested.len() + accepted.len(),
             crate::operation::EditOperation::ALL.len(),
-            "編集 operation の一覧と除外の一覧が食い違っています"
+            "編集 operation の一覧と表が食い違っています"
         );
 
-        for name in excluded {
+        for name in excluded.into_iter().chain(nested) {
             let mut value = serde_json::to_value(move_object(2)).unwrap();
             value["type"] = json!(name);
             assert!(
                 serde_json::from_value::<BatchOperation>(value).is_err(),
                 "{name} が sub-operation として受理されました"
+            );
+        }
+
+        for name in accepted {
+            assert!(
+                crate::operation::EditOperation::from_operation_name(name).is_some(),
+                "{name} が編集 operation ではありません"
             );
         }
     }

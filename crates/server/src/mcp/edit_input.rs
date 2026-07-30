@@ -845,6 +845,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_input_table_leaves_out_only_the_operations_without_an_input_type() {
+        // 網羅 match は operation の追加を止めるが、既存の枝を除外へ書き換えても
+        // 止まらない。表から外れているものを固定することで、除外を増やしても
+        // 減らしてもここが落ちる。
+        let excluded: Vec<&str> = EditOperation::ALL
+            .into_iter()
+            .filter(|operation| current_input(*operation).is_none())
+            .map(EditOperation::as_str)
+            .collect();
+
+        assert_eq!(excluded, vec![EditOperation::ApplyBatch.as_str()]);
+
+        // 表から外れている operation は復号もできない。**片方だけ実装すると、
+        // 新しい入力が上の検査を素通りしたまま残る。** 入力型を足して復号の腕
+        // だけ書き換えると、この主張が先に落ちる。
+        for operation in EditOperation::ALL {
+            if current_input(operation).is_some() {
+                continue;
+            }
+            assert_eq!(
+                decode_input(operation, &json!({})),
+                Err(ErrorCode::UnsupportedOperation),
+                "{} が表に無いまま復号できます",
+                operation.as_str()
+            );
+        }
+    }
+
     /// 応答が返した値をそのまま送り返す往復型のフィールドか。
     ///
     /// 往復型は応答へ optional field が増えても往復が壊れないよう、未知

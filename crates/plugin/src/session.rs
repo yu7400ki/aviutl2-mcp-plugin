@@ -2625,6 +2625,21 @@ mod edit_tests {
     }
 
     #[test]
+    fn the_request_table_leaves_out_only_the_operations_without_an_adapter() {
+        // 網羅 match は operation の追加を止めるが、既存の枝を除外へ書き換えても
+        // 止まらない。表から外れているものを固定することで、除外を増やしても
+        // 減らしてもここが落ちる。実行できるようになった operation を表へ
+        // 書き忘れた場合は、上の未対応の主張が先に落ちる。
+        let excluded: Vec<&str> = EditOperation::ALL
+            .into_iter()
+            .filter(|operation| current_request(*operation).is_none())
+            .map(EditOperation::as_str)
+            .collect();
+
+        assert_eq!(excluded, vec![EditOperation::ApplyBatch.as_str()]);
+    }
+
+    #[test]
     fn params_are_decoded_before_the_lifecycle_state_is_checked() {
         // 起動処理中でも、要求内容の誤りは要求の誤りとして返す。状態由来の
         // 再試行可能なエラーで返すと、解消しない再試行を促してしまう。
