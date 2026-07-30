@@ -940,14 +940,22 @@ fn a_silently_ignored_enable_change_is_not_reported_as_success() {
     assert_eq!(error.details()["mutation_issued"], json!(true));
 }
 
-/// effect のロックが変わると、対象の同一性も動くことを確かめる。
+/// effect のロックが変わると、読み取りの値も対象の同一性も動くことを確かめる。
 ///
-/// ロックは alias へ書き出されるため、オブジェクトの fingerprint も追随する。
-/// 追随しなければ、要求元はロックの前後を見分けられない selector を握り続ける。
+/// ロックは effect の fingerprint の材料であり、alias へも書き出されるため
+/// オブジェクトの fingerprint まで追随する。追随しなければ、要求元はロックの
+/// 前後を見分けられない selector を握り続ける。
 #[test]
 fn locking_an_effect_changes_the_object_fingerprint() {
     let harness = Harness::new();
     let before = harness.selector(1, 100);
+    let before_effect = harness
+        .read
+        .get_object(&before)
+        .expect("ロック前の詳細を取得できません")
+        .effects
+        .remove(1);
+    assert!(!before_effect.locked);
 
     harness.host.scene.lock().unwrap().layers[1].objects[0].effects[1].locked = true;
 
@@ -959,10 +967,20 @@ fn locking_an_effect_changes_the_object_fingerprint() {
 
     // 読み直した selector はそのまま次の要求へ渡せる。ロック前の selector は
     // もう一致しない。
-    harness
+    let after_effect = harness
         .read
         .get_object(&after)
-        .expect("読み直した selector で引けません");
+        .expect("読み直した selector で引けません")
+        .effects
+        .remove(1);
+    assert!(
+        after_effect.locked,
+        "読み取りが effect のロックを返していません"
+    );
+    assert_ne!(
+        before_effect.fingerprint, after_effect.fingerprint,
+        "effect のロックを変えても effect の fingerprint が変わりません"
+    );
     assert_eq!(
         harness.read.get_object(&before).unwrap_err().error_code(),
         ErrorCode::PreconditionFailed
