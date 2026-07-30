@@ -89,6 +89,12 @@ pub(crate) enum PanicPoint {
 /// 配下 effect の一覧を引いたことを表す記録。
 pub(crate) const EFFECT_LIST: &str = "get_effect_list";
 
+/// 読み取り経路が参照区間へ入ったことを表す記録。
+///
+/// 編集の要求を組み立てるための読み直しはこの経路を通る。失敗と再要求の間に
+/// 読み直しが挟まっていないことを、この記録の増減で確かめられる。
+pub(crate) const READ_SECTION: &str = "enter_read_section";
+
 /// レイヤーの属性を名前・表示・ロックまとめて読んだことを表す記録。
 pub(crate) const LAYER_ATTRIBUTES: &str = "get_layer_attributes";
 
@@ -489,6 +495,7 @@ impl ReadHost for FakeReadHost {
         T: Send + 'static,
         F: FnOnce(&dyn SceneReader) -> T + Send,
     {
+        self.0.record(READ_SECTION);
         let editor = FakeSceneEditor {
             host: &self.0,
             objects: RefCell::new(Vec::new()),

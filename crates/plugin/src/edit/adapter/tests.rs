@@ -8,7 +8,7 @@ use super::*;
 use crate::edit::fake::{
     CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, EFFECT_LIST, FakeEditHost, FakeLayer, FakeObject,
     FakeReadHost, Fault, ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX, MAX_FRAME,
-    MAX_ITEM_VALUE, MAX_LAYER, MOVE_FRAME_SHIFT, MUTATIONS, PanicPoint, SCENE_ID,
+    MAX_ITEM_VALUE, MAX_LAYER, MOVE_FRAME_SHIFT, MUTATIONS, PanicPoint, READ_SECTION, SCENE_ID,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
@@ -429,6 +429,9 @@ fn the_current_object_of_a_content_mismatch_is_accepted_as_is() {
         .placement
         .name = Some("改名後".to_string());
 
+    // 要求の組み立てに使った読み取りをここまでで数え、以降増えないことを見る。
+    let reads_before = read_sections(&harness);
+
     let error = harness
         .edit
         .move_object(&params)
@@ -450,6 +453,27 @@ fn the_current_object_of_a_content_mismatch_is_accepted_as_is() {
     let object = outcome.object.expect("移動の応答が対象を返しませんでした");
     assert_eq!(object.frame_start, params.destination.frame as usize);
     assert_eq!(object.name.as_deref(), Some("改名後"));
+
+    assert_eq!(
+        read_sections(&harness),
+        reads_before,
+        "失敗と再要求の間に読み直しを挟みました"
+    );
+    assert_eq!(
+        harness.host.enter_calls(),
+        2,
+        "失敗と再要求の 2 呼び出しで済んでいません"
+    );
+}
+
+/// 読み取り経路が参照区間へ入った回数。
+fn read_sections(harness: &Harness) -> usize {
+    harness
+        .host
+        .calls()
+        .iter()
+        .filter(|call| **call == READ_SECTION)
+        .count()
 }
 
 /// 名前を名乗らないセレクターでも対象が特定できることを確かめる。
