@@ -59,10 +59,14 @@ pub struct ProtocolVersion {
 impl ProtocolVersion {
     /// 現行プロトコルバージョン。
     ///
-    /// operation の追加は MINOR を、operation・フィールドの削除や意味の変更は
-    /// MAJOR を上げる。両端が完全一致を求めるため、どちらを上げても旧版とは
-    /// 接続できなくなる。
-    pub const CURRENT: Self = Self { major: 2, minor: 0 };
+    /// **版が動く単位はリリースとリリースの間である。** リリースを挟まない
+    /// ワイヤ表現の変更は、いくつ重ねても 1 つの版へまとまる。`1.0` は最初に
+    /// リリースされる版の番号である。
+    ///
+    /// リリースを跨ぐ変更では、operation の追加で MINOR を、operation・
+    /// フィールドの削除や意味の変更で MAJOR を上げる。両端が完全一致を求める
+    /// ため、どちらを上げても旧版とは接続できなくなる。
+    pub const CURRENT: Self = Self { major: 1, minor: 0 };
 
     /// 文字列表現を返す（例: "1.0"）。
     pub fn as_str(&self) -> String {
