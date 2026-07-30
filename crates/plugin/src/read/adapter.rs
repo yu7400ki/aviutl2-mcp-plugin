@@ -606,11 +606,11 @@ mod tests {
         layers: Vec<FakeLayer>,
         catalog: Vec<AvailableEffect>,
         panic_at: Option<PanicPoint>,
-        /// 同一性の材料の読み取りを失敗させる対象の開始フレーム。
+        /// 対象そのものの読み取りを失敗させる開始フレーム。
         ///
         /// 特定のオブジェクトだけが読めない状況を作り、他の対象の読み取りが
         /// 巻き込まれないことを確かめるために用いる。
-        detail_fails_at: Option<usize>,
+        object_read_fails_at: Option<usize>,
         /// 配下 effect の読み取りだけを失敗させる対象の開始フレーム。
         ///
         /// 同一性の材料は読めるのに effect の一覧だけが取れない状況を作る。
@@ -618,7 +618,7 @@ mod tests {
         /// 走査には現れるのに読み直せない対象の開始フレーム。
         ///
         /// 走査と読み直しの間に対象が消えた状況を作る。
-        detail_missing_at: Option<usize>,
+        object_missing_at: Option<usize>,
         /// 参照区間の確保そのものを失敗させる。
         section_fails: bool,
         /// 参照区間へ入る直前に進めるプロジェクト revision の回数。
@@ -645,9 +645,9 @@ mod tests {
                 layers: fake_layers(),
                 catalog: fake_catalog(),
                 panic_at: None,
-                detail_fails_at: None,
+                object_read_fails_at: None,
                 effects_fail_at: None,
-                detail_missing_at: None,
+                object_missing_at: None,
                 section_fails: false,
                 bump_on_enter: 0,
                 renew_boundary_on_enter: false,
@@ -805,7 +805,7 @@ mod tests {
             frame_start: usize,
         ) -> Result<HostObject, ReadError> {
             self.host.record("object_identity");
-            if self.host.detail_missing_at == Some(frame_start) {
+            if self.host.object_missing_at == Some(frame_start) {
                 // 対象の探索が不在を検出する。alias を読む前に分かる。
                 return Err(ReadError::ObjectNotFound {
                     detected_by: "find_object",
@@ -820,7 +820,7 @@ mod tests {
             frame_start: usize,
         ) -> Result<HostObjectDetail, ReadError> {
             self.host.record("object_detail");
-            if self.host.detail_missing_at == Some(frame_start) {
+            if self.host.object_missing_at == Some(frame_start) {
                 // 実際の SDK では effect 一覧の取得も不在を検出する。検出元が
                 // 対象の探索とは限らないことを、この経路で再現する。
                 return Err(ReadError::ObjectNotFound {
@@ -865,7 +865,7 @@ mod tests {
                 .ok_or(ReadError::ObjectNotFound {
                     detected_by: "find_object",
                 })?;
-            if self.host.detail_fails_at == Some(frame_start) {
+            if self.host.object_read_fails_at == Some(frame_start) {
                 return Err(ReadError::Sdk {
                     operation: "get_object_alias",
                 });
@@ -1584,7 +1584,7 @@ mod tests {
     #[test]
     fn list_objects_does_not_report_not_found() {
         let adapter = adapter_with(|_| FakeHost {
-            detail_missing_at: Some(100),
+            object_missing_at: Some(100),
             ..FakeHost::new()
         });
 
@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     fn get_object_reports_not_found_when_the_target_vanished() {
         let adapter = adapter_with(|_| FakeHost {
-            detail_missing_at: Some(100),
+            object_missing_at: Some(100),
             ..FakeHost::new()
         });
         let selector = sample_selector(&adapter);
@@ -1713,7 +1713,7 @@ mod tests {
         // レイヤー 1 には開始フレーム 100 と 300 の対象がある。300 の読み取りだけを
         // 失敗させ、100 を取得する。
         let adapter = adapter_with(|_| FakeHost {
-            detail_fails_at: Some(300),
+            object_read_fails_at: Some(300),
             ..FakeHost::new()
         });
         let selector = sample_selector(&adapter);
