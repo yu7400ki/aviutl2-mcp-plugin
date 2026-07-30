@@ -122,6 +122,7 @@ dependencies = [
  "aviutl2",
  "aviutl2-mcp-core",
  "chrono",
+ "proptest",
  "rand 0.10.2",
  "raw-window-handle",
  "serde",

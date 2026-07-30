@@ -22,6 +22,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
+[dev-dependencies]
+proptest = "1.6.0"
+
 # SDK ラッパーと Win32 API は Windows でのみ解決する。
 # 実装は全て `#[cfg(windows)]` 配下にあり、他プラットフォームでは参照されない。
 [target.'cfg(windows)'.dependencies]

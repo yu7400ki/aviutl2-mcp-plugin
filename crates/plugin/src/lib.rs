@@ -20,6 +20,8 @@ pub mod redact;
 #[cfg(windows)]
 pub mod registry;
 #[cfg(windows)]
+pub mod render;
+#[cfg(windows)]
 pub mod security;
 #[cfg(windows)]
 pub mod session;
