@@ -480,19 +480,6 @@ fn classify_operation(name: &str) -> Result<Operation, ErrorObject> {
     }
 }
 
-/// operation の実行に許す上限を引く。
-///
-/// 生存確認だけは実行に費やす時間を持たない。状態を読むだけで完結するため、
-/// 期限をそのまま応答の送信へ充てる。
-///
-/// 残りは要求予算の区分から引き、区分の判定そのものは
-/// [`KnownOperation::budget_kind`] に委ねる。ここで operation 名や族から直接
-/// 引くと、要求元が使う予算の区分と plugin 側の上限が別々の一覧で決まり、
-/// 片方だけを変えても気付けない。
-///
-/// **どちらの `match` も `_` を使わない網羅 `match` で書く。** operation の族
-/// も予算の区分も、足すと腕が足りずコンパイルが落ちる。上限を決めないまま
-/// 新しい operation が既定へ落ちることがない。
 /// operation ごとの上限と要求の期限から、実行に採用する期限を決める。
 ///
 /// 上限の選択と期限の突き合わせを 1 つの関数にまとめる。要求処理はこれを
@@ -512,6 +499,19 @@ fn resolve_execution_deadline(
     )
 }
 
+/// operation の実行に許す上限を引く。
+///
+/// 生存確認だけは実行に費やす時間を持たない。状態を読むだけで完結するため、
+/// 期限をそのまま応答の送信へ充てる。
+///
+/// 残りは要求予算の区分から引き、区分の判定そのものは
+/// [`KnownOperation::budget_kind`] に委ねる。ここで operation 名や族から直接
+/// 引くと、要求元が使う予算の区分と plugin 側の上限が別々の一覧で決まり、
+/// 片方だけを変えても気付けない。
+///
+/// **どちらの `match` も `_` を使わない網羅 `match` で書く。** operation の族
+/// も予算の区分も、足すと腕が足りずコンパイルが落ちる。上限を決めないまま
+/// 新しい operation が既定へ落ちることがない。
 fn execution_timeout(operation: Operation) -> Duration {
     let known = match operation {
         Operation::Ping => return WRITE_TIMEOUT,
@@ -773,15 +773,24 @@ fn deliver_render_response(
     outcome: Result<RenderFrameResult, ErrorObject>,
     send: impl FnOnce(Result<Value, ErrorObject>) -> Result<()>,
 ) -> Result<()> {
+    // 成果物を持つのは成功した結果だけである。失敗した要求は作っていない。
     let handoff_token = outcome
         .as_ref()
         .ok()
         .map(|result| result.handoff_token.clone());
-    let sent = send(outcome.and_then(|result| to_result(&result)));
-    if sent.is_err()
+
+    // 応答へ載せられたことと、載せた応答を送れたことは別の失敗である。識別子が
+    // 要求元へ渡るのは**その両方を満たしたときだけ**であり、どちらか一方でも
+    // 欠ければ成果物は宙に浮く。2 つを 1 つの結果へ畳むと、変換に失敗した
+    // 応答が「失敗応答の送信に成功した」ものとして後始末を素通りする。
+    let body = outcome.and_then(|result| to_result(&result));
+    let carries_the_token = body.is_ok();
+    let sent = send(body);
+
+    if !(carries_the_token && sent.is_ok())
         && let Some(handoff_token) = handoff_token
     {
-        tracing::warn!("応答を送れなかったため引き渡し用ファイルを削除します");
+        tracing::warn!("応答が要求元へ届かなかったため引き渡し用ファイルを削除します");
         adapter.discard_artifact(&handoff_token);
     }
     sent
@@ -2964,12 +2973,61 @@ mod edit_tests {
             &InstanceState::Starting,
             EditOperation::SetSelection,
             &json!({ "expected_scene_id": SCENE_ID }),
-            RequestDeadline::Within(Instant::now() + Duration::from_secs(1)),
+            within(),
         )
         .unwrap_err();
 
         assert_eq!(error.code, ErrorCode::InvalidArgument);
         assert!(adapter.calls().is_empty());
+    }
+
+    /// 期限内の判定。
+    fn within() -> RequestDeadline {
+        RequestDeadline::Within(Instant::now() + Duration::from_secs(1))
+    }
+
+    /// 要求内容の誤りを、状態と期限のどちらへ先に掛けても崩れない組。
+    ///
+    /// 受付判定を先に通すと、解消しない誤りが再試行を促す `host_busy` として
+    /// 返る。期限判定を先に通すと、同じ誤りが再試行可能な `timeout` に化ける。
+    /// **どちらの順序も塞ぐ。** 片方だけを見ていると、もう一方へ入れ替える
+    /// 変更が素通りする。
+    fn misordering_cases() -> [(InstanceState, RequestDeadline, &'static str); 2] {
+        [
+            (InstanceState::Starting, within(), "起動処理中"),
+            (InstanceState::Ready, RequestDeadline::Exceeded, "期限超過"),
+        ]
+    }
+
+    #[test]
+    fn invalid_edit_params_are_rejected_before_the_state_and_the_deadline() {
+        // 全 operation を網羅 match の表から引く。一括適用も単一の編集も、
+        // 要求内容の誤りに対する扱いは同じでなければならない。
+        for (state, deadline, order) in misordering_cases() {
+            for operation in EditOperation::ALL {
+                let mut params = current_request(operation).expect("要求の形が表にありません");
+                params
+                    .as_object_mut()
+                    .expect("params は object")
+                    .insert("unknown_field".to_string(), json!(1));
+
+                let adapter = FakeEditAdapter::new();
+                let error =
+                    execute_edit(&adapter, &state, operation, &params, deadline).unwrap_err();
+
+                assert_eq!(
+                    error.code,
+                    ErrorCode::InvalidArgument,
+                    "{order} の {} が要求内容の誤りとして返りませんでした",
+                    operation.as_str()
+                );
+                assert!(
+                    adapter.calls().is_empty(),
+                    "{order} の {} が編集口へ届きました",
+                    operation.as_str()
+                );
+            }
+        }
     }
 
     #[test]
@@ -3259,19 +3317,29 @@ mod edit_tests {
             ),
         ];
 
-        for (label, params) in cases {
-            let adapter = FakeEditAdapter::new();
-            let error = execute_edit(
-                &adapter,
-                &InstanceState::Ready,
-                EditOperation::ApplyBatch,
-                &params,
-                RequestDeadline::Within(Instant::now() + Duration::from_secs(1)),
-            )
-            .unwrap_err();
+        // 一括適用で初めて生じる規則も、状態にも期限にも先んじて判定する。
+        for (state, deadline, order) in misordering_cases() {
+            for (label, params) in &cases {
+                let adapter = FakeEditAdapter::new();
+                let error = execute_edit(
+                    &adapter,
+                    &state,
+                    EditOperation::ApplyBatch,
+                    params,
+                    deadline,
+                )
+                .unwrap_err();
 
-            assert_eq!(error.code, ErrorCode::InvalidArgument, "{label}");
-            assert!(adapter.calls().is_empty(), "{label} が実行口へ届きました");
+                assert_eq!(
+                    error.code,
+                    ErrorCode::InvalidArgument,
+                    "{order} の {label} が要求内容の誤りとして返りませんでした"
+                );
+                assert!(
+                    adapter.calls().is_empty(),
+                    "{order} の {label} が実行口へ届きました"
+                );
+            }
         }
     }
 
@@ -3407,32 +3475,40 @@ mod render_tests {
     }
 
     #[test]
-    fn render_params_are_decoded_before_the_lifecycle_state_is_checked() {
-        // 起動処理中でも、要求内容の誤りは要求の誤りとして返す。状態由来の
-        // 再試行可能なエラーで返すと、解消しない再試行を促してしまう。
-        for params in [
-            json!({ "expected_scene_id": SCENE_ID }),
-            json!({ "expected_scene_id": SCENE_ID, "frame": FRAME, "future": 1 }),
-            json!({ "expected_scene_id": SCENE_ID, "frame": -1 }),
-            json!({ "expected_scene_id": SCENE_ID, "frame": u32::MAX }),
-            json!({ "frame": FRAME }),
+    fn render_params_are_decoded_before_the_state_and_the_deadline() {
+        // 要求内容の誤りはライフサイクル状態にも期限にも依存しない。受付判定を
+        // 先に通すと、解消しない誤りが再試行を促す host_busy として返る。期限
+        // 判定を先に通すと、同じ誤りが再試行可能な timeout に化ける。**どちらの
+        // 順序も塞ぐ。** 片方だけを見ていると、もう一方へ入れ替える変更が
+        // 素通りする。
+        for (state, deadline, order) in [
+            (InstanceState::Starting, within(), "起動処理中"),
+            (InstanceState::Ready, RequestDeadline::Exceeded, "期限超過"),
         ] {
-            let adapter = FakeRenderAdapter::new();
-            let error = execute_render(
-                &adapter,
-                &InstanceState::Starting,
-                RenderOperation::RenderFrame,
-                &params,
-                within(),
-            )
-            .unwrap_err();
+            for params in [
+                json!({ "expected_scene_id": SCENE_ID }),
+                json!({ "expected_scene_id": SCENE_ID, "frame": FRAME, "future": 1 }),
+                json!({ "expected_scene_id": SCENE_ID, "frame": -1 }),
+                json!({ "expected_scene_id": SCENE_ID, "frame": u32::MAX }),
+                json!({ "frame": FRAME }),
+            ] {
+                let adapter = FakeRenderAdapter::new();
+                let error = execute_render(
+                    &adapter,
+                    &state,
+                    RenderOperation::RenderFrame,
+                    &params,
+                    deadline,
+                )
+                .unwrap_err();
 
-            assert_eq!(
-                error.code,
-                ErrorCode::InvalidArgument,
-                "{params} が状態由来のエラーで返りました"
-            );
-            assert!(adapter.calls().is_empty(), "{params}");
+                assert_eq!(
+                    error.code,
+                    ErrorCode::InvalidArgument,
+                    "{order} の {params} が要求内容の誤りとして返りませんでした"
+                );
+                assert!(adapter.calls().is_empty(), "{order}: {params}");
+            }
         }
     }
 
@@ -3592,45 +3668,137 @@ mod render_tests {
         assert!(!outcome.to_string().contains(HANDOFF_TOKEN));
     }
 
-    /// レンダリングの失敗の代表値。実行口が返し得る全 variant を並べる。
-    fn render_error_variants() -> Vec<fn() -> RenderError> {
-        vec![
-            || RenderError::Read(crate::read::ReadError::NotReady),
-            || {
-                RenderError::Read(crate::read::ReadError::EditBlocked {
-                    state: crate::read::EditState::Save,
-                })
-            },
-            || RenderError::SceneMismatch {
-                expected: SCENE_ID,
-                current: SCENE_ID + 1,
-            },
-            || RenderError::FrameOutOfRange,
-            || RenderError::FrameTooLarge,
-            || RenderError::WaitTimeout,
-            || RenderError::ShuttingDown,
-            || RenderError::TooManyAbandoned,
-            || RenderError::InvalidBuffer {
-                rule: crate::render::BufferRule::PitchTooSmall,
-            },
-            || RenderError::Artifact {
-                stage: crate::render::ArtifactStage::Encode,
-            },
-            || RenderError::Artifact {
-                stage: crate::render::ArtifactStage::Write,
-            },
-            || RenderError::Sdk {
-                operation: "rendering_scene_video",
-            },
-            || RenderError::Panicked,
-        ]
+    /// レンダリングの失敗の分類。実行口が返し得る全 variant を 1 つずつ表す。
+    ///
+    /// **`RenderError` を直接並べない。** 失敗は複製できないため一覧は
+    /// 生成関数の列になり、生成関数の列は網羅性を型で縛れない。variant を
+    /// 表すこの列挙を挟むと、[`RenderFailure::error`] の網羅 `match` が
+    /// variant の追加でコンパイルを止める。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RenderFailure {
+        Read,
+        ReadEditBlocked,
+        SceneMismatch,
+        FrameOutOfRange,
+        FrameTooLarge,
+        WaitTimeout,
+        ShuttingDown,
+        TooManyAbandoned,
+        InvalidBuffer,
+        ArtifactEncode,
+        ArtifactWrite,
+        Sdk,
+        Panicked,
+    }
+
+    impl RenderFailure {
+        /// 全分類。ここから漏れた分類はどのテストにも掛からない。
+        const ALL: [RenderFailure; 13] = [
+            RenderFailure::Read,
+            RenderFailure::ReadEditBlocked,
+            RenderFailure::SceneMismatch,
+            RenderFailure::FrameOutOfRange,
+            RenderFailure::FrameTooLarge,
+            RenderFailure::WaitTimeout,
+            RenderFailure::ShuttingDown,
+            RenderFailure::TooManyAbandoned,
+            RenderFailure::InvalidBuffer,
+            RenderFailure::ArtifactEncode,
+            RenderFailure::ArtifactWrite,
+            RenderFailure::Sdk,
+            RenderFailure::Panicked,
+        ];
+
+        /// 対応する失敗の代表値を作る。
+        ///
+        /// **`_` を使わない網羅 `match` で書く。** 分類を足すと腕が足りず
+        /// コンパイルが落ちる。
+        fn error(self) -> RenderError {
+            match self {
+                RenderFailure::Read => RenderError::Read(crate::read::ReadError::NotReady),
+                RenderFailure::ReadEditBlocked => {
+                    RenderError::Read(crate::read::ReadError::EditBlocked {
+                        state: crate::read::EditState::Save,
+                    })
+                }
+                RenderFailure::SceneMismatch => RenderError::SceneMismatch {
+                    expected: SCENE_ID,
+                    current: SCENE_ID + 1,
+                },
+                RenderFailure::FrameOutOfRange => RenderError::FrameOutOfRange,
+                RenderFailure::FrameTooLarge => RenderError::FrameTooLarge,
+                RenderFailure::WaitTimeout => RenderError::WaitTimeout,
+                RenderFailure::ShuttingDown => RenderError::ShuttingDown,
+                RenderFailure::TooManyAbandoned => RenderError::TooManyAbandoned,
+                RenderFailure::InvalidBuffer => RenderError::InvalidBuffer {
+                    rule: crate::render::BufferRule::PitchTooSmall,
+                },
+                RenderFailure::ArtifactEncode => RenderError::Artifact {
+                    stage: crate::render::ArtifactStage::Encode,
+                },
+                RenderFailure::ArtifactWrite => RenderError::Artifact {
+                    stage: crate::render::ArtifactStage::Write,
+                },
+                RenderFailure::Sdk => RenderError::Sdk {
+                    operation: "rendering_scene_video",
+                },
+                RenderFailure::Panicked => RenderError::Panicked,
+            }
+        }
+    }
+
+    #[test]
+    fn every_render_error_variant_has_a_failure_case() {
+        // 分類の網羅 match は `RenderError` の variant 追加を止めない。
+        // variant を 1 つずつ名指しし、名前の集合が一致することを主張する。
+        // ここが落ちたら、足した variant を [`RenderFailure`] へも足す。
+        fn variant_name(error: &RenderError) -> &'static str {
+            match error {
+                RenderError::Read(_) => "Read",
+                RenderError::SceneMismatch { .. } => "SceneMismatch",
+                RenderError::FrameOutOfRange => "FrameOutOfRange",
+                RenderError::FrameTooLarge => "FrameTooLarge",
+                RenderError::WaitTimeout => "WaitTimeout",
+                RenderError::ShuttingDown => "ShuttingDown",
+                RenderError::TooManyAbandoned => "TooManyAbandoned",
+                RenderError::InvalidBuffer { .. } => "InvalidBuffer",
+                RenderError::Artifact { .. } => "Artifact",
+                RenderError::Sdk { .. } => "Sdk",
+                RenderError::Panicked => "Panicked",
+            }
+        }
+
+        const VARIANTS: &[&str] = &[
+            "Read",
+            "SceneMismatch",
+            "FrameOutOfRange",
+            "FrameTooLarge",
+            "WaitTimeout",
+            "ShuttingDown",
+            "TooManyAbandoned",
+            "InvalidBuffer",
+            "Artifact",
+            "Sdk",
+            "Panicked",
+        ];
+
+        let mut covered: Vec<&str> = RenderFailure::ALL
+            .into_iter()
+            .map(|failure| variant_name(&failure.error()))
+            .collect();
+        covered.sort_unstable();
+        covered.dedup();
+
+        let mut expected = VARIANTS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(covered, expected, "代表値が全 variant を覆っていません");
     }
 
     #[test]
     fn render_failures_keep_their_code_and_details() {
-        for make in render_error_variants() {
-            let expected = make();
-            let adapter = FakeRenderAdapter::failing(make());
+        for failure in RenderFailure::ALL {
+            let expected = failure.error();
+            let adapter = FakeRenderAdapter::failing(failure.error());
 
             let error = execute_render(
                 &adapter,
@@ -3651,8 +3819,8 @@ mod render_tests {
     #[test]
     fn render_failures_never_produce_cancelled() {
         // 受信から実行までの窓も保留キューも無いため、取り消しは生成しない。
-        for make in render_error_variants() {
-            let adapter = FakeRenderAdapter::failing(make());
+        for failure in RenderFailure::ALL {
+            let adapter = FakeRenderAdapter::failing(failure.error());
             let error = execute_render(
                 &adapter,
                 &InstanceState::Ready,
@@ -3699,8 +3867,8 @@ mod render_tests {
             "sdk_operation",
             "retry_requires",
         ];
-        for make in render_error_variants() {
-            let adapter = FakeRenderAdapter::failing(make());
+        for failure in RenderFailure::ALL {
+            let adapter = FakeRenderAdapter::failing(failure.error());
             let error = execute_render(
                 &adapter,
                 &InstanceState::Ready,
@@ -3725,8 +3893,8 @@ mod render_tests {
         // 引き渡し用の識別子を渡せば、それだけで成果物の在り処が分かる。画像
         // には利用者のプロジェクトの内容が写る。どちらも失敗の応答へ出さない。
         let mut documents = Vec::new();
-        for make in render_error_variants() {
-            let adapter = FakeRenderAdapter::failing(make());
+        for failure in RenderFailure::ALL {
+            let adapter = FakeRenderAdapter::failing(failure.error());
             let error = execute_render(
                 &adapter,
                 &InstanceState::Ready,

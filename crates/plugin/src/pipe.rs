@@ -2267,8 +2267,8 @@ mod tests {
 
     /// 期限を過ぎた読み取りの結果は破棄される。
     ///
-    /// 直後の編集のテストと対にしてある。破棄の規則を取り違えると、どちらか
-    /// 一方が必ず落ちる。
+    /// 結果を破棄しない編集・一括適用・レンダリングの 3 つのテストが続く。
+    /// 破棄の規則を取り違えると、読み取りかそれらのどれかが必ず落ちる。
     #[test]
     fn a_read_that_outlives_its_deadline_is_discarded() {
         let (lifecycle, dir) = temp_lifecycle();
@@ -2388,7 +2388,8 @@ mod tests {
     /// 期限を過ぎてもレンダリングの結果は破棄されない。
     ///
     /// 破棄すると引き渡し用ファイルが宙に浮く。受け取る側は識別子を得ていない
-    /// ため掃除できない。**読み取りの破棄を確かめる直前のテストと対にしてある。**
+    /// ため掃除できない。**読み取りの破棄を確かめる
+    /// [`a_read_that_outlives_its_deadline_is_discarded`] と対にしてある。**
     /// 破棄経路をレンダリングへ再利用すると、どちらか一方が必ず落ちる。
     #[test]
     fn a_render_that_outlives_its_deadline_still_delivers_its_result() {
