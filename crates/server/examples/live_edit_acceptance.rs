@@ -102,6 +102,10 @@ const REVISION_CHAIN_STEPS: usize = 10;
 const CLEAR_LAYER_LIMIT: usize = 32;
 /// 列挙されたレイヤーの末尾から、明らかに範囲外と言える位置までの隔たり。
 const OUT_OF_RANGE_LAYER_OFFSET: usize = 1_000;
+/// 編集がブロックされた状態からの復帰を実行者へ促す回数。
+const BLOCKED_RESUME_PROMPTS: usize = 3;
+/// 1 回促した後、復帰を待つ上限。
+const BLOCKED_RESUME_WAIT: Duration = Duration::from_secs(60);
 /// 実改行を含む設定値の観測に用いる 1 行目。
 const MULTILINE_FIRST: &str = "実改行確認の1行目";
 /// 同じく 2 行目。
@@ -1310,6 +1314,11 @@ fn detail_str(error: &ErrorObject, key: &str) -> Option<String> {
         .get(key)
         .and_then(|value| value.as_str())
         .map(|value| value.to_string())
+}
+
+/// `details` の整数値を取り出す。
+fn detail_u64(error: &ErrorObject, key: &str) -> Option<u64> {
+    error.details.get(key).and_then(|value| value.as_u64())
 }
 
 /// 拒否が名乗る `details.mismatch` に何を期待するか。
@@ -4592,7 +4601,7 @@ fn section_blocked(
             "出力を停止または完了させてから Enter を押してください。",
         ),
     ] {
-        let outcome = check_blocked(harness, instance, context, label, start, stop);
+        let attempt = check_blocked(harness, instance, context, label, start, stop);
         report.record(
             "5.6",
             format!("{label}の編集"),
@@ -4600,14 +4609,31 @@ fn section_blocked(
                 "{label}の編集要求が edit_blocked になり、AviUtl2 が停止せず、プロジェクトが変更されない。終了後は同じ要求が成功する"
             ),
             Mode::Operator,
-            outcome,
+            attempt.outcome,
         );
+        // ブロックされたままでは列挙すらできない。次の確認へ進まず区間を閉じる。
+        if !attempt.resumed {
+            return Err(format!(
+                "{label}の確認の後、編集がブロックされた状態から復帰できませんでした"
+            ));
+        }
     }
 
     Ok(())
 }
 
+/// ブロックされる状態の確認 1 件の結末。
+struct BlockedAttempt {
+    /// 確認の合否。
+    outcome: CheckResult,
+    /// 編集がブロックされない状態へ戻れたか。
+    resumed: bool,
+}
+
 /// ブロックされる状態での編集と、解除後の再実行を確かめる。
+///
+/// 再生中・出力中は編集だけでなく列挙もブロックされる。対象の読み取りは開始
+/// させる前に済ませ、結果の判定は解除を待ってから行う。
 fn check_blocked(
     harness: &Harness,
     instance: &Instance,
@@ -4615,15 +4641,23 @@ fn check_blocked(
     label: &str,
     start: &str,
     stop: &str,
-) -> CheckResult {
-    let before = snapshot(harness, instance, context.scene_id)?;
+) -> BlockedAttempt {
+    let prepared = prepare_blocked(harness, instance, context);
+    let (before, object) = match prepared {
+        Ok(prepared) => prepared,
+        Err(reason) => {
+            return BlockedAttempt {
+                outcome: Err(reason),
+                resumed: true,
+            };
+        }
+    };
+
+    let destination = context.free_slots[0];
     prompt(&format!(
         "AviUtl2 のインスタンス {} で、{start}",
         instance.label
     ));
-
-    let object = resolve_object(harness, instance, context.scene_id, context.target)?;
-    let destination = context.free_slots[0];
     let blocked = harness.move_object(
         &instance.id,
         &object.selector,
@@ -4632,38 +4666,67 @@ fn check_blocked(
             frame: destination.frame as u32,
         },
     );
-    let blocked_note = match &blocked {
+
+    // 後始末: 結果によらず終了を促し、ブロックが解けるまで待つ。
+    let resumed = resume_editable(harness, instance, stop);
+    let outcome = match &resumed {
+        Ok(()) => judge_blocked(
+            harness,
+            instance,
+            context,
+            label,
+            &before,
+            blocked,
+            destination,
+        ),
+        Err(reason) => Err(format!("{label}の終了を待てませんでした: {reason}")),
+    };
+    BlockedAttempt {
+        outcome,
+        resumed: resumed.is_ok(),
+    }
+}
+
+/// 開始前に、全件の控えと対象の selector を読んでおく。
+fn prepare_blocked(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+) -> Result<(Vec<ObjectSummary>, ObjectSummary), String> {
+    let before = snapshot(harness, instance, context.scene_id)?;
+    let object = resolve_object(harness, instance, context.scene_id, context.target)?;
+    Ok((before, object))
+}
+
+/// ブロック中の要求の結果を判定し、解除後の再実行まで確かめる。
+fn judge_blocked(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    label: &str,
+    before: &[ObjectSummary],
+    blocked: Result<EditOutcome, ErrorObject>,
+    destination: Placement,
+) -> CheckResult {
+    let blocked_note = match blocked {
         Ok(applied) => {
-            prompt(&format!(
-                "AviUtl2 のインスタンス {}: {stop}",
-                instance.label
-            ));
             // 拒否されるはずの編集が通っている。以降の確認が別の配置に対して
             // 走らないよう、元の位置へ戻してから失敗として返す。
-            restore_position(harness, instance, applied, context.target)?;
+            restore_position(harness, instance, &applied, context.target)?;
             return Err(format!("{label}の編集が成功として返りました"));
         }
-        Err(error) if error.code == ErrorCode::EditBlocked => describe_error(error),
+        Err(error) if error.code == ErrorCode::EditBlocked => describe_error(&error),
         Err(error) => {
-            prompt(&format!(
-                "AviUtl2 のインスタンス {}: {stop}",
-                instance.label
-            ));
             return Err(format!(
                 "edit_blocked を期待しましたが {}",
-                describe_error(error)
+                describe_error(&error)
             ));
         }
     };
 
     let after_blocked = snapshot(harness, instance, context.scene_id)?;
-    expect_unchanged(&before, &after_blocked)
+    expect_unchanged(before, &after_blocked)
         .map_err(|reason| format!("ブロックされたのにプロジェクトが変化しました: {reason}"))?;
-
-    prompt(&format!(
-        "AviUtl2 のインスタンス {}: {stop}",
-        instance.label
-    ));
 
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
     let moved = require(
@@ -4682,6 +4745,48 @@ fn check_blocked(
     restore_position(harness, instance, &moved, context.target)?;
 
     Ok(vec![blocked_note, format!("{label}の終了後は成功した")])
+}
+
+/// 実行者へ終了を促し、編集がブロックされない状態へ戻るまで待つ。
+///
+/// 再生中・出力中は列挙もブロックされるため、解除を待たずに次へ進むと以降の
+/// 確認は全て同じ理由で落ちる。拒否が案内する `retry_after_ms` の間隔で読み
+/// 直し、待っても解けなければ促し直す。
+fn resume_editable(harness: &Harness, instance: &Instance, stop: &str) -> Result<(), String> {
+    let mut last = "不明".to_string();
+    for _ in 0..BLOCKED_RESUME_PROMPTS {
+        prompt(&format!(
+            "AviUtl2 のインスタンス {}: {stop}",
+            instance.label
+        ));
+        let mut waited = Duration::ZERO;
+        while waited < BLOCKED_RESUME_WAIT {
+            let error = match harness.edit_info(&instance.id) {
+                Ok(_) => return Ok(()),
+                Err(error) if error.code == ErrorCode::EditBlocked => error,
+                Err(error) => {
+                    return Err(format!(
+                        "編集状態を確認できません: {}",
+                        describe_error(&error)
+                    ));
+                }
+            };
+            last = detail_str(&error, "edit_state").unwrap_or_else(|| "不明".to_string());
+            let interval = detail_u64(&error, "retry_after_ms")
+                .map(Duration::from_millis)
+                .unwrap_or(POLL_INTERVAL)
+                .max(POLL_INTERVAL);
+            println!(
+                "  edit_state={last} のため {} 秒後に読み直します",
+                interval.as_secs_f64()
+            );
+            std::thread::sleep(interval);
+            waited += interval;
+        }
+    }
+    Err(format!(
+        "edit_state={last} のまま {BLOCKED_RESUME_PROMPTS} 回促しても復帰しません"
+    ))
 }
 
 /// 移動の応答が返した selector を使って、対象を元の位置へ戻す。
