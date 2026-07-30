@@ -4,6 +4,7 @@
 //! discovery と読み取り operation を MCP の read tool / resource として提供する。
 
 pub mod api;
+pub mod artifact;
 pub mod discovery;
 pub mod identity;
 pub mod mcp;
