@@ -2366,6 +2366,37 @@ mod tests {
         );
     }
 
+    /// effect の有効状態を変えると、そのオブジェクトの fingerprint も変わる
+    /// ことを確かめる。
+    ///
+    /// 有効状態は alias の節へ書き出される。設定値やロックと同じく、列挙が
+    /// effect を読まないままオブジェクトの同一性へ伝わる。
+    #[test]
+    fn object_fingerprint_changes_when_an_effect_enabled_changes() {
+        let project = Arc::new(ProjectState::new());
+        let fingerprint_of = |enabled: bool| {
+            let effect = HostEffect {
+                enabled,
+                ..file_effect("動画ファイル", 0, r"C:\movie.mp4")
+            };
+            let adapter =
+                HostReadAdapter::new(host_with_effects(vec![effect]), Arc::clone(&project));
+            let fingerprint = listed_sample(&adapter).fingerprint;
+            assert!(
+                !adapter.host.calls().contains(&EFFECT_LIST),
+                "列挙が effect を読みました: {:?}",
+                adapter.host.calls()
+            );
+            fingerprint
+        };
+
+        assert_ne!(
+            fingerprint_of(true),
+            fingerprint_of(false),
+            "effect の有効状態を変えても fingerprint が変わりません"
+        );
+    }
+
     /// 列挙が配下 effect を読まないことを確かめる。
     ///
     /// 読めば 1 ページあたりの SDK 呼び出しが effect 数と設定項目数に比例して

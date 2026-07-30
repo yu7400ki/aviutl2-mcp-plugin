@@ -22,18 +22,15 @@ pub(crate) fn sample_object_summary() -> ObjectSummary {
     )
 }
 
-/// 配下 effect の設定値とロック状態を含む alias を組み立てる。
+/// 配下 effect の設定値・有効状態・ロック状態を含む alias を組み立てる。
 ///
-/// ホストが返す alias は配下 effect の設定値とロック状態を本文へ含み、effect を
-/// 変えれば alias も追随する。オブジェクトの fingerprint は alias だけを材料に
-/// するため、フェイクの alias がこの性質を持たなければ「effect を変えると対象の
-/// 同一性が変わる」ことを検証できない。
+/// ホストが返す alias は配下 effect の設定値・有効状態・ロック状態を本文へ含み、
+/// effect を変えれば alias も追随する。オブジェクトの fingerprint は alias だけを
+/// 材料にするため、フェイクの alias がこの性質を持たなければ「effect を変えると
+/// 対象の同一性が変わる」ことを検証できない。
 ///
 /// effect の各値は表示のためだけに文字列へ写す。求める性質は「値が変われば
 /// alias も変わる」ことだけであり、書式そのものに意味は無い。
-///
-/// **有効状態は写さない。** alias に現れるかが確認できていないため、現れる側にも
-/// 現れない側にも寄せない。
 pub(crate) fn alias_with_effects(base: &str, effects: &[HostEffect]) -> String {
     let mut alias = base.to_string();
     for (position, effect) in effects.iter().enumerate() {
@@ -44,7 +41,10 @@ pub(crate) fn alias_with_effects(base: &str, effects: &[HostEffect]) -> String {
         for item in &effect.items {
             alias.push_str(&format!(" / {}={:?}", item.name, item.value));
         }
-        // ロックは節へ書き出される。ロックしていない節には現れない。
+        // 有効状態とロックは既定から外れた節にだけ印が付く。
+        if !effect.enabled {
+            alias.push_str(" / display.disable=1");
+        }
         if effect.locked {
             alias.push_str(" / display.lock=1");
         }
