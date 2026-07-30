@@ -499,6 +499,10 @@ impl EditOutcome {
 ///
 /// `set_selection` だけが返す。プロジェクトの内容を変えないため
 /// [`EditOutcome`] とは別の型である。
+///
+/// **この変更は取り消し単位を作らない。** 実行後に取り消し操作を行うと、
+/// カーソルや選択範囲ではなく、その前に行った編集が取り消される。カーソルを
+/// 動かしたあとに取り消した利用者は、直前の編集を失う。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SelectionState {
     /// プロジェクトの epoch。

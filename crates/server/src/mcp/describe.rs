@@ -292,7 +292,7 @@ pub fn selection_state(state: &SelectionState) -> String {
     }
     text.push_line(format!("project_revision={}", state.project_revision));
     text.push_line(
-        "上の値はホストがクランプした結果であり、編集と同時に観測したものではありません。取り消し操作で元へ戻る保証もありません",
+        "上の値はホストがクランプした結果であり、編集と同時に観測したものではありません。この変更は取り消し単位を作らず、取り消し操作はその前に行った編集を取り消します",
     );
     text.push_line(
         "not_applied の項目は反映されていません。確かめるには aviutl2_get_edit_info で読み直してください",
@@ -914,6 +914,24 @@ mod tests {
         assert!(text.contains("適用できなかった項目: cursor"), "{text}");
         assert!(text.contains("選択範囲なし"), "{text}");
         assert!(text.contains("フォーカスなし"), "{text}");
+    }
+
+    #[test]
+    fn selection_text_names_what_an_undo_would_remove() {
+        // 「戻る保証が無い」は「戻るかもしれない」と読める。実際は戻らないうえに
+        // 取り消しが 1 つ前の編集まで飛ぶため、失うものを名指しする。
+        let state = SelectionState::observed(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            Cursor { frame: 5, layer: 1 },
+            None,
+            None,
+            vec![SelectionField::Cursor],
+            Vec::new(),
+        );
+        let text = selection_state(&state);
+        assert!(text.contains("取り消し単位を作らず"), "{text}");
+        assert!(text.contains("その前に行った編集を取り消します"), "{text}");
     }
 
     #[test]

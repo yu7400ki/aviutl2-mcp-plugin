@@ -930,8 +930,8 @@ impl AviUtl2McpServer {
     /// 変化していれば fingerprint が、別のプロジェクトであれば selector の
     /// project_epoch が拒否する。応答が返した selector は読み直さずにそのまま
     /// 次の編集へ渡せる。
-    /// この tool は取り消し操作で元へ戻る保証が無く、他の編集 tool と異なり
-    /// 取り消し単位を作らない。
+    /// この tool は他の編集 tool と異なり取り消し単位を作らない。実行後に取り消し
+    /// 操作を行うと、カーソルや選択範囲ではなく、その前に行った編集が取り消される。
     /// 応答が返す反映値は編集と原子的に観測したものではなく、ホストが範囲外の値を
     /// クランプした結果である。実際に適用できた項目は applied が、要求したが
     /// 適用できなかった項目は not_applied が示す。一部だけが適用されても応答は
@@ -1699,11 +1699,16 @@ mod tests {
         for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
             let description = description_of(name);
             if *name == "aviutl2_set_selection" {
-                // 取り消しで元へ戻る保証が無いことを、単位を作ると読める文言に
-                // 紛れさせない。
+                // 「戻る保証が無い」は「戻るかもしれない」と読める。実際は戻ら
+                // ないうえに取り消しが 1 つ前の編集まで飛ぶため、失うものを
+                // 名指しする。
                 assert!(
-                    description.contains("取り消し操作で元へ戻る保証が無く"),
-                    "{name} の説明に取り消しの保証が無い旨がありません"
+                    description.contains("取り消し単位を作らない"),
+                    "{name} の説明に取り消し単位を作らない旨がありません"
+                );
+                assert!(
+                    description.contains("その前に行った編集が取り消される"),
+                    "{name} の説明が取り消しの飛び先を述べていません"
                 );
                 assert!(
                     !description.contains("1 つの取り消し単位"),
