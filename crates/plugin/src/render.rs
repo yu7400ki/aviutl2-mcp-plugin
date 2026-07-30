@@ -39,5 +39,5 @@ pub use error::{ArtifactStage, BufferRule, RenderError, RenderStage};
 pub use handoff::{ARTIFACT_MEDIA_TYPE, HANDOFF_TTL, HandoffArtifact, HandoffDir, HandoffToken};
 pub use slot::{
     ABANDONED_ENTRY_TTL, MAX_ABANDONED_RENDERS, RENDER_WAIT_TICK, RenderInventory, RenderSlot,
-    RenderedFrame, SlotWait, deliver_frame, deliver_frame_guarded, guard_callback,
+    RenderedFrame, SlotWait, StopRequest, deliver_frame, deliver_frame_guarded, guard_callback,
 };

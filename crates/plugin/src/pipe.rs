@@ -269,7 +269,7 @@ impl StopSignal {
     }
 
     /// 既にシグナル済みかを待機なしで確認する。
-    fn is_signaled(&self) -> bool {
+    pub(crate) fn is_signaled(&self) -> bool {
         matches!(self.event.wait(0), WaitOutcome::Signaled(_))
     }
 

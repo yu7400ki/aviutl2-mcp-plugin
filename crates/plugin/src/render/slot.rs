@@ -45,7 +45,7 @@ pub const ABANDONED_ENTRY_TTL: Duration = Duration::from_secs(300);
 pub const RENDER_WAIT_TICK: Duration = Duration::from_millis(100);
 
 /// 詰め物を除いた RGBA8 画像。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RenderedFrame {
     /// 描画したフレーム。
     pub frame: u32,
@@ -55,6 +55,23 @@ pub struct RenderedFrame {
     pub height: u32,
     /// 長さは `width * height * 4`。
     pub pixels: Vec<u8>,
+}
+
+/// 画素を出さない表示。
+///
+/// 画像には利用者のプロジェクトの内容が写る。導出した表示のままにすると、
+/// この型を含む値をどこかで表示に流した時点で画素列がそのまま出る。表示する
+/// 場所を後から全て見張るより、型の側で出せなくしておく。これは
+/// [`SlotWait`] のように本型を含む値の表示にも効く。
+impl std::fmt::Debug for RenderedFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RenderedFrame")
+            .field("frame", &self.frame)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("pixel_bytes", &self.pixels.len())
+            .finish()
+    }
 }
 
 /// 受け皿の状態。
@@ -154,13 +171,53 @@ impl RenderInventory {
 
     /// 放棄済みの記録を 1 件落とす。
     ///
-    /// 落とすのは最も古い 1 件である。どの記録がどのタスクのものかは分からず、
-    /// 古い順に減らせば TTL による減衰の対象を最小に保てる。
+    /// **落とすのは最も新しい 1 件である。** どの記録がどのタスクのものかは
+    /// 分からないため、どれを落としても総数は同じだけ減る。違うのは受付判定への
+    /// 効き方である。
+    ///
+    /// 記録は放棄した順に並ぶ。最古を落とすと、そこに溜まっているのは
+    /// [`ABANDONED_ENTRY_TTL`] を過ぎて**もともと受付判定に数えられていない**
+    /// 記録であり、到着しても受付判定の件数が減らない。期限切れが 4 件、
+    /// TTL 内が 4 件たまった状態では、TTL 内のタスクのコールバックが何件届いても
+    /// 受付が戻らなくなる。
+    ///
+    /// 最新を落とせばこれが起きない。受付判定の件数が 0 でないなら、記録の順序
+    /// から最新は必ず TTL 内であり、落とせば必ず 1 減る。
     fn release_abandon(&self) {
         let mut abandoned = self.abandoned.lock().unwrap_or_else(|e| e.into_inner());
-        if !abandoned.is_empty() {
-            abandoned.remove(0);
-        }
+        abandoned.pop();
+    }
+}
+
+/// 停止が要求されたかどうかだけを見る観測口。
+///
+/// 待機が観測する停止は、接続受理ループを止めるものと**同一でなければ
+/// ならない**。要求処理は接続を受けるスレッド上で同期実行されるため、別の
+/// 合図を用意すると、片方が立ってからもう片方が立つまでの間に待機が居座る。
+/// 停止手順はその間ずっと待たされ、待ちきれずスレッドを切り離すことになる。
+///
+/// 観測だけを型として切り出すのは、待機に停止の**立て方**を渡さないためである。
+/// 立てられる値を渡すと、レンダリング側から停止を起こす経路が生まれる。
+/// 実装は [`crate::pipe::StopSignal`] に対して下で与えており、それ以外の合図を
+/// 新たに作る必要は無い。
+pub trait StopRequest: Send + Sync {
+    /// 停止が要求済みか。待機なしで確認できること。
+    fn is_stop_requested(&self) -> bool;
+}
+
+impl StopRequest for crate::pipe::StopSignal {
+    fn is_stop_requested(&self) -> bool {
+        self.is_signaled()
+    }
+}
+
+/// 合図を差し替えて待機を確かめるための実装。
+///
+/// 本番では [`crate::pipe::StopSignal`] を渡す。こちらは Win32 のイベントを
+/// 用意せずに停止の観測だけを再現できる。
+impl StopRequest for AtomicBool {
+    fn is_stop_requested(&self) -> bool {
+        self.load(Ordering::Acquire)
     }
 }
 
@@ -265,14 +322,23 @@ impl RenderSlot {
     ///
     /// 放棄は終端であり、取り消せない。取り消せると、期限超過を返した要求が
     /// 後から成功する経路が生まれる。
+    ///
+    /// **放棄済みへの計上を先に行い、未完了からの取り下げを後に行う。順序を
+    /// 逆にしてはならない。** [`RenderInventory::outstanding`] は未完了の件数を
+    /// 読んでから放棄済みの記録を数えるため、逆順にすると 2 つの更新の隙間で
+    /// 在庫が 0 に見える。終了判定がその瞬間を読むと、ホスト側でタスクが生きて
+    /// いるのに待たずにアンロードへ進む。放棄は停止要求でも起きるため、
+    /// 終了手順の中で在庫を数えるのとまさに並行する。
+    ///
+    /// この順序なら隙間で起きるのは過大計上であり、余分に待つだけで済む。
     fn abandon_at(&self, now: Instant) {
         let mut state = self.lock_state();
         if let SlotState::Pending = *state {
             *state = SlotState::Abandoned {
                 callback_arrived: false,
             };
-            self.inventory.release_issue();
             self.inventory.record_abandon(now);
+            self.inventory.release_issue();
         }
     }
 
@@ -299,7 +365,7 @@ impl RenderSlot {
     ///
     /// 期限超過と停止要求では、戻る前に受け皿を放棄する。放棄を呼び出し側の
     /// 作法に委ねると、忘れた経路で在庫が減らないまま残る。
-    pub fn wait(&self, deadline: Instant, stop: &AtomicBool) -> SlotWait {
+    pub fn wait(&self, deadline: Instant, stop: &dyn StopRequest) -> SlotWait {
         let mut state = self.lock_state();
         loop {
             if let SlotState::Done(result) = &mut *state
@@ -307,7 +373,7 @@ impl RenderSlot {
             {
                 return SlotWait::Done(result);
             }
-            if stop.load(Ordering::Acquire) {
+            if stop.is_stop_requested() {
                 drop(state);
                 self.abandon_at(Instant::now());
                 return SlotWait::Stopped;
@@ -324,6 +390,25 @@ impl RenderSlot {
                 .wait_timeout(state, tick)
                 .unwrap_or_else(|e| e.into_inner());
             state = guard;
+        }
+    }
+}
+
+/// 未完了のまま解放された受け皿を在庫から落とす。
+///
+/// 計上は受け皿の生成時に行うため、完了・放棄・投入失敗のどれも通らずに
+/// 解放されると未完了の件数が 1 残る。残ると [`RenderInventory::outstanding`]
+/// が二度と 0 にならず、**終了のたびに全タスクの完了待ちを呼ぶ**ようになる。
+/// 費用も危険も無いはずの既定の経路が失われる。
+///
+/// 取り下げが二重に走らないのは、状態が `Pending` のときだけ落とすためである。
+/// 完了・放棄・投入失敗はいずれも `Pending` から出るため、ここには来ない。
+impl Drop for RenderSlot {
+    fn drop(&mut self) {
+        // 解放の時点で他に所有者は居ないため、毒されていても中身は有効である。
+        let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
+        if let SlotState::Pending = state {
+            self.inventory.release_issue();
         }
     }
 }
@@ -537,6 +622,74 @@ mod tests {
     }
 
     #[test]
+    fn an_abandoned_slot_is_never_invisible_to_the_shutdown_count() {
+        // 放棄は放棄済みへの計上と未完了からの取り下げの 2 段で進む。取り下げを
+        // 先に行うと、2 段の隙間で在庫が 0 に見える。終了判定がその瞬間を読むと、
+        // ホスト側でタスクが生きているのに待たずにアンロードへ進む。
+        //
+        // 放棄済みの記録を外から押さえておくと、放棄は計上の段で必ず止まる。
+        // その時点で未完了の件数がまだ 1 であることが、順序そのものを表す。
+        let inventory = RenderInventory::new();
+        let slot = RenderSlot::new(inventory.clone());
+        let blocked = inventory.abandoned.lock().unwrap();
+
+        let abandoning = {
+            let slot = slot.clone();
+            std::thread::spawn(move || slot.abandon_at(Instant::now()))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+
+        assert_eq!(
+            inventory.pending.load(Ordering::Acquire),
+            1,
+            "放棄済みへ計上する前に未完了から取り下げています"
+        );
+
+        drop(blocked);
+        abandoning.join().unwrap();
+        assert_eq!(inventory.outstanding(), 1);
+    }
+
+    #[test]
+    fn a_slot_dropped_while_pending_gives_its_count_back() {
+        // 計上は受け皿の生成時に行う。完了も放棄も通らずに解放されると、
+        // 未完了の件数が残り続けて終了判定が二度と 0 にならない。
+        let inventory = RenderInventory::new();
+        drop(RenderSlot::new(inventory.clone()));
+        assert_eq!(inventory.outstanding(), 0);
+    }
+
+    #[test]
+    fn dropping_a_settled_slot_does_not_give_the_count_back_twice() {
+        // 取り下げが二重に走ると、まだ生きている別のタスクの分まで消える。
+        // 引き算は飽和するため、ずれても表には出ない。
+        let inventory = RenderInventory::new();
+        let alive = RenderSlot::new(inventory.clone());
+        let settled = RenderSlot::new(inventory.clone());
+        deliver_sample(&settled, 7);
+        assert_eq!(inventory.outstanding(), 1);
+
+        drop(settled);
+        assert_eq!(
+            inventory.outstanding(),
+            1,
+            "完了済みの受け皿の解放が、生きているタスクの計上まで消しました"
+        );
+
+        let abandoned = RenderSlot::new(inventory.clone());
+        abandoned.abandon_at(Instant::now());
+        assert_eq!(inventory.outstanding(), 2);
+        drop(abandoned);
+        assert_eq!(
+            inventory.outstanding(),
+            2,
+            "放棄済みの受け皿の解放が計上を消しました"
+        );
+
+        drop(alive);
+    }
+
+    #[test]
     fn a_failed_issue_is_not_counted_as_abandoned() {
         let inventory = RenderInventory::new();
         let slot = RenderSlot::new(inventory.clone());
@@ -574,6 +727,50 @@ mod tests {
             "到着で計上が減らず、受付が戻りません"
         );
         assert_eq!(inventory.outstanding(), MAX_ABANDONED_RENDERS - 1);
+    }
+
+    #[test]
+    fn admission_recovers_even_when_expired_entries_are_mixed_in() {
+        // 期限切れの記録は受付判定に数えられていない。到着でそれを落としても
+        // 受付は戻らない。落とすべきは TTL 内の記録である。
+        let inventory = RenderInventory::new();
+        let long_ago = Instant::now();
+        for _ in 0..MAX_ABANDONED_RENDERS {
+            RenderSlot::new(inventory.clone()).abandon_at(long_ago);
+        }
+
+        let recently = long_ago + ABANDONED_ENTRY_TTL + Duration::from_secs(10);
+        let fresh: Vec<_> = (0..MAX_ABANDONED_RENDERS)
+            .map(|_| {
+                let slot = RenderSlot::new(inventory.clone());
+                slot.abandon_at(recently);
+                slot
+            })
+            .collect();
+
+        assert_eq!(
+            inventory.abandoned_within_ttl(recently),
+            MAX_ABANDONED_RENDERS
+        );
+        assert!(!inventory.accepts_new_render(recently));
+
+        // 新しく放棄したタスクのコールバックが遅れて届く。
+        deliver_sample(&fresh[0], 7);
+
+        assert_eq!(
+            inventory.abandoned_within_ttl(recently),
+            MAX_ABANDONED_RENDERS - 1,
+            "到着で減ったのが期限切れの記録だけになっています"
+        );
+        assert!(
+            inventory.accepts_new_render(recently),
+            "期限切れの記録が先頭にあると受付が戻りません"
+        );
+        assert_eq!(
+            inventory.outstanding(),
+            MAX_ABANDONED_RENDERS * 2 - 1,
+            "終了判定の件数は 1 件だけ減る"
+        );
     }
 
     #[test]
@@ -658,6 +855,41 @@ mod tests {
         assert!(matches!(waited, SlotWait::Done(Ok(_))), "{waited:?}");
         handle.join().unwrap();
         assert_eq!(inventory.outstanding(), 0);
+    }
+
+    #[test]
+    fn the_wait_can_observe_the_accept_loop_stop_itself() {
+        // 待機が見る停止は、接続受理ループを止めるものと同一でなければならない。
+        // 別の合図を用意すると、片方が立ってからもう片方が立つまでの間、待機が
+        // 居座って停止手順を待たせる。
+        //
+        // 確かめるのは「そのまま渡せること」である。合図を新たに作らせない
+        // ために作成と送出は借りていないため、実際に立てて確かめるのは接続
+        // 受理ループ側のテストの担当になる。ここで固定するのは、次の配線が
+        // 2 つ目のフラグを作らずに済む形が保たれていることである。
+        fn assert_observable<T: StopRequest + ?Sized>() {}
+        assert_observable::<crate::pipe::StopSignal>();
+        assert_observable::<dyn StopRequest>();
+    }
+
+    #[test]
+    fn neither_a_frame_nor_a_wait_outcome_prints_its_pixels() {
+        // 画像には利用者のプロジェクトの内容が写る。表示する場所を後から全て
+        // 見張るより、型の側で出せなくしておく。
+        let frame = RenderedFrame {
+            frame: 7,
+            width: 2,
+            height: 2,
+            pixels: sample_buffer(),
+        };
+        let shown = format!("{frame:?}");
+        assert!(shown.contains("pixel_bytes: 16"), "{shown}");
+        assert!(!shown.contains("pixels"), "{shown}");
+
+        let outcome = SlotWait::Done(Ok(frame));
+        let shown = format!("{outcome:?}");
+        assert!(shown.contains("pixel_bytes: 16"), "{shown}");
+        assert!(!shown.contains("pixels"), "{shown}");
     }
 
     #[test]
