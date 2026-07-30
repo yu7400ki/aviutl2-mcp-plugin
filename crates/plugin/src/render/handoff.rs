@@ -82,6 +82,17 @@ impl HandoffToken {
         Self(hex)
     }
 
+    /// 文字列表現から識別子を復元する。小文字 16 進 32 文字以外は受け付けない。
+    ///
+    /// 復元の口を検証つきにしておくのは、**任意の文字列からファイルの場所を
+    /// 組み立てる経路を作らない**ためである。この型を経由しなければパスは
+    /// 組み立てられず、相対参照や区切り文字を含む文字列はここで止まる。
+    pub fn parse(text: &str) -> Option<Self> {
+        let valid = text.len() == TOKEN_HEX_LEN
+            && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        valid.then(|| Self(text.to_string()))
+    }
+
     /// 応答へ載せる文字列表現。
     pub fn as_str(&self) -> &str {
         &self.0
@@ -231,6 +242,24 @@ impl HandoffDir {
                 .context("引き渡し用ディレクトリを作成できませんでした")?;
         }
         Ok(())
+    }
+
+    /// ディレクトリに残っているファイルの数。
+    ///
+    /// 書き出しと掃除の結果を、パスを外へ出さずに確かめるための口である。
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> usize {
+        std::fs::read_dir(&self.dir)
+            .map(|entries| entries.flatten().count())
+            .unwrap_or(0)
+    }
+
+    /// 書き出した成果物の中身。
+    ///
+    /// 画素が往復することを確かめるための口である。
+    #[cfg(test)]
+    pub(crate) fn read_artifact(&self, token: &HandoffToken) -> Option<Vec<u8>> {
+        std::fs::read(self.artifact_path(token)).ok()
     }
 
     fn artifact_path(&self, token: &HandoffToken) -> PathBuf {
@@ -408,6 +437,27 @@ mod tests {
             "{}",
             token.as_str()
         );
+    }
+
+    #[test]
+    fn only_a_well_formed_token_can_be_restored() {
+        let token = HandoffToken::generate();
+        assert_eq!(HandoffToken::parse(token.as_str()), Some(token.clone()));
+
+        for text in [
+            "",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef0",
+            "0123456789ABCDEF0123456789abcdef",
+            "..\\..\\instances\\0123456789abcdef",
+            "0123456789abcdef0123456789abcde/",
+        ] {
+            assert_eq!(
+                HandoffToken::parse(text),
+                None,
+                "{text} が識別子として受理されました"
+            );
+        }
     }
 
     #[test]

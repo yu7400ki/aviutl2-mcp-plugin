@@ -23,7 +23,7 @@ use crate::render::error::BufferRule;
 pub const MAX_RENDER_FRAME_BYTES: usize = 256 * 1024 * 1024;
 
 /// 1 画素のバイト数。
-const BYTES_PER_PIXEL: u32 = 4;
+pub const BYTES_PER_PIXEL: u32 = 4;
 
 /// 寸法として受け取ってよい上限。
 ///

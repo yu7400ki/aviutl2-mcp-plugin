@@ -92,6 +92,8 @@ struct AviUtl2McpPlugin {
     lifecycle: Option<Arc<lifecycle::Lifecycle>>,
     project_state: Option<Arc<project::ProjectState>>,
     pipe_server: Option<pipe::PipeServer>,
+    /// レンダリングの実行口。終了手順が投入済みタスクの在庫を数えるために持つ。
+    render_adapter: Option<Arc<render::HostRenderAdapter<render::sdk::SdkRenderHost>>>,
 }
 
 #[cfg(windows)]
@@ -102,6 +104,7 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
             lifecycle: None,
             project_state: None,
             pipe_server: None,
+            render_adapter: None,
         })
     }
 
@@ -151,16 +154,38 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
             }
         };
 
+        // 停止の合図をここで作る。接続受理ループとレンダリングの完了待ちが
+        // **同一の合図**を見る必要があり、待つ側は起動より前に組み立てる。
+        let stop_signal = match pipe::StopSignal::new() {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                tracing::error!("停止イベントの作成に失敗しました: {e:?}");
+                return;
+            }
+        };
+
         let read_adapter = read::sdk_read_adapter(project_state.clone());
-        let edit_adapter = edit::sdk_edit_adapter(project_state);
-        let pipe_server =
-            match pipe::PipeServer::start(lifecycle.clone(), read_adapter, edit_adapter) {
-                Ok(s) => s,
+        let edit_adapter = edit::sdk_edit_adapter(project_state.clone());
+        let render_adapter =
+            match render::sdk_render_adapter(project_state, &instance_id, stop_signal.clone()) {
+                Ok(a) => a,
                 Err(e) => {
-                    tracing::error!("named pipe server の起動に失敗しました: {e:?}");
+                    tracing::error!("レンダリングの実行口の初期化に失敗しました: {e:?}");
                     return;
                 }
             };
+        let pipe_server = match pipe::PipeServer::start(
+            lifecycle.clone(),
+            read_adapter,
+            edit_adapter,
+            stop_signal,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("named pipe server の起動に失敗しました: {e:?}");
+                return;
+            }
+        };
 
         tracing::info!(
             instance_id = %redact::instance_id(&instance_id),
@@ -170,6 +195,7 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
 
         self.lifecycle = Some(lifecycle);
         self.pipe_server = Some(pipe_server);
+        self.render_adapter = Some(render_adapter);
     }
 
     fn plugin_info(&self) -> aviutl2::generic::GenericPluginTable {
@@ -349,13 +375,18 @@ fn descriptor_project(path: &std::path::Path) -> DescriptorProject {
 /// 捕捉した panic をここでログ化しないのは、ログ経路自体が panic 源であり
 /// 得るためである。また `Drop` から panic を漏らさないことで、ホストの
 /// 終了処理が巻き戻り経路へ入るのも防ぐ。
+///
+/// `drain_renders` を `stop_pipe` の直後に置く順序が要である。接続受理を止める
+/// 前にレンダリングの在庫を数えると、その後に投入されたタスクを取りこぼす。
 #[cfg(windows)]
 fn run_shutdown_sequence(
     stop_pipe: impl FnOnce(),
+    drain_renders: impl FnOnce(),
     drain: impl FnOnce(),
     remove_descriptor: impl FnOnce(),
 ) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(stop_pipe));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(drain_renders));
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(drain));
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(remove_descriptor));
 }
@@ -365,13 +396,24 @@ impl Drop for AviUtl2McpPlugin {
     fn drop(&mut self) {
         let pipe_server = self.pipe_server.take();
         let lifecycle = self.lifecycle.take();
+        let render_adapter = self.render_adapter.take();
 
         // pipe を停止してから descriptor を削除する。順序を逆にすると
         // descriptor が消えた後も pipe が接続を受け付ける窓ができる。
+        //
+        // レンダリングの在庫を空にするのは pipe を止めた直後である。止めた後で
+        // なければ在庫が増え続け、数えた値がすぐ古くなる。
         run_shutdown_sequence(
             || {
                 if let Some(pipe_server) = pipe_server {
                     pipe_server.stop(pipe::STOP_TIMEOUT);
+                }
+            },
+            || {
+                if let Some(render_adapter) = &render_adapter {
+                    render::drain_render_tasks(render_adapter, render::RENDER_DRAIN_TIMEOUT);
+                    // 以後この instance が成果物を書くことはない。
+                    render::RenderDrain::discard_artifacts(render_adapter.as_ref());
                 }
             },
             || {
@@ -407,12 +449,17 @@ mod tests {
 
     #[test]
     fn shutdown_sequence_removes_descriptor_even_if_earlier_steps_panic() {
+        let renders_drained = std::cell::Cell::new(false);
         let drained = std::cell::Cell::new(false);
         let removed = std::cell::Cell::new(false);
 
         with_silent_panic_hook(|| {
             run_shutdown_sequence(
                 || panic!("pipe 停止時のログ出力が失敗しました"),
+                || {
+                    renders_drained.set(true);
+                    panic!("レンダリングの完了待ちのログ出力が失敗しました");
+                },
                 || {
                     drained.set(true);
                     panic!("draining 遷移時のログ出力が失敗しました");
@@ -422,8 +469,12 @@ mod tests {
         });
 
         assert!(
+            renders_drained.get(),
+            "pipe 停止の panic でレンダリングの完了待ちが飛ばされました"
+        );
+        assert!(
             drained.get(),
-            "pipe 停止の panic で draining が飛ばされました"
+            "レンダリングの完了待ちの panic で draining が飛ばされました"
         );
         assert!(
             removed.get(),
@@ -433,21 +484,32 @@ mod tests {
 
     #[test]
     fn shutdown_sequence_runs_steps_in_order() {
+        // レンダリングの在庫を数えるのは接続受理を止めた後でなければならない。
+        // 止める前に数えると、その後に投入されたタスクを取りこぼす。
         let order = std::cell::RefCell::new(Vec::new());
 
         run_shutdown_sequence(
             || order.borrow_mut().push("pipe"),
+            || order.borrow_mut().push("render"),
             || order.borrow_mut().push("drain"),
             || order.borrow_mut().push("remove"),
         );
 
-        assert_eq!(order.into_inner(), vec!["pipe", "drain", "remove"]);
+        assert_eq!(
+            order.into_inner(),
+            vec!["pipe", "render", "drain", "remove"]
+        );
     }
 
     #[test]
     fn shutdown_sequence_does_not_propagate_panic() {
         with_silent_panic_hook(|| {
-            run_shutdown_sequence(|| panic!("pipe"), || panic!("drain"), || panic!("remove"));
+            run_shutdown_sequence(
+                || panic!("pipe"),
+                || panic!("render"),
+                || panic!("drain"),
+                || panic!("remove"),
+            );
         });
     }
 
@@ -531,6 +593,7 @@ mod tests {
             lifecycle: Some(lifecycle),
             project_state: Some(project_state.clone()),
             pipe_server: None,
+            render_adapter: None,
         };
 
         plugin.event_change_edit_frame();
@@ -717,6 +780,7 @@ mod tests {
             lifecycle: Some(lifecycle.clone()),
             project_state: Some(Arc::new(project::ProjectState::new())),
             pipe_server: None,
+            render_adapter: None,
         };
 
         let logs = capture_logs(|| {

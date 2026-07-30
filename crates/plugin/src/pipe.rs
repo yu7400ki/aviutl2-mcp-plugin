@@ -249,12 +249,18 @@ fn map_io_error(error: IoError, operation: &'static str, started: Instant) -> Pi
 ///
 /// 生ハンドル値を共有せず、Windows イベントオブジェクトのシグナルのみで
 /// 停止を伝える。待機中の overlapped I/O もこのイベントで中断できる。
-pub(crate) struct StopSignal {
+///
+/// **接続受理ループの外からも観測される。** 要求処理は接続を受けるスレッド上で
+/// 同期実行されるため、長く待つ処理はこの合図を見て早く抜ける必要がある。
+/// 別の合図を用意すると、片方が立ってからもう片方が立つまでの間その処理が
+/// 居座り、停止手順は待ちきれずにスレッドを切り離すことになる。合図を立てる
+/// 手段は公開せず、観測だけを外から行えるようにしてある。
+pub struct StopSignal {
     event: EventHandle,
 }
 
 impl StopSignal {
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         Ok(Self {
             event: EventHandle::new().context("停止イベントの作成に失敗しました")?,
         })
@@ -302,12 +308,16 @@ impl PipeServer {
     /// 戻り値は制御ハンドルであり、accept スレッドとは共有しない。スレッドへ
     /// 渡すのは停止イベントとライフサイクル・読み取り口・編集口のみで、スレッドから
     /// 制御ハンドルを触る経路は存在しない。
+    ///
+    /// 停止イベントを引数に取るのは、**接続受理ループの外にもこの合図を観測する
+    /// 処理があるため**である。観測する側は起動より前に組み立てられるため、
+    /// 合図の作成をここへ閉じ込めると渡す先が無くなる。
     pub fn start(
         lifecycle: Arc<Lifecycle>,
         read_adapter: Arc<dyn ReadAdapter>,
         edit_adapter: Arc<dyn EditAdapter>,
+        stop_signal: Arc<StopSignal>,
     ) -> Result<Self> {
-        let stop_signal = Arc::new(StopSignal::new()?);
         // 送信は行わない。スレッド終了時に `tx` が drop され、受信側が
         // `Disconnected` を得ることでスレッド終了を検知する。
         let (tx, rx) = channel::<()>();
@@ -636,7 +646,18 @@ mod tests {
     fn start_server(lifecycle: &Arc<Lifecycle>) -> PipeServer {
         let project = Arc::new(ProjectState::new());
         let read_adapter = crate::read::sdk_read_adapter(project.clone());
-        PipeServer::start(lifecycle.clone(), read_adapter, sdk_edit_adapter(project)).unwrap()
+        PipeServer::start(
+            lifecycle.clone(),
+            read_adapter,
+            sdk_edit_adapter(project),
+            new_stop_signal(),
+        )
+        .unwrap()
+    }
+
+    /// 接続受理ループを止める合図を 1 つ作る。
+    fn new_stop_signal() -> Arc<StopSignal> {
+        Arc::new(StopSignal::new().unwrap())
     }
 
     /// 指定した読み取り口を添えて server を起動する。
@@ -648,7 +669,13 @@ mod tests {
         read_adapter: Arc<dyn ReadAdapter>,
     ) -> PipeServer {
         let edit_adapter = sdk_edit_adapter(Arc::new(ProjectState::new()));
-        PipeServer::start(lifecycle.clone(), read_adapter, edit_adapter).unwrap()
+        PipeServer::start(
+            lifecycle.clone(),
+            read_adapter,
+            edit_adapter,
+            new_stop_signal(),
+        )
+        .unwrap()
     }
 
     /// 応答が要求へ届くことだけを確かめるための読み取り口。
@@ -1866,7 +1893,13 @@ mod tests {
         read_adapter: Arc<dyn ReadAdapter>,
         edit_adapter: Arc<dyn EditAdapter>,
     ) -> PipeServer {
-        PipeServer::start(lifecycle.clone(), read_adapter, edit_adapter).unwrap()
+        PipeServer::start(
+            lifecycle.clone(),
+            read_adapter,
+            edit_adapter,
+            new_stop_signal(),
+        )
+        .unwrap()
     }
 
     /// 編集区間のクロージャの内側で panic する編集口と、その前提を作る。
