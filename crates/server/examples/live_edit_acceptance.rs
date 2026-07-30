@@ -5894,6 +5894,8 @@ fn section_layer_bounds(
     );
 
     // 列挙の範囲を超えたレイヤーの属性は、read-back を持つ tool でしか覗けない。
+    // 要求する値は既定と異なる locked=true とする。既定と同じ値では、要求が
+    // 素通りしても read-back が一致してしまい、成功が何も意味しない。
     let beyond = last.index + 1;
     let far = last.index + OUT_OF_RANGE_LAYER_OFFSET;
     let epoch = precondition(harness, instance)?;
@@ -5901,25 +5903,42 @@ fn section_layer_bounds(
         &instance.id,
         context.scene_id,
         far,
-        LayerStateChange::locked(false),
+        LayerStateChange::locked(true),
         epoch,
     );
+    let mut finding = match &probed {
+        Ok(outcome) => format!(
+            "layer={far} へ既定と異なる locked=true を要求した aviutl2_set_layer_state が成功し、name={} enabled={} locked={} object_count={} を返した",
+            outcome.layer.name.as_deref().unwrap_or("（標準名）"),
+            outcome.layer.enabled,
+            outcome.layer.locked,
+            outcome.layer.object_count,
+        ),
+        Err(error) => format!(
+            "layer={far} へ既定と異なる locked=true を要求した aviutl2_set_layer_state は {}",
+            describe_error(error)
+        ),
+    };
+    // 後始末: 受け入れられた場合は既定値へ戻す。範囲外のレイヤーが本当に増えて
+    // いれば、ロックされたまま残る。
+    if probed.is_ok() {
+        let epoch = precondition(harness, instance)?;
+        let restored = harness.set_layer_state(
+            &instance.id,
+            context.scene_id,
+            far,
+            LayerStateChange::locked(false),
+            epoch,
+        );
+        finding.push_str(&match &restored {
+            Ok(outcome) => format!("。locked={} へ戻した", outcome.layer.locked),
+            Err(error) => format!("。locked=false へ戻せなかった: {}", describe_error(error)),
+        });
+    }
     report.observe(
         "out_of_range_layer_attributes",
-        "列挙の範囲を超えたレイヤーの属性の読み取りは何を返すか",
-        match &probed {
-            Ok(outcome) => format!(
-                "layer={far} への aviutl2_set_layer_state が成功し、name={} enabled={} locked={} object_count={} を返した",
-                outcome.layer.name.as_deref().unwrap_or("（標準名）"),
-                outcome.layer.enabled,
-                outcome.layer.locked,
-                outcome.layer.object_count,
-            ),
-            Err(error) => format!(
-                "layer={far} への aviutl2_set_layer_state は {}",
-                describe_error(error)
-            ),
-        },
+        "列挙の範囲を超えたレイヤーへ既定と異なる状態を要求すると何が起きるか",
+        finding,
     );
 
     let outcome = check_layer_bound_destinations(
