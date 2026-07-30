@@ -37,8 +37,17 @@ use serde::{Deserialize, Serialize};
 /// ここに挙げた名前だけを例外として読み捨て、**それ以外の未知フィールドは
 /// 従来どおり拒否する。**
 ///
-/// 一覧であって既定ではない。フィールドを外すたびにここへ足し、要求元が
-/// 送らなくなったことを確かめてから取り除く。
+/// 一覧であって既定ではない。フィールドを外すたびにここへ足し、
+/// `protocol_version` の MAJOR を上げるときに取り除く。
+///
+/// **「要求元が送らなくなったこと」を撤去条件にしない。** 読み捨ては無言であり、
+/// 何が送られてきたかを数える経路が無いため確かめられない。MAJOR の更新は判断の
+/// 時点が定まり、観測を要しない。
+///
+/// **ここに挙げる名前は、どの要求でも現に使われていないものに限る。** 一覧は
+/// 全 operation で共有するため、使われている名前を足すとその operation の
+/// フィールドが黙って落ちる。衝突は各境界の
+/// `no_retired_field_collides_with_a_field_in_use` が拒む。
 pub const RETIRED_EDIT_FIELDS: &[&str] = &["expected"];
 
 /// [`RETIRED_EDIT_FIELDS`] を読み捨てる [`Deserialize`] を実装する。
@@ -47,6 +56,18 @@ pub const RETIRED_EDIT_FIELDS: &[&str] = &["expected"];
 /// trait ではなく関連関数として生成されるため、こうして前処理を挟んだうえで
 /// trait 実装へ繋げられる。落とすのは一覧に挙げた名前だけであり、他の未知
 /// フィールドは派生実装が従来どおり拒否する。
+///
+/// # 前提と、狭まった受理集合
+///
+/// **自己記述的な map 形の deserializer を前提とする。** 一度 [`serde_json::Value`]
+/// へ受けてから派生実装へ渡すため、JSON 以外の形式では使えない。要求は MCP と
+/// IPC のいずれも JSON であり、現に使う経路はすべてこの前提を満たす。
+///
+/// **struct を配列として送る形は受理しなくなった。** 以前は
+/// `[selector, destination]` のような列も受理していたが、いまは
+/// `invalid type: sequence, expected a map` になる。JSON-RPC と MCP の params は
+/// object であるため実害は無いが、受理する要求の集合が狭まった点は事実として
+/// 記す。
 #[macro_export]
 macro_rules! tolerate_retired_edit_fields {
     ($($params:ty),+ $(,)?) => {

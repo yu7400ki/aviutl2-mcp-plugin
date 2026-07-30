@@ -630,7 +630,9 @@ fn from_input_error(error: EditInputError) -> ErrorObject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::{EditOperation, ErrorCode, ObjectFingerprintInput, ObjectSummary};
+    use aviutl2_mcp_core::{
+        EditOperation, ErrorCode, ObjectFingerprintInput, ObjectSummary, RETIRED_EDIT_FIELDS,
+    };
     use serde_json::{Value, json};
 
     const SAMPLE_ID: &str = "8df98c04-e7c2-4f98-b3ce-fc1c39d76414";
@@ -746,6 +748,26 @@ mod tests {
             EditOperation::SetEffectState => decoded!(SetEffectStateInput),
             EditOperation::SetSelection => decoded!(SetSelectionInput),
         })
+    }
+
+    #[test]
+    fn no_retired_field_collides_with_a_field_in_use() {
+        // 読み捨てる一覧は全 tool で共有する。現に使われている名前を足すと、その
+        // tool の必須フィールドが黙って落ちる。名前を足した時点で落ちるよう、
+        // 現在の形の top-level キーと突き合わせる。
+        for operation in EditOperation::ALL {
+            let name = operation.as_str();
+            let current = current_input(operation);
+            for retired in RETIRED_EDIT_FIELDS {
+                assert!(
+                    !current
+                        .as_object()
+                        .expect("入力は object")
+                        .contains_key(*retired),
+                    "{name} が現に使っている {retired} を読み捨ての一覧が含んでいます"
+                );
+            }
+        }
     }
 
     #[test]

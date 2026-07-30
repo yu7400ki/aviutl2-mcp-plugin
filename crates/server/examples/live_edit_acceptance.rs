@@ -1057,11 +1057,6 @@ fn precondition(harness: &Harness, instance: &Instance) -> Result<String, String
     Ok(info.project_epoch)
 }
 
-/// 応答が返した epoch を前提条件として得る。
-fn outcome_precondition(outcome: &EditOutcome) -> String {
-    outcome.project_epoch.clone()
-}
-
 /// 失敗を実行の中断理由へ写す。
 fn require<T>(result: Result<T, ErrorObject>, what: &str) -> Result<T, String> {
     result.map_err(|error| format!("{what}: {}", describe_error(&error)))
@@ -3844,7 +3839,7 @@ fn check_same_name_objects(
                 layer: slot.layer as u32,
                 frame: second_frame as u32,
             },
-            outcome_precondition(&first),
+            first.project_epoch.clone(),
         )
         .map_err(|error| {
             format!(
