@@ -10,7 +10,9 @@
 //! - 投入したタスクを取り消す手段が無い。
 //! - 完了が届く時刻に上限が無い。
 //!
-//! したがって「待てば必ず終わる」前提では組めない。
+//! したがって「待てば必ず終わる」前提では組めない。要求元は期限付きで待ち、
+//! 超えたら受け皿を放棄する（[`slot`]）。放棄しても、ホストが抱えるタスクは
+//! 生き続ける。
 //!
 //! # 区間の外で行う
 //!
@@ -20,6 +22,11 @@
 
 pub mod buffer;
 pub mod error;
+pub mod slot;
 
 pub use buffer::{ExtractedFrame, FrameLayout, MAX_RENDER_FRAME_BYTES};
 pub use error::{ArtifactStage, BufferRule, RenderError, RenderStage};
+pub use slot::{
+    ABANDONED_ENTRY_TTL, MAX_ABANDONED_RENDERS, RENDER_WAIT_TICK, RenderInventory, RenderSlot,
+    RenderedFrame, SlotWait, deliver_frame, deliver_frame_guarded, guard_callback,
+};
