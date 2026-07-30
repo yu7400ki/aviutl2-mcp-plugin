@@ -76,7 +76,7 @@ impl FrameLayout {
 }
 
 /// 詰め物を除いた RGBA8 画像。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ExtractedFrame {
     /// 画像の幅（画素）。
     pub width: u32,
@@ -84,6 +84,20 @@ pub struct ExtractedFrame {
     pub height: u32,
     /// 長さは `width * height * 4`。
     pub pixels: Vec<u8>,
+}
+
+/// 画素を出さない表示。
+///
+/// 画像には利用者のプロジェクトの内容が写る。導出した表示のままにすると、
+/// この型を含む値をどこかで表示に流した時点で画素列がそのまま出る。
+impl std::fmt::Debug for ExtractedFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtractedFrame")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("pixel_bytes", &self.pixels.len())
+            .finish()
+    }
 }
 
 /// 寸法と長さの整合を検証する。

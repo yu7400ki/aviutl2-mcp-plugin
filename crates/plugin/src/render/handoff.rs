@@ -598,8 +598,8 @@ mod tests {
         writer.finish().unwrap();
 
         assert!(
-            fast.len() >= default_encoded.len(),
-            "既定より小さくなりました。速度側へ寄せられていません: {} < {}",
+            fast.len() > default_encoded.len(),
+            "既定と同じかそれより小さくなりました。速度側へ寄せられていません: {} <= {}",
             fast.len(),
             default_encoded.len()
         );

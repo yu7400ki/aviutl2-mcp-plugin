@@ -89,16 +89,6 @@ pub enum ArtifactStage {
     Write,
 }
 
-impl ArtifactStage {
-    /// 応答へ載せる機械可読な名前。
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ArtifactStage::Encode => "encode",
-            ArtifactStage::Write => "handoff",
-        }
-    }
-}
-
 impl std::fmt::Display for ArtifactStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let text = match self {
@@ -131,6 +121,19 @@ impl RenderStage {
             RenderStage::Wait => "wait",
             RenderStage::Encode => "encode",
             RenderStage::Handoff => "handoff",
+        }
+    }
+}
+
+/// 成果物を作る段を、応答へ載せる段の呼び方へ写す。
+///
+/// 同じ段に 2 つの名前を持たせない。持たせると、片方だけを変えても誰も
+/// 気付かないまま応答の語彙が食い違う。
+impl From<ArtifactStage> for RenderStage {
+    fn from(stage: ArtifactStage) -> Self {
+        match stage {
+            ArtifactStage::Encode => RenderStage::Encode,
+            ArtifactStage::Write => RenderStage::Handoff,
         }
     }
 }
@@ -229,12 +232,7 @@ impl RenderError {
     fn render_stage(&self) -> Option<RenderStage> {
         match self {
             RenderError::WaitTimeout => Some(RenderStage::Wait),
-            RenderError::Artifact {
-                stage: ArtifactStage::Encode,
-            } => Some(RenderStage::Encode),
-            RenderError::Artifact {
-                stage: ArtifactStage::Write,
-            } => Some(RenderStage::Handoff),
+            RenderError::Artifact { stage } => Some(RenderStage::from(*stage)),
             _ => None,
         }
     }
