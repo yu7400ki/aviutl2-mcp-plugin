@@ -16,9 +16,8 @@
 //!   入出力の費用を払わない。
 
 use crate::project::ProjectState;
-use crate::read::EditState;
-use crate::read::ReadError;
 use crate::read::host::HostEditInfo;
+use crate::read::{EditState, ReadError};
 use crate::render::buffer::{BYTES_PER_PIXEL, MAX_RENDER_FRAME_BYTES};
 use crate::render::error::RenderError;
 use crate::render::handoff::{ARTIFACT_MEDIA_TYPE, HandoffDir, HandoffToken};

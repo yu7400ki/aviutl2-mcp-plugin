@@ -108,7 +108,7 @@ pub trait RenderDrain: Send + Sync {
 pub fn sdk_render_adapter(
     project_state: Arc<ProjectState>,
     instance_id: &InstanceId,
-    stop: Arc<dyn slot::StopRequest>,
+    stop: Arc<dyn StopRequest>,
 ) -> Result<Arc<HostRenderAdapter<sdk::SdkRenderHost>>> {
     let handoff = HandoffDir::new(instance_id)?;
     Ok(Arc::new(HostRenderAdapter::new(
