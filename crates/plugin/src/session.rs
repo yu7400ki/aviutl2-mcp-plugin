@@ -2341,8 +2341,7 @@ mod tests {
 mod edit_tests {
     use super::*;
     use aviutl2_mcp_core::{
-        EditOutcome, ObjectFingerprintInput, ObjectSummary, RETIRED_EDIT_FIELDS, SelectionField,
-        SelectionState,
+        EditOutcome, ObjectFingerprintInput, ObjectSummary, SelectionField, SelectionState,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -2496,9 +2495,6 @@ mod edit_tests {
     }
 
     /// 要求を復号し、成功したら params を JSON へ写して返す。
-    ///
-    /// 写して返すのは、読み捨てたフィールドが params へ流れ込んでいないことを
-    /// 突き合わせられるようにするためである。
     fn decode_request(operation: EditOperation, params: &Value) -> Result<Value, ErrorObject> {
         let request = decode_edit_request(operation, params)?;
         let encoded = match &request {
@@ -2565,60 +2561,16 @@ mod edit_tests {
     }
 
     #[test]
-    fn no_retired_field_collides_with_a_field_in_use() {
-        // 読み捨てる一覧は全 operation で共有する。現に使われている名前を足すと、
-        // その operation の必須フィールドが黙って落ちる。名前を足した時点で
-        // 落ちるよう、現在の形の top-level キーと突き合わせる。
+    fn every_edit_request_follows_the_selector_and_unknown_field_table() {
+        // 1 つの operation で通しても、他が違う扱いなら気付けないため、全
+        // operation を網羅 match から引いて同じ表に掛ける。
         for operation in EditOperation::ALL {
             let name = operation.as_str();
             let current = current_request(operation);
-            for retired in RETIRED_EDIT_FIELDS {
-                assert!(
-                    !current
-                        .as_object()
-                        .expect("params は object")
-                        .contains_key(*retired),
-                    "{name} が現に使っている {retired} を読み捨ての一覧が含んでいます"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn every_edit_request_follows_the_backward_compatibility_table() {
-        // 以前の形で組み立てられた要求を拒否しない。1 つの operation で通しても、
-        // 他が未知フィールドの拒否のままなら気付けないため、全 operation を
-        // 網羅 match から引いて同じ表に掛ける。
-        for operation in EditOperation::ALL {
-            let name = operation.as_str();
-            let current = current_request(operation);
-            let decoded = decode_request(operation, &current)
+            decode_request(operation, &current)
                 .unwrap_or_else(|error| panic!("{name} の現在の形が拒否されました: {error:?}"));
 
-            // 旧: 前提条件の入れ物を持つ。受理し、値は params へ流れない。
-            let mut old = current.clone();
-            old.as_object_mut().unwrap().insert(
-                "expected".to_string(),
-                json!({ "project_epoch": "別のプロジェクト", "project_revision": 42 }),
-            );
-            assert_eq!(
-                decode_request(operation, &old).ok().as_ref(),
-                Some(&decoded),
-                "{name} が以前の形の要求を拒否したか、読み捨てた値を使いました"
-            );
-
-            // 旧: 入れ物が epoch だけを持つ。
-            let mut old = current.clone();
-            old.as_object_mut()
-                .unwrap()
-                .insert("expected".to_string(), json!({ "project_epoch": EPOCH }));
-            assert_eq!(
-                decode_request(operation, &old).ok().as_ref(),
-                Some(&decoded),
-                "{name} が epoch だけの入れ物を拒否しました"
-            );
-
-            // 旧: effect セレクターが算出方式を運ぶ。往復型なので元から通る。
+            // effect セレクターが算出方式を運ぶ。往復型なので受理する。
             let mut old = current.clone();
             for_each_effect_selector(&mut old, &|map| {
                 map.insert("fingerprint_algorithm".to_string(), json!("sha256-raw-v1"));
@@ -2628,7 +2580,7 @@ mod edit_tests {
                 "{name} が effect セレクターの算出方式を拒否しました"
             );
 
-            // 新: オブジェクトセレクターが算出方式を運ばない。
+            // オブジェクトセレクターは算出方式を運ばない。
             let mut without = current.clone();
             for_each_object_selector(&mut without, &|map| {
                 map.remove("fingerprint_algorithm");
@@ -2638,7 +2590,7 @@ mod edit_tests {
                 "{name} が算出方式を持たないセレクターを拒否しました"
             );
 
-            // 未知フィールドは従来どおり拒否する。互換のために保護を失わない。
+            // 未知フィールドは拒否する。
             let mut unknown = current.clone();
             unknown
                 .as_object_mut()

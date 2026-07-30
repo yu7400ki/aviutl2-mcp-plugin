@@ -1790,8 +1790,8 @@ mod tests {
 
     #[test]
     fn input_schemas_declare_the_expected_epoch_only_where_it_is_used() {
-        // 要求から外したフィールドは受け取って読み捨てるが、schema へは宣言
-        // しない。宣言すると、要求元へ組み立てを勧めることになる。
+        // 前提の epoch を持つのは、対象を指す selector を持たない tool だけで
+        // ある。持つ tool へ宣言すると、同じ意味の値が 1 要求の 2 か所へ並ぶ。
         for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
             let tool = tool_named(name);
             let properties = tool
@@ -1799,10 +1799,6 @@ mod tests {
                 .get("properties")
                 .and_then(|v| v.as_object())
                 .unwrap_or_else(|| panic!("{name} に properties がありません"));
-            assert!(
-                !properties.contains_key("expected"),
-                "{name} の入力 schema が外したフィールドを宣言しています"
-            );
 
             let carries = TOOLS_CARRYING_AN_EXPECTED_EPOCH.contains(name);
             assert_eq!(
@@ -2017,10 +2013,10 @@ mod tests {
         // フィールド名はバッククォートで囲まれるため、値を伏せても残る。
         let result = normalize_tool_result(
             "aviutl2_set_object_item",
-            router_argument_error("failed to deserialize parameters: missing field `expected`"),
+            router_argument_error("failed to deserialize parameters: missing field `selector`"),
         );
         assert!(
-            text_of(&result).contains("expected"),
+            text_of(&result).contains("selector"),
             "{}",
             text_of(&result)
         );

@@ -347,7 +347,7 @@ impl ItemValueInput {
 
 /// `aviutl2_create_object` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(remote = "Self", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct CreateObjectInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -376,7 +376,7 @@ impl CreateObjectInput {
 
 /// `aviutl2_move_object` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(remote = "Self", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct MoveObjectInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -401,7 +401,7 @@ impl MoveObjectInput {
 
 /// `aviutl2_delete_object` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(remote = "Self", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteObjectInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -423,7 +423,7 @@ impl DeleteObjectInput {
 
 /// `aviutl2_set_object_name` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(remote = "Self", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SetObjectNameInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -450,7 +450,7 @@ impl SetObjectNameInput {
 
 /// `aviutl2_set_object_item` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(remote = "Self", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SetObjectItemInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -479,7 +479,7 @@ impl SetObjectItemInput {
 
 /// `aviutl2_add_effect` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(remote = "Self", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct AddEffectInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -505,7 +505,7 @@ impl AddEffectInput {
 
 /// `aviutl2_delete_effect` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(remote = "Self", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteEffectInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -527,7 +527,7 @@ impl DeleteEffectInput {
 
 /// `aviutl2_set_effect_state` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(remote = "Self", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SetEffectStateInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -557,7 +557,7 @@ impl SetEffectStateInput {
 
 /// `aviutl2_set_selection` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(remote = "Self", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SetSelectionInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -604,21 +604,6 @@ fn expected_project_epoch(value: &str) -> Result<String, ErrorObject> {
     Ok(value.to_string())
 }
 
-// 要求から外したフィールドを読み捨てる。IPC 境界の params と同じ一覧を使う。
-// server と plugin は別のプロセスであり、`protocol_version` の MAJOR を据え置く
-// ため版のずれが起こり得る。どちらの境界でも同じ形の要求が同じように受理される。
-aviutl2_mcp_core::tolerate_retired_edit_fields!(
-    CreateObjectInput,
-    MoveObjectInput,
-    DeleteObjectInput,
-    SetObjectNameInput,
-    SetObjectItemInput,
-    AddEffectInput,
-    DeleteEffectInput,
-    SetEffectStateInput,
-    SetSelectionInput,
-);
-
 /// core の入力検証の失敗を tool result のエラーへ写す。
 ///
 /// 説明には検証に失敗した値そのものを含めない。過大な入力をそのまま応答へ
@@ -630,9 +615,7 @@ fn from_input_error(error: EditInputError) -> ErrorObject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::{
-        EditOperation, ErrorCode, ObjectFingerprintInput, ObjectSummary, RETIRED_EDIT_FIELDS,
-    };
+    use aviutl2_mcp_core::{EditOperation, ErrorCode, ObjectFingerprintInput, ObjectSummary};
     use serde_json::{Value, json};
 
     const SAMPLE_ID: &str = "8df98c04-e7c2-4f98-b3ce-fc1c39d76414";
@@ -723,9 +706,6 @@ mod tests {
     }
 
     /// 入力を復元し、IPC の params へ写して返す。
-    ///
-    /// 写して返すのは、読み捨てたフィールドが params へ流れ込んでいないことを
-    /// 突き合わせられるようにするためである。
     fn decode_input(operation: EditOperation, input: &Value) -> Result<Value, ErrorCode> {
         /// 復元と変換を済ませて params を JSON へ写す。
         macro_rules! decoded {
@@ -751,61 +731,15 @@ mod tests {
     }
 
     #[test]
-    fn no_retired_field_collides_with_a_field_in_use() {
-        // 読み捨てる一覧は全 tool で共有する。現に使われている名前を足すと、その
-        // tool の必須フィールドが黙って落ちる。名前を足した時点で落ちるよう、
-        // 現在の形の top-level キーと突き合わせる。
+    fn every_edit_input_rejects_unknown_fields() {
+        // 1 つの tool で通しても、他が受理のままなら気付けないため、全 tool を
+        // 網羅 match から引いて同じ表に掛ける。
         for operation in EditOperation::ALL {
             let name = operation.as_str();
             let current = current_input(operation);
-            for retired in RETIRED_EDIT_FIELDS {
-                assert!(
-                    !current
-                        .as_object()
-                        .expect("入力は object")
-                        .contains_key(*retired),
-                    "{name} が現に使っている {retired} を読み捨ての一覧が含んでいます"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn every_edit_input_follows_the_backward_compatibility_table() {
-        // 以前の形で組み立てられた要求を拒否しない。1 つの tool で通しても、他が
-        // 未知フィールドの拒否のままなら気付けないため、全 tool を網羅 match から
-        // 引いて同じ表に掛ける。
-        for operation in EditOperation::ALL {
-            let name = operation.as_str();
-            let current = current_input(operation);
-            let decoded = decode_input(operation, &current)
+            decode_input(operation, &current)
                 .unwrap_or_else(|code| panic!("{name} の現在の形が拒否されました: {code:?}"));
 
-            // 旧: 前提条件の入れ物を持つ。受理し、値は params へ流れない。
-            let mut old = current.clone();
-            old.as_object_mut().unwrap().insert(
-                "expected".to_string(),
-                json!({ "project_epoch": "別のプロジェクト", "project_revision": 42 }),
-            );
-            assert_eq!(
-                decode_input(operation, &old).ok().as_ref(),
-                Some(&decoded),
-                "{name} が以前の形の入力を拒否したか、読み捨てた値を使いました"
-            );
-
-            // 旧: 入れ物が epoch だけを持つ。
-            let mut old = current.clone();
-            old.as_object_mut().unwrap().insert(
-                "expected".to_string(),
-                json!({ "project_epoch": SAMPLE_EPOCH }),
-            );
-            assert_eq!(
-                decode_input(operation, &old).ok().as_ref(),
-                Some(&decoded),
-                "{name} が epoch だけの入れ物を拒否しました"
-            );
-
-            // 未知フィールドは従来どおり拒否する。互換のために保護を失わない。
             let mut unknown = current.clone();
             unknown
                 .as_object_mut()
@@ -821,7 +755,7 @@ mod tests {
 
     #[test]
     fn every_edit_input_accepts_the_selectors_of_both_shapes() {
-        // effect セレクターが算出方式を運ぶ以前の形も、オブジェクトセレクターが
+        // effect セレクターが算出方式を運ぶ形も、オブジェクトセレクターが
         // 運ばない形も、どちらも受理する。
         for operation in EditOperation::ALL {
             let name = operation.as_str();
