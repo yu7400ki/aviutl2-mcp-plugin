@@ -8,6 +8,12 @@
 //! 実行者へ確認し、複製であると答えられない限り実行しない。終了後は保存せずに
 //! AviUtl2 を閉じること。
 //!
+//! # レイヤー番号の表し方
+//!
+//! MCP のレイヤー番号は 0 始まりであり、AviUtl2 の UI は 1 始まりで表示する。
+//! 番号だけを伝えると実行者は 1 つ隣のレイヤーを見るため、実行者へ出す文面では
+//! [`layer_label`] を通して UI 上の見え方を併記する。
+//!
 //! # 準備
 //!
 //! 1. `au2 develop` で plugin と server を配置し、AviUtl2 から plugin が読み込まれる
@@ -616,6 +622,14 @@ impl Report {
 // ---------------------------------------------------------------------------
 // 対話
 // ---------------------------------------------------------------------------
+
+/// レイヤー番号を、AviUtl2 の UI 上の見え方を添えて表す。
+///
+/// MCP のレイヤー番号は 0 始まりであり、AviUtl2 の UI は 1 始まりで表示する。
+/// 番号だけを伝えると、実行者は 1 つ隣のレイヤーを見る。
+fn layer_label(layer: usize) -> String {
+    format!("レイヤー {layer}（UI の表示では Layer{}）", layer + 1)
+}
 
 /// 実行者へ操作を指示し、Enter を待つ。
 fn prompt(message: &str) {
@@ -1231,7 +1245,7 @@ impl Context {
             .collect();
         if free_slots.len() < 3 {
             return Err(format!(
-                "空きレイヤーが {} 個しかありません。3 個以上あるサンプルプロジェクトを使ってください。",
+                "オブジェクトが 1 つも無いレイヤーが {} 個しかありません。3 個以上あるサンプルプロジェクトを使ってください。",
                 free_slots.len()
             ));
         }
@@ -1244,14 +1258,18 @@ impl Context {
 
         println!();
         println!(
-            "対象オブジェクト: layer={} frame={} name={}",
-            target.layer,
+            "主に使うオブジェクト: {} のフレーム {}、名前は {}",
+            layer_label(target.layer),
             target.frame,
             first.name.as_deref().unwrap_or("（標準名）")
         );
         println!(
-            "空きレイヤー: {:?}",
-            free_slots.iter().map(|slot| slot.layer).collect::<Vec<_>>()
+            "オブジェクトが 1 つも無いレイヤー: {}",
+            free_slots
+                .iter()
+                .map(|slot| layer_label(slot.layer))
+                .collect::<Vec<_>>()
+                .join(" / ")
         );
         println!("付与に用いる effect: {effect_name}");
 
@@ -1583,7 +1601,8 @@ fn clear_layer(
         )?;
     }
     Err(format!(
-        "レイヤー {layer} のオブジェクトを {CLEAR_LAYER_LIMIT} 件削除しても空になりません"
+        "{} のオブジェクトを {CLEAR_LAYER_LIMIT} 件削除しても空になりません",
+        layer_label(layer)
     ))
 }
 
@@ -1694,7 +1713,7 @@ fn layer_state(
     )?
     .into_iter()
     .find(|listed| listed.index == layer)
-    .ok_or_else(|| format!("レイヤー {layer} が列挙に現れません"))
+    .ok_or_else(|| format!("{} が列挙に現れません", layer_label(layer)))
 }
 
 /// 空きレイヤーへ一時的な名前を付け、値が実際に変わったことを確かめる。
@@ -1715,7 +1734,8 @@ fn name_layer_for_undo_probe(
     let before = layer_state(harness, instance, context, layer)?;
     if before.name.as_deref() == Some(UNDO_PROBE_LAYER_NAME) {
         return Err(format!(
-            "レイヤー {layer} は既に {UNDO_PROBE_LAYER_NAME} という名前であり、変更が空振りになります"
+            "{} は既に {UNDO_PROBE_LAYER_NAME} という名前であり、変更が空振りになります",
+            layer_label(layer)
         ));
     }
 
@@ -1740,7 +1760,8 @@ fn name_layer_for_undo_probe(
     let after = layer_state(harness, instance, context, layer)?;
     if after.name.as_deref() != Some(UNDO_PROBE_LAYER_NAME) {
         return Err(format!(
-            "読み直したレイヤー {layer} の名前が {:?} であり、変更が入っていません",
+            "読み直した {} の名前が {:?} であり、変更が入っていません",
+            layer_label(layer),
             after.name
         ));
     }
@@ -2950,13 +2971,13 @@ fn check_layer_lock_release(
         .iter()
         .find(|listed| listed.index == layer)
         .map(|listed| listed.locked)
-        .ok_or_else(|| format!("レイヤー {layer} が列挙に現れません"))?;
+        .ok_or_else(|| format!("{} が列挙に現れません", layer_label(layer)))?;
     // 取り消しの単位は空きレイヤーの名前で尋ねる。控えた名前は後始末で戻す。
     let original_name = layers
         .iter()
         .find(|listed| listed.index == away.layer)
         .map(|listed| listed.name.clone())
-        .ok_or_else(|| format!("レイヤー {} が列挙に現れません", away.layer))?;
+        .ok_or_else(|| format!("{} が列挙に現れません", layer_label(away.layer)))?;
 
     let probed = probe_layer_lock_release(harness, report, instance, context, away, original);
     // 後始末: 対象を元の位置へ戻し、ロックと空きレイヤーの名前も元の状態へ戻す。
