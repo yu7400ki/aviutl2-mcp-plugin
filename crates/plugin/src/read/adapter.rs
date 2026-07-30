@@ -783,6 +783,10 @@ mod tests {
             })
         }
 
+        fn layer_locked(&self, layer: usize) -> Result<bool, ReadError> {
+            Ok(self.layer(layer)?.locked)
+        }
+
         fn object_count(&self, layer: usize) -> Result<usize, ReadError> {
             self.host.record("object_count");
             Ok(self

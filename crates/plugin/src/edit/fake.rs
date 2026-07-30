@@ -81,6 +81,12 @@ pub(crate) enum PanicPoint {
 /// 配下 effect の一覧を引いたことを表す記録。
 pub(crate) const EFFECT_LIST: &str = "get_effect_list";
 
+/// レイヤーの属性を名前・表示・ロックまとめて読んだことを表す記録。
+pub(crate) const LAYER_ATTRIBUTES: &str = "get_layer_attributes";
+
+/// レイヤーのロック状態だけを読んだことを表す記録。
+pub(crate) const LAYER_LOCK: &str = "get_layer_lock";
+
 /// クロージャから巻き戻しが漏れたことを表す記録。
 ///
 /// 実機ではこの位置でホストのプロセスが落ちる。記録が残る経路は、捕捉が
@@ -534,7 +540,7 @@ impl SceneReader for FakeSceneEditor<'_> {
     }
 
     fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {
-        self.host.record("layer");
+        self.host.record(LAYER_ATTRIBUTES);
         let scene = self.host.scene.lock().unwrap();
         let fake = scene.layers.get(layer).ok_or(ReadError::Sdk {
             operation: "get_layer_name",
@@ -544,6 +550,15 @@ impl SceneReader for FakeSceneEditor<'_> {
             enabled: true,
             locked: fake.locked,
         })
+    }
+
+    fn layer_locked(&self, layer: usize) -> Result<bool, ReadError> {
+        self.host.record(LAYER_LOCK);
+        let scene = self.host.scene.lock().unwrap();
+        let fake = scene.layers.get(layer).ok_or(ReadError::Sdk {
+            operation: "get_layer_lock",
+        })?;
+        Ok(fake.locked)
     }
 
     fn object_count(&self, layer: usize) -> Result<usize, ReadError> {

@@ -818,6 +818,10 @@ mod tests {
             panic!("参照区間の内側で panic させます")
         }
 
+        fn layer_locked(&self, _layer: usize) -> Result<bool, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
         fn object_count(&self, _layer: usize) -> Result<usize, crate::read::ReadError> {
             panic!("参照区間の内側で panic させます")
         }

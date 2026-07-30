@@ -7,8 +7,8 @@
 use super::*;
 use crate::edit::fake::{
     CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, EFFECT_LIST, FakeEditHost, FakeLayer, FakeObject,
-    FakeReadHost, Fault, Knobs, MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER, MUTATIONS, PanicPoint,
-    SCENE_ID,
+    FakeReadHost, Fault, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER,
+    MUTATIONS, PanicPoint, SCENE_ID,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
@@ -1944,28 +1944,180 @@ fn every_content_edit_advances_the_revision_once() {
     }
 }
 
+/// ロックされたレイヤー上の対象に対する operation の可否。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockedLayer {
+    /// `precondition_failed` / `layer_locked` で拒否される。
+    Refused,
+    /// 成功する。
+    Allowed,
+}
+
+/// ロックされたレイヤーに対する operation の可否を述べる。
+///
+/// **網羅 match で書く。** operation を足すとここがコンパイルエラーになり、
+/// 可否を書くまで進めない。手書きの一覧にすると、足し忘れた operation が
+/// 検査を素通りする。
+///
+/// 拒否するのは、レイヤーのロックが UI で止めるもの——オブジェクトの削除と
+/// 時間軸上の移動——に限る。設定値の変更も effect の増減も UI の設定パネルから
+/// 行えるため、MCP からだけ拒む理由が無い。選択状態の変更は対象を書き換えない
+/// ため表に載らない。
+fn locked_layer(operation: EditOperation) -> Option<LockedLayer> {
+    Some(match operation {
+        EditOperation::CreateObject | EditOperation::MoveObject | EditOperation::DeleteObject => {
+            LockedLayer::Refused
+        }
+        EditOperation::SetObjectName
+        | EditOperation::SetObjectItem
+        | EditOperation::AddEffect
+        | EditOperation::DeleteEffect
+        | EditOperation::SetEffectState => LockedLayer::Allowed,
+        EditOperation::SetSelection => return None,
+    })
+}
+
 #[test]
-fn every_content_edit_refuses_a_locked_layer() {
-    // ロックの確認が一部の経路にしか無いと、残りの経路から無言で書き換えられる。
-    // 利用者が明示的にロックした対象への書き換えは削除と同格の破壊である。
-    for (name, run) in content_edits() {
+fn the_layer_lock_stops_exactly_the_declared_operations() {
+    for operation in EditOperation::ALL {
+        let (Some(run), Some(expected)) = (content_edit(operation), locked_layer(operation)) else {
+            continue;
+        };
+        let name = operation.as_str();
         let harness = Harness::new();
         let target = harness.selector(1, 100);
-        // 対象と作成先を含むレイヤーをロックする。
+        // 対象・移動先・作成先を含むレイヤーをロックする。
         harness.host.lock_layer(1, true);
 
-        let Err(error) = run(&harness, target) else {
-            panic!("{name} がロックされたレイヤーを書き換えました");
-        };
-        assert_eq!(
-            error.error_code(),
-            ErrorCode::PreconditionFailed,
-            "{name} がロックを前提条件として扱いません"
-        );
-        assert_eq!(error.details()["reason"], json!("layer_locked"), "{name}");
-        assert!(!harness.host.mutated(), "{name} が変更 API を呼びました");
-        assert_eq!(harness.project.revision(), 0, "{name}");
+        let result = run(&harness, target);
+        match expected {
+            LockedLayer::Refused => {
+                let Err(error) = result else {
+                    panic!("{name} がロックされたレイヤーを書き換えました");
+                };
+                assert_eq!(
+                    error.error_code(),
+                    ErrorCode::PreconditionFailed,
+                    "{name} がロックを前提条件として扱いません"
+                );
+                assert_eq!(error.details()["reason"], json!("layer_locked"), "{name}");
+                assert!(!harness.host.mutated(), "{name} が変更 API を呼びました");
+                assert_eq!(harness.project.revision(), 0, "{name}");
+            }
+            LockedLayer::Allowed => {
+                result
+                    .unwrap_or_else(|error| panic!("{name} がロックを理由に拒否しました: {error}"));
+                assert!(harness.host.mutated(), "{name} が変更 API を呼びません");
+            }
+        }
     }
+}
+
+#[test]
+fn only_the_selection_change_is_left_out_of_the_layer_lock_table() {
+    // 網羅 match は operation の追加を止めるが、既存の枝を除外へ書き換えても
+    // 止まらない。表に載らないのが選択状態の変更だけであることを併せて固定する。
+    let excluded: Vec<&str> = EditOperation::ALL
+        .into_iter()
+        .filter(|operation| locked_layer(*operation).is_none())
+        .map(EditOperation::as_str)
+        .collect();
+
+    assert_eq!(excluded, vec![EditOperation::SetSelection.as_str()]);
+}
+
+#[test]
+fn moving_checks_the_lock_of_both_the_source_and_the_destination() {
+    // 移動元だけがロックされている場合。
+    let harness = Harness::new();
+    let error = harness
+        .edit
+        .move_object(&MoveObjectParams {
+            selector: harness.selector(2, 0),
+            destination: Destination {
+                layer: 1,
+                frame: 500,
+            },
+        })
+        .expect_err("ロックされたレイヤーから移動できました");
+    assert_eq!(error.details()["reason"], json!("layer_locked"));
+    assert_eq!(error.details()["layer"], json!(2));
+    harness.assert_untouched();
+
+    // 移動先だけがロックされている場合。
+    let harness = Harness::new();
+    let mut params = move_params(&harness);
+    params.destination.layer = 2;
+    params.destination.frame = 500;
+    let error = harness
+        .edit
+        .move_object(&params)
+        .expect_err("ロックされたレイヤーへ移動できました");
+    assert_eq!(error.details()["reason"], json!("layer_locked"));
+    assert_eq!(error.details()["layer"], json!(2));
+    harness.assert_untouched();
+}
+
+#[test]
+fn the_lock_check_reads_only_the_lock_state() {
+    // ここで使うのは 1 ビットである。名前と表示まで読むと、応答に現れない値の
+    // 読み取り失敗が移動と削除の可否を左右する。
+    let harness = Harness::new();
+    let params = move_params(&harness);
+    harness.host.clear_calls();
+    harness
+        .edit
+        .move_object(&params)
+        .expect("移動に失敗しました");
+
+    let calls = harness.host.calls();
+    assert!(
+        !calls.contains(&LAYER_ATTRIBUTES),
+        "ロックの確認がレイヤー属性をまとめて読みました: {calls:?}"
+    );
+}
+
+#[test]
+fn moving_within_one_layer_reads_the_lock_state_once() {
+    // 移動元と移動先が同じレイヤーになる移動で 2 回読む理由が無い。
+    let harness = Harness::new();
+    let params = move_params(&harness);
+    harness.host.clear_calls();
+    harness
+        .edit
+        .move_object(&params)
+        .expect("移動に失敗しました");
+    assert_eq!(
+        harness
+            .host
+            .calls()
+            .iter()
+            .filter(|call| **call == LAYER_LOCK)
+            .count(),
+        1,
+        "同一レイヤー内の移動でロック状態を 2 回読みました"
+    );
+
+    // レイヤーを跨ぐ移動では移動元と移動先の双方を読む。
+    let harness = Harness::new();
+    let mut params = move_params(&harness);
+    params.destination.layer = 0;
+    params.destination.frame = 500;
+    harness.host.clear_calls();
+    harness
+        .edit
+        .move_object(&params)
+        .expect("移動に失敗しました");
+    assert_eq!(
+        harness
+            .host
+            .calls()
+            .iter()
+            .filter(|call| **call == LAYER_LOCK)
+            .count(),
+        2,
+        "レイヤーを跨ぐ移動で片方のロックしか確かめていません"
+    );
 }
 
 #[test]

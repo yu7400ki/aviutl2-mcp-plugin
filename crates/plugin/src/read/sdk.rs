@@ -124,11 +124,14 @@ impl SceneReader for SdkSceneReader<'_> {
                 .section
                 .get_layer_enable(layer)
                 .map_err(|_| sdk("get_layer_enable"))?,
-            locked: self
-                .section
-                .get_layer_lock(layer)
-                .map_err(|_| sdk("get_layer_lock"))?,
+            locked: self.layer_locked(layer)?,
         })
+    }
+
+    fn layer_locked(&self, layer: usize) -> Result<bool, ReadError> {
+        self.section
+            .get_layer_lock(layer)
+            .map_err(|_| sdk("get_layer_lock"))
     }
 
     fn object_count(&self, layer: usize) -> Result<usize, ReadError> {

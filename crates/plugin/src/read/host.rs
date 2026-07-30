@@ -161,7 +161,16 @@ pub trait SceneReader {
     fn grid_bpm(&self) -> Result<Vec<FiniteF64>, ReadError>;
 
     /// レイヤーの属性。
+    ///
+    /// 名前・表示・ロックを揃って必要とする経路だけが使う。ロックだけを見る
+    /// 経路は [`Self::layer_locked`] を使い、応答に現れない属性を読まない。
     fn layer(&self, layer: usize) -> Result<HostLayer, ReadError>;
+
+    /// レイヤーがロックされているか。
+    ///
+    /// **実装の義務**: [`Self::layer`] が同じレイヤーに対して返す `locked` と
+    /// 一致させる。
+    fn layer_locked(&self, layer: usize) -> Result<bool, ReadError>;
 
     /// レイヤー内のオブジェクト数。
     ///

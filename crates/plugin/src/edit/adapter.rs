@@ -205,13 +205,30 @@ fn index(value: u32) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
-/// 対象のレイヤーがロックされていないことを確かめる。
+/// レイヤーのロックが止める編集であることを確かめる。
 ///
-/// 利用者が UI で明示的にロックした対象を無言で書き換えることは、削除と同格の
-/// 破壊である。SDK がロックを尊重するかは確認できておらず、戻り値を持たない
-/// 変更 API では拒否されたのか無言で書き換わったのかを区別できない。
+/// SDK はレイヤーのロックを尊重しないため、このガードだけが利用者の表明を守る。
+/// ただし守る範囲はレイヤーのロックが UI で止めるものに揃える——オブジェクトの
+/// 削除と、時間軸上の移動である。設定値の変更も effect の増減も UI の設定
+/// パネルから行えるため、ここでは止めない。
+///
+/// 同じレイヤーを 2 度渡しても読み取りは 1 回に畳む。移動元と移動先が同じ
+/// レイヤーになる移動が最も多い使い方であり、そこで 2 回読む理由が無い。
+///
+/// 読むのはロック状態だけである。ここで使うのは 1 ビットであり、名前と表示の
+/// 読み取り失敗が移動や削除の可否を左右する理由が無い。
+fn ensure_layers_unlocked(editor: &dyn SceneEditor, layers: [usize; 2]) -> Result<(), EditError> {
+    let [first, second] = layers;
+    ensure_layer_unlocked(editor, first)?;
+    if second != first {
+        ensure_layer_unlocked(editor, second)?;
+    }
+    Ok(())
+}
+
+/// 対象のレイヤーがロックされていないことを確かめる。
 fn ensure_layer_unlocked(editor: &dyn SceneEditor, layer: usize) -> Result<(), EditError> {
-    if editor.reader().layer(layer)?.locked {
+    if editor.reader().layer_locked(layer)? {
         return Err(EditError::LayerLocked { layer });
     }
     Ok(())
@@ -431,8 +448,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 &[&params.selector],
             )?;
             let object = resolve_object(editor, &boundary, &params.selector)?;
-            ensure_layer_unlocked(editor, object.layer())?;
-            ensure_layer_unlocked(editor, layer)?;
+            ensure_layers_unlocked(editor, [object.layer(), layer])?;
             let moving_from = (layer == object.layer()).then(|| object.frame_start());
             let occupants = editor.reader().object_placements(layer)?;
             ensure_destination_free(&occupants, layer, frame, moving_from)?;
@@ -505,7 +521,6 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 &[&params.selector],
             )?;
             let object = resolve_object(editor, &boundary, &params.selector)?;
-            ensure_layer_unlocked(editor, object.layer())?;
 
             let permit = boundary.issue_permit(project)?;
             permit.issue(&boundary, |ticket| {
@@ -548,7 +563,6 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 &[&params.selector.object],
             )?;
             let (object, effect) = resolve_effect(editor, &boundary, &params.selector)?;
-            ensure_layer_unlocked(editor, object.layer())?;
 
             // 設定項目の実在と種別の照合は、対象 effect が公開する一覧に対して
             // 行う。要求内容だけでは判定できない。
@@ -594,7 +608,6 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             )?;
             // 付与位置は前後の差分から求めるため、付与前の effect 列が必要になる。
             let (object, effects) = resolve_object_with_effects(editor, &boundary, &params.object)?;
-            ensure_layer_unlocked(editor, object.layer())?;
             let before = effect_names(&effects);
 
             let permit = boundary.issue_permit(project)?;
@@ -647,7 +660,6 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 &[&params.selector.object],
             )?;
             let (object, effect) = resolve_effect(editor, &boundary, &params.selector)?;
-            ensure_layer_unlocked(editor, object.layer())?;
 
             let permit = boundary.issue_permit(project)?;
             permit.issue(&boundary, |ticket| {
@@ -682,7 +694,6 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 &[&params.selector.object],
             )?;
             let (object, effect) = resolve_effect(editor, &boundary, &params.selector)?;
-            ensure_layer_unlocked(editor, object.layer())?;
 
             let permit = boundary.issue_permit(project)?;
             if let Some(enabled) = params.enabled {

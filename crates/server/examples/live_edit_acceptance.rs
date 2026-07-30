@@ -1474,7 +1474,7 @@ fn section_fingerprint_premises(
     report.record(
         "5.9",
         "レイヤーのロック",
-        "ロックしたレイヤー上の対象への移動・削除・名前変更が precondition_failed（layer_locked）になる",
+        "ロックしたレイヤー上の対象への移動・削除が precondition_failed（layer_locked）になり、名前変更は成功する",
         Mode::Operator,
         outcome,
     );
@@ -1959,12 +1959,19 @@ fn check_layer_lock(
     let move_outcome = expect_layer_locked(moved);
     let deleted = harness.delete_object(&instance.id, &object.selector);
     let delete_outcome = expect_layer_locked(deleted);
+    // 名前の変更は UI の設定パネルからも行えるため、ロックは止めない。
     let renamed = harness.set_object_name(
         &instance.id,
         &object.selector,
         Some("ロック確認".to_string()),
     );
-    let rename_outcome = expect_layer_locked(renamed);
+    let rename_outcome = match renamed {
+        Ok(_) => Ok(vec!["ロック中でも成功した".to_string()]),
+        Err(error) => Err(format!(
+            "ロック中の名前変更が拒否されました: {}",
+            describe_error(&error)
+        )),
+    };
 
     let sdk = ask(
         "AviUtl2 の UI 上で、同じロック済みレイヤーのオブジェクトを移動・削除できますか。\n\
