@@ -353,9 +353,16 @@ fn record_section_failure(report: &mut Report, section: &'static str, reason: St
 /// 破壊的であることを実行前に告げる。
 fn print_destructive_warning() {
     println!();
-    println!("警告: 本ターゲットは対象プロジェクトを実際に書き換えます。");
-    println!("      固定サンプルプロジェクトの複製に対してのみ実行してください。");
+    println!("警告: このプログラムは AviUtl2 で開いているプロジェクトを実際に書き換えます。");
+    println!("      オブジェクトの作成・移動・名前変更・削除を行います。");
+    println!("      effect の付与・削除と、設定値の書き換えも行います。");
+    println!("      開いてよいのは固定サンプルプロジェクトの複製だけです。");
+    println!("      原本を開いている場合は、ここで実行を中止してください。");
     println!("      終了後は保存せずに AviUtl2 を閉じてください。");
+    println!();
+    println!("レイヤー番号: この画面が出す「レイヤー N」は MCP の番号で、0 から数えます。");
+    println!("              AviUtl2 の UI は 1 から数えて表示するため、UI 上の表示を併記します。");
+    println!("              例: {}", layer_label(1));
 }
 
 /// registry ディレクトリを決定する。
@@ -629,6 +636,13 @@ impl Report {
 /// 番号だけを伝えると、実行者は 1 つ隣のレイヤーを見る。
 fn layer_label(layer: usize) -> String {
     format!("レイヤー {layer}（UI の表示では Layer{}）", layer + 1)
+}
+
+/// 区間の始まりと、その区間が何をするかを実行者へ告げる。
+fn print_section(title: &str, doing: &str) {
+    println!();
+    println!("=== {title} ===");
+    println!("これから行うこと: {doing}");
 }
 
 /// 実行者へ操作を指示し、Enter を待つ。
@@ -1968,8 +1982,10 @@ fn section_fingerprint_premises(
     context: &Context,
     premise: &mut Premise,
 ) -> RevisionAdvance {
-    println!();
-    println!("### 5.9 fingerprint の前提");
+    print_section(
+        "5.9 fingerprint の前提",
+        "対象オブジェクトを動かしたり effect を付けたりして、同じ対象を指し続けられるかを確かめます。途中で AviUtl2 の操作をお願いします。",
+    );
 
     let guard = SectionGuard {
         harness,
@@ -3221,8 +3237,10 @@ fn section_basic_edits(
     instance: &Instance,
     context: &Context,
 ) -> Result<(), String> {
-    println!();
-    println!("### 5.1 基本の編集");
+    print_section(
+        "5.1 基本の編集",
+        "オブジェクトを作り、動かし、名前を変え、effect を付け外しし、最後に削除します。途中で 1 度だけ、作成された位置の確認をお願いします。",
+    );
 
     match env_value(MEDIA_FILE_ENV) {
         Some(path) => {
@@ -3692,8 +3710,10 @@ fn section_undo(
     instance: &Instance,
     context: &Context,
 ) -> Result<(), String> {
-    println!();
-    println!("### 5.2 Undo 境界");
+    print_section(
+        "5.2 Undo 境界",
+        "MCP から 1 回編集するたびに、AviUtl2 で「元に戻す」を 1 回だけ押していただきます。",
+    );
 
     let source = resolve_object(harness, instance, context.scene_id, context.target)?;
     let detail = require(
@@ -3856,8 +3876,10 @@ fn section_silent_rejection(
     instance: &Instance,
     context: &Context,
 ) -> Result<(), String> {
-    println!();
-    println!("### 5.3 SDK の無言拒否");
+    print_section(
+        "5.3 SDK の無言拒否",
+        "変えられない設定への要求が、成功として返らないことを確かめます。実行者の操作はありません。",
+    );
 
     match find_effect(harness, instance, context, |context, effect| {
         effect_type_of(context, &effect.name) == Some(EffectType::Output)
@@ -3992,8 +4014,10 @@ fn section_item_round_trip(
     instance: &Instance,
     context: &Context,
 ) -> Result<(), String> {
-    println!();
-    println!("### 5.4 設定値の round-trip");
+    print_section(
+        "5.4 設定値の round-trip",
+        "作業用のオブジェクトを 1 つ作り、その設定値を読んでそのまま書き戻します。最後にその作業用オブジェクトを削除します。実行者の操作はありません。",
+    );
 
     // 確認は作業用オブジェクトに対して行う。既存の対象へ effect を足して回ると、
     // 網羅のために足した分の後始末が失敗したときに元の構成へ戻せなくなる。
@@ -4680,8 +4704,10 @@ fn check_track_item(
 /// 二重に加算されても要求は拒否されない（revision は照合しない）。それでも
 /// 応答が返す revision の意味が変わるため、実機での挙動として観測する。
 fn section_revision(report: &mut Report, advance: &RevisionAdvance) {
-    println!();
-    println!("### 5.5 revision の二重加算");
+    print_section(
+        "5.5 revision の二重加算",
+        "5.9 の連続編集で数えた結果をまとめます。新しい編集は行いません。実行者の操作はありません。",
+    );
 
     if advance.steps == 0 {
         report.skip(
@@ -4972,8 +4998,10 @@ fn section_target_confusion(
     other: &Instance,
     context: &Context,
 ) -> Result<(), String> {
-    println!();
-    println!("### 5.7 対象の取り違え防止");
+    print_section(
+        "5.7 対象の取り違え防止",
+        "古くなった指定での編集が拒まれることを確かめます。UI での編集と、その取り消しをお願いします。",
+    );
 
     let outcome = check_cross_instance_selector(harness, instance, other, context);
     report.record(
@@ -5387,8 +5415,10 @@ fn section_misc(
     instance: &Instance,
     context: &Context,
 ) -> Result<(), String> {
-    println!();
-    println!("### 5.8 その他");
+    print_section(
+        "5.8 その他",
+        "宛先の重複・名前の文字種・パス・カーソルと選択範囲を確かめます。ログの確認とシーンの切り替えをお願いします。",
+    );
 
     let outcome = check_destination_occupied(harness, instance, context);
     report.record(
@@ -6017,8 +6047,10 @@ fn section_layer_bounds(
     instance: &Instance,
     context: &Context,
 ) -> Result<(), String> {
-    println!();
-    println!("### 5.10 空レイヤーと範囲外レイヤー");
+    print_section(
+        "5.10 空レイヤーと範囲外レイヤー",
+        "オブジェクトが 1 つも無いレイヤーと、一覧に出ないレイヤーを宛先にして、作成と移動を試します。実行者の操作はありません。",
+    );
 
     let layers = require(
         harness.layers(&instance.id, context.scene_id),
@@ -6336,10 +6368,14 @@ fn section_completion(
     a: &Instance,
     b: &Instance,
 ) -> Result<(), String> {
-    println!();
-    println!("### 6 完了条件の検証手順");
-    println!("  働くガードは 2 つ: project_epoch（プロジェクト境界）と fingerprint（対象の内容）");
-    println!("  project_revision は照合しない。位置が古くなった selector は対象の解決で落ちる");
+    print_section(
+        "6 完了条件の検証手順",
+        "2 つの AviUtl2 をまたいで、一方への編集がもう一方へ及ばないことを確かめます。UI での確認・編集・取り消しをお願いします。",
+    );
+    println!(
+        "補足: 照合するのは project_epoch（プロジェクトの境界）と fingerprint（対象の内容）の 2 つです。"
+    );
+    println!("      位置が古くなった指定は、対象そのものが見つからないことで落ちます。");
 
     let scene_a = scene_id(harness, a)?;
     let scene_b = scene_id(harness, b)?;
