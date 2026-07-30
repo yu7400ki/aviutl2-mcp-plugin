@@ -166,6 +166,11 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
 
         let read_adapter = read::sdk_read_adapter(project_state.clone());
         let edit_adapter = edit::sdk_edit_adapter(project_state.clone());
+        // 成果物の置き場は descriptor と同じ基底から導く。基底を求められない
+        // 場合は登録ごと打ち切る。既に作成済みの registry writer が同じ基底を
+        // 要求しており、そこで失敗していれば手前で戻っているため、ここへ到達
+        // するのは基底の解決が 2 回の間に壊れた場合だけである。**その状態で
+        // 進んでも、書き出せない実行口を配ることにしかならない。**
         let render_adapter =
             match render::sdk_render_adapter(project_state, &instance_id, stop_signal.clone()) {
                 Ok(a) => a,

@@ -160,6 +160,15 @@ impl<H: RenderHost> RenderAdapter for HostRenderAdapter<H> {
         ensure_scene(&before, params.expected_scene_id)?;
         ensure_renderable_frame(&before, params.frame)?;
 
+        // 停止の観測を完了待ちだけに任せない。接続受理の停止は待ちきれなければ
+        // 要求スレッドを切り離して戻るため、切り離された要求がここまで進むと、
+        // **終了手順が在庫を数え終えた後でタスクを増やせる。** 増えた分は誰も
+        // 待たず、アンロード後にコールバックが飛ぶ。投入して待ちに入っていれば
+        // 在庫に現れるので、塞ぐべき窓は投入の直前だけである。
+        if self.stop.is_stop_requested() {
+            return Err(RenderError::ShuttingDown);
+        }
+
         let slot = RenderSlot::new(Arc::clone(&self.inventory));
         if let Err(error) = self.issue(params.frame, Arc::clone(&slot)) {
             // ホストへ届かなかったタスクのコールバックは来ない。放棄済みとして
@@ -278,7 +287,7 @@ fn ensure_renderable_frame(info: &HostEditInfo, frame: u32) -> Result<(), Render
 mod tests {
     use super::*;
     use crate::read::host::ReadHost;
-    use crate::render::handoff::HandoffToken;
+    use crate::render::handoff::{HANDOFF_TTL, HandoffToken};
     use crate::render::slot::{MAX_ABANDONED_RENDERS, deliver_frame_guarded, guard_callback};
     use crate::test_support::with_silent_panic_hook;
     use aviutl2_mcp_core::{AvailableEffect, ErrorCode, InstanceId, RenderFormat};
@@ -578,6 +587,18 @@ mod tests {
             display_layer_num: 2,
             select_range_start: None,
             select_range_end: None,
+        }
+    }
+
+    /// 最初の観測にだけ「停止していない」と答える合図。
+    ///
+    /// 投入の直前と完了待ちが同じ合図を見るため、待機側の観測だけを確かめる
+    /// にはこの形が要る。
+    struct StopAfterFirstLook(AtomicUsize);
+
+    impl StopRequest for StopAfterFirstLook {
+        fn is_stop_requested(&self) -> bool {
+            self.0.fetch_add(1, Ordering::AcqRel) > 0
         }
     }
 
@@ -925,23 +946,69 @@ mod tests {
     fn a_stop_request_leaves_the_wait_early_as_host_busy() {
         // 要求処理は接続を受けるスレッド上で同期実行される。停止を観測できない
         // 待ちにすると、終了のたびにそのスレッドを切り離すことになる。
+        //
+        // 投入の直前でも停止を見るため、待機側の観測だけを確かめるには、
+        // 1 度目の観測で停止していないと答える合図が要る。
         let fixture = fixture_with(
             FakeRenderHost {
                 completion: Completion::Never,
                 ..FakeRenderHost::new()
             },
-            Arc::new(AtomicBool::new(true)),
+            Arc::new(StopAfterFirstLook(AtomicUsize::new(0))),
         );
 
         let started = Instant::now();
         let (code, details) = failed(&fixture, 7);
         assert_eq!(code, ErrorCode::HostBusy);
         assert!(details["retry_after_ms"].is_number());
+        assert_eq!(fixture.host.issued(), 1, "完了待ちまで進んでいません");
         assert!(
             started.elapsed() < Duration::from_millis(150),
             "停止要求を観測できていません: {}ms",
             started.elapsed().as_millis()
         );
+    }
+
+    #[test]
+    fn a_stop_request_keeps_the_task_from_being_issued_at_all() {
+        // 接続受理の停止は待ちきれなければ要求スレッドを切り離して戻る。
+        // 切り離された要求が投入まで進むと、終了手順が在庫を数え終えた後に
+        // タスクが増える。増えた分は誰も待たないままアンロードされる。
+        let fixture = fixture_with(FakeRenderHost::new(), Arc::new(AtomicBool::new(true)));
+
+        let (code, details) = failed(&fixture, 7);
+        assert_eq!(code, ErrorCode::HostBusy);
+        assert!(details["retry_after_ms"].is_number());
+        assert_eq!(
+            fixture.host.issued(),
+            0,
+            "停止が要求された後にタスクを投入しました"
+        );
+        assert_eq!(RenderDrain::outstanding(&fixture.adapter), 0);
+    }
+
+    #[test]
+    fn a_new_render_sweeps_what_earlier_ones_left_behind() {
+        // 正常時、引き渡し用ファイルは受け取る側が引き取った直後に消える。
+        // 残るのは失敗経路だけであり、その掃除は新しい要求を受けたときに行う。
+        // 専用のスレッドを持たないため、要求経路から呼ばれなければ誰も掃除しない。
+        let fixture = fixture(FakeRenderHost::new());
+        let stale = HandoffToken::parse(&rendered(&fixture, 7).handoff_token).unwrap();
+        fixture
+            .handoff
+            .age_entries(HANDOFF_TTL + Duration::from_secs(1));
+
+        let fresh = HandoffToken::parse(&rendered(&fixture, 8).handoff_token).unwrap();
+
+        assert!(
+            fixture.handoff.read_artifact(&stale).is_none(),
+            "期限を過ぎた引き渡し用ファイルが残りました"
+        );
+        assert!(
+            fixture.handoff.read_artifact(&fresh).is_some(),
+            "書いたばかりの成果物まで消えました"
+        );
+        assert_eq!(fixture.handoff.entry_count(), 1);
     }
 
     #[test]

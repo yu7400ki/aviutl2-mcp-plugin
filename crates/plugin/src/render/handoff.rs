@@ -262,6 +262,22 @@ impl HandoffDir {
         std::fs::read(self.artifact_path(token)).ok()
     }
 
+    /// ディレクトリ内の全ファイルの更新時刻を過去へずらす。
+    ///
+    /// 期限切れの掃除が起きることを、実時間を待たずに確かめるための口である。
+    #[cfg(test)]
+    pub(crate) fn age_entries(&self, age: Duration) {
+        let aged = SystemTime::now() - age;
+        for entry in std::fs::read_dir(&self.dir).into_iter().flatten().flatten() {
+            let file = std::fs::File::options()
+                .write(true)
+                .open(entry.path())
+                .expect("引き渡し用ファイルを開けません");
+            file.set_modified(aged)
+                .expect("引き渡し用ファイルの更新時刻を変更できません");
+        }
+    }
+
     fn artifact_path(&self, token: &HandoffToken) -> PathBuf {
         self.dir
             .join(format!("{}.{ARTIFACT_EXTENSION}", token.as_str()))
