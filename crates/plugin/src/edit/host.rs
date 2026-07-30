@@ -33,6 +33,18 @@ pub struct ObjectSlot(pub(crate) usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectSlot(pub(crate) usize);
 
+/// 編集区間の内側で解決済みトークンから読み直したオブジェクトの位置。
+///
+/// 名前も alias も持たない。呼び出し側はこの位置で改めて読み直して応答を
+/// 組み立てるため、ここでは対象を指し直す材料だけを運ぶ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectPosition {
+    /// 0 始まりのレイヤー番号。
+    pub layer: usize,
+    /// 0 始まりの開始フレーム番号。
+    pub frame_start: usize,
+}
+
 /// 編集の区間を抜けたあとに観測した選択状態。
 ///
 /// カーソル・選択範囲・フォーカスの反映値は編集情報にしか現れず、編集情報は
@@ -114,6 +126,14 @@ pub trait SceneEditor {
         layer: usize,
         frame: usize,
     ) -> Result<(), EditError>;
+
+    /// 解決済みオブジェクトの現在の位置を読み直す。
+    ///
+    /// 移動は対象を破棄しないためトークンは有効なままであり、位置を直接読める。
+    /// 要求した宛先ではなく実際の配置を応答へ載せるために使う。ホストは長さや
+    /// 挿入位置を調整し得るため、要求値との一致を求めると、成功した移動を
+    /// 失敗として報告することになる。
+    fn object_position(&self, object: &ResolvedObject<'_>) -> Result<ObjectPosition, EditError>;
 
     /// オブジェクトのレイヤーと開始フレームを変更する。
     fn move_object(

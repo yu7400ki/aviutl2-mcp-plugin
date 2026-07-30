@@ -9,7 +9,9 @@
 
 use crate::EDIT_HANDLE;
 use crate::edit::error::{EditError, NotIssuedReason};
-use crate::edit::host::{EditHost, EffectSlot, HostSelection, ObjectSlot, SceneEditor};
+use crate::edit::host::{
+    EditHost, EffectSlot, HostSelection, ObjectPosition, ObjectSlot, SceneEditor,
+};
 use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
 use crate::read::ReadError;
@@ -311,6 +313,18 @@ impl SceneEditor for SdkSceneEditor<'_> {
             .create_object_from_media_file(path, layer, frame, None)
             .map(|_| ())
             .map_err(|error| mutation_failure("create_object_from_media_file", &error))
+    }
+
+    fn object_position(&self, object: &ResolvedObject<'_>) -> Result<ObjectPosition, EditError> {
+        let position = self
+            .reader
+            .section
+            .get_object_layer_frame(self.object(object.slot())?)
+            .map_err(|_| sdk("get_object_layer_frame"))?;
+        Ok(ObjectPosition {
+            layer: non_negative(position.layer),
+            frame_start: non_negative(position.start),
+        })
     }
 
     fn move_object(

@@ -8,7 +8,7 @@ use super::*;
 use crate::edit::fake::{
     CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, EFFECT_LIST, FakeEditHost, FakeLayer, FakeObject,
     FakeReadHost, Fault, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER,
-    MUTATIONS, PanicPoint, SCENE_ID,
+    MOVE_FRAME_SHIFT, MUTATIONS, PanicPoint, SCENE_ID,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
@@ -1039,6 +1039,51 @@ fn an_added_effect_is_located_by_the_difference_in_the_name_list() {
     // 既に同名が 1 つあるため、同名内の順序は 1 になる。
     assert_eq!(effect.index, 1);
     assert_eq!(effect.selector.effect_index, 1);
+}
+
+#[test]
+fn moving_reports_the_placement_the_host_chose() {
+    // ホストが宛先を調整しても移動そのものは成功している。要求値との一致を
+    // 求めると、成功した移動が対象の不在として返る。
+    let harness =
+        Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::AdjustMoveDestination)));
+    let params = move_params(&harness);
+    let outcome = harness
+        .edit
+        .move_object(&params)
+        .expect("宛先を調整されただけで移動が失敗しました");
+
+    let moved = outcome.object.expect("移動後の対象");
+    assert_eq!(
+        moved.frame_start,
+        500 + MOVE_FRAME_SHIFT,
+        "要求した宛先をそのまま応答へ載せています"
+    );
+    // 応答が返した selector はそのまま次の要求へ渡せる。
+    harness
+        .read
+        .get_object(&moved.selector)
+        .expect("応答が返した selector で引けません");
+}
+
+#[test]
+fn moving_fails_when_the_new_placement_cannot_be_read() {
+    // read-back が無くなるわけではない。位置を読めなければ応答を組み立てられず、
+    // 変更を発行した後の失敗として返す。
+    let harness =
+        Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::PositionUnreadable)));
+    let params = move_params(&harness);
+    let error = harness
+        .edit
+        .move_object(&params)
+        .expect_err("位置を読めないのに成功として返りました");
+
+    assert_eq!(error.error_code(), ErrorCode::SdkError);
+    assert_eq!(
+        error.details()["sdk_operation"],
+        json!("get_object_layer_frame")
+    );
+    assert_eq!(error.details()["mutation_issued"], json!(true));
 }
 
 #[test]

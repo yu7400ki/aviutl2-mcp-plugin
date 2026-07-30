@@ -477,7 +477,16 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 editor.move_object(ticket, &object, layer, frame)
             })?;
 
-            let summary = attribute(&permit, &boundary, reread(editor, &boundary, layer, frame))?;
+            // 要求した宛先ではなく、実際の配置を読み直して応答へ載せる。ホストは
+            // 位置を調整し得るため、要求値との一致を求めると成功した移動が対象の
+            // 不在として返る。移動は対象を破棄しないためトークンは有効なままで
+            // あり、位置を直接読める。
+            let position = attribute(&permit, &boundary, editor.object_position(&object))?;
+            let summary = attribute(
+                &permit,
+                &boundary,
+                reread(editor, &boundary, position.layer, position.frame_start),
+            )?;
             Ok(EditOutcome::object_changed(
                 boundary.epoch(),
                 permit.project_revision(&boundary),

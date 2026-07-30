@@ -8,7 +8,9 @@
 //! 同一のフェイク状態に対して確かめられる。
 
 use crate::edit::error::{EditError, NotIssuedReason};
-use crate::edit::host::{EditHost, EffectSlot, HostSelection, ObjectSlot, SceneEditor};
+use crate::edit::host::{
+    EditHost, EffectSlot, HostSelection, ObjectPosition, ObjectSlot, SceneEditor,
+};
 use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
 use crate::project::ProjectState;
@@ -59,6 +61,10 @@ pub(crate) enum Fault {
     TargetGone,
     /// フォーカスの設定だけが SDK へ届かずに失敗する。
     FocusGone,
+    /// 移動先をホストが調整する。
+    AdjustMoveDestination,
+    /// 解決済みトークンから位置を読めない。
+    PositionUnreadable,
 }
 
 /// panic させる位置。
@@ -766,6 +772,24 @@ impl SceneEditor for FakeSceneEditor<'_> {
         self.create(layer, frame, format!("[{path}]"))
     }
 
+    fn object_position(&self, object: &ResolvedObject<'_>) -> Result<ObjectPosition, EditError> {
+        self.host.record("get_object_layer_frame");
+        if self.host.knobs().fault == Some(Fault::PositionUnreadable) {
+            return Err(EditError::Sdk {
+                operation: "get_object_layer_frame",
+            });
+        }
+        let id = self.object_id(object.slot())?;
+        let scene = self.host.scene.lock().unwrap();
+        let found = scene.by_id(id).ok_or(EditError::Sdk {
+            operation: "get_object_layer_frame",
+        })?;
+        Ok(ObjectPosition {
+            layer: found.placement.layer,
+            frame_start: found.placement.frame_start,
+        })
+    }
+
     fn move_object(
         &self,
         _ticket: MutationTicket<'_>,
@@ -774,6 +798,12 @@ impl SceneEditor for FakeSceneEditor<'_> {
         frame: usize,
     ) -> Result<(), EditError> {
         self.mutation("move_object")?;
+        // ホストは宛先を調整し得る。要求値をそのまま応答へ載せる実装では、
+        // 成功した移動が対象の不在として返る。
+        let frame = match self.host.knobs().fault {
+            Some(Fault::AdjustMoveDestination) => frame + MOVE_FRAME_SHIFT,
+            _ => frame,
+        };
         let id = self.object_id(object.slot())?;
         let mut scene = self.host.scene.lock().unwrap();
         let mut moved = scene
@@ -1031,6 +1061,9 @@ impl FakeSceneEditor<'_> {
 
 /// ホストが作成位置を自動調整する量。
 pub(crate) const CREATE_FRAME_SHIFT: usize = 5;
+
+/// ホストが移動先を自動調整する量。
+pub(crate) const MOVE_FRAME_SHIFT: usize = 7;
 
 /// カーソルがクランプされる上限。
 pub(crate) const MAX_LAYER: usize = 9;
