@@ -426,6 +426,39 @@ impl SceneEditor for SdkSceneEditor<'_> {
             .map_err(|error| mutation_failure("set_effect_item_value", &error))
     }
 
+    fn set_layer_name(
+        &self,
+        _ticket: MutationTicket<'_>,
+        layer: usize,
+        name: Option<&str>,
+    ) -> Result<(), EditError> {
+        self.section
+            .set_layer_name(layer, name)
+            .map_err(|error| mutation_failure("set_layer_name", &error))
+    }
+
+    fn set_layer_enabled(
+        &self,
+        _ticket: MutationTicket<'_>,
+        layer: usize,
+        enabled: bool,
+    ) -> Result<(), EditError> {
+        self.section
+            .set_layer_enable(layer, enabled)
+            .map_err(|error| mutation_failure("set_layer_enable", &error))
+    }
+
+    fn set_layer_locked(
+        &self,
+        _ticket: MutationTicket<'_>,
+        layer: usize,
+        locked: bool,
+    ) -> Result<(), EditError> {
+        self.section
+            .set_layer_lock(layer, locked)
+            .map_err(|error| mutation_failure("set_layer_lock", &error))
+    }
+
     fn set_cursor(
         &self,
         _ticket: MutationTicket<'_>,

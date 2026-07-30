@@ -219,6 +219,30 @@ pub trait SceneEditor {
         value: &str,
     ) -> Result<(), EditError>;
 
+    /// レイヤー名を設定する。`None` で標準名へ戻す。
+    fn set_layer_name(
+        &self,
+        ticket: MutationTicket<'_>,
+        layer: usize,
+        name: Option<&str>,
+    ) -> Result<(), EditError>;
+
+    /// レイヤーの表示を設定する。
+    fn set_layer_enabled(
+        &self,
+        ticket: MutationTicket<'_>,
+        layer: usize,
+        enabled: bool,
+    ) -> Result<(), EditError>;
+
+    /// レイヤーのロックを設定する。
+    fn set_layer_locked(
+        &self,
+        ticket: MutationTicket<'_>,
+        layer: usize,
+        locked: bool,
+    ) -> Result<(), EditError>;
+
     /// 編集カーソルの位置を設定する。ホストが範囲外の値をクランプする。
     fn set_cursor(
         &self,

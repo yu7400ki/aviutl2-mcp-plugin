@@ -18,8 +18,8 @@ pub mod sdk;
 use crate::project::ProjectState;
 use aviutl2_mcp_core::{
     AddEffectParams, CreateObjectParams, DeleteEffectParams, DeleteObjectParams, EditOutcome,
-    MoveObjectParams, SelectionState, SetEffectEnabledParams, SetObjectItemParams,
-    SetObjectNameParams, SetSelectionParams,
+    LayerStateOutcome, MoveObjectParams, SelectionState, SetEffectEnabledParams,
+    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
 };
 use std::sync::Arc;
 
@@ -58,6 +58,14 @@ pub trait EditAdapter: Send + Sync {
     /// effect の有効・無効を変更する。
     fn set_effect_enabled(&self, params: &SetEffectEnabledParams)
     -> Result<EditOutcome, EditError>;
+
+    /// レイヤーの名前・表示・ロックを変更する。
+    ///
+    /// **レイヤーのロックはこの operation を止めない。** 止めると、ロックされた
+    /// レイヤーのロックを外す手段が無くなり、ロックが止める移動・削除・作成の
+    /// 行き止まりが解けなくなる。
+    fn set_layer_state(&self, params: &SetLayerStateParams)
+    -> Result<LayerStateOutcome, EditError>;
 
     /// カーソル・選択範囲・フォーカスを変更する。
     ///

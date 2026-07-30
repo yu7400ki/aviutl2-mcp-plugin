@@ -2343,7 +2343,8 @@ mod tests {
 mod edit_tests {
     use super::*;
     use aviutl2_mcp_core::{
-        EditOutcome, ObjectFingerprintInput, ObjectSummary, SelectionField, SelectionState,
+        EditOutcome, LayerInfo, LayerStateOutcome, ObjectFingerprintInput, ObjectSummary,
+        SelectionField, SelectionState, SetLayerStateParams,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -2432,6 +2433,21 @@ mod edit_tests {
 
         fn set_effect_enabled(&self, _: &SetEffectEnabledParams) -> Result<EditOutcome, EditError> {
             Ok(self.enter("set_effect_enabled"))
+        }
+
+        fn set_layer_state(&self, _: &SetLayerStateParams) -> Result<LayerStateOutcome, EditError> {
+            self.calls.lock().unwrap().push("set_layer_state");
+            Ok(LayerStateOutcome {
+                project_epoch: EPOCH.to_string(),
+                project_revision: 1,
+                layer: LayerInfo {
+                    index: 1,
+                    name: Some("背景".to_string()),
+                    enabled: true,
+                    locked: false,
+                    object_count: 0,
+                },
+            })
         }
 
         fn set_selection(&self, _: &SetSelectionParams) -> Result<SelectionState, EditError> {

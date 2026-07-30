@@ -25,13 +25,13 @@ use crate::edit::resolve::{
 use crate::project::ProjectState;
 use crate::read::ReadError;
 use crate::read::adapter::object_summary;
-use crate::read::host::{EditState, HostEffect, HostObjectPlacement};
+use crate::read::host::{EditState, HostEffect, HostLayer, HostObjectPlacement};
 use aviutl2_mcp_core::{
     AddEffectParams, CreateObjectParams, Cursor, DeleteEffectParams, DeleteObjectParams,
-    EditOutcome, EffectInfo, EffectType, FocusChange, FrameRange, ItemWriteError, MoveObjectParams,
-    ObjectSource, ObjectSummary, RangeChange, SelectionField, SelectionState,
-    SetEffectEnabledParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
-    prepare_item_write,
+    EditOutcome, EffectInfo, EffectType, FocusChange, FrameRange, ItemWriteError, LayerInfo,
+    LayerStateOutcome, MoveObjectParams, ObjectSource, ObjectSummary, RangeChange, SelectionField,
+    SelectionState, SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams,
+    SetObjectNameParams, SetSelectionParams, prepare_item_write,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -421,6 +421,34 @@ fn requested_name(name: Option<&str>) -> Option<&str> {
     name.filter(|name| !name.is_empty())
 }
 
+/// 読み直したレイヤーの状態が、要求した軸の全てで要求値と一致するか。
+///
+/// 要求されなかった軸は見ない。ロックだけを変える要求で、他所から名前が
+/// 変わっていたことを理由に失敗させる理由が無い。
+fn layer_state_applied(
+    state: &HostLayer,
+    name: Option<Option<&str>>,
+    enabled: Option<bool>,
+    locked: Option<bool>,
+) -> bool {
+    if let Some(name) = name
+        && state.name.as_deref() != name
+    {
+        return false;
+    }
+    if let Some(enabled) = enabled
+        && state.enabled != enabled
+    {
+        return false;
+    }
+    if let Some(locked) = locked
+        && state.locked != locked
+    {
+        return false;
+    }
+    true
+}
+
 impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
     fn create_object(&self, params: &CreateObjectParams) -> Result<EditOutcome, EditError> {
         self.ensure_editable()?;
@@ -808,6 +836,75 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 summary,
                 info,
             ))
+        })
+    }
+
+    fn set_layer_state(
+        &self,
+        params: &SetLayerStateParams,
+    ) -> Result<LayerStateOutcome, EditError> {
+        self.ensure_editable()?;
+        let project = self.project.as_ref();
+        let layer = index(params.layer);
+        let name = params.name.as_ref().map(|change| {
+            // SDK は `None` と空文字のどちらでも標準名へ戻す。読み直した名前は
+            // 標準名のとき `None` になるため、照合の前に空文字を寄せておく。
+            requested_name(change.requested())
+        });
+
+        self.edit_section(move |editor| {
+            let boundary = verify_boundary(
+                project,
+                editor.entry_edit_info(),
+                ExpectedEpoch::Only(params.expected_project_epoch.as_str()),
+                EditKind::Content,
+                &[params.expected_scene_id],
+                &[],
+            )?;
+            // レイヤーのロックは確かめない。確かめると、ロックされたレイヤーの
+            // ロックを外せなくなる。
+
+            let permit = boundary.issue_permit(project)?;
+            if let Some(name) = name {
+                permit.issue(&boundary, |ticket| {
+                    editor.set_layer_name(ticket, layer, name)
+                })?;
+            }
+            if let Some(enabled) = params.enabled {
+                permit.issue(&boundary, |ticket| {
+                    editor.set_layer_enabled(ticket, layer, enabled)
+                })?;
+            }
+            if let Some(locked) = params.locked {
+                permit.issue(&boundary, |ticket| {
+                    editor.set_layer_locked(ticket, layer, locked)
+                })?;
+            }
+
+            // 3 つの setter はいずれも戻り値を持たない。同一区間内で読み直し、
+            // 要求した値になっていることを確かめる。レイヤーは 3 つの属性を
+            // まとめて 1 度で読める。
+            let state = attribute(&permit, &boundary, editor.reader().layer(layer))?;
+            if !layer_state_applied(&state, name, params.enabled, params.locked) {
+                return Err(permit.attribute(
+                    &boundary,
+                    EditError::UnsupportedTarget {
+                        reason: UnsupportedReason::ChangeNotApplied,
+                    },
+                ));
+            }
+            let object_count = attribute(&permit, &boundary, editor.reader().object_count(layer))?;
+            Ok(LayerStateOutcome {
+                project_epoch: boundary.epoch().to_string(),
+                project_revision: permit.project_revision(&boundary),
+                layer: LayerInfo {
+                    index: layer,
+                    name: state.name,
+                    enabled: state.enabled,
+                    locked: state.locked,
+                    object_count,
+                },
+            })
         })
     }
 

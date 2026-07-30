@@ -42,6 +42,8 @@ pub(crate) enum Fault {
     ReadBack,
     /// 有効・無効の変更を無言で無視する。
     IgnoreEffectState,
+    /// レイヤーの状態変更を無言で無視する。
+    IgnoreLayerState,
     /// 名前の変更を無言で無視する。
     IgnoreObjectName,
     /// 削除を無言で無視する。
@@ -153,8 +155,32 @@ impl FakeObject {
 /// フェイクが保持するレイヤー。
 #[derive(Debug, Clone)]
 pub(crate) struct FakeLayer {
+    /// レイヤー名。標準名のままなら `None`。
+    pub(crate) name: Option<String>,
+    /// 表示が有効か。
+    pub(crate) enabled: bool,
     pub(crate) locked: bool,
     pub(crate) objects: Vec<FakeObject>,
+}
+
+impl FakeLayer {
+    /// 標準の状態で空のレイヤーを作る。
+    pub(crate) fn empty() -> Self {
+        Self {
+            name: None,
+            enabled: true,
+            locked: false,
+            objects: Vec::new(),
+        }
+    }
+
+    /// 標準の状態でオブジェクトを持つレイヤーを作る。
+    fn with(objects: Vec<FakeObject>) -> Self {
+        Self {
+            objects,
+            ..Self::empty()
+        }
+    }
 }
 
 /// フェイクが保持するプロジェクトの中身。
@@ -346,6 +372,9 @@ pub(crate) const MUTATIONS: &[&str] = &[
     "delete_effect",
     "set_effect_enable",
     "set_effect_item_value",
+    "set_layer_name",
+    "set_layer_enable",
+    "set_layer_lock",
     "set_cursor_layer_frame",
     "set_select_range",
     "set_focus_object",
@@ -566,8 +595,8 @@ impl SceneReader for FakeSceneEditor<'_> {
             operation: "get_layer_name",
         })?;
         Ok(HostLayer {
-            name: None,
-            enabled: true,
+            name: fake.name.clone(),
+            enabled: fake.enabled,
             locked: fake.locked,
         })
     }
@@ -981,6 +1010,38 @@ impl SceneEditor for FakeSceneEditor<'_> {
         })
     }
 
+    fn set_layer_name(
+        &self,
+        _ticket: MutationTicket<'_>,
+        layer: usize,
+        name: Option<&str>,
+    ) -> Result<(), EditError> {
+        self.mutation("set_layer_name")?;
+        // SDK は `None` と空文字のどちらでも標準名へ戻す。
+        let name = name.filter(|name| !name.is_empty()).map(str::to_string);
+        self.with_layer(layer, "set_layer_name", |fake| fake.name = name)
+    }
+
+    fn set_layer_enabled(
+        &self,
+        _ticket: MutationTicket<'_>,
+        layer: usize,
+        enabled: bool,
+    ) -> Result<(), EditError> {
+        self.mutation("set_layer_enable")?;
+        self.with_layer(layer, "set_layer_enable", |fake| fake.enabled = enabled)
+    }
+
+    fn set_layer_locked(
+        &self,
+        _ticket: MutationTicket<'_>,
+        layer: usize,
+        locked: bool,
+    ) -> Result<(), EditError> {
+        self.mutation("set_layer_lock")?;
+        self.with_layer(layer, "set_layer_lock", |fake| fake.locked = locked)
+    }
+
     fn set_cursor(
         &self,
         _ticket: MutationTicket<'_>,
@@ -1027,6 +1088,28 @@ impl SceneEditor for FakeSceneEditor<'_> {
 }
 
 impl FakeSceneEditor<'_> {
+    /// レイヤーへ変更を適用する。
+    ///
+    /// 状態を無言で保たせる仕込みもここで働かせる。戻り値を持たない setter が
+    /// 無視されたときに read-back が捕まえられることを確かめる。
+    fn with_layer(
+        &self,
+        layer: usize,
+        operation: &'static str,
+        apply: impl FnOnce(&mut FakeLayer),
+    ) -> Result<(), EditError> {
+        if self.host.knobs().fault == Some(Fault::IgnoreLayerState) {
+            return Ok(());
+        }
+        let mut scene = self.host.scene.lock().unwrap();
+        let fake = scene
+            .layers
+            .get_mut(layer)
+            .ok_or(EditError::Sdk { operation })?;
+        apply(fake);
+        Ok(())
+    }
+
     /// 解決済み effect へ変更を適用する。
     fn with_effect(
         &self,
@@ -1180,50 +1263,44 @@ fn video() -> HostEffect {
 pub(crate) fn fake_scene() -> FakeScene {
     FakeScene {
         layers: vec![
-            FakeLayer {
-                locked: false,
-                objects: vec![FakeObject {
-                    id: 1,
+            FakeLayer::with(vec![FakeObject {
+                id: 1,
+                placement: HostObjectPlacement {
+                    layer: 0,
+                    frame_start: 0,
+                    frame_end: 99,
+                    name: None,
+                },
+                alias: "[0:0]".to_string(),
+                effects: Vec::new(),
+            }]),
+            FakeLayer::with(vec![
+                FakeObject {
+                    id: 2,
                     placement: HostObjectPlacement {
-                        layer: 0,
-                        frame_start: 0,
-                        frame_end: 99,
-                        name: None,
+                        layer: 1,
+                        frame_start: 100,
+                        frame_end: 200,
+                        name: Some("立ち絵".to_string()),
                     },
-                    alias: "[0:0]".to_string(),
-                    effects: Vec::new(),
-                }],
-            },
-            FakeLayer {
-                locked: false,
-                objects: vec![
-                    FakeObject {
-                        id: 2,
-                        placement: HostObjectPlacement {
-                            layer: 1,
-                            frame_start: 100,
-                            frame_end: 200,
-                            name: Some("立ち絵".to_string()),
-                        },
-                        alias: "[1:100]".to_string(),
-                        effects: vec![video(), blur(0, 20)],
+                    alias: "[1:100]".to_string(),
+                    effects: vec![video(), blur(0, 20)],
+                },
+                FakeObject {
+                    id: 3,
+                    placement: HostObjectPlacement {
+                        layer: 1,
+                        frame_start: 300,
+                        frame_end: 400,
+                        name: Some("字幕".to_string()),
                     },
-                    FakeObject {
-                        id: 3,
-                        placement: HostObjectPlacement {
-                            layer: 1,
-                            frame_start: 300,
-                            frame_end: 400,
-                            name: Some("字幕".to_string()),
-                        },
-                        alias: "[1:300]".to_string(),
-                        effects: vec![blur(0, 20)],
-                    },
-                ],
-            },
+                    alias: "[1:300]".to_string(),
+                    effects: vec![blur(0, 20)],
+                },
+            ]),
             FakeLayer {
                 locked: true,
-                objects: vec![FakeObject {
+                ..FakeLayer::with(vec![FakeObject {
                     id: 4,
                     placement: HostObjectPlacement {
                         layer: 2,
@@ -1233,18 +1310,12 @@ pub(crate) fn fake_scene() -> FakeScene {
                     },
                     alias: "[2:0]".to_string(),
                     effects: Vec::new(),
-                }],
+                }])
             },
             // 編集情報が名乗る layer_max より先にある空レイヤー。ここへ作ると
             // オブジェクトの存在する最大レイヤーが伸びる。
-            FakeLayer {
-                locked: false,
-                objects: Vec::new(),
-            },
-            FakeLayer {
-                locked: false,
-                objects: Vec::new(),
-            },
+            FakeLayer::empty(),
+            FakeLayer::empty(),
         ],
         next_id: 100,
         cursor: Cursor { frame: 0, layer: 0 },

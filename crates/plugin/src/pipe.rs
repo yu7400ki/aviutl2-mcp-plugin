@@ -1764,6 +1764,13 @@ mod tests {
             Err(Self::unavailable())
         }
 
+        fn set_layer_state(
+            &self,
+            _: &aviutl2_mcp_core::SetLayerStateParams,
+        ) -> Result<aviutl2_mcp_core::LayerStateOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
         fn set_selection(
             &self,
             _: &aviutl2_mcp_core::SetSelectionParams,

@@ -14,7 +14,7 @@ use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
 use aviutl2_mcp_core::{
     CursorPosition, Destination, EditOperation, EffectItem, EffectItemType, EffectSelector,
-    ErrorCode, Fingerprint, ItemValue, ObjectSelector, PageRequest, Placement,
+    ErrorCode, Fingerprint, ItemValue, LayerNameChange, ObjectSelector, PageRequest, Placement,
 };
 use serde_json::json;
 use std::sync::mpsc::channel;
@@ -2310,6 +2310,219 @@ fn a_panic_before_any_mutation_is_not_reported_as_a_possible_change() {
     assert!(
         error.details().get("mutation_issued").is_none(),
         "何も変更していないのに変更が入った可能性として報告されました"
+    );
+}
+
+// -------------------------------------------------- レイヤーの状態の変更
+
+/// 何も変えないレイヤーの状態変更要求を組み立てる。
+fn layer_state_params(harness: &Harness, layer: u32) -> SetLayerStateParams {
+    SetLayerStateParams {
+        expected_scene_id: SCENE_ID,
+        layer,
+        name: None,
+        enabled: None,
+        locked: None,
+        expected_project_epoch: harness.epoch(),
+    }
+}
+
+#[test]
+fn the_three_layer_axes_can_be_set_alone_or_together() {
+    // 軸ごとに、要求した軸だけが変わり、他の軸は元のままであること。
+    let cases: [(&str, SetLayerStateParams, Option<&str>, bool, bool); 4] = {
+        let harness = Harness::new();
+        [
+            (
+                "name",
+                SetLayerStateParams {
+                    name: Some(LayerNameChange::Set {
+                        name: "背景".to_string(),
+                    }),
+                    ..layer_state_params(&harness, 0)
+                },
+                Some("背景"),
+                true,
+                false,
+            ),
+            (
+                "enabled",
+                SetLayerStateParams {
+                    enabled: Some(false),
+                    ..layer_state_params(&harness, 0)
+                },
+                None,
+                false,
+                false,
+            ),
+            (
+                "locked",
+                SetLayerStateParams {
+                    locked: Some(true),
+                    ..layer_state_params(&harness, 0)
+                },
+                None,
+                true,
+                true,
+            ),
+            (
+                "全て",
+                SetLayerStateParams {
+                    name: Some(LayerNameChange::Set {
+                        name: "背景".to_string(),
+                    }),
+                    enabled: Some(false),
+                    locked: Some(true),
+                    ..layer_state_params(&harness, 0)
+                },
+                Some("背景"),
+                false,
+                true,
+            ),
+        ]
+    };
+
+    for (label, params, name, enabled, locked) in cases {
+        let harness = Harness::new();
+        let params = SetLayerStateParams {
+            expected_project_epoch: harness.epoch(),
+            ..params
+        };
+        let outcome = harness
+            .edit
+            .set_layer_state(&params)
+            .unwrap_or_else(|error| panic!("{label} の変更が失敗しました: {error}"));
+
+        assert_eq!(outcome.layer.index, 0, "{label}");
+        assert_eq!(outcome.layer.name.as_deref(), name, "{label}");
+        assert_eq!(outcome.layer.enabled, enabled, "{label}");
+        assert_eq!(outcome.layer.locked, locked, "{label}");
+        // 応答は読み取りの DTO をそのまま返すため、件数も載る。
+        assert_eq!(outcome.layer.object_count, 1, "{label}");
+        assert_eq!(outcome.project_epoch, harness.epoch(), "{label}");
+        assert_eq!(outcome.project_revision, 1, "{label}");
+        assert_eq!(harness.project.revision(), 1, "{label}");
+        assert!(harness.project.modified(), "{label}");
+    }
+}
+
+#[test]
+fn resetting_the_layer_name_hands_the_sdk_no_name() {
+    let harness = Harness::new();
+    harness
+        .edit
+        .set_layer_state(&SetLayerStateParams {
+            name: Some(LayerNameChange::Set {
+                name: "背景".to_string(),
+            }),
+            ..layer_state_params(&harness, 0)
+        })
+        .expect("名前を設定できません");
+    assert_eq!(harness.host.scene().layers[0].name.as_deref(), Some("背景"));
+
+    let outcome = harness
+        .edit
+        .set_layer_state(&SetLayerStateParams {
+            name: Some(LayerNameChange::Reset {}),
+            ..layer_state_params(&harness, 0)
+        })
+        .expect("標準名へ戻せません");
+
+    assert_eq!(outcome.layer.name, None, "標準名へ戻っていません");
+    assert_eq!(harness.host.scene().layers[0].name, None);
+}
+
+#[test]
+fn a_layer_state_that_did_not_take_effect_is_not_reported_as_a_success() {
+    // 3 つの setter は戻り値を持たない。無言で無視されたことは読み直しでしか
+    // 分からない。
+    let harness =
+        Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::IgnoreLayerState)));
+    let error = harness
+        .edit
+        .set_layer_state(&SetLayerStateParams {
+            enabled: Some(false),
+            ..layer_state_params(&harness, 0)
+        })
+        .expect_err("反映されていない変更が成功として返りました");
+
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(error.details()["reason"], json!("change_not_applied"));
+    // SDK へは届いている。届いた以上は変更が入った側へ倒す。
+    assert_eq!(error.details()["mutation_issued"], json!(true));
+}
+
+#[test]
+fn the_layer_state_read_back_takes_the_three_attributes_at_once() {
+    let harness = Harness::new();
+    let params = SetLayerStateParams {
+        name: Some(LayerNameChange::Set {
+            name: "背景".to_string(),
+        }),
+        enabled: Some(false),
+        locked: Some(true),
+        ..layer_state_params(&harness, 0)
+    };
+    harness.host.clear_calls();
+    harness
+        .edit
+        .set_layer_state(&params)
+        .expect("変更が失敗しました");
+
+    let calls = harness.host.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| **call == LAYER_ATTRIBUTES)
+            .count(),
+        1,
+        "読み直しが属性ごとに分かれています: {calls:?}"
+    );
+}
+
+#[test]
+fn changing_the_layer_state_is_not_stopped_by_the_layer_lock() {
+    // ロックを外すこの operation にロックのガードを掛けると、ロックされた
+    // レイヤーの行き止まりが解けなくなる。
+    let harness = Harness::new();
+    harness.host.clear_calls();
+    let outcome = harness
+        .edit
+        .set_layer_state(&SetLayerStateParams {
+            locked: Some(false),
+            ..layer_state_params(&harness, 2)
+        })
+        .expect("ロックされたレイヤーのロックを外せません");
+
+    assert!(!outcome.layer.locked, "ロックが外れていません");
+    assert!(!harness.host.scene().layers[2].locked);
+    assert!(
+        !harness.host.calls().contains(&LAYER_LOCK),
+        "ロックの確認を行いました: {:?}",
+        harness.host.calls()
+    );
+}
+
+#[test]
+fn changing_the_layer_state_advances_the_revision_once_for_all_three_axes() {
+    let harness = Harness::new();
+    let outcome = harness
+        .edit
+        .set_layer_state(&SetLayerStateParams {
+            name: Some(LayerNameChange::Set {
+                name: "背景".to_string(),
+            }),
+            enabled: Some(false),
+            locked: Some(true),
+            ..layer_state_params(&harness, 0)
+        })
+        .expect("変更が失敗しました");
+
+    assert_eq!(outcome.project_revision, 1);
+    assert_eq!(
+        harness.project.revision(),
+        1,
+        "軸ごとに revision が進みました"
     );
 }
 
