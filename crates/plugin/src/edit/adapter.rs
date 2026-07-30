@@ -15,7 +15,9 @@
 use crate::edit::EditAdapter;
 use crate::edit::error::{EditError, OccupiedRange, UnsupportedReason};
 use crate::edit::host::{EditHost, HostSelection, SceneEditor};
-use crate::edit::precondition::{Boundary, EditKind, MutationPermit, verify_boundary};
+use crate::edit::precondition::{
+    Boundary, EditKind, ExpectedEpoch, MutationPermit, verify_boundary,
+};
 use crate::edit::resolve::{
     ResolvedObject, effect_info_at, resolve_effect, resolve_object, resolve_object_with_effects,
 };
@@ -383,7 +385,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                Some(params.expected_project_epoch.as_str()),
+                ExpectedEpoch::Only(params.expected_project_epoch.as_str()),
                 EditKind::Content,
                 &[params.placement.scene_id],
                 &[],
@@ -453,7 +455,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                None,
+                ExpectedEpoch::Absent,
                 EditKind::Content,
                 &[],
                 &[&params.selector],
@@ -486,7 +488,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                None,
+                ExpectedEpoch::Absent,
                 EditKind::Content,
                 &[],
                 &[&params.selector],
@@ -526,7 +528,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                None,
+                ExpectedEpoch::Absent,
                 EditKind::Content,
                 &[],
                 &[&params.selector],
@@ -568,7 +570,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                None,
+                ExpectedEpoch::Absent,
                 EditKind::Content,
                 &[],
                 &[&params.selector.object],
@@ -612,7 +614,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                None,
+                ExpectedEpoch::Absent,
                 EditKind::Content,
                 &[],
                 &[&params.object],
@@ -665,7 +667,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                None,
+                ExpectedEpoch::Absent,
                 EditKind::Content,
                 &[],
                 &[&params.selector.object],
@@ -699,7 +701,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                None,
+                ExpectedEpoch::Absent,
                 EditKind::Content,
                 &[],
                 &[&params.selector.object],
@@ -753,10 +755,16 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 Some(FocusChange::Set { object }) => Some(object),
                 _ => None,
             };
+            // 選択状態の変更だけが epoch を 2 か所から受け取る。focus を指定した
+            // 要求では、どちらで落ちたかを伝えなければ要求元は直す先を選べない。
+            let expected = params.expected_project_epoch.as_str();
             let boundary = verify_boundary(
                 project,
                 editor.entry_edit_info(),
-                Some(params.expected_project_epoch.as_str()),
+                match focus_selector {
+                    Some(_) => ExpectedEpoch::WithFocus(expected),
+                    None => ExpectedEpoch::Only(expected),
+                },
                 EditKind::Selection,
                 &[params.expected_scene_id],
                 focus_selector.as_slice(),

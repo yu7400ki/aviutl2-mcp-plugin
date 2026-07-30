@@ -59,7 +59,7 @@
 //! 発行による revision の加算と、応答が返す revision は残す。要求元へ変更が
 //! 入ったことを伝える値であり、前提条件の照合とは別の役割を持つ。
 
-use crate::edit::error::EditError;
+use crate::edit::error::{EditError, EpochSource};
 use crate::project::ProjectState;
 use crate::read::ReadError;
 use crate::read::adapter::ensure_fingerprint_algorithm;
@@ -241,10 +241,48 @@ pub struct MutationTicket<'a> {
     _permit: PhantomData<&'a ()>,
 }
 
+/// 要求が前提として運ぶ epoch と、食い違いをどう名乗るか。
+///
+/// 出所を名乗るのは、1 要求が epoch を 2 か所から受け取る場合だけである。
+/// 1 か所からしか受け取らない要求で出所を名乗ると、要求元は 1 つしか送って
+/// いない値に対して 2 つの分岐を持つことになる。
+pub(crate) enum ExpectedEpoch<'a> {
+    /// 前提の epoch を運ばない。セレクターの epoch だけが境界を定める。
+    Absent,
+    /// 前提の epoch だけが境界を定める。
+    Only(&'a str),
+    /// 前提の epoch と focus 対象のセレクターが別々に epoch を運ぶ。
+    /// どちらで落ちたかを名乗る。
+    WithFocus(&'a str),
+}
+
+impl ExpectedEpoch<'_> {
+    /// 照合する前提の epoch。
+    fn value(&self) -> Option<&str> {
+        match self {
+            ExpectedEpoch::Absent => None,
+            ExpectedEpoch::Only(epoch) | ExpectedEpoch::WithFocus(epoch) => Some(epoch),
+        }
+    }
+
+    /// 食い違いが出所を名乗るか。
+    fn names_the_source(&self) -> bool {
+        matches!(self, ExpectedEpoch::WithFocus(_))
+    }
+}
+
+/// epoch の食い違いを、出所を名乗る形と名乗らない形のどちらかで作る。
+fn epoch_mismatch(source: Option<EpochSource>) -> EditError {
+    match source {
+        Some(origin) => EditError::EpochMismatch { origin },
+        None => ReadError::EpochMismatch.into(),
+    }
+}
+
 /// 判定 1〜4 を要求全体へ適用する。
 ///
-/// `expected_project_epoch` は、対象を指すセレクターを持たない要求だけが運ぶ
-/// 前提の epoch である。セレクターを持つ要求は `None` を渡す。判定 2 が同じ値を
+/// 前提の epoch を運ぶのは、対象を指すセレクターを持たない要求だけである。
+/// セレクターを持つ要求は [`ExpectedEpoch::Absent`] を渡す。判定 2 が同じ値を
 /// 照合するため、両方を課すと不整合な組を作れる余地だけが増える。
 ///
 /// `guards` には要求が持つ全てのシーン guard を、`selectors` には要求が含む
@@ -253,25 +291,26 @@ pub struct MutationTicket<'a> {
 pub(crate) fn verify_boundary(
     project: &ProjectState,
     entry_info: &HostEditInfo,
-    expected_project_epoch: Option<&str>,
+    expected_project_epoch: ExpectedEpoch<'_>,
     kind: EditKind,
     guards: &[i32],
     selectors: &[&ObjectSelector],
 ) -> Result<Boundary, EditError> {
     let observed = ProjectBoundary::load(project);
+    let named = expected_project_epoch.names_the_source();
 
     // 1. 前提の epoch。セレクターを持たない要求では、これがプロジェクト境界を
     //    照合する唯一の材料である。
-    if let Some(expected) = expected_project_epoch
+    if let Some(expected) = expected_project_epoch.value()
         && expected != observed.epoch
     {
-        return Err(ReadError::EpochMismatch.into());
+        return Err(epoch_mismatch(named.then_some(EpochSource::Expected)));
     }
     // 2. セレクターの epoch。同じプロジェクトの、その時点の対象であることを
     //    ここで定める。
     for selector in selectors {
         if selector.project_epoch != observed.epoch {
-            return Err(ReadError::EpochMismatch.into());
+            return Err(epoch_mismatch(named.then_some(EpochSource::Focus)));
         }
     }
     // 3. シーンの guard。区間へ入った時点の編集情報と照合する。
@@ -359,7 +398,7 @@ mod tests {
         let boundary = verify_boundary(
             &project,
             &edit_info(0),
-            None,
+            ExpectedEpoch::Absent,
             EditKind::Content,
             &[0],
             &[&selector(&epoch)],
@@ -379,7 +418,7 @@ mod tests {
         verify_boundary(
             &project,
             &edit_info(0),
-            None,
+            ExpectedEpoch::Absent,
             EditKind::Content,
             &[],
             &[&selector(&epoch)],
@@ -393,7 +432,7 @@ mod tests {
         let error = verify_boundary(
             &project,
             &edit_info(0),
-            None,
+            ExpectedEpoch::Absent,
             EditKind::Content,
             &[],
             &[&selector("別のプロジェクト")],
@@ -412,7 +451,7 @@ mod tests {
             let error = verify_boundary(
                 &project,
                 &edit_info(0),
-                Some("別のプロジェクト"),
+                ExpectedEpoch::Only("別のプロジェクト"),
                 kind,
                 &[0],
                 &[],
@@ -426,7 +465,7 @@ mod tests {
         verify_boundary(
             &project,
             &edit_info(0),
-            Some(&epoch),
+            ExpectedEpoch::Only(&epoch),
             EditKind::Content,
             &[0],
             &[],
@@ -444,7 +483,7 @@ mod tests {
         let error = verify_boundary(
             &project,
             &edit_info(7),
-            None,
+            ExpectedEpoch::Absent,
             EditKind::Content,
             &[0],
             &[&selector(&epoch)],
@@ -465,7 +504,7 @@ mod tests {
         let error = verify_boundary(
             &project,
             &edit_info(0),
-            None,
+            ExpectedEpoch::Absent,
             EditKind::Content,
             &[],
             &[&stale],
@@ -487,7 +526,7 @@ mod tests {
         let error = verify_boundary(
             &project,
             &edit_info(0),
-            None,
+            ExpectedEpoch::Absent,
             EditKind::Content,
             &[],
             &[&stale],
@@ -501,8 +540,15 @@ mod tests {
         // 境界の照合は verify_boundary の 1 か所に閉じる。区間の内側で境界が
         // 入れ替わる経路は無いため、許可の発行は境界を見ない。
         let project = state();
-        let boundary =
-            verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
+        let boundary = verify_boundary(
+            &project,
+            &edit_info(0),
+            ExpectedEpoch::Absent,
+            EditKind::Content,
+            &[],
+            &[],
+        )
+        .unwrap();
         project.on_project_load(Some(r"C:\projects\other.aup2"));
         project.on_object_updated();
         boundary
@@ -515,8 +561,15 @@ mod tests {
         // 許可はそれぞれ独立に発行を数える。2 つ取れると、同じ要求の中で
         // revision が 2 度進み、応答が返す値がどちらのものか定まらない。
         let project = state();
-        let boundary =
-            verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
+        let boundary = verify_boundary(
+            &project,
+            &edit_info(0),
+            ExpectedEpoch::Absent,
+            EditKind::Content,
+            &[],
+            &[],
+        )
+        .unwrap();
         boundary.issue_permit(&project).expect("1 度目の許可");
         let Err(error) = boundary.issue_permit(&project) else {
             panic!("同じ要求で 2 つ目の許可が取れました");
@@ -533,8 +586,15 @@ mod tests {
     #[test]
     fn the_first_issue_advances_the_revision_once() {
         let project = state();
-        let boundary =
-            verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
+        let boundary = verify_boundary(
+            &project,
+            &edit_info(0),
+            ExpectedEpoch::Absent,
+            EditKind::Content,
+            &[],
+            &[],
+        )
+        .unwrap();
         let permit = boundary.issue_permit(&project).unwrap();
         assert_eq!(permit.project_revision(&boundary), 0);
 
@@ -549,8 +609,15 @@ mod tests {
     #[test]
     fn selection_edits_do_not_advance_the_revision() {
         let project = state();
-        let boundary =
-            verify_boundary(&project, &edit_info(0), None, EditKind::Selection, &[], &[]).unwrap();
+        let boundary = verify_boundary(
+            &project,
+            &edit_info(0),
+            ExpectedEpoch::Absent,
+            EditKind::Selection,
+            &[],
+            &[],
+        )
+        .unwrap();
         let permit = boundary.issue_permit(&project).unwrap();
         let _ = permit.issue(&boundary, |_ticket| Ok(()));
         assert_eq!(project.revision(), 0);
@@ -560,8 +627,15 @@ mod tests {
     #[test]
     fn failures_before_the_first_issue_are_not_attributed_to_a_mutation() {
         let project = state();
-        let boundary =
-            verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
+        let boundary = verify_boundary(
+            &project,
+            &edit_info(0),
+            ExpectedEpoch::Absent,
+            EditKind::Content,
+            &[],
+            &[],
+        )
+        .unwrap();
         let permit = boundary.issue_permit(&project).unwrap();
         let error = permit.attribute(&boundary, EditError::Panicked);
         assert!(error.details().get("mutation_issued").is_none());

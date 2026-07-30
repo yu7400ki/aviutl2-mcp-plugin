@@ -1599,8 +1599,79 @@ fn every_nested_selector_is_checked_including_the_ones_inside_other_inputs() {
             expected_project_epoch: harness.epoch(),
         })
         .expect_err("フォーカス対象の epoch 不一致が受理されました");
-    assert_eq!(error.details()["mismatch"], json!("project_epoch"));
+    // 選択状態の変更だけが epoch を 2 か所から受け取るため、出所を名乗る。
+    assert_eq!(error.details()["mismatch"], json!("focus_project_epoch"));
     assert!(!harness.host.mutated());
+}
+
+#[test]
+fn the_selection_change_names_which_epoch_did_not_match() {
+    // 前提と focus の双方から epoch を受け取るのは選択状態の変更だけである。
+    // どちらで落ちたかを伝えなければ、要求元は直す先を選べない。
+    let harness = Harness::new();
+    let error = harness
+        .edit
+        .set_selection(&SetSelectionParams {
+            expected_scene_id: SCENE_ID,
+            cursor: None,
+            selected_range: None,
+            focus: Some(FocusChange::Set {
+                object: harness.selector(1, 100),
+            }),
+            expected_project_epoch: "別のプロジェクト".to_string(),
+        })
+        .expect_err("別プロジェクトの前提が受理されました");
+    assert_eq!(error.details()["mismatch"], json!("expected_project_epoch"));
+
+    let harness = Harness::new();
+    let mut focus = harness.selector(1, 100);
+    focus.project_epoch = "別のプロジェクト".to_string();
+    let error = harness
+        .edit
+        .set_selection(&SetSelectionParams {
+            expected_scene_id: SCENE_ID,
+            cursor: None,
+            selected_range: None,
+            focus: Some(FocusChange::Set { object: focus }),
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect_err("別プロジェクトのフォーカス対象が受理されました");
+    assert_eq!(error.details()["mismatch"], json!("focus_project_epoch"));
+
+    // focus を省略した要求は epoch を 1 か所からしか受け取らない。出所を名乗る
+    // 理由が無い。
+    let harness = Harness::new();
+    let error = harness
+        .edit
+        .set_selection(&SetSelectionParams {
+            expected_scene_id: SCENE_ID,
+            cursor: Some(CursorPosition { layer: 1, frame: 5 }),
+            selected_range: None,
+            focus: None,
+            expected_project_epoch: "別のプロジェクト".to_string(),
+        })
+        .expect_err("別プロジェクトの前提が受理されました");
+    assert_eq!(error.details()["mismatch"], json!("project_epoch"));
+}
+
+#[test]
+fn the_other_operations_do_not_tell_the_epoch_sources_apart() {
+    // epoch を 1 か所からしか受け取らない要求で出所を名乗ると、要求元は
+    // 1 つしか送っていない値に対して 2 つの分岐を持つことになる。
+    for (name, run) in content_edits() {
+        let harness = Harness::new();
+        let mut target = harness.selector(1, 100);
+        target.project_epoch = "別のプロジェクト".to_string();
+
+        let Err(error) = run(&harness, target) else {
+            panic!("{name} が別プロジェクトの対象を受理しました");
+        };
+        assert_eq!(
+            error.details()["mismatch"],
+            json!("project_epoch"),
+            "{name} が epoch の出所を名乗りました"
+        );
+    }
 }
 
 // -------------------------------------------- SDK へ届かなかった変更の扱い

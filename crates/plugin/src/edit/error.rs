@@ -123,11 +123,28 @@ pub struct OccupiedRange {
     pub frame_end: usize,
 }
 
+/// 1 要求が epoch を 2 か所から受け取る場合の、食い違った側。
+///
+/// 出所を名乗るのは、要求が前提の epoch と focus 対象のセレクターの双方から
+/// epoch を受け取る場合だけである。1 か所からしか受け取らない要求で出所を
+/// 名乗ると、要求元は 1 つしか送っていない値に対して 2 つの分岐を持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpochSource {
+    /// 要求が前提として運ぶ epoch。
+    Expected,
+    /// focus 対象のセレクターが運ぶ epoch。
+    Focus,
+}
+
 /// 前提条件のうち、どれが食い違ったか。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mismatch {
-    /// プロジェクトの epoch。
+    /// プロジェクトの epoch。出所は区別しない。
     ProjectEpoch,
+    /// 前提として運ばれたプロジェクトの epoch。
+    ExpectedProjectEpoch,
+    /// focus 対象のセレクターが運ぶプロジェクトの epoch。
+    FocusProjectEpoch,
     /// 現在シーンの ID。
     SceneId,
     /// fingerprint の算出方式。
@@ -141,6 +158,8 @@ impl Mismatch {
     fn as_str(self) -> &'static str {
         match self {
             Mismatch::ProjectEpoch => "project_epoch",
+            Mismatch::ExpectedProjectEpoch => "expected_project_epoch",
+            Mismatch::FocusProjectEpoch => "focus_project_epoch",
             Mismatch::SceneId => "scene_id",
             Mismatch::FingerprintAlgorithm => "fingerprint_algorithm",
             Mismatch::Fingerprint => "fingerprint",
@@ -170,6 +189,14 @@ pub enum EditError {
         frame: usize,
         /// 宛先を塞いでいる既存オブジェクトが占める範囲。
         occupied_by: OccupiedRange,
+    },
+    /// epoch を 2 か所から受け取る要求で、どちらかが現在の epoch と異なる。
+    ///
+    /// 出所を区別しない食い違いは [`ReadError::EpochMismatch`] が表す。
+    #[error("プロジェクトの epoch が要求の前提と一致しません")]
+    EpochMismatch {
+        /// 食い違った側。
+        origin: EpochSource,
     },
     /// 対象または宛先のレイヤーがロックされている。
     #[error("レイヤーがロックされています")]
@@ -254,9 +281,9 @@ impl EditError {
     pub fn error_code(&self) -> ErrorCode {
         match self {
             EditError::Read(error) => error.error_code(),
-            EditError::DestinationOccupied { .. } | EditError::LayerLocked { .. } => {
-                ErrorCode::PreconditionFailed
-            }
+            EditError::DestinationOccupied { .. }
+            | EditError::LayerLocked { .. }
+            | EditError::EpochMismatch { .. } => ErrorCode::PreconditionFailed,
             EditError::EffectNotFound { .. } => ErrorCode::NotFound,
             EditError::ItemWrite(error) => error.error_code(),
             EditError::UnsupportedTarget { .. } => ErrorCode::UnsupportedOperation,
@@ -279,6 +306,10 @@ impl EditError {
     fn mismatch(&self) -> Option<Mismatch> {
         match self {
             EditError::Read(ReadError::EpochMismatch) => Some(Mismatch::ProjectEpoch),
+            EditError::EpochMismatch { origin } => Some(match origin {
+                EpochSource::Expected => Mismatch::ExpectedProjectEpoch,
+                EpochSource::Focus => Mismatch::FocusProjectEpoch,
+            }),
             EditError::Read(ReadError::SceneMismatch { .. }) => Some(Mismatch::SceneId),
             EditError::Read(ReadError::FingerprintAlgorithmMismatch { .. }) => {
                 Some(Mismatch::FingerprintAlgorithm)
@@ -350,6 +381,8 @@ impl EditError {
                 details.insert("reason".to_string(), json!("layer_locked"));
                 details.insert("layer".to_string(), json!(layer));
             }
+            // 食い違った側は `mismatch` が名乗る。
+            EditError::EpochMismatch { .. } => {}
             EditError::EffectNotFound {
                 effect_name,
                 effect_index,
@@ -453,6 +486,12 @@ mod tests {
                     frame_end: 260,
                 },
             },
+            EditError::EpochMismatch {
+                origin: EpochSource::Expected,
+            },
+            EditError::EpochMismatch {
+                origin: EpochSource::Focus,
+            },
             EditError::LayerLocked { layer: 3 },
             EditError::EffectNotFound {
                 effect_name: "ぼかし".to_string(),
@@ -510,6 +549,7 @@ mod tests {
         match error {
             EditError::Read(_) => "Read",
             EditError::DestinationOccupied { .. } => "DestinationOccupied",
+            EditError::EpochMismatch { .. } => "EpochMismatch",
             EditError::LayerLocked { .. } => "LayerLocked",
             EditError::EffectNotFound { .. } => "EffectNotFound",
             EditError::ItemWrite(_) => "ItemWrite",
@@ -529,6 +569,7 @@ mod tests {
         const VARIANTS: &[&str] = &[
             "Read",
             "DestinationOccupied",
+            "EpochMismatch",
             "LayerLocked",
             "EffectNotFound",
             "ItemWrite",
@@ -622,6 +663,9 @@ mod tests {
                 ErrorCode::AmbiguousSelector,
                 ErrorCode::SdkError,
                 ErrorCode::InternalError,
+                ErrorCode::PreconditionFailed,
+                // 前提の epoch と focus の epoch を別々に名乗る 2 つ。
+                ErrorCode::PreconditionFailed,
                 ErrorCode::PreconditionFailed,
                 ErrorCode::PreconditionFailed,
                 ErrorCode::NotFound,
