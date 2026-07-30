@@ -52,16 +52,16 @@
 
 use aviutl2_mcp_core::{
     AvailableEffect, EditInfo, EditOutcome, EffectInfo, EffectItem, EffectItemType, EffectSelector,
-    EffectType, ErrorCode, ErrorObject, FingerprintAlgorithm, ItemValue, LayerInfo, ObjectDetail,
-    ObjectSelector, ObjectSummary, SelectionState,
+    EffectType, ErrorCode, ErrorObject, FingerprintAlgorithm, ItemValue, LayerInfo,
+    LayerStateOutcome, ObjectDetail, ObjectSelector, ObjectSummary, SelectionState,
 };
 use aviutl2_mcp_server::api::ListInstancesResponse;
 use aviutl2_mcp_server::discovery::default_registry_dir;
 use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, CreateObjectInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
-    DestinationInput, EffectSelectorInput, FocusChangeInput, ItemValueInput, MoveObjectInput,
-    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetObjectItemInput,
-    SetObjectNameInput, SetSelectionInput,
+    DestinationInput, EffectSelectorInput, FocusChangeInput, ItemValueInput, LayerNameChangeInput,
+    MoveObjectInput, ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput,
+    SetLayerStateInput, SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::{
     AvailableEffectsPageInput, GetObjectInput, InstanceInput, ListAvailableEffectsInput,
@@ -797,6 +797,31 @@ impl Harness {
         self.decode(result)
     }
 
+    fn set_layer_state(
+        &self,
+        instance: &str,
+        scene_id: i32,
+        layer: usize,
+        change: LayerStateChange,
+        expected_project_epoch: String,
+    ) -> Result<LayerStateOutcome, ErrorObject> {
+        let result = self
+            .runtime
+            .block_on(
+                self.server
+                    .aviutl2_set_layer_state(Parameters(SetLayerStateInput {
+                        instance_id: instance.to_string(),
+                        expected_scene_id: scene_id,
+                        layer: layer as u32,
+                        name: change.name,
+                        enabled: change.enabled,
+                        locked: change.locked,
+                        expected_project_epoch,
+                    })),
+            );
+        self.decode(result)
+    }
+
     fn set_selection(
         &self,
         instance: &str,
@@ -818,6 +843,24 @@ impl Harness {
                     })),
             );
         self.decode(result)
+    }
+}
+
+/// `aviutl2_set_layer_state` へ渡す変更内容。
+#[derive(Default)]
+struct LayerStateChange {
+    name: Option<LayerNameChangeInput>,
+    enabled: Option<bool>,
+    locked: Option<bool>,
+}
+
+impl LayerStateChange {
+    /// ロックだけを変える。
+    fn locked(locked: bool) -> Self {
+        Self {
+            locked: Some(locked),
+            ..Self::default()
+        }
     }
 }
 
@@ -1476,6 +1519,15 @@ fn section_fingerprint_premises(
         outcome,
     );
 
+    let outcome = check_layer_lock_release(harness, report, instance, context);
+    report.record(
+        "5.9",
+        "ロックの解除による行き止まりの解消",
+        "aviutl2_set_layer_state でロックを掛けた対象の移動が拒否され、同じ tool でロックを解除すると移動できる",
+        Mode::Auto,
+        outcome,
+    );
+
     let (outcome, advance) = check_revision_chain(harness, instance, context);
     report.record(
         "5.9",
@@ -1997,6 +2049,120 @@ fn check_layer_lock(
         }
     }
     Ok(notes)
+}
+
+/// ロックによる行き止まりが MCP だけで解けることを確かめる。
+///
+/// レイヤーをロックするのも解除するのも `aviutl2_set_layer_state` で行うため、
+/// 実行者の操作を要しない。後始末で元のロック状態へ戻す。
+fn check_layer_lock_release(
+    harness: &Harness,
+    report: &mut Report,
+    instance: &Instance,
+    context: &Context,
+) -> CheckResult {
+    let layer = context.target.layer;
+    let layers = require(
+        harness.layers(&instance.id, context.scene_id),
+        "レイヤーを列挙できません",
+    )?;
+    let original = layers
+        .iter()
+        .find(|listed| listed.index == layer)
+        .map(|listed| listed.locked)
+        .ok_or_else(|| format!("レイヤー {layer} が列挙に現れません"))?;
+
+    let epoch = precondition(harness, instance)?;
+    let locked = require(
+        harness.set_layer_state(
+            &instance.id,
+            context.scene_id,
+            layer,
+            LayerStateChange::locked(true),
+            epoch,
+        ),
+        "レイヤーをロックできません",
+    )?;
+    if !locked.layer.locked {
+        return Err("ロックを要求したのに応答がロックされていないと返しました".to_string());
+    }
+
+    let object = resolve_object(harness, instance, context.scene_id, context.target)?;
+    let away = context.free_slots[0];
+    let destination = DestinationInput {
+        layer: away.layer as u32,
+        frame: away.frame as u32,
+    };
+    let refused =
+        expect_layer_locked(harness.move_object(&instance.id, &object.selector, destination));
+
+    // 行き止まりを塞ぐ。ロックされたレイヤーでも、この tool は通る。
+    let epoch = precondition(harness, instance)?;
+    let released = require(
+        harness.set_layer_state(
+            &instance.id,
+            context.scene_id,
+            layer,
+            LayerStateChange::locked(false),
+            epoch,
+        ),
+        "ロックされたレイヤーのロックを解除できません",
+    )?;
+    if released.layer.locked {
+        return Err("解除を要求したのに応答がロックされたままだと返しました".to_string());
+    }
+
+    let object = resolve_object(harness, instance, context.scene_id, context.target)?;
+    let moved = require(
+        harness.move_object(&instance.id, &object.selector, destination),
+        "ロック解除後の移動が失敗しました",
+    )?;
+    let moved_to = moved
+        .object
+        .ok_or_else(|| "移動の応答が対象を返しません".to_string())?;
+
+    // 後始末: 対象を元の位置へ戻し、ロックも元の状態へ戻す。
+    require(
+        harness.move_object(
+            &instance.id,
+            &moved_to.selector,
+            DestinationInput {
+                layer: context.target.layer as u32,
+                frame: context.target.frame as u32,
+            },
+        ),
+        "対象を元の位置へ戻せません",
+    )?;
+    let epoch = precondition(harness, instance)?;
+    require(
+        harness.set_layer_state(
+            &instance.id,
+            context.scene_id,
+            layer,
+            LayerStateChange::locked(original),
+            epoch,
+        ),
+        "レイヤーのロックを元へ戻せません",
+    )?;
+
+    let undo = ask(
+        "直前のレイヤー状態の変更に対して AviUtl2 で「元に戻す」を 1 回実行すると、何が戻りますか。\n\
+         レイヤー系 setter が取り消し単位を作るかの記録に使います\n\
+         （レイヤーの状態が戻る / その前の編集が戻る / 何も戻らない / 未確認 で回答）。",
+    );
+    report.observe(
+        "layer_setter_undo_unit",
+        "レイヤー系 setter は取り消し単位を作るか",
+        format!("回答: {}", if undo.is_empty() { "未回答" } else { &undo }),
+    );
+
+    let refused = refused?;
+    Ok(vec![format!(
+        "ロック中の移動: {}。解除後は layer={} frame={} へ移動できた",
+        refused.join(" / "),
+        moved_to.layer,
+        moved_to.frame_start
+    )])
 }
 
 /// ロックされたレイヤーに対する拒否であることを確かめる。
