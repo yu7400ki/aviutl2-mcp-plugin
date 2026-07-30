@@ -645,12 +645,43 @@ fn rejected_edit_tool_calls_take_the_same_path() {
         },
     }));
 
+    // 以前の形で組み立てられた要求は引数の復元を通る。登録の無いインスタンスを
+    // 指すため失敗はするが、要求の誤りとしては扱われない。
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_delete_object",
+            "arguments": {
+                "instance_id": instance_id,
+                "selector": {
+                    "project_epoch": epoch,
+                    "scene_id": 0,
+                    "layer": 1,
+                    "frame": 0,
+                    "name": null,
+                    "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "fingerprint_algorithm": "sha256-raw-v1",
+                },
+                "expected": { "project_epoch": epoch, "project_revision": 42 },
+            },
+        },
+    }));
+
     let session = run_session(&registry_dir, &requests);
     for id in [2, 3, 4, 5] {
         let response = session.response(id);
         assert_eq!(response["result"]["isError"], json!(true), "{response}");
         assert_structured_invalid_argument(&response);
     }
+    let tolerated = session.response(6);
+    assert_eq!(
+        tolerated["result"]["structuredContent"]["code"],
+        json!("instance_not_found"),
+        "以前の形の要求が引数の誤りとして拒否されました: {tolerated}"
+    );
+
     let unknown_field = session.response(2);
     let message = unknown_field["result"]["content"][0]["text"]
         .as_str()
