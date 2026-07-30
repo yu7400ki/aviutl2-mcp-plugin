@@ -17,7 +17,11 @@ pub struct ObjectSelector {
     pub layer: usize,
     /// 0 始まりの開始フレーム番号。完全一致で照合する。
     pub frame: usize,
-    /// オブジェクト名。指定時は一致を必須とする。
+    /// オブジェクト名。標準名のままなら null。
+    ///
+    /// 候補の絞り込みには使わない。対象はレイヤーと開始フレームで定まり、
+    /// 同一性は fingerprint が検証する。名前は fingerprint の材料であるため、
+    /// 名前が変わった対象は fingerprint の照合が捕まえる。
     pub name: Option<String>,
     /// 同一性検証用の fingerprint。
     pub fingerprint: Fingerprint,
