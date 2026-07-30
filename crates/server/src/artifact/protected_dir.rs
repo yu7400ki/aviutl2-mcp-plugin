@@ -42,7 +42,7 @@ use windows::core::PCWSTR;
 ///
 /// 失敗の説明に対象パスを含めない。利用者のディレクトリ構成をログへ残さないため、
 /// どの対象で失敗したかは呼び出し元が匿名化した形で添える。
-pub fn create_protected_directory(path: &Path) -> io::Result<()> {
+pub(super) fn create_protected_directory(path: &Path) -> io::Result<()> {
     let wide = to_wide(path);
     let sa = ProtectedSecurityAttributes::new()?;
     // SAFETY: `wide` は NUL 終端したパスであり、`sa` は本呼び出しの間生存する。
