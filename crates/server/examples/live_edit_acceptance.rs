@@ -684,9 +684,9 @@ fn ask(message: &str) -> String {
 /// 実行者の回答を合否として受け取る。
 fn operator_verdict(message: &str) -> CheckResult {
     if confirm(message) {
-        passed_with("実行者が確認した")
+        passed_with("実行者が y と回答した")
     } else {
-        Err("実行者が確認できないと回答した".to_string())
+        Err("実行者が n と回答した".to_string())
     }
 }
 
@@ -1845,10 +1845,14 @@ fn prepare(harness: &Harness, report: &mut Report) -> Result<(Instance, Instance
     }
 
     if !confirm(
-        "上記 2 つはいずれも固定サンプルプロジェクトの複製であり、原本ではありませんか。\n\
-         本ターゲットは対象を実際に書き換えます。原本であれば中止してください。",
+        "いま行ったこと: 起動中の AviUtl2 を 2 つ見つけ、開いているプロジェクトを上に表示しました。\n\
+         お願いすること: 上の 2 行が、どちらも固定サンプルプロジェクトの複製かを見分けてください。\n\
+         確認する場所: 上の 2 行の project= に出ているファイル名とパス。\n\
+         AviUtl2 のタイトルバーでも同じものを確かめられます。\n\
+         回答: 2 つとも複製なら y、どちらか 1 つでも原本なら n を入力してください。\n\
+         n を入力した場合は、何も書き換えずに実行を終えます。",
     ) {
-        return Err("複製であることを確認できないため実行しません。".to_string());
+        return Err("実行者が n（複製ではない）と回答したため実行しません。".to_string());
     }
 
     let mut iter = instances.into_iter();
@@ -2641,10 +2645,16 @@ fn probe_layer_lock(
         )),
     };
 
-    let sdk = ask(
-        "AviUtl2 の UI 上で、同じロック済みレイヤーのオブジェクトを移動・削除できますか。\n\
-         SDK 側がロックを尊重するかの記録に使います（できる / できない / 未確認 で回答）。",
-    );
+    let sdk = ask(&format!(
+        "いま行ったこと: ロック中の {} のオブジェクトに対して、MCP から移動・削除・名前変更を試しました。\n\
+         それぞれの結果は、この後の判定の一覧に出します。\n\
+         お願いすること: 同じレイヤーのオブジェクトを、AviUtl2 の UI から手で動かすか削除してみてください。\n\
+         確認する場所: タイムライン上の、そのレイヤーに置かれたオブジェクト。\n\
+         回答: 動かせたか消せたなら できる\n\
+         ロックで止められたなら できない\n\
+         試していないなら 未確認 と入力してください。",
+        layer_label(context.target.layer)
+    ));
     report.observe(
         "layer_lock_respected_by_sdk",
         "SDK 側はレイヤーのロックを尊重するか",
@@ -3082,12 +3092,16 @@ fn probe_layer_lock_release(
     name_layer_for_undo_probe(harness, instance, context, away.layer)?;
 
     let undo = ask(&format!(
-        "直前に、空きレイヤー {} の名前を「{UNDO_PROBE_LAYER_NAME}」へ変更しました。\n\
-         AviUtl2 で「元に戻す」を 1 回実行すると、何が戻りますか。\n\
-         レイヤー {} の名前が標準名へ戻るか、その前の編集（対象オブジェクトの移動）が戻るかを見てください。\n\
-         レイヤー系 setter が取り消し単位を作るかの記録に使います\n\
-         （レイヤーの状態が戻る / その前の編集が戻る / 何も戻らない / 未確認 で回答）。",
-        away.layer, away.layer
+        "いま行ったこと: {} の名前を「{UNDO_PROBE_LAYER_NAME}」へ変更しました。\n\
+         その 1 つ前には、対象オブジェクトを別のレイヤーへ動かし、元の位置へ戻しています。\n\
+         お願いすること: AviUtl2 で「元に戻す」を 1 回だけ実行してください。\n\
+         確認する場所: タイムライン左のレイヤー見出しの名前と、{} のオブジェクトの位置。\n\
+         回答: 見出しの名前が「{UNDO_PROBE_LAYER_NAME}」でなくなったら レイヤーの状態が戻る\n\
+         オブジェクトの位置が動いたら その前の編集が戻る\n\
+         どちらも変わらなければ 何も戻らない\n\
+         確かめられなければ 未確認 と入力してください。",
+        layer_label(away.layer),
+        layer_label(context.target.layer)
     ));
     report.observe(
         "layer_setter_undo_unit",
@@ -3487,8 +3501,14 @@ fn check_create_from_media(
     );
 
     let confirmed = confirm(&format!(
-        "AviUtl2 のインスタンス {} で、作成されたオブジェクトはレイヤー {}、開始フレーム {} にありますか。",
-        instance.label, object.layer, object.frame_start
+        "いま行ったこと: メディアファイルからオブジェクトを 1 つ作成しました。\n\
+         応答は {} の開始フレーム {} を返しました。\n\
+         お願いすること: 作成されたオブジェクトが本当にその位置にあるかを見比べてください。\n\
+         確認する場所: インスタンス {} のタイムライン。\n\
+         回答: 応答どおりの位置にあれば y、違う位置にあれば n を入力してください。",
+        layer_label(object.layer),
+        object.frame_start,
+        instance.label
     ));
 
     // 後始末: 作成したオブジェクトを削除する。
@@ -5475,8 +5495,11 @@ fn section_misc(
     );
 
     let outcome = operator_verdict(
-        "plugin のログに SDK handle / raw pointer / alias 全文 / 設定値が現れていませんか。\n\
-         開発用ディレクトリの data/log にある最新のログを確認して回答してください。",
+        "いま行ったこと: ここまでの確認で、plugin は多数の編集要求を処理してログへ書き出しました。\n\
+         お願いすること: plugin のログを開き、SDK handle・raw pointer・alias の全文・設定値の中身が\n\
+         書かれていないかを探してください。\n\
+         確認する場所: 開発用ディレクトリの data/log にある最新のログファイル。\n\
+         回答: どれも見つからなければ y、1 つでも見つかれば n を入力してください。",
     );
     report.record(
         "5.8",
@@ -5768,8 +5791,13 @@ fn check_set_selection(
     let clamped_frame = clamped.cursor.frame;
 
     let undo = ask(
-        "AviUtl2 で取り消し操作を 1 回行うと、直前のカーソル移動は元へ戻りますか。\n\
-         set_selection が取り消し単位を作るかの記録に使います（戻る / 戻らない / 未確認 で回答）。",
+        "いま行ったこと: MCP からカーソル位置・選択範囲・フォーカスを変更しました。\n\
+         続けて、範囲の外にあるフレーム番号をカーソル位置として指定しました。\n\
+         お願いすること: AviUtl2 で「元に戻す」を 1 回だけ実行してください。\n\
+         確認する場所: タイムライン上のカーソル（時間軸の縦線）の位置。\n\
+         回答: カーソルが動く前の位置へ戻ったら 戻る\n\
+         カーソルの位置が変わらなければ 戻らない\n\
+         確かめられなければ 未確認 と入力してください。",
     );
     report.observe(
         "set_selection_undo_unit",
@@ -5922,7 +5950,10 @@ fn section_scene_switch(
 ) -> Result<(), String> {
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
     let answer = ask(&format!(
-        "AviUtl2 のインスタンス {} で、別のシーンへ切り替えてから Enter を押してください。\n\
+        "いま行ったこと: いま開いているシーンで、対象オブジェクトの指定を読み取りました。\n\
+         お願いすること: インスタンス {} の AviUtl2 で、別のシーンへ切り替えてください。\n\
+         確認する場所: 現在のシーン名の表示。別のシーン名に変わること。\n\
+         回答: 切り替えたら Enter を押してください。\n\
          シーンが 1 つしか無く切り替えられない場合は skip と入力してください。",
         instance.label
     ));
@@ -6023,9 +6054,14 @@ fn check_client_disconnect(
         .set_object_name(&instance.id, &selector, None)
         .map_err(|error| format!("名前を戻せません: {}", describe_error(&error)))?;
 
-    if !confirm("plugin のログに、切断したクライアントへの応答送信の失敗が記録されていますか。")
-    {
-        return Err("切断時の送信失敗がログに残っていないと回答された".to_string());
+    if !confirm(
+        "いま行ったこと: 切断の後にオブジェクトの名前を変更し、元へ戻しました。AviUtl2 は応答し続けています。\n\
+         お願いすること: plugin のログを開き、切断したクライアントへ応答を送れなかった記録があるかを探してください。\n\
+         確認する場所: 開発用ディレクトリの data/log にある最新のログファイル。\n\
+         回答: 記録が見つかれば y、見つからなければ n を入力してください。\n\
+         強制終了を実施できなかった場合も n を入力してください。",
+    ) {
+        return Err("実行者が n（送信失敗の記録が見つからない）と回答した".to_string());
     }
     Ok(vec!["切断後も読み取りと編集を受け付けた".to_string()])
 }
@@ -6444,15 +6480,30 @@ fn section_completion(
     let outcome = match (
         unchanged,
         confirm(&format!(
-            "AviUtl2 のインスタンス {} のプロジェクトは変更されていませんか（UI で確認してください）。",
+            "いま行ったこと: インスタンス {} のオブジェクトを 1 つ、{} のフレーム {} へ動かしました。\n\
+             インスタンス {} へは何も送っていません。\n\
+             お願いすること: インスタンス {} のオブジェクトが、実行前と同じ位置・同じ数・同じ名前のままかを見てください。\n\
+             確認する場所: インスタンス {} のタイムライン。\n\
+             回答: 実行前のままなら y、位置・数・名前のどれかが変わっていれば n を入力してください。",
+            a.label,
+            layer_label(destination.layer),
+            destination.frame,
+            b.label,
+            b.label,
             b.label
         )),
     ) {
         (Ok(mut notes), true) => {
-            notes.push("UI 上も変更されていないことを実行者が確認した".to_string());
+            notes.push(format!(
+                "実行者が y（インスタンス {} は実行前のまま）と回答した",
+                b.label
+            ));
             Ok(notes)
         }
-        (Ok(_), false) => Err("UI 上で instance B が変更されたと回答された".to_string()),
+        (Ok(_), false) => Err(format!(
+            "実行者が n（インスタンス {} が変わっている）と回答した",
+            b.label
+        )),
         (Err(reason), _) => Err(reason),
     };
     report.record(
