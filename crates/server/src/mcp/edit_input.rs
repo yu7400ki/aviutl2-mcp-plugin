@@ -347,7 +347,7 @@ impl ItemValueInput {
 
 /// `aviutl2_create_object` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct CreateObjectInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -376,7 +376,7 @@ impl CreateObjectInput {
 
 /// `aviutl2_move_object` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct MoveObjectInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -401,7 +401,7 @@ impl MoveObjectInput {
 
 /// `aviutl2_delete_object` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct DeleteObjectInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -423,7 +423,7 @@ impl DeleteObjectInput {
 
 /// `aviutl2_set_object_name` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct SetObjectNameInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -450,7 +450,7 @@ impl SetObjectNameInput {
 
 /// `aviutl2_set_object_item` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct SetObjectItemInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -479,7 +479,7 @@ impl SetObjectItemInput {
 
 /// `aviutl2_add_effect` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct AddEffectInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -505,7 +505,7 @@ impl AddEffectInput {
 
 /// `aviutl2_delete_effect` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct DeleteEffectInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -527,7 +527,7 @@ impl DeleteEffectInput {
 
 /// `aviutl2_set_effect_state` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct SetEffectStateInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -557,7 +557,7 @@ impl SetEffectStateInput {
 
 /// `aviutl2_set_selection` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct SetSelectionInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
@@ -603,6 +603,21 @@ fn expected_project_epoch(value: &str) -> Result<String, ErrorObject> {
     ensure_length("expected_project_epoch", value, 1, MAX_EPOCH_CHARS)?;
     Ok(value.to_string())
 }
+
+// 要求から外したフィールドを読み捨てる。IPC 境界の params と同じ一覧を使う。
+// server と plugin は別のプロセスであり、`protocol_version` の MAJOR を据え置く
+// ため版のずれが起こり得る。どちらの境界でも同じ形の要求が同じように受理される。
+aviutl2_mcp_core::tolerate_retired_edit_fields!(
+    CreateObjectInput,
+    MoveObjectInput,
+    DeleteObjectInput,
+    SetObjectNameInput,
+    SetObjectItemInput,
+    AddEffectInput,
+    DeleteEffectInput,
+    SetEffectStateInput,
+    SetSelectionInput,
+);
 
 /// core の入力検証の失敗を tool result のエラーへ写す。
 ///

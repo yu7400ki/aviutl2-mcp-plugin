@@ -30,6 +30,90 @@ use crate::validation::{
 };
 use serde::{Deserialize, Serialize};
 
+/// 要求から外したが、受け取って読み捨てるフィールド名。
+///
+/// 編集 params は未知フィールドを拒否する。外したフィールドをそのまま拒否の
+/// 対象にすると、以前の形で組み立てられた要求が `invalid_argument` になる。
+/// ここに挙げた名前だけを例外として読み捨て、**それ以外の未知フィールドは
+/// 従来どおり拒否する。**
+///
+/// 一覧であって既定ではない。フィールドを外すたびにここへ足し、要求元が
+/// 送らなくなったことを確かめてから取り除く。
+pub const RETIRED_EDIT_FIELDS: &[&str] = &["expected"];
+
+/// [`RETIRED_EDIT_FIELDS`] を読み捨てる [`Deserialize`] を実装する。
+///
+/// 対象には `#[serde(remote = "Self", deny_unknown_fields)]` を付ける。派生実装は
+/// trait ではなく関連関数として生成されるため、こうして前処理を挟んだうえで
+/// trait 実装へ繋げられる。落とすのは一覧に挙げた名前だけであり、他の未知
+/// フィールドは派生実装が従来どおり拒否する。
+#[macro_export]
+macro_rules! tolerate_retired_edit_fields {
+    ($($params:ty),+ $(,)?) => {
+        $(
+            impl<'de> ::serde::Deserialize<'de> for $params {
+                fn deserialize<D>(deserializer: D) -> ::core::result::Result<Self, D::Error>
+                where
+                    D: ::serde::Deserializer<'de>,
+                {
+                    let mut fields = <::serde_json::Map<
+                        ::std::string::String,
+                        ::serde_json::Value,
+                    > as ::serde::Deserialize>::deserialize(deserializer)?;
+                    for retired in $crate::RETIRED_EDIT_FIELDS {
+                        fields.remove(*retired);
+                    }
+                    Self::deserialize(::serde_json::Value::Object(fields))
+                        .map_err(::serde::de::Error::custom)
+                }
+            }
+        )+
+    };
+}
+
+/// 派生した直列化を [`Serialize`] の実装へ繋ぐ。
+///
+/// `#[serde(remote = "Self")]` は直列化側も関連関数として生成する。読み捨てる
+/// フィールドは要求を受け取るときだけの話であり、送り出す形は派生のままである。
+macro_rules! serialize_through_the_derive {
+    ($($params:ty),+ $(,)?) => {
+        $(
+            impl Serialize for $params {
+                fn serialize<S: serde::Serializer>(
+                    &self,
+                    serializer: S,
+                ) -> Result<S::Ok, S::Error> {
+                    Self::serialize(self, serializer)
+                }
+            }
+        )+
+    };
+}
+
+tolerate_retired_edit_fields!(
+    CreateObjectParams,
+    MoveObjectParams,
+    DeleteObjectParams,
+    SetObjectNameParams,
+    SetObjectItemParams,
+    AddEffectParams,
+    DeleteEffectParams,
+    SetEffectStateParams,
+    SetSelectionParams,
+);
+
+serialize_through_the_derive!(
+    CreateObjectParams,
+    MoveObjectParams,
+    DeleteObjectParams,
+    SetObjectNameParams,
+    SetObjectItemParams,
+    AddEffectParams,
+    DeleteEffectParams,
+    SetEffectStateParams,
+    SetSelectionParams,
+);
+
 /// 作成の配置先。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -176,7 +260,7 @@ pub enum FocusChange {
 
 /// `create_object` の params。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct CreateObjectParams {
     /// 作成元。
     pub source: ObjectSource,
@@ -199,7 +283,7 @@ impl CreateObjectParams {
 
 /// `move_object` の params。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct MoveObjectParams {
     /// 対象オブジェクト。
     pub selector: ObjectSelector,
@@ -217,7 +301,7 @@ impl MoveObjectParams {
 
 /// `delete_object` の params。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct DeleteObjectParams {
     /// 対象オブジェクト。
     pub selector: ObjectSelector,
@@ -235,7 +319,7 @@ impl DeleteObjectParams {
 
 /// `set_object_name` の params。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct SetObjectNameParams {
     /// 対象オブジェクト。
     pub selector: ObjectSelector,
@@ -263,7 +347,7 @@ impl SetObjectNameParams {
 /// オブジェクトの設定項目は必ずいずれかの effect に属するため、対象は
 /// [`EffectSelector`] で指す。トラックバー項目の値も同じ経路を通る。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct SetObjectItemParams {
     /// 設定項目を持つ effect。
     pub selector: EffectSelector,
@@ -291,7 +375,7 @@ impl SetObjectItemParams {
 
 /// `add_effect` の params。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct AddEffectParams {
     /// 付与先のオブジェクト。
     pub object: ObjectSelector,
@@ -312,7 +396,7 @@ impl AddEffectParams {
 
 /// `delete_effect` の params。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct DeleteEffectParams {
     /// 対象 effect。
     pub selector: EffectSelector,
@@ -330,7 +414,7 @@ impl DeleteEffectParams {
 
 /// `set_effect_state` の params。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct SetEffectStateParams {
     /// 対象 effect。
     pub selector: EffectSelector,
@@ -359,7 +443,7 @@ impl SetEffectStateParams {
 
 /// `set_selection` の params。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct SetSelectionParams {
     /// 現在シーンの一致確認に使う guard。
     ///
@@ -887,6 +971,18 @@ mod tests {
             focus: Some(FocusChange::Clear {}),
             ..sample_set_selection()
         });
+    }
+
+    #[test]
+    fn retired_fields_are_read_and_dropped() {
+        // 以前の形で組み立てられた要求を `invalid_argument` にしない。値は使わない。
+        let mut value = serde_json::to_value(sample_move()).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "expected".to_string(),
+            json!({ "project_epoch": EPOCH, "project_revision": 42 }),
+        );
+        let restored: MoveObjectParams = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, sample_move());
     }
 
     #[test]
