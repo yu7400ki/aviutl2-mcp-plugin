@@ -339,8 +339,8 @@ impl EditError {
             // 読み直せば宛先の空きが分かる。
             EditError::DestinationOccupied { .. } => RetryRequires::Refetch,
             // ロックの解除は別の operation であり、同じ要求を送り直しても対象を
-            // 読み直しても解消しない。3 値のどれにも当たらないため、値を増やさず
-            // 「再試行では解消しない」とする。次に取るべき操作の案内は本文が担う。
+            // 読み直しても解消しない。この 3 値は「この要求をどう扱うか」だけを
+            // 表すため、値を増やさず「再試行では解消しない」とする。
             EditError::LayerLocked { .. } => RetryRequires::None,
             other => match other.error_code() {
                 ErrorCode::PreconditionFailed => RetryRequires::Refetch,
@@ -874,9 +874,13 @@ mod tests {
 
     #[test]
     fn details_only_use_allowed_keys() {
-        // 補助情報のキーはここで列挙したものに限る。新しいキーを足す際は
-        // ハンドル・生ポインタ・設定値・alias・パスでないことを確かめる。
+        // 補助情報のキーはここで列挙したものに限る。入れ子の内側まで見る。
+        // トップレベルだけを見ると、値をオブジェクトで包んだ瞬間に検査が
+        // 素通りする。新しいキーを足す際はハンドル・生ポインタ・設定値・
+        // alias・パスでないことを確かめる。
         const ALLOWED: &[&str] = &[
+            "frame_start",
+            "frame_end",
             "retry_after_ms",
             "edit_state",
             "expected_scene_id",
@@ -899,12 +903,29 @@ mod tests {
             "change_applied",
             "mutation_origin",
         ];
+        /// 入れ子を含む全てのキーを集める。
+        fn keys(value: &Value, into: &mut Vec<String>) {
+            match value {
+                Value::Object(object) => {
+                    for (key, value) in object {
+                        into.push(key.clone());
+                        keys(value, into);
+                    }
+                }
+                Value::Array(items) => items.iter().for_each(|item| keys(item, into)),
+                _ => {}
+            }
+        }
+
         for error in all_errors() {
             let details = error.details();
-            let object = details
-                .as_object()
-                .unwrap_or_else(|| panic!("{error} の補助情報がオブジェクトではありません"));
-            for key in object.keys() {
+            assert!(
+                details.is_object(),
+                "{error} の補助情報がオブジェクトではありません"
+            );
+            let mut found = Vec::new();
+            keys(&details, &mut found);
+            for key in found {
                 assert!(
                     ALLOWED.contains(&key.as_str()),
                     "{error} の補助情報に未許可のキー {key} が含まれています"
