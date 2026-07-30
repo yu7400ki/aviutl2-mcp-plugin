@@ -463,72 +463,130 @@ mod tests {
         assert_eq!(validate_name("立ち絵"), Ok(()));
     }
 
-    /// 規則ごとの、拒否される入力と受理される対の入力。
+    /// 規則 1 つ分の入力。
+    struct PathRuleInputs {
+        /// 規則を指す名前。失敗時の目印にする。
+        rule: &'static str,
+        /// この規則に当たって拒否される入力。
+        rejected: Vec<String>,
+        /// この規則に当たらず受理される入力。
+        accepted: Vec<String>,
+    }
+
+    /// 理由ごとの入力を返す。
     ///
-    /// 規則を足したら行が増える形にする。規則ごとに別のテストを並べるだけでは、
-    /// 足した規則がどこにも現れないまま通り得る。
-    fn path_rule_table() -> Vec<(&'static str, String, PathSyntaxError, String)> {
+    /// `PathSyntaxError` に対する網羅 `match` であり `_` を使わない。**理由を
+    /// 足すとここが落ち、拒否される入力と受理される入力を書くまでコンパイル
+    /// できない。** 規則ごとの入力の置き場所はここだけである。
+    fn path_rule_inputs(reason: &PathSyntaxError) -> PathRuleInputs {
+        let absolute = || vec![r"C:\movie.mp4".to_string()];
+        match reason {
+            PathSyntaxError::Empty => PathRuleInputs {
+                rule: "空文字列",
+                rejected: vec![String::new()],
+                accepted: absolute(),
+            },
+            PathSyntaxError::ContainsNul => PathRuleInputs {
+                rule: "NUL",
+                rejected: vec!["C:\\movie\0.mp4".to_string(), "\0".to_string()],
+                accepted: absolute(),
+            },
+            PathSyntaxError::TooLong { units } => PathRuleInputs {
+                rule: "長さの上限",
+                // 理由が名乗る code unit 数を入力から導き、両者がずれないようにする。
+                rejected: vec![format!(r"C:\{}", "a".repeat(units - 3))],
+                accepted: vec![format!(r"C:\{}", "a".repeat(MAX_PATH_UTF16_UNITS - 3))],
+            },
+            PathSyntaxError::DeviceNamespace => PathRuleInputs {
+                rule: "device namespace",
+                rejected: vec![
+                    r"\\.\PhysicalDrive0".to_string(),
+                    r"\\?\C:\movie.mp4".to_string(),
+                    r"\\?\UNC\server\share".to_string(),
+                    "//./pipe/name".to_string(),
+                    r"\\.".to_string(),
+                    r"\\?".to_string(),
+                ],
+                accepted: vec![r"C:\pipe\name".to_string()],
+            },
+            PathSyntaxError::AlternateDataStream => PathRuleInputs {
+                rule: "代替データストリーム",
+                rejected: vec![
+                    r"C:\movie.mp4:stream".to_string(),
+                    r"C:\dir\file:$DATA".to_string(),
+                    r"\\server\share\file:stream".to_string(),
+                ],
+                // ドライブレターの `:` だけは許す。
+                accepted: vec![r"C:\movie.mp4".to_string(), r"Z:\".to_string()],
+            },
+            PathSyntaxError::NotAbsolute => PathRuleInputs {
+                rule: "絶対パス",
+                rejected: vec![
+                    "movie.mp4".to_string(),
+                    r"dir\movie.mp4".to_string(),
+                    r"..\movie.mp4".to_string(),
+                    r"\movie.mp4".to_string(),
+                    "C:movie.mp4".to_string(),
+                    "C:".to_string(),
+                ],
+                accepted: vec![r"C:\dir\movie.mp4".to_string()],
+            },
+            PathSyntaxError::UncPath => PathRuleInputs {
+                rule: "UNC",
+                rejected: vec![
+                    r"\\server\share".to_string(),
+                    r"\\server\share\dir\movie.mp4".to_string(),
+                    "//server/share/movie.mp4".to_string(),
+                    r"//server\share\movie.mp4".to_string(),
+                    // 共有名を欠く形も同じ理由で拒否する。
+                    r"\\".to_string(),
+                    r"\\server".to_string(),
+                    r"\\server\".to_string(),
+                ],
+                // 割り当て済みのドライブレターは指す先を利用者が選んでいる。
+                accepted: vec![r"Z:\share\movie.mp4".to_string()],
+            },
+        }
+    }
+
+    /// 検証する理由の一覧。
+    ///
+    /// **この一覧の網羅は型では強制できない。** 理由を足したときに落ちるのは
+    /// [`path_rule_inputs`] であり、その行を書くときに本一覧へも足す。
+    fn path_rule_reasons() -> Vec<PathSyntaxError> {
         vec![
-            (
-                "空文字列",
-                String::new(),
-                PathSyntaxError::Empty,
-                r"C:\movie.mp4".to_string(),
-            ),
-            (
-                "NUL",
-                "C:\\mo\0vie.mp4".to_string(),
-                PathSyntaxError::ContainsNul,
-                r"C:\movie.mp4".to_string(),
-            ),
-            (
-                "長さの上限",
-                format!(r"C:\{}", "a".repeat(MAX_PATH_UTF16_UNITS)),
-                PathSyntaxError::TooLong {
-                    units: MAX_PATH_UTF16_UNITS + 3,
-                },
-                format!(r"C:\{}", "a".repeat(MAX_PATH_UTF16_UNITS - 3)),
-            ),
-            (
-                "device namespace",
-                r"\\.\pipe\aviutl2".to_string(),
-                PathSyntaxError::DeviceNamespace,
-                r"C:\pipe\aviutl2".to_string(),
-            ),
-            (
-                "代替データストリーム",
-                r"C:\movie.mp4:stream".to_string(),
-                PathSyntaxError::AlternateDataStream,
-                r"C:\movie.mp4".to_string(),
-            ),
-            (
-                "絶対パス",
-                r"dir\movie.mp4".to_string(),
-                PathSyntaxError::NotAbsolute,
-                r"C:\dir\movie.mp4".to_string(),
-            ),
-            (
-                "UNC",
-                r"\\server\share\movie.mp4".to_string(),
-                PathSyntaxError::UncPath,
-                r"Z:\share\movie.mp4".to_string(),
-            ),
+            PathSyntaxError::Empty,
+            PathSyntaxError::ContainsNul,
+            PathSyntaxError::TooLong {
+                units: MAX_PATH_UTF16_UNITS + 3,
+            },
+            PathSyntaxError::DeviceNamespace,
+            PathSyntaxError::AlternateDataStream,
+            PathSyntaxError::NotAbsolute,
+            PathSyntaxError::UncPath,
         ]
     }
 
     #[test]
-    fn every_path_rule_rejects_and_accepts_its_pair() {
-        for (rule, rejected, expected, accepted) in path_rule_table() {
-            assert_eq!(
-                validate_path(&rejected),
-                Err(expected),
-                "{rule} の拒否が期待どおりではありません"
-            );
-            assert_eq!(
-                validate_path(&accepted),
-                Ok(()),
-                "{rule} の対になる入力が拒否されました"
-            );
+    fn every_path_rule_rejects_and_accepts_its_inputs() {
+        for reason in path_rule_reasons() {
+            let inputs = path_rule_inputs(&reason);
+            for path in &inputs.rejected {
+                assert_eq!(
+                    validate_path(path),
+                    Err(reason),
+                    "{} が {path:?} を拒否しませんでした",
+                    inputs.rule
+                );
+            }
+            for path in &inputs.accepted {
+                assert_eq!(
+                    validate_path(path),
+                    Ok(()),
+                    "{} の対になる {path:?} が拒否されました",
+                    inputs.rule
+                );
+            }
         }
     }
 
@@ -542,35 +600,6 @@ mod tests {
             r"C:\日本語\動画.mp4",
         ] {
             assert_eq!(validate_path(path), Ok(()), "{path} が拒否されました");
-        }
-    }
-
-    #[test]
-    fn path_rejects_unc() {
-        // 区切りを揃えた形でも同じ理由で拒否する。
-        for path in [
-            r"\\server\share",
-            r"\\server\share\dir\movie.mp4",
-            "//server/share/movie.mp4",
-            r"//server\share\movie.mp4",
-        ] {
-            assert_eq!(
-                validate_path(path),
-                Err(PathSyntaxError::UncPath),
-                "{path} が受理されました"
-            );
-        }
-    }
-
-    #[test]
-    fn path_rejects_incomplete_unc_as_a_network_path() {
-        // 共有名を足しても受け付けないため、絶対パスの不備として案内しない。
-        for path in [r"\\", r"\\server", r"\\server\"] {
-            assert_eq!(
-                validate_path(path),
-                Err(PathSyntaxError::UncPath),
-                "{path} が受理されました"
-            );
         }
     }
 
@@ -597,35 +626,6 @@ mod tests {
     }
 
     #[test]
-    fn path_accepts_a_mapped_network_drive() {
-        // 割り当て済みのドライブレターは、指す先を利用者が選んだ結果である。
-        assert_eq!(validate_path(r"Z:\share\movie.mp4"), Ok(()));
-    }
-
-    #[test]
-    fn path_rejects_empty_and_nul() {
-        assert_eq!(validate_path(""), Err(PathSyntaxError::Empty));
-        assert_eq!(
-            validate_path("C:\\movie\0.mp4"),
-            Err(PathSyntaxError::ContainsNul)
-        );
-    }
-
-    #[test]
-    fn path_rejects_over_the_length_limit() {
-        let path = format!(r"C:\{}", "a".repeat(MAX_PATH_UTF16_UNITS));
-        assert_eq!(
-            validate_path(&path),
-            Err(PathSyntaxError::TooLong {
-                units: MAX_PATH_UTF16_UNITS + 3
-            })
-        );
-
-        let path = format!(r"C:\{}", "a".repeat(MAX_PATH_UTF16_UNITS - 3));
-        assert_eq!(validate_path(&path), Ok(()));
-    }
-
-    #[test]
     fn path_length_limit_counts_utf16_code_units() {
         // BMP 外の文字は 1 文字で 2 code unit を占めるため、文字数が上限の
         // 半分でも超過する。
@@ -639,57 +639,6 @@ mod tests {
     }
 
     #[test]
-    fn path_rejects_device_namespace() {
-        for path in [
-            r"\\.\PhysicalDrive0",
-            r"\\?\C:\movie.mp4",
-            r"\\?\UNC\server\share",
-            "//./pipe/name",
-            r"\\.",
-            r"\\?",
-        ] {
-            assert_eq!(
-                validate_path(path),
-                Err(PathSyntaxError::DeviceNamespace),
-                "{path} が受理されました"
-            );
-        }
-    }
-
-    #[test]
-    fn path_rejects_alternate_data_stream() {
-        for path in [
-            r"C:\movie.mp4:stream",
-            r"C:\dir\file:$DATA",
-            r"\\server\share\file:stream",
-        ] {
-            assert_eq!(
-                validate_path(path),
-                Err(PathSyntaxError::AlternateDataStream),
-                "{path} が受理されました"
-            );
-        }
-    }
-
-    #[test]
-    fn path_rejects_relative_forms() {
-        for path in [
-            "movie.mp4",
-            r"dir\movie.mp4",
-            r"..\movie.mp4",
-            r"\movie.mp4",
-            "C:movie.mp4",
-            "C:",
-        ] {
-            assert_eq!(
-                validate_path(path),
-                Err(PathSyntaxError::NotAbsolute),
-                "{path} が受理されました"
-            );
-        }
-    }
-
-    #[test]
     fn path_does_not_resolve_dot_segments() {
         // `..` を解決しても起点は変わらないため、構文としては通す。
         assert_eq!(validate_path(r"C:\dir\..\movie.mp4"), Ok(()));
@@ -699,18 +648,17 @@ mod tests {
 
     #[test]
     fn errors_do_not_repeat_the_input() {
-        for error in [
-            PathSyntaxError::Empty,
-            PathSyntaxError::ContainsNul,
-            PathSyntaxError::TooLong { units: 40_000 },
-            PathSyntaxError::DeviceNamespace,
-            PathSyntaxError::AlternateDataStream,
-            PathSyntaxError::NotAbsolute,
-            PathSyntaxError::UncPath,
-        ] {
+        let mut reasons = Vec::new();
+        for error in path_rule_reasons() {
             assert!(!error.reason().is_empty());
             assert!(!error.to_string().contains("C:\\"));
+            reasons.push(error.reason());
         }
+        // 理由の名前は失敗の種別ごとに異なる。
+        reasons.sort_unstable();
+        let count = reasons.len();
+        reasons.dedup();
+        assert_eq!(reasons.len(), count, "同じ名前を名乗る理由があります");
         assert_eq!(TextSyntaxError::ContainsNul.reason(), "contains_nul");
         assert_eq!(
             TextSyntaxError::ContainsControl.reason(),
