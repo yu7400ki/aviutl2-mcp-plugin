@@ -91,7 +91,8 @@ impl Destination {
 pub enum ObjectSource {
     /// メディアファイルから作成する。
     MediaFile {
-        /// 絶対パス。
+        /// 絶対パス。相対パス・device path・代替データストリーム・
+        /// ネットワークパス（UNC）は受け付けない。
         path: String,
     },
     /// object alias から作成する。
@@ -1385,6 +1386,55 @@ mod tests {
             .validate(),
             Ok(())
         );
+    }
+
+    #[test]
+    fn path_rules_apply_to_every_field_that_carries_a_path() {
+        // 作成元のパスと設定値のパスは別の型を通るため、規則が片方だけに
+        // 掛かっていても個別のテストでは気付けない。
+        for (path, expected) in [
+            ("", PathSyntaxError::Empty),
+            (r"..\movie.mp4", PathSyntaxError::NotAbsolute),
+            (r"\\.\pipe\aviutl2", PathSyntaxError::DeviceNamespace),
+            (r"C:\movie.mp4:stream", PathSyntaxError::AlternateDataStream),
+            (r"\\server\share\movie.mp4", PathSyntaxError::UncPath),
+            ("//server/share/movie.mp4", PathSyntaxError::UncPath),
+        ] {
+            assert_eq!(
+                CreateObjectParams {
+                    source: ObjectSource::MediaFile {
+                        path: path.to_string(),
+                    },
+                    ..sample_create()
+                }
+                .validate(),
+                Err(EditInputError::Path {
+                    field: FIELD_PATH,
+                    source: expected,
+                }),
+                "作成元の {path}"
+            );
+
+            for value in [
+                ItemValue::File {
+                    path: path.to_string(),
+                },
+                ItemValue::Folder {
+                    path: path.to_string(),
+                },
+            ] {
+                let kind = value.kind();
+                assert_eq!(
+                    SetObjectItemParams {
+                        value,
+                        ..sample_set_object_item()
+                    }
+                    .validate(),
+                    Err(EditInputError::ItemValue(ItemWriteError::Path(expected))),
+                    "{kind} の {path}"
+                );
+            }
+        }
     }
 
     #[test]

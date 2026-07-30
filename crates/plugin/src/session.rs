@@ -2388,6 +2388,17 @@ mod edit_tests {
         )
     }
 
+    /// 対象を指す effect セレクター。解決はフェイクが行わないため値は任意でよい。
+    fn fake_effect_selector() -> Value {
+        json!({
+            "object": fake_summary().selector,
+            "effect_name": "動画ファイル",
+            "effect_index": 0,
+            "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "fingerprint_algorithm": "sha256-raw-v1",
+        })
+    }
+
     impl EditAdapter for FakeEditAdapter {
         fn create_object(&self, _: &CreateObjectParams) -> Result<EditOutcome, EditError> {
             Ok(self.enter("create_object"))
@@ -2491,6 +2502,62 @@ mod edit_tests {
 
         assert_eq!(error.code, ErrorCode::InvalidArgument);
         assert!(adapter.calls().is_empty());
+    }
+
+    #[test]
+    fn rejected_paths_never_reach_the_edit_section() {
+        // パスの構文は要求元の側でも検証されるが、そこを通らない要求もある。
+        // 実行側で弾けなければ、ネットワーク越しの接続や device namespace への
+        // 到達をホストへ任せることになる。
+        let cases = [
+            ("", "空文字列"),
+            (r"..\movie.mp4", "相対パス"),
+            (r"\\.\pipe\aviutl2", "device namespace"),
+            (r"C:\movie.mp4:stream", "代替データストリーム"),
+            (r"\\server\share\movie.mp4", "ネットワークパス"),
+            ("//server/share/movie.mp4", "区切りを揃えたネットワークパス"),
+        ];
+        for (path, label) in cases {
+            for (operation, params) in [
+                (
+                    EditOperation::CreateObject,
+                    json!({
+                        "source": { "type": "media_file", "path": path },
+                        "placement": { "scene_id": SCENE_ID, "layer": 1, "frame": 0 },
+                        "expected": { "project_epoch": EPOCH, "project_revision": 0 },
+                    }),
+                ),
+                (
+                    EditOperation::SetObjectItem,
+                    json!({
+                        "selector": fake_effect_selector(),
+                        "item": "ファイル",
+                        "value": { "type": "file", "path": path },
+                        "expected": { "project_epoch": EPOCH, "project_revision": 0 },
+                    }),
+                ),
+            ] {
+                let adapter = FakeEditAdapter::new();
+                let error = execute_edit(
+                    &adapter,
+                    &InstanceState::Ready,
+                    operation,
+                    &params,
+                    RequestDeadline::Within(Instant::now() + Duration::from_secs(1)),
+                )
+                .unwrap_err();
+
+                assert_eq!(
+                    error.code,
+                    ErrorCode::InvalidArgument,
+                    "{label} が {operation:?} で拒否されませんでした"
+                );
+                assert!(
+                    adapter.calls().is_empty(),
+                    "{label} が {operation:?} で編集口へ届きました"
+                );
+            }
+        }
     }
 
     #[test]

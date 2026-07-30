@@ -186,7 +186,8 @@ impl DestinationInput {
 pub enum ObjectSourceInput {
     /// メディアファイルから作成する。
     MediaFile {
-        /// 絶対パス。相対パス・device path・代替データストリームは受け付けない。
+        /// 絶対パス。相対パス・device path・代替データストリーム・ネットワークパス（UNC）は受け付けない。
+        /// ネットワーク上の素材はドライブレターを割り当てて指定する。
         #[schemars(length(min = 1, max = MAX_PATH_CHARS))]
         path: String,
     },
@@ -321,13 +322,13 @@ pub enum ItemValueInput {
     },
     /// ファイルパス。
     File {
-        /// 絶対パス。
+        /// 絶対パス。相対パス・device path・代替データストリーム・ネットワークパス（UNC）は受け付けない。
         #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]
         path: String,
     },
     /// フォルダパス。
     Folder {
-        /// 絶対パス。
+        /// 絶対パス。相対パス・device path・代替データストリーム・ネットワークパス（UNC）は受け付けない。
         #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]
         path: String,
     },
@@ -913,6 +914,8 @@ mod tests {
             r"\\.\PhysicalDrive0",
             r"C:\movie.mp4:stream",
             "movie.mp4",
+            r"\\server\share\movie.mp4",
+            "//server/share/movie.mp4",
         ] {
             let input: CreateObjectInput = serde_json::from_value(json!({
                 "instance_id": SAMPLE_ID,
@@ -926,6 +929,38 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("{path} が受理されました"));
             assert_eq!(error.code, ErrorCode::InvalidArgument, "{path}");
+        }
+    }
+
+    #[test]
+    fn item_path_syntax_is_validated_before_the_request_is_sent() {
+        // 設定値のパスも作成元と同じ規則を通る。
+        for path in [
+            "",
+            r"..\image.png",
+            r"\\.\PhysicalDrive0",
+            r"C:\image.png:stream",
+            r"\\server\share\image.png",
+            "//server/share/image.png",
+        ] {
+            for value in [
+                json!({ "type": "file", "path": path }),
+                json!({ "type": "folder", "path": path }),
+            ] {
+                let input: SetObjectItemInput = serde_json::from_value(json!({
+                    "instance_id": SAMPLE_ID,
+                    "selector": effect_selector_json(),
+                    "item": "ファイル",
+                    "value": value,
+                    "expected": expected_json(),
+                }))
+                .expect("入力型としては受理される");
+                let error = input
+                    .to_params()
+                    .err()
+                    .unwrap_or_else(|| panic!("{value} が受理されました"));
+                assert_eq!(error.code, ErrorCode::InvalidArgument, "{value}");
+            }
         }
     }
 

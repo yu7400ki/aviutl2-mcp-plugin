@@ -635,7 +635,11 @@ fn assert_path_validation_follows_the_rules(path: &str) -> Result<(), TestCaseEr
     prop_assert!(!normalized.starts_with(r"\\?\"));
     prop_assert!(normalized != r"\\." && normalized != r"\\?");
     prop_assert!(normalized.matches(':').count() <= 1);
-    prop_assert!(normalized.starts_with(r"\\") || normalized.contains(r":\"));
+    // 受理されるのはドライブレター起点だけである。ネットワーク上の場所を指す
+    // 形（`\\` 始まり）はここへ残らない。
+    prop_assert!(!normalized.starts_with(r"\\"));
+    prop_assert!(normalized.starts_with(|c: char| c.is_ascii_alphabetic()));
+    prop_assert_eq!(normalized.get(1..3), Some(r":\"));
     Ok(())
 }
 
@@ -683,6 +687,19 @@ proptest! {
             validate_path(&path),
             Err(PathSyntaxError::AlternateDataStream)
         );
+    }
+
+    #[test]
+    fn unc_is_always_rejected(
+        (prefix, server, rest) in (
+            prop_oneof![Just(r"\\"), Just("//")],
+            string_regex(r"[a-zA-Z0-9_あ]{1,12}").unwrap(),
+            string_regex(r"[a-zA-Z0-9_.あ\\/]{0,24}").unwrap(),
+        ),
+    ) {
+        // 共有名の有無にも区切りの種類にも依らず、同じ理由で拒否する。
+        let path = format!(r"{prefix}{server}\{rest}");
+        prop_assert_eq!(validate_path(&path), Err(PathSyntaxError::UncPath));
     }
 
     #[test]

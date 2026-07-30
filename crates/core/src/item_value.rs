@@ -743,6 +743,7 @@ mod tests {
             (r"..\movie.mp4", PathSyntaxError::NotAbsolute),
             (r"\\.\PhysicalDrive0", PathSyntaxError::DeviceNamespace),
             (r"C:\movie.mp4:stream", PathSyntaxError::AlternateDataStream),
+            (r"\\server\share\movie.mp4", PathSyntaxError::UncPath),
         ] {
             for value in [
                 ItemValue::File {

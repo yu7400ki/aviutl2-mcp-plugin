@@ -37,7 +37,6 @@
 //! |---|---|---|
 //! | `AVIUTL2_MCP_REGISTRY_DIR` | インスタンス登録ディレクトリ | 既定の場所 |
 //! | `AVIUTL2_MCP_LIVE_MEDIA_FILE` | メディアファイルからの作成に使う絶対パス | 該当項目を未実施にする |
-//! | `AVIUTL2_MCP_LIVE_UNC_MEDIA_FILE` | ネットワークパス（UNC）の確認に使う絶対パス | 該当項目を未実施にする |
 //! | `AVIUTL2_MCP_LIVE_MULTI_ALIAS_FILE` | 複数オブジェクトを含む alias ファイルのパス | 該当項目を未実施にする |
 //! | `AVIUTL2_MCP_LIVE_EFFECT_NAME` | 付与に用いる effect 名 | カタログから自動で選ぶ |
 //!
@@ -80,8 +79,6 @@ use std::time::{Duration, Instant};
 
 /// メディアファイルからの作成に使う絶対パスを与える環境変数。
 const MEDIA_FILE_ENV: &str = "AVIUTL2_MCP_LIVE_MEDIA_FILE";
-/// ネットワークパス（UNC）の確認に使う絶対パスを与える環境変数。
-const UNC_MEDIA_FILE_ENV: &str = "AVIUTL2_MCP_LIVE_UNC_MEDIA_FILE";
 /// 複数オブジェクトを含む alias ファイルのパスを与える環境変数。
 const MULTI_ALIAS_FILE_ENV: &str = "AVIUTL2_MCP_LIVE_MULTI_ALIAS_FILE";
 /// 付与に用いる effect 名を与える環境変数。
@@ -4105,25 +4102,14 @@ fn section_misc(
         outcome,
     );
 
-    match env_value(UNC_MEDIA_FILE_ENV) {
-        Some(path) => {
-            let outcome = check_unc_path(harness, instance, context, &path);
-            report.record(
-                "5.8",
-                "ネットワークパス（UNC）",
-                "UNC パスのメディアファイルから作成できる",
-                Mode::Auto,
-                outcome,
-            );
-        }
-        None => report.skip(
-            "5.8",
-            "ネットワークパス（UNC）",
-            "UNC パスのメディアファイルから作成できる",
-            Mode::Auto,
-            format!("{UNC_MEDIA_FILE_ENV} が設定されていません"),
-        ),
-    }
+    let outcome = check_rejected_unc_paths(harness, instance, context);
+    report.record(
+        "5.8",
+        "ネットワークパス（UNC）",
+        "UNC パスのメディアファイルからの作成が invalid_argument になる",
+        Mode::Auto,
+        outcome,
+    );
 
     let outcome = check_set_selection(harness, report, instance, context);
     report.record(
@@ -4314,15 +4300,51 @@ fn check_wide_characters(harness: &Harness, instance: &Instance, context: &Conte
 
 /// 許可されないパスが要求の誤りとして拒否されることを確かめる。
 fn check_rejected_paths(harness: &Harness, instance: &Instance, context: &Context) -> CheckResult {
+    expect_media_paths_rejected(
+        harness,
+        instance,
+        context,
+        &[
+            r"\\.\pipe\aviutl2",
+            r"\\?\C:\movie.mp4",
+            r"..\movie.mp4",
+            r"C:\movie.mp4:stream",
+            "",
+        ],
+    )
+}
+
+/// ネットワークパスが要求の誤りとして拒否されることを確かめる。
+///
+/// 判定は構文だけで決まるため、到達できる共有を用意する必要はない。ホストへ
+/// 渡ってしまえば接続そのものが起きるため、確認は接続先を持たない形で行う。
+fn check_rejected_unc_paths(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+) -> CheckResult {
+    expect_media_paths_rejected(
+        harness,
+        instance,
+        context,
+        &[
+            r"\\server\share\movie.mp4",
+            "//server/share/movie.mp4",
+            r"\\server\share",
+        ],
+    )
+}
+
+/// 与えたパスからの作成がいずれも `invalid_argument` になることを確かめる。
+fn expect_media_paths_rejected(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    paths: &[&str],
+) -> CheckResult {
     let slot = context.free_slots[1];
     let mut notes = Vec::new();
-    for path in [
-        r"\\.\pipe\aviutl2",
-        r"\\?\C:\movie.mp4",
-        r"..\movie.mp4",
-        r"C:\movie.mp4:stream",
-        "",
-    ] {
+    for &path in paths {
         let expected = precondition(harness, instance)?;
         let result = harness.create_object(
             &instance.id,
@@ -4350,51 +4372,6 @@ fn check_rejected_paths(harness: &Harness, instance: &Instance, context: &Contex
         }
     }
     Ok(notes)
-}
-
-/// UNC パスからの作成を確かめる。
-fn check_unc_path(
-    harness: &Harness,
-    instance: &Instance,
-    context: &Context,
-    path: &str,
-) -> CheckResult {
-    let slot = context.free_slots[1];
-    let expected = precondition(harness, instance)?;
-    let created = require(
-        harness.create_object(
-            &instance.id,
-            ObjectSourceInput::MediaFile {
-                path: path.to_string(),
-            },
-            PlacementInput {
-                scene_id: context.scene_id,
-                layer: slot.layer as u32,
-                frame: slot.frame as u32,
-            },
-            expected,
-        ),
-        "UNC パスから作成できません",
-    )?;
-    let object = created
-        .object
-        .clone()
-        .ok_or_else(|| "作成の応答が対象を返しませんでした".to_string())?;
-
-    let selector = object.selector.clone();
-    harness
-        .delete_object(&instance.id, &selector, outcome_precondition(&created))
-        .map_err(|error| {
-            format!(
-                "作成したオブジェクトを削除できません: {}",
-                describe_error(&error)
-            )
-        })?;
-
-    Ok(vec![format!(
-        "layer={} frame_start={} へ作成できた",
-        object.layer, object.frame_start
-    )])
 }
 
 /// カーソル・選択範囲・フォーカスの変更とクランプを確かめる。
