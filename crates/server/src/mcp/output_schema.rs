@@ -283,7 +283,6 @@ fn effect_selector() -> Value {
         ("effect_name", string()),
         ("effect_index", unsigned()),
         ("fingerprint", string()),
-        ("fingerprint_algorithm", string()),
     ])
 }
 

@@ -24,8 +24,8 @@
 
 use crate::mcp::failure::{from_code, invalid_argument};
 use crate::mcp::input::{
-    FINGERPRINT_PATTERN, MAX_ALGORITHM_CHARS, MAX_EPOCH_CHARS, MAX_NAME_CHARS, ObjectSelectorInput,
-    UUID_PATTERN, ensure_length,
+    FINGERPRINT_PATTERN, MAX_EPOCH_CHARS, MAX_NAME_CHARS, ObjectSelectorInput, UUID_PATTERN,
+    ensure_length,
 };
 use aviutl2_mcp_core::{
     AddEffectParams, CreateObjectParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
@@ -85,7 +85,8 @@ impl ExpectedInput {
 /// オブジェクト内の effect を再指定するセレクター。
 ///
 /// [`ObjectSelectorInput`] と同じく往復型であり、未知フィールドを拒否しない。
-/// 内側の `object` も同じ扱いになる。
+/// 内側の `object` も同じ扱いになる。fingerprint の算出方式は `object` だけが
+/// 持ち、ここには置かない。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct EffectSelectorInput {
     /// effect が属するオブジェクト。
@@ -98,9 +99,6 @@ pub struct EffectSelectorInput {
     /// 同一性検証用の fingerprint。
     #[schemars(pattern(FINGERPRINT_PATTERN))]
     pub fingerprint: String,
-    /// fingerprint の算出方式。
-    #[schemars(length(min = 1, max = MAX_ALGORITHM_CHARS))]
-    pub fingerprint_algorithm: String,
 }
 
 impl EffectSelectorInput {
@@ -108,12 +106,6 @@ impl EffectSelectorInput {
     pub(crate) fn to_selector(&self) -> Result<EffectSelector, ErrorObject> {
         let object = self.object.to_selector()?;
         ensure_length("selector.effect_name", &self.effect_name, 0, MAX_NAME_CHARS)?;
-        ensure_length(
-            "selector.fingerprint_algorithm",
-            &self.fingerprint_algorithm,
-            1,
-            MAX_ALGORITHM_CHARS,
-        )?;
         let object = serde_json::to_value(&object).map_err(|_| {
             from_code(
                 aviutl2_mcp_core::ErrorCode::InternalError,
@@ -125,7 +117,6 @@ impl EffectSelectorInput {
             "effect_name": self.effect_name,
             "effect_index": self.effect_index,
             "fingerprint": self.fingerprint,
-            "fingerprint_algorithm": self.fingerprint_algorithm,
         });
         serde_json::from_value(value).map_err(|_| {
             invalid_argument(
@@ -802,27 +793,21 @@ mod tests {
 
     #[test]
     fn effect_selector_strings_are_bounded() {
-        for (field, value) in [
-            ("effect_name", "あ".repeat(MAX_NAME_CHARS as usize + 1)),
-            (
-                "fingerprint_algorithm",
-                "x".repeat(MAX_ALGORITHM_CHARS as usize + 1),
-            ),
-        ] {
-            let mut selector = effect_selector_json();
-            selector[field] = json!(value);
-            let input: DeleteEffectInput = serde_json::from_value(json!({
-                "instance_id": SAMPLE_ID,
-                "selector": selector,
-                "expected": expected_json(),
-            }))
-            .expect("入力型としては受理される");
-            let error = input
+        let mut selector = effect_selector_json();
+        selector["effect_name"] = json!("あ".repeat(MAX_NAME_CHARS as usize + 1));
+        let input: DeleteEffectInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "selector": selector,
+            "expected": expected_json(),
+        }))
+        .expect("入力型としては受理される");
+        assert_eq!(
+            input
                 .to_params()
-                .err()
-                .unwrap_or_else(|| panic!("{field} の上限超過が受理されました"));
-            assert_eq!(error.code, ErrorCode::InvalidArgument, "{field}");
-        }
+                .expect_err("effect_name の上限超過が受理されました")
+                .code,
+            ErrorCode::InvalidArgument
+        );
     }
 
     #[test]

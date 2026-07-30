@@ -260,7 +260,6 @@ fn effect_selector_input() -> EffectSelectorInput {
         effect_name: effect.selector.effect_name,
         effect_index: effect.selector.effect_index as u32,
         fingerprint: effect.selector.fingerprint.as_str().to_string(),
-        fingerprint_algorithm: effect.selector.fingerprint_algorithm.as_str().to_string(),
     }
 }
 

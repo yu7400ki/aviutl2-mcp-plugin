@@ -29,6 +29,9 @@ pub struct ObjectSelector {
 ///
 /// 同名 effect の順序は `effect_index` で表し、利用者へ名前の文字列結合を
 /// 要求しない。[`ObjectSelector`] と同じ理由で未知フィールドを拒否しない。
+///
+/// fingerprint の算出方式は持たない。方式の照合は `object` が持つ値に対して
+/// 行われ、effect 側の値は解決のどの段でも読まれない。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectSelector {
     /// effect が属するオブジェクト。
@@ -39,8 +42,6 @@ pub struct EffectSelector {
     pub effect_index: usize,
     /// 同一性検証用の fingerprint。
     pub fingerprint: Fingerprint,
-    /// fingerprint の算出方式。
-    pub fingerprint_algorithm: FingerprintAlgorithm,
 }
 
 #[cfg(test)]
@@ -77,7 +78,6 @@ mod tests {
             effect_name: "動画ファイル".to_string(),
             effect_index: 0,
             fingerprint: sample_fingerprint("effect"),
-            fingerprint_algorithm: FingerprintAlgorithm::GENERATED,
         }
     }
 
@@ -153,6 +153,17 @@ mod tests {
         let value = serde_json::to_value(sample_effect_selector()).unwrap();
         assert_eq!(value["effect_name"], serde_json::json!("動画ファイル"));
         assert_eq!(value["effect_index"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn effect_selector_does_not_carry_a_fingerprint_algorithm() {
+        // 方式の照合は所属オブジェクトの指定に対して行う。読まれない値を
+        // 要求元へ組み立てさせない。
+        let value = serde_json::to_value(sample_effect_selector()).unwrap();
+        assert!(
+            value.get("fingerprint_algorithm").is_none(),
+            "{value} が算出方式を持っています"
+        );
     }
 
     #[test]

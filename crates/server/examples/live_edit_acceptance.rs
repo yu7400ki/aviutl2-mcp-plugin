@@ -904,7 +904,6 @@ fn effect_selector_input(selector: &EffectSelector) -> EffectSelectorInput {
         effect_name: selector.effect_name.clone(),
         effect_index: selector.effect_index as u32,
         fingerprint: selector.fingerprint.to_string(),
-        fingerprint_algorithm: selector.fingerprint_algorithm.to_string(),
     }
 }
 
@@ -1780,7 +1779,6 @@ fn check_effect_index_shift(
         effect_name: front.effect_name.clone(),
         effect_index: front.effect_index,
         fingerprint: front.fingerprint.clone(),
-        fingerprint_algorithm: front.fingerprint_algorithm.clone(),
     };
     let expected = precondition(harness, instance)?;
     let attempt = harness.set_effect_state(&instance.id, &stale, Some(false), None, expected);

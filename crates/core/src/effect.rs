@@ -45,7 +45,6 @@ impl EffectInfo {
     /// effect 情報とセレクターを、単一の fingerprint 算出結果から組み立てる。
     pub fn new(object: ObjectSelector, input: EffectFingerprintInput<'_>) -> Self {
         let fingerprint = effect_fingerprint(input);
-        let algorithm = FingerprintAlgorithm::GENERATED;
         Self {
             name: input.effect_name.to_string(),
             index: input.effect_index,
@@ -57,10 +56,9 @@ impl EffectInfo {
                 effect_name: input.effect_name.to_string(),
                 effect_index: input.effect_index,
                 fingerprint: fingerprint.clone(),
-                fingerprint_algorithm: algorithm.clone(),
             },
             fingerprint,
-            fingerprint_algorithm: algorithm,
+            fingerprint_algorithm: FingerprintAlgorithm::GENERATED,
         }
     }
 }
@@ -805,11 +803,19 @@ mod tests {
     fn effect_info_shares_one_fingerprint_with_selector() {
         let info = sample_effect_info();
         assert_eq!(info.fingerprint, info.selector.fingerprint);
-        assert_eq!(
-            info.fingerprint_algorithm,
-            info.selector.fingerprint_algorithm
-        );
         assert_eq!(info.fingerprint_algorithm, FingerprintAlgorithm::GENERATED);
+    }
+
+    #[test]
+    fn effect_info_still_reports_the_fingerprint_algorithm() {
+        // セレクターは方式を持たないが、応答は返し続ける。往復型として送り
+        // 返されれば照合が働き、第 2 の方式が生まれたときに要求元の変更なしで
+        // 効き始める。
+        let value = serde_json::to_value(sample_effect_info()).unwrap();
+        assert_eq!(
+            value["fingerprint_algorithm"],
+            serde_json::json!(FingerprintAlgorithm::GENERATED.as_str())
+        );
     }
 
     #[test]
