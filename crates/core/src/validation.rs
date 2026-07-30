@@ -92,6 +92,9 @@ pub enum PathSyntaxError {
     /// 絶対パスでない。
     #[error("絶対パスである必要があります")]
     NotAbsolute,
+    /// UNC（ネットワーク上の場所）を指すパス。
+    #[error("ネットワーク上のパスは指定できません")]
+    UncPath,
 }
 
 impl PathSyntaxError {
@@ -106,6 +109,7 @@ impl PathSyntaxError {
             PathSyntaxError::DeviceNamespace => "device_namespace",
             PathSyntaxError::AlternateDataStream => "alternate_data_stream",
             PathSyntaxError::NotAbsolute => "not_absolute",
+            PathSyntaxError::UncPath => "unc_path",
         }
     }
 }
@@ -200,12 +204,27 @@ pub fn validate_alias(alias: &str) -> Result<(), TextSyntaxError> {
 /// 4. device namespace（`\\.\` / `\\?\`）を拒否する
 /// 5. 代替データストリーム（ドライブレター以外の位置に現れる `:`）を拒否する
 /// 6. 絶対パスであることを要求する
+/// 7. UNC（`\\server\share\...`）を拒否する
 ///
 /// 6 は、相対パスの基準ディレクトリが要求元と実行側で異なるためである。
-/// UNC パス（`\\server\share\...`）は絶対パスとして受け付ける。
 ///
-/// **正規化後の値へ再度適用すること。** `..` の解決や短縮名の展開は本関数の
-/// 範囲外であり、正規化前だけを検証すると `..` で制限を回避できる。
+/// 7 は、渡されたパスがそのまま接続先になるためである。到達性を確かめずに
+/// 任意のホストを指す UNC を渡すと、応答しないホストでは操作が戻らず、
+/// 利用者の資格情報で認証が行われ、接続した事実が相手に残る。**割り当て済みの
+/// ネットワークドライブはドライブレター起点であり 7 に当たらない** — 指す先を
+/// 選んだのは利用者であり、パスを組み立てただけでは到達できない。
+///
+/// 6 と 7 は根の分類（[`path_root`]）で同時に決まるが、理由は畳まない。
+/// 「絶対パスへ直せば通る」と「ネットワーク上の場所は受け付けない」は、
+/// 呼び出し元にとって別の対処になる。
+///
+/// 判定は文字列に閉じ、`..` の解決も短縮名の展開も行わない。`..` では
+/// ローカルパスがネットワーク上の場所へ化けないため、正規化した値へ
+/// 再適用する必要はない。
+///
+/// **解決先は追わない。** ネットワーク上の場所を指すシンボリックリンクや
+/// ジャンクション、そこへ割り当てたドライブレターは素通りする。ここでの判定は
+/// 誤った指定を防ぐためのものである。
 pub fn validate_path(path: &str) -> Result<(), PathSyntaxError> {
     if path.is_empty() {
         return Err(PathSyntaxError::Empty);
@@ -230,17 +249,18 @@ pub fn validate_path(path: &str) -> Result<(), PathSyntaxError> {
     if has_stream_separator(&path) {
         return Err(PathSyntaxError::AlternateDataStream);
     }
-    if !is_absolute(&path) {
-        return Err(PathSyntaxError::NotAbsolute);
+    match path_root(&path) {
+        PathRoot::Drive => Ok(()),
+        PathRoot::Network => Err(PathSyntaxError::UncPath),
+        PathRoot::None => Err(PathSyntaxError::NotAbsolute),
     }
-    Ok(())
 }
 
 /// device namespace を指すか。
 ///
 /// `\\.\` / `\\?\` で始まるパスはファイルシステム以外の名前空間へ到達でき、
 /// 以降の構文規則も適用されないため受け付けない。`\\server\share` の形は
-/// これに当たらない。
+/// これに当たらず、起点の分類（[`path_root`]）が拒否する。
 fn is_device_namespace(path: &str) -> bool {
     match path.strip_prefix(r"\\") {
         Some(rest) => {
@@ -265,23 +285,37 @@ fn starts_with_drive_letter(path: &str) -> bool {
     path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
 }
 
-/// 絶対パスか。
+/// パスの起点。
 ///
-/// ドライブレター起点（`X:\...`）と UNC（`\\server\share...`）のみを認める。
-/// 先頭が区切りだけのパス（`\dir`）はカレントドライブ基準であり、基準が
-/// 要求元と実行側で一致しないため認めない。
-fn is_absolute(path: &str) -> bool {
+/// 構文の判定に要るのは「どこを起点として解釈されるか」だけであり、この 3 つが
+/// そのまま受理と拒否の理由になる。
+enum PathRoot {
+    /// ドライブレター起点（`X:\...`）。
+    Drive,
+    /// 区切り 2 つで始まるネットワーク上の場所（`\\server\share\...`）。
+    Network,
+    /// 起点を持たない。相対パスと、カレントドライブ基準のパス（`\dir`）。
+    None,
+}
+
+/// パスの起点を判定する。
+///
+/// device namespace は本関数より前に弾く。残る `\\` 始まりはすべて
+/// ネットワーク上の場所を指すため、`\\server` のように共有名を欠く形も
+/// [`PathRoot::Network`] とする。共有名を足しても受け付けないので、
+/// 「絶対パスにすれば通る」と読める理由を返さない。
+///
+/// 先頭が区切り 1 つだけのパス（`\dir`）はカレントドライブ基準であり、その
+/// 基準が呼び出し元と実行側で一致しないため起点として認めない。
+fn path_root(path: &str) -> PathRoot {
+    if path.starts_with(r"\\") {
+        return PathRoot::Network;
+    }
     let bytes = path.as_bytes();
     if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
-        return true;
+        return PathRoot::Drive;
     }
-    let Some(rest) = path.strip_prefix(r"\\") else {
-        return false;
-    };
-    let mut parts = rest.split('\\');
-    let server = parts.next().unwrap_or_default();
-    let share = parts.next().unwrap_or_default();
-    !server.is_empty() && !share.is_empty()
+    PathRoot::None
 }
 
 /// UTF-16 code unit 数の上限を課す。
@@ -436,6 +470,75 @@ mod tests {
         assert_eq!(validate_name("立ち絵"), Ok(()));
     }
 
+    /// 規則ごとの、拒否される入力と受理される対の入力。
+    ///
+    /// 規則を足したら行が増える形にする。規則ごとに別のテストを並べるだけでは、
+    /// 足した規則がどこにも現れないまま通り得る。
+    fn path_rule_table() -> Vec<(&'static str, String, PathSyntaxError, String)> {
+        vec![
+            (
+                "空文字列",
+                String::new(),
+                PathSyntaxError::Empty,
+                r"C:\movie.mp4".to_string(),
+            ),
+            (
+                "NUL",
+                "C:\\mo\0vie.mp4".to_string(),
+                PathSyntaxError::ContainsNul,
+                r"C:\movie.mp4".to_string(),
+            ),
+            (
+                "長さの上限",
+                format!(r"C:\{}", "a".repeat(MAX_PATH_UTF16_UNITS)),
+                PathSyntaxError::TooLong {
+                    units: MAX_PATH_UTF16_UNITS + 3,
+                },
+                format!(r"C:\{}", "a".repeat(MAX_PATH_UTF16_UNITS - 3)),
+            ),
+            (
+                "device namespace",
+                r"\\.\pipe\aviutl2".to_string(),
+                PathSyntaxError::DeviceNamespace,
+                r"C:\pipe\aviutl2".to_string(),
+            ),
+            (
+                "代替データストリーム",
+                r"C:\movie.mp4:stream".to_string(),
+                PathSyntaxError::AlternateDataStream,
+                r"C:\movie.mp4".to_string(),
+            ),
+            (
+                "絶対パス",
+                r"dir\movie.mp4".to_string(),
+                PathSyntaxError::NotAbsolute,
+                r"C:\dir\movie.mp4".to_string(),
+            ),
+            (
+                "UNC",
+                r"\\server\share\movie.mp4".to_string(),
+                PathSyntaxError::UncPath,
+                r"Z:\share\movie.mp4".to_string(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_path_rule_rejects_and_accepts_its_pair() {
+        for (rule, rejected, expected, accepted) in path_rule_table() {
+            assert_eq!(
+                validate_path(&rejected),
+                Err(expected),
+                "{rule} の拒否が期待どおりではありません"
+            );
+            assert_eq!(
+                validate_path(&accepted),
+                Ok(()),
+                "{rule} の対になる入力が拒否されました"
+            );
+        }
+    }
+
     #[test]
     fn path_accepts_absolute_forms() {
         for path in [
@@ -450,26 +553,60 @@ mod tests {
     }
 
     #[test]
-    fn path_accepts_unc() {
-        // UNC は device namespace ではなく、構文としては受け付ける。
+    fn path_rejects_unc() {
+        // 区切りを揃えた形でも同じ理由で拒否する。
         for path in [
             r"\\server\share",
             r"\\server\share\dir\movie.mp4",
             "//server/share/movie.mp4",
+            r"//server\share\movie.mp4",
         ] {
-            assert_eq!(validate_path(path), Ok(()), "{path} が拒否されました");
+            assert_eq!(
+                validate_path(path),
+                Err(PathSyntaxError::UncPath),
+                "{path} が受理されました"
+            );
         }
     }
 
     #[test]
-    fn path_rejects_incomplete_unc() {
+    fn path_rejects_incomplete_unc_as_a_network_path() {
+        // 共有名を足しても受け付けないため、絶対パスの不備として案内しない。
         for path in [r"\\", r"\\server", r"\\server\"] {
             assert_eq!(
                 validate_path(path),
-                Err(PathSyntaxError::NotAbsolute),
+                Err(PathSyntaxError::UncPath),
                 "{path} が受理されました"
             );
         }
+    }
+
+    #[test]
+    fn path_distinguishes_a_network_path_from_a_relative_path() {
+        // 対処が別であるため、理由も分ける。
+        assert_eq!(
+            validate_path(r"\\server\share\movie.mp4"),
+            Err(PathSyntaxError::UncPath)
+        );
+        assert_eq!(
+            validate_path(r"\server\share\movie.mp4"),
+            Err(PathSyntaxError::NotAbsolute)
+        );
+        assert_eq!(
+            PathSyntaxError::UncPath.reason(),
+            "unc_path",
+            "理由が機械可読な名前で区別できません"
+        );
+        assert_ne!(
+            PathSyntaxError::UncPath.reason(),
+            PathSyntaxError::NotAbsolute.reason()
+        );
+    }
+
+    #[test]
+    fn path_accepts_a_mapped_network_drive() {
+        // 割り当て済みのドライブレターは、指す先を利用者が選んだ結果である。
+        assert_eq!(validate_path(r"Z:\share\movie.mp4"), Ok(()));
     }
 
     #[test]
@@ -561,9 +698,10 @@ mod tests {
 
     #[test]
     fn path_does_not_resolve_dot_segments() {
-        // 正規化は OS 層の担当であり、構文としては通る。呼び出し側は
-        // 正規化後の値へ再度適用する。
+        // `..` を解決しても起点は変わらないため、構文としては通す。
         assert_eq!(validate_path(r"C:\dir\..\movie.mp4"), Ok(()));
+        // ローカルパスは `..` を重ねてもネットワーク上の場所へは化けない。
+        assert_eq!(validate_path(r"C:\..\..\..\movie.mp4"), Ok(()));
     }
 
     #[test]
@@ -575,6 +713,7 @@ mod tests {
             PathSyntaxError::DeviceNamespace,
             PathSyntaxError::AlternateDataStream,
             PathSyntaxError::NotAbsolute,
+            PathSyntaxError::UncPath,
         ] {
             assert!(!error.reason().is_empty());
             assert!(!error.to_string().contains("C:\\"));
