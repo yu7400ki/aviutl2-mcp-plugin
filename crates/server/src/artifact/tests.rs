@@ -33,7 +33,8 @@ fn temp_base_dir() -> PathBuf {
 struct Fixture {
     base_dir: PathBuf,
     clock: Arc<FixedClock>,
-    store: ArtifactStore,
+    /// 後始末で基底を消す前に閉じる必要があるため、取り出せる形で持つ。
+    store: Option<ArtifactStore>,
     instance_id: InstanceId,
 }
 
@@ -46,9 +47,14 @@ impl Fixture {
         Self {
             base_dir,
             clock,
-            store,
+            store: Some(store),
             instance_id: InstanceId::new_v4(),
         }
+    }
+
+    /// 試験対象の store。
+    fn store(&self) -> &ArtifactStore {
+        self.store.as_ref().expect("store は後始末まで生きています")
     }
 
     /// handoff ファイルを書き、そのパスと token を返す。
@@ -66,7 +72,7 @@ impl Fixture {
     /// 申告どおりの handoff を引き取る。
     fn ingest_valid(&self, token: &str, bytes: &[u8]) -> Artifact {
         self.write_handoff(token, bytes);
-        self.store
+        self.store()
             .ingest(
                 &self.instance_id,
                 token,
@@ -79,6 +85,9 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        // store が session.lock を共有無しで掴んでいる間は基底を消せない。
+        // 先に閉じないと、走査がそのファイルで打ち切られて handoff 側が残る。
+        drop(self.store.take());
         let _ = std::fs::remove_dir_all(&self.base_dir);
     }
 }
@@ -183,7 +192,7 @@ fn handoff_path_is_built_from_the_own_base_and_the_resolved_instance() {
     let fixture = Fixture::new();
     let value = token(0x5a);
     let parsed = HandoffToken::parse(&value).unwrap();
-    let path = fixture.store.handoff_path(&fixture.instance_id, &parsed);
+    let path = fixture.store().handoff_path(&fixture.instance_id, &parsed);
 
     assert_eq!(
         path,
@@ -218,7 +227,7 @@ fn ingest_moves_the_handoff_file_into_the_store() {
     let handoff = fixture.write_handoff(&value, &bytes);
 
     let artifact = fixture
-        .store
+        .store()
         .ingest(
             &fixture.instance_id,
             &value,
@@ -245,7 +254,7 @@ fn ingest_moves_the_handoff_file_into_the_store() {
 
     assert!(!handoff.exists(), "引き取り後に handoff ファイルは残らない");
     let content = fixture
-        .store
+        .store()
         .read(&artifact.artifact_id)
         .expect("登録直後は読み出せます");
     assert_eq!(content.bytes, bytes);
@@ -264,7 +273,7 @@ fn ingest_rejects_a_malformed_token_before_touching_the_filesystem() {
     std::fs::write(&decoy, b"decoy").unwrap();
 
     let error = fixture
-        .store
+        .store()
         .ingest(&fixture.instance_id, "DEADBEEF", 5, &sha256_of(b"decoy"))
         .expect_err("書式違反の token では引き取れない");
     assert_eq!(error, IngestError::InvalidToken);
@@ -272,7 +281,7 @@ fn ingest_rejects_a_malformed_token_before_touching_the_filesystem() {
         decoy.exists(),
         "パスを組み立てていないため、別名のファイルには触れない"
     );
-    assert!(fixture.store.is_empty());
+    assert!(fixture.store().is_empty());
 }
 
 #[test]
@@ -283,7 +292,7 @@ fn ingest_discards_the_handoff_when_the_byte_length_disagrees() {
     let handoff = fixture.write_handoff(&value, &bytes);
 
     let error = fixture
-        .store
+        .store()
         .ingest(
             &fixture.instance_id,
             &value,
@@ -293,7 +302,7 @@ fn ingest_discards_the_handoff_when_the_byte_length_disagrees() {
         .expect_err("長さが申告と食い違えば引き取らない");
     assert_eq!(error, IngestError::ContentMismatch);
     assert!(!handoff.exists(), "失敗時も handoff ファイルは削除される");
-    assert!(fixture.store.is_empty(), "artifact は作られない");
+    assert!(fixture.store().is_empty(), "artifact は作られない");
 }
 
 #[test]
@@ -304,7 +313,7 @@ fn ingest_discards_the_handoff_when_the_digest_disagrees() {
     let handoff = fixture.write_handoff(&value, &bytes);
 
     let error = fixture
-        .store
+        .store()
         .ingest(
             &fixture.instance_id,
             &value,
@@ -314,18 +323,18 @@ fn ingest_discards_the_handoff_when_the_digest_disagrees() {
         .expect_err("ダイジェストが申告と食い違えば引き取らない");
     assert_eq!(error, IngestError::ContentMismatch);
     assert!(!handoff.exists());
-    assert!(fixture.store.is_empty());
+    assert!(fixture.store().is_empty());
 }
 
 #[test]
 fn ingest_reports_a_missing_handoff_file() {
     let fixture = Fixture::new();
     let error = fixture
-        .store
+        .store()
         .ingest(&fixture.instance_id, &token(0x44), 0, &sha256_of(b""))
         .expect_err("ファイルが無ければ引き取れない");
     assert_eq!(error, IngestError::Unreadable);
-    assert!(fixture.store.is_empty());
+    assert!(fixture.store().is_empty());
 }
 
 #[test]
@@ -354,7 +363,7 @@ fn ingest_rejects_an_oversized_file_before_reading_it() {
 
     let started = std::time::Instant::now();
     let error = fixture
-        .store
+        .store()
         .ingest(&fixture.instance_id, &value, HUGE, &sha256_of(b""))
         .expect_err("上限を超えるファイルは引き取らない");
     let elapsed = started.elapsed();
@@ -366,7 +375,7 @@ fn ingest_rejects_an_oversized_file_before_reading_it() {
         elapsed.as_millis()
     );
     assert!(!handoff.exists());
-    assert!(fixture.store.is_empty());
+    assert!(fixture.store().is_empty());
 }
 
 /// ファイルをスパースにしたうえで、長さだけを `length` へ伸ばす。
@@ -410,7 +419,7 @@ fn ingest_does_not_allocate_for_a_declared_length() {
     fixture.write_handoff(&value, b"small");
 
     let error = fixture
-        .store
+        .store()
         .ingest(&fixture.instance_id, &value, u64::MAX, &sha256_of(b"small"))
         .expect_err("申告された長さと実体が食い違う");
     assert_eq!(error, IngestError::ContentMismatch);
@@ -431,7 +440,7 @@ fn ingest_ignores_the_handoff_files_of_other_instances() {
     std::fs::write(&path, &bytes).unwrap();
 
     let error = fixture
-        .store
+        .store()
         .ingest(
             &fixture.instance_id,
             &value,
@@ -457,17 +466,17 @@ fn the_oldest_artifact_is_dropped_when_the_count_limit_is_exceeded() {
         fixture.clock.advance(1);
     }
 
-    assert_eq!(fixture.store.len(), ARTIFACT_MAX_COUNT);
+    assert_eq!(fixture.store().len(), ARTIFACT_MAX_COUNT);
     assert!(
-        fixture.store.get(&ids[0]).is_none(),
+        fixture.store().get(&ids[0]).is_none(),
         "最も古い artifact が落ちる"
     );
     assert!(
-        fixture.store.get(ids.last().unwrap()).is_some(),
+        fixture.store().get(ids.last().unwrap()).is_some(),
         "新しい artifact は残る"
     );
     let remaining: Vec<_> = fixture
-        .store
+        .store()
         .list()
         .into_iter()
         .map(|artifact| artifact.artifact_id)
@@ -521,13 +530,13 @@ fn an_expired_artifact_is_indistinguishable_from_an_unknown_one() {
     // 期限切れと未知の識別子はどちらも同じ `Option` の `None` へ落ちる。
     // 引き当ての戻り値には理由を運ぶ余地が無く、両者を区別する型が存在しない。
     // 区別できると、過去に存在した識別子を総当たりで調べられる。
-    let expired: Option<Artifact> = fixture.store.get(&artifact.artifact_id);
-    let unknown: Option<Artifact> = fixture.store.get(&Uuid::new_v4().to_string());
+    let expired: Option<Artifact> = fixture.store().get(&artifact.artifact_id);
+    let unknown: Option<Artifact> = fixture.store().get(&Uuid::new_v4().to_string());
     assert!(expired.is_none());
     assert!(unknown.is_none());
 
-    assert!(fixture.store.read(&artifact.artifact_id).is_none());
-    assert!(fixture.store.list().is_empty(), "一覧にも現れない");
+    assert!(fixture.store().read(&artifact.artifact_id).is_none());
+    assert!(fixture.store().list().is_empty(), "一覧にも現れない");
 }
 
 #[test]
@@ -538,7 +547,7 @@ fn an_expired_artifact_leaves_no_file_behind() {
     assert!(path.exists());
 
     fixture.clock.advance(ARTIFACT_TTL.as_secs() as i64);
-    let _ = fixture.store.list();
+    let _ = fixture.store().list();
     assert!(!path.exists(), "期限切れの実体は掃除で消える");
 }
 
@@ -549,7 +558,7 @@ fn an_artifact_survives_until_its_expiry() {
 
     fixture.clock.advance(ARTIFACT_TTL.as_secs() as i64 - 1);
     assert!(
-        fixture.store.get(&artifact.artifact_id).is_some(),
+        fixture.store().get(&artifact.artifact_id).is_some(),
         "期限前は引き当てられる"
     );
 }
@@ -582,15 +591,15 @@ fn lookup_never_joins_the_identifier_to_a_path() {
         "escape",
     ] {
         assert!(
-            fixture.store.get(identifier).is_none(),
+            fixture.store().get(identifier).is_none(),
             "一覧に無い識別子は見つからない: {identifier:?}"
         );
-        assert!(fixture.store.read(identifier).is_none());
+        assert!(fixture.store().read(identifier).is_none());
     }
 
     assert!(outside.exists());
     assert!(
-        fixture.store.get(&artifact.artifact_id).is_some(),
+        fixture.store().get(&artifact.artifact_id).is_some(),
         "登録済みの識別子だけが引き当てられる"
     );
 }
@@ -612,7 +621,7 @@ fn artifact_debug_output_carries_no_path() {
     assert!(rendered.contains(&artifact.artifact_id));
 
     // 実体も記録されない。画像には利用者のプロジェクトの内容が写る。
-    let content = fixture.store.read(&artifact.artifact_id).unwrap();
+    let content = fixture.store().read(&artifact.artifact_id).unwrap();
     let rendered = format!("{content:?}");
     assert!(!rendered.contains("rendered image"), "実体が現れています");
 }
@@ -728,29 +737,29 @@ fn the_store_recreates_its_directory_when_it_disappears() {
     // ロックごと消す。掴んでいるファイルは残るため、まず手放させる。
     drop(
         fixture
-            .store
+            .store()
             .lock
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take(),
     );
-    std::fs::remove_dir_all(&fixture.store.session_dir).expect("store を消せます");
+    std::fs::remove_dir_all(&fixture.store().session_dir).expect("store を消せます");
 
     let second = fixture.ingest_valid(&token(0xd3), b"another image");
     assert!(
-        fixture.store.session_dir.is_dir(),
+        fixture.store().session_dir.is_dir(),
         "引き取りの前にディレクトリを作り直す"
     );
     assert_eq!(
         fixture
-            .store
+            .store()
             .read(&second.artifact_id)
             .expect("作り直した store から読み出せます")
             .bytes,
         b"another image",
     );
     // 消えた実体は読み出せない。存在しない artifact として扱う。
-    assert!(fixture.store.read(&first.artifact_id).is_none());
+    assert!(fixture.store().read(&first.artifact_id).is_none());
 }
 
 // ============================================================================
