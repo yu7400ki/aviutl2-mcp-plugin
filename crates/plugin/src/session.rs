@@ -3693,7 +3693,11 @@ mod render_tests {
         // 最も短い予算へ落ちると、投入した瞬間に予算が尽きる。
         assert_ne!(RENDER_TIMEOUT, READ_TIMEOUT);
         assert_ne!(RENDER_TIMEOUT, EDIT_TIMEOUT);
-        assert_ne!(RENDER_TIMEOUT, BATCH_TIMEOUT);
+
+        // 実行の上限は、実行口が持つ 2 つの段の取り分をどちらも覆う。片方だけを
+        // 数えると、もう一方の段へ入った時点で既に上限を超えている。
+        assert!(RENDER_TIMEOUT > PLUGIN_RENDER_WAIT_TIMEOUT);
+        assert!(RENDER_TIMEOUT > PLUGIN_RENDER_ARTIFACT_TIMEOUT);
 
         // レンダリングが実行の上限まで走っても、応答送信と、要求元が応答を
         // 受けてから行う成果物の引き取りの持ち時間が要求フェーズ予算の内側に
