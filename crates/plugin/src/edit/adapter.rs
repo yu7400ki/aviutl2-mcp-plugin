@@ -375,7 +375,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 });
             }
 
-            let permit = boundary.revalidate(project)?;
+            let permit = boundary.issue_permit(project)?;
             permit.issue(&boundary, |ticket| match &params.source {
                 ObjectSource::MediaFile { path } => {
                     editor.create_object_from_media_file(ticket, path, layer, frame)
@@ -437,7 +437,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let occupants = editor.reader().object_placements(layer)?;
             ensure_destination_free(&occupants, layer, frame, moving_from)?;
 
-            let permit = boundary.revalidate(project)?;
+            let permit = boundary.issue_permit(project)?;
             permit.issue(&boundary, |ticket| {
                 editor.move_object(ticket, &object, layer, frame)
             })?;
@@ -467,7 +467,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let object = resolve_object(editor, &boundary, &params.selector)?;
             ensure_layer_unlocked(editor, object.layer())?;
 
-            let permit = boundary.revalidate(project)?;
+            let permit = boundary.issue_permit(project)?;
             permit.issue(&boundary, |ticket| editor.delete_object(ticket, &object))?;
 
             // 削除は戻り値を持たない。同一区間内で解決し直し、不在を確かめる。
@@ -507,7 +507,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let object = resolve_object(editor, &boundary, &params.selector)?;
             ensure_layer_unlocked(editor, object.layer())?;
 
-            let permit = boundary.revalidate(project)?;
+            let permit = boundary.issue_permit(project)?;
             permit.issue(&boundary, |ticket| {
                 editor.set_object_name(ticket, &object, name)
             })?;
@@ -556,7 +556,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let value = prepare_item_write(&items, &params.item, &params.value)
                 .map_err(EditError::ItemWrite)?;
 
-            let permit = boundary.revalidate(project)?;
+            let permit = boundary.issue_permit(project)?;
             permit.issue(&boundary, |ticket| {
                 editor.set_effect_item(ticket, &effect, &params.item, &value)
             })?;
@@ -597,7 +597,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             ensure_layer_unlocked(editor, object.layer())?;
             let before = effect_names(&effects);
 
-            let permit = boundary.revalidate(project)?;
+            let permit = boundary.issue_permit(project)?;
             permit.issue(&boundary, |ticket| {
                 editor.create_effect(ticket, &object, &params.effect_name)
             })?;
@@ -649,7 +649,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let (object, effect) = resolve_effect(editor, &boundary, &params.selector)?;
             ensure_layer_unlocked(editor, object.layer())?;
 
-            let permit = boundary.revalidate(project)?;
+            let permit = boundary.issue_permit(project)?;
             permit.issue(&boundary, |ticket| {
                 editor.delete_effect(ticket, &object, &effect)
             })?;
@@ -684,7 +684,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let (object, effect) = resolve_effect(editor, &boundary, &params.selector)?;
             ensure_layer_unlocked(editor, object.layer())?;
 
-            let permit = boundary.revalidate(project)?;
+            let permit = boundary.issue_permit(project)?;
             if let Some(enabled) = params.enabled {
                 permit.issue(&boundary, |ticket| {
                     editor.set_effect_enabled(ticket, &effect, enabled)
@@ -746,7 +746,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 .map(|selector| resolve_object(editor, &boundary, selector))
                 .transpose()?;
 
-            let permit = boundary.revalidate(project)?;
+            let permit = boundary.issue_permit(project)?;
             let outcome = apply_selection(editor, &permit, &boundary, params, focus.as_ref());
             Ok((
                 boundary.epoch().to_string(),

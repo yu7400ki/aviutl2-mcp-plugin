@@ -14,8 +14,15 @@
 //! 1〜4 は [`verify_boundary`] が要求全体へ適用し、5〜6 は解決処理が行う。
 //! 判定を飛ばして変更へ進む経路が作れないよう、変更 API は
 //! [`MutationTicket`] を要求する。権利を作れるのは [`MutationPermit::issue`] だけ、
-//! permit を作れるのは [`Boundary::revalidate`] だけ、[`Boundary`] を作れるのは
+//! permit を作れるのは [`Boundary::issue_permit`] だけ、[`Boundary`] を作れるのは
 //! [`verify_boundary`] だけ、という連鎖で順序を型が強制する。
+//!
+//! # 発行の直前にプロジェクト境界を読み直さない
+//!
+//! プロジェクト境界の更新と編集区間のコールバックはホストの同一スレッドで走る。
+//! 区間へ入ってから変更を発行するまでの間に境界が入れ替わる経路が存在しないため、
+//! 判定 1〜2 の後に epoch を照合し直しても何も捕まえない。境界の照合は
+//! [`verify_boundary`] の 1 か所に閉じる。
 //!
 //! # 判定 1 はセレクターを持たない要求だけに掛かる
 //!
@@ -136,26 +143,17 @@ impl Boundary {
         self.scene_id
     }
 
-    /// 変更 API を発行する直前にプロジェクト境界を再検証する。
-    ///
-    /// 境界の照合（判定 1〜2）と実際の変更の間には、対象の解決と fingerprint の
-    /// 再計算が挟まる。
-    /// 大きなレイヤーでは相応の時間がかかり、その間に別のプロジェクトが開かれ
-    /// 得る。ここで不一致なら SDK を呼ばずに中断する。まだ何も変更していない
-    /// ため中断は安全であり、変更の発行も記録されない。
+    /// 変更の許可を 1 つ発行する。
     ///
     /// 1 要求で 2 度呼ぶことはできない。許可はそれぞれ独立に発行を数えるため、
-    /// 2 つ取ると revision が 2 度進み、応答が返す値が定まらない。
-    pub(crate) fn revalidate<'a>(
+    /// 2 つ取ると revision が 2 度進み、応答が返す値が定まらない。単回性は
+    /// 「1 要求が進める revision は高々 1」を守る唯一の機構である。
+    pub(crate) fn issue_permit<'a>(
         &self,
         project: &'a ProjectState,
     ) -> Result<MutationPermit<'a>, EditError> {
         if self.spent.replace(true) {
             return Err(EditError::MutationPermitReissued);
-        }
-        let current = ProjectBoundary::load(project);
-        if current.epoch != self.observed.epoch {
-            return Err(ReadError::EpochMismatch.into());
         }
         Ok(MutationPermit {
             project,
@@ -167,8 +165,8 @@ impl Boundary {
 
 /// 変更 API を発行してよいことの証。
 ///
-/// 変更 API はこの型を要求するため、前提条件の照合と再検証を経ずに変更を
-/// 発行する経路が存在しない。
+/// 変更 API はこの型を要求するため、前提条件の照合を経ずに変更を発行する経路が
+/// 存在しない。
 ///
 /// 発行の記録もここで行う。記録の引き金は「要求全体の成功」ではなく「SDK の
 /// 変更 API を 1 回でも発行したこと」である。成功が確定してから記録する形に
@@ -499,30 +497,17 @@ mod tests {
     }
 
     #[test]
-    fn revalidation_rejects_a_project_boundary_change() {
+    fn issuing_a_permit_does_not_recheck_the_project_boundary() {
+        // 境界の照合は verify_boundary の 1 か所に閉じる。区間の内側で境界が
+        // 入れ替わる経路は無いため、許可の発行は境界を見ない。
         let project = state();
         let boundary =
             verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
         project.on_project_load(Some(r"C:\projects\other.aup2"));
-        let error = boundary
-            .revalidate(&project)
-            .err()
-            .expect("境界の更新後に変更が許可されました");
-        assert_eq!(error.details()["mismatch"], json!("project_epoch"));
-        assert_eq!(project.revision(), 0, "中断したのに revision が進みました");
-    }
-
-    #[test]
-    fn revalidation_ignores_a_revision_change() {
-        // 再検証が見るのはプロジェクト境界だけである。解決中に他所の変更が
-        // 入っても、対象の内容が変わっていなければ変更を止めない。
-        let project = state();
-        let boundary =
-            verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
         project.on_object_updated();
         boundary
-            .revalidate(&project)
-            .expect("revision の変化で変更が拒否されました");
+            .issue_permit(&project)
+            .expect("許可の発行が境界を読み直しました");
     }
 
     #[test]
@@ -532,8 +517,8 @@ mod tests {
         let project = state();
         let boundary =
             verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
-        boundary.revalidate(&project).expect("1 度目の許可");
-        let Err(error) = boundary.revalidate(&project) else {
+        boundary.issue_permit(&project).expect("1 度目の許可");
+        let Err(error) = boundary.issue_permit(&project) else {
             panic!("同じ要求で 2 つ目の許可が取れました");
         };
         assert_eq!(error.error_code(), ErrorCode::InternalError);
@@ -550,7 +535,7 @@ mod tests {
         let project = state();
         let boundary =
             verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
-        let permit = boundary.revalidate(&project).unwrap();
+        let permit = boundary.issue_permit(&project).unwrap();
         assert_eq!(permit.project_revision(&boundary), 0);
 
         let _ = permit.issue(&boundary, |_ticket| Ok(()));
@@ -566,7 +551,7 @@ mod tests {
         let project = state();
         let boundary =
             verify_boundary(&project, &edit_info(0), None, EditKind::Selection, &[], &[]).unwrap();
-        let permit = boundary.revalidate(&project).unwrap();
+        let permit = boundary.issue_permit(&project).unwrap();
         let _ = permit.issue(&boundary, |_ticket| Ok(()));
         assert_eq!(project.revision(), 0);
         assert!(!project.modified());
@@ -577,7 +562,7 @@ mod tests {
         let project = state();
         let boundary =
             verify_boundary(&project, &edit_info(0), None, EditKind::Content, &[], &[]).unwrap();
-        let permit = boundary.revalidate(&project).unwrap();
+        let permit = boundary.issue_permit(&project).unwrap();
         let error = permit.attribute(&boundary, EditError::Panicked);
         assert!(error.details().get("mutation_issued").is_none());
 

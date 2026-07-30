@@ -409,14 +409,27 @@ fn a_revision_change_during_the_resolution_does_not_stop_the_mutation() {
 }
 
 #[test]
-fn a_project_boundary_change_during_the_resolution_stops_the_mutation() {
+fn the_project_boundary_is_matched_only_before_the_resolution() {
+    // 境界の照合は区間の先頭で 1 度だけ行う。区間へ入った後に境界が変わっても
+    // 変更は止まらない——プロジェクト境界の更新は区間と同じスレッドで走るため、
+    // 区間の内側で入れ替わる経路が存在しない。
     let harness = Harness::with(|host| host.arm(|knobs| knobs.renew_on_detail = true));
     let params = move_params(&harness);
 
+    harness
+        .edit
+        .move_object(&params)
+        .expect("区間の内側の境界の変化で変更が止まりました");
+    assert!(harness.host.mutated());
+
+    // 区間へ入る前の境界の食い違いは従来どおり止める。
+    let harness = Harness::new();
+    let mut params = move_params(&harness);
+    params.selector.project_epoch = "別のプロジェクト".to_string();
     let error = harness
         .edit
         .move_object(&params)
-        .expect_err("プロジェクトが入れ替わったのに変更されました");
+        .expect_err("別プロジェクトのセレクターが受理されました");
     assert_eq!(error.details()["mismatch"], json!("project_epoch"));
     assert!(!harness.host.mutated());
 }
