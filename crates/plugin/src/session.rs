@@ -427,19 +427,12 @@ fn run_request_loop(
                     );
                 }
 
-                // 引き渡し用ファイルは応答を送れた場合にだけ受け取る側の所有へ
-                // 移る。送る前に識別子を控え、送信に失敗したら実行口へ戻す。
-                let handoff_token = outcome
-                    .as_ref()
-                    .ok()
-                    .map(|result| result.handoff_token.clone());
-                let outcome = outcome.and_then(|result| to_result(&result));
-
-                // 期限を過ぎていても結果は捨てず、送信の持ち時間を丸ごと充てる。
-                let deadline = retained_send_deadline(Instant::now());
-                let response =
-                    response_envelope(request.request_id, lifecycle.instance_id(), outcome);
-                deliver_render_response(render_adapter, handoff_token.as_deref(), || {
+                deliver_render_response(render_adapter, outcome, |outcome| {
+                    // 期限を過ぎていても結果は捨てず、送信の持ち時間を丸ごと
+                    // 充てる。
+                    let deadline = retained_send_deadline(Instant::now());
+                    let response =
+                        response_envelope(request.request_id, lifecycle.instance_id(), outcome);
                     send_response(stream, &response, deadline)
                 })?;
             }
@@ -746,26 +739,35 @@ fn retained_send_deadline(now: Instant) -> Instant {
     now + WRITE_TIMEOUT
 }
 
-/// レンダリングの応答を送り、送れなかった成果物を実行口へ戻す。
+/// レンダリングの結果を応答として送り、送れなかった成果物を実行口へ戻す。
 ///
 /// 引き渡し用ファイルの識別子は応答にだけ載る。送信できなければ受け取る側は
 /// 識別子を持たず、ファイルを引き取ることも掃除することもできないため、
-/// ここで実行口へ差し戻す。**送信できた場合は消さない。** 受け取る側が所有し、
-/// 引き取りを終えたときに片付ける。
+/// **送る前に識別子を控えておき、送信に失敗したら実行口へ差し戻す。**
+/// **送信できた場合は消さない。** 受け取る側が所有し、引き取りを終えたときに
+/// 片付ける。失敗した要求は成果物を作っていないため、戻すものを持たない。
+///
+/// 識別子の控えと差し戻しを 1 つの関数に閉じ込めるのは、控えを取り損ねても
+/// 差し戻しの側は動いたままに見えるからである。分けて書くと、控えを落とす
+/// 変更が「後始末はあるのに何も消えない」状態として通ってしまう。
 ///
 /// **編集にはこれに対応する後始末が無い。** 変更は既に取り消し単位へ登録されて
 /// おり、応答を送れなくても実行口へ差し戻せるものが存在しない。
 fn deliver_render_response(
     adapter: &dyn RenderAdapter,
-    handoff_token: Option<&str>,
-    send: impl FnOnce() -> Result<()>,
+    outcome: Result<RenderFrameResult, ErrorObject>,
+    send: impl FnOnce(Result<Value, ErrorObject>) -> Result<()>,
 ) -> Result<()> {
-    let sent = send();
+    let handoff_token = outcome
+        .as_ref()
+        .ok()
+        .map(|result| result.handoff_token.clone());
+    let sent = send(outcome.and_then(|result| to_result(&result)));
     if sent.is_err()
         && let Some(handoff_token) = handoff_token
     {
         tracing::warn!("応答を送れなかったため引き渡し用ファイルを削除します");
-        adapter.discard_artifact(handoff_token);
+        adapter.discard_artifact(&handoff_token);
     }
     sent
 }
@@ -3457,20 +3459,36 @@ mod render_tests {
         );
     }
 
+    /// 実行口が返した成果物つきの結果。
+    fn rendered(adapter: &FakeRenderAdapter) -> RenderFrameResult {
+        execute_render(
+            adapter,
+            &InstanceState::Ready,
+            RenderOperation::RenderFrame,
+            &render_params(),
+            within(),
+        )
+        .expect("期限内のレンダリングが拒否されました")
+    }
+
     #[test]
     fn a_failed_send_returns_the_artifact_to_the_adapter() {
         let adapter = FakeRenderAdapter::new();
 
         // 送信できた成果物は受け取る側が所有する。消してはならない。
-        deliver_render_response(&adapter, Some(HANDOFF_TOKEN), || Ok(()))
-            .expect("送信できた応答が失敗として返りました");
+        deliver_render_response(&adapter, Ok(rendered(&adapter)), |outcome| {
+            // 応答へ載るのは実行口が返した結果そのものである。
+            assert_eq!(outcome.unwrap()["handoff_token"], json!(HANDOFF_TOKEN));
+            Ok(())
+        })
+        .expect("送信できた応答が失敗として返りました");
         assert!(
             adapter.discarded().is_empty(),
             "送信できた成果物を消しました"
         );
 
         // 送信に失敗すれば受け取る側は識別子を持たない。ここで消す。
-        deliver_render_response(&adapter, Some(HANDOFF_TOKEN), || {
+        deliver_render_response(&adapter, Ok(rendered(&adapter)), |_| {
             anyhow::bail!("応答の送信に失敗しました")
         })
         .expect_err("送信の失敗が握り潰されました");
@@ -3482,8 +3500,12 @@ mod render_tests {
         // 失敗した要求は成果物を作っていない。消すものが無いのに実行口を
         // 呼ぶと、他の要求の成果物を消しかねない。
         let adapter = FakeRenderAdapter::new();
-        deliver_render_response(&adapter, None, || anyhow::bail!("応答の送信に失敗しました"))
-            .expect_err("送信の失敗が握り潰されました");
+        let failure = render_error(RenderError::WaitTimeout);
+        deliver_render_response(&adapter, Err(failure.clone()), |outcome| {
+            assert_eq!(outcome.unwrap_err(), failure);
+            anyhow::bail!("応答の送信に失敗しました")
+        })
+        .expect_err("送信の失敗が握り潰されました");
         assert!(adapter.discarded().is_empty());
     }
 
@@ -3492,15 +3514,7 @@ mod render_tests {
         // レンダリングの結果は引き渡し用ファイルを 1 つ残す。だから送信に
         // 失敗したときの後始末が要る。
         let adapter = FakeRenderAdapter::new();
-        let rendered = execute_render(
-            &adapter,
-            &InstanceState::Ready,
-            RenderOperation::RenderFrame,
-            &render_params(),
-            within(),
-        )
-        .expect("期限内のレンダリングが拒否されました");
-        assert!(!rendered.handoff_token.is_empty());
+        assert!(!rendered(&adapter).handoff_token.is_empty());
 
         // 一括適用の結果は掃除すべきものを 1 つも残さない。変更は既に取り消し
         // 単位へ登録されており、応答を送れなくても差し戻せるものは無い。
