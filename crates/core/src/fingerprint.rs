@@ -93,61 +93,26 @@ fn to_hex(bytes: &[u8]) -> String {
 
 /// fingerprint の算出方式。
 ///
-/// 応答へ含めて算出方式を明示し、再計算時に同じ方式を選べるようにする。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// ワイヤ表現を持たない。要求も応答も方式を運ばず、方式は
+/// [`object_fingerprint`] / [`effect_fingerprint`] がダイジェストの材料として
+/// 書き込むためだけに存在する。**方式が変われば同じ対象でもダイジェストが変わる
+/// ため、方式の食い違いは fingerprint の照合が捕まえる。** 方式を運ぶ必要が
+/// 無いのは、この性質による。
+///
+/// 生成関数は方式を引数に取らない。alias を正規化しないまま正規化を名乗る
+/// ダイジェストを作れないよう、方式を型で固定している。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FingerprintAlgorithm {
-    /// alias を正規化した構造から算出する。
-    NormalizedAliasV1,
     /// alias の生文字列と位置情報から算出する。
     RawV1,
-    /// 未知の方式名を破棄せず raw 保持。
-    Unknown(String),
 }
 
 impl FingerprintAlgorithm {
-    /// 本 crate が生成する fingerprint の方式。
-    ///
-    /// 生成関数は方式を引数に取らない。alias を正規化しないまま
-    /// [`FingerprintAlgorithm::NormalizedAliasV1`] を名乗るダイジェストを
-    /// 作れないよう、方式を型で固定している。
-    pub const GENERATED: Self = FingerprintAlgorithm::RawV1;
-
-    /// 方式名を返す。
-    pub fn as_str(&self) -> &str {
+    /// 方式名を返す。ダイジェストの材料に書き込む値である。
+    pub fn as_str(&self) -> &'static str {
         match self {
-            FingerprintAlgorithm::NormalizedAliasV1 => "sha256-alias-v1",
             FingerprintAlgorithm::RawV1 => "sha256-raw-v1",
-            FingerprintAlgorithm::Unknown(name) => name,
         }
-    }
-}
-
-impl Serialize for FingerprintAlgorithm {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for FingerprintAlgorithm {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let name = String::deserialize(deserializer)?;
-        Ok(match name.as_str() {
-            "sha256-alias-v1" => FingerprintAlgorithm::NormalizedAliasV1,
-            "sha256-raw-v1" => FingerprintAlgorithm::RawV1,
-            _ => FingerprintAlgorithm::Unknown(name),
-        })
-    }
-}
-
-impl fmt::Display for FingerprintAlgorithm {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -350,7 +315,7 @@ pub struct EffectFingerprintInput<'a> {
 
 /// オブジェクトの fingerprint を算出する。
 ///
-/// 方式は [`FingerprintAlgorithm::GENERATED`] に固定される。同一入力に対して
+/// 方式は [`FingerprintAlgorithm::RawV1`] に固定される。同一入力に対して
 /// 常に同一のダイジェストを返す。
 ///
 /// ```
@@ -369,7 +334,7 @@ pub struct EffectFingerprintInput<'a> {
 /// ```
 pub fn object_fingerprint(input: ObjectFingerprintInput<'_>) -> Fingerprint {
     let mut bytes = FingerprintInput::new();
-    bytes.text("algorithm", FingerprintAlgorithm::GENERATED.as_str());
+    bytes.text("algorithm", FingerprintAlgorithm::RawV1.as_str());
     bytes.integer("scene_id", i64::from(input.scene_id));
     bytes.count("layer", input.layer);
     bytes.count("frame_start", input.frame_start);
@@ -381,11 +346,11 @@ pub fn object_fingerprint(input: ObjectFingerprintInput<'_>) -> Fingerprint {
 
 /// effect の fingerprint を算出する。
 ///
-/// 方式は [`FingerprintAlgorithm::GENERATED`] に固定される。同一入力に対して
+/// 方式は [`FingerprintAlgorithm::RawV1`] に固定される。同一入力に対して
 /// 常に同一のダイジェストを返す。
 pub fn effect_fingerprint(input: EffectFingerprintInput<'_>) -> Fingerprint {
     let mut bytes = FingerprintInput::new();
-    bytes.text("algorithm", FingerprintAlgorithm::GENERATED.as_str());
+    bytes.text("algorithm", FingerprintAlgorithm::RawV1.as_str());
     bytes.text("effect_name", input.effect_name);
     bytes.count("effect_index", input.effect_index);
     bytes.count("position", input.position);
@@ -752,55 +717,85 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn fingerprint_algorithm_roundtrip() {
-        for algorithm in [
-            FingerprintAlgorithm::NormalizedAliasV1,
-            FingerprintAlgorithm::RawV1,
-        ] {
-            let s = serde_json::to_string(&algorithm).unwrap();
-            assert_eq!(s, format!("\"{algorithm}\""));
-            let restored: FingerprintAlgorithm = serde_json::from_str(&s).unwrap();
-            assert_eq!(restored, algorithm);
+    /// 方式だけを差し替えて object の材料を組み立て直す。
+    fn object_digest_with(
+        algorithm: Option<&str>,
+        input: ObjectFingerprintInput<'_>,
+    ) -> Fingerprint {
+        let mut bytes = FingerprintInput::new();
+        if let Some(algorithm) = algorithm {
+            bytes.text("algorithm", algorithm);
         }
+        bytes.integer("scene_id", i64::from(input.scene_id));
+        bytes.count("layer", input.layer);
+        bytes.count("frame_start", input.frame_start);
+        bytes.count("frame_end", input.frame_end);
+        bytes.optional_text("name", input.name);
+        bytes.text("alias", input.alias);
+        bytes.finish()
     }
 
-    #[test]
-    fn fingerprint_algorithm_unknown_preserved() {
-        let algorithm: FingerprintAlgorithm = serde_json::from_str("\"sha256-future-v9\"").unwrap();
-        assert_eq!(
-            algorithm,
-            FingerprintAlgorithm::Unknown("sha256-future-v9".to_string())
-        );
-        assert_eq!(
-            serde_json::to_string(&algorithm).unwrap(),
-            "\"sha256-future-v9\""
-        );
-    }
-
-    #[test]
-    fn fingerprint_algorithm_known_names_never_become_unknown() {
-        // 既知の方式名は Unknown に落ちないため、名前が一致するのに
-        // variant が食い違う値が逆直列化から生まれることはない。
-        for algorithm in [
-            FingerprintAlgorithm::NormalizedAliasV1,
-            FingerprintAlgorithm::RawV1,
-        ] {
-            let restored: FingerprintAlgorithm =
-                serde_json::from_str(&format!("\"{}\"", algorithm.as_str())).unwrap();
-            assert_eq!(restored, algorithm);
-            assert_ne!(
-                restored,
-                FingerprintAlgorithm::Unknown(algorithm.as_str().to_string())
-            );
+    /// 方式だけを差し替えて effect の材料を組み立て直す。設定項目は持たせない。
+    fn effect_digest_with(
+        algorithm: Option<&str>,
+        input: EffectFingerprintInput<'_>,
+    ) -> Fingerprint {
+        let mut bytes = FingerprintInput::new();
+        if let Some(algorithm) = algorithm {
+            bytes.text("algorithm", algorithm);
         }
+        bytes.text("effect_name", input.effect_name);
+        bytes.count("effect_index", input.effect_index);
+        bytes.count("position", input.position);
+        bytes.count("effect_count", input.effect_count);
+        bytes.boolean("enabled", input.enabled);
+        bytes.boolean("locked", input.locked);
+        bytes.count("item_count", 0);
+        bytes.finish()
     }
 
     #[test]
-    fn generated_algorithm_is_raw_v1() {
-        // 生成関数は方式を引数に取らず、常にこの方式で算出する。
-        assert_eq!(FingerprintAlgorithm::GENERATED, FingerprintAlgorithm::RawV1);
-        assert_eq!(FingerprintAlgorithm::GENERATED.as_str(), "sha256-raw-v1");
+    fn the_algorithm_is_a_material_of_every_digest() {
+        // 方式はワイヤに現れないが、ダイジェストの材料として書き込まれる。
+        // 方式が変われば同じ対象でもダイジェストが変わるため、方式の食い違いは
+        // fingerprint の照合が捕まえる。材料から外せば、この保護が消える。
+        let object = ObjectFingerprintInput {
+            scene_id: 0,
+            layer: 2,
+            frame_start: 120,
+            frame_end: 240,
+            name: Some("立ち絵"),
+            alias: "alias",
+        };
+        let generated = FingerprintAlgorithm::RawV1.as_str();
+        assert_eq!(
+            object_fingerprint(object),
+            object_digest_with(Some(generated), object)
+        );
+        assert_ne!(
+            object_fingerprint(object),
+            object_digest_with(Some("sha256-alias-v1"), object)
+        );
+        assert_ne!(object_fingerprint(object), object_digest_with(None, object));
+
+        let effect = EffectFingerprintInput {
+            effect_name: "動画ファイル",
+            effect_index: 0,
+            position: 0,
+            effect_count: 1,
+            enabled: true,
+            locked: false,
+            items: &[],
+        };
+        assert_eq!(
+            effect_fingerprint(effect),
+            effect_digest_with(Some(generated), effect)
+        );
+        assert_ne!(
+            effect_fingerprint(effect),
+            effect_digest_with(Some("sha256-alias-v1"), effect)
+        );
+        assert_ne!(effect_fingerprint(effect), effect_digest_with(None, effect));
     }
 
     #[test]
