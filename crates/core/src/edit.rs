@@ -1897,11 +1897,10 @@ mod tests {
     }
 
     #[test]
-    fn results_keep_reporting_the_project_generation_and_the_algorithm() {
-        // 要求から外した値も、応答は返し続ける。要求のフィールドは要求元へ組み立て
-        // を強いるが、応答のフィールドは強いない。revision は `modified` の状態と
-        // 変更の発生を要求元が観測する唯一の手段であり、算出方式は往復型として
-        // 送り返されれば照合が働く。
+    fn results_keep_reporting_the_project_generation() {
+        // 要求から外した値でも、応答が返し続けるものはある。要求のフィールドは
+        // 要求元へ組み立てを強いるが、応答のフィールドは強いない。revision は
+        // `modified` の状態と変更の発生を要求元が観測する唯一の手段である。
         let outcome = serde_json::to_value(EditOutcome::effect_changed(
             EPOCH,
             43,
@@ -1911,10 +1910,6 @@ mod tests {
         .unwrap();
         assert_eq!(outcome["project_epoch"], json!(EPOCH));
         assert_eq!(outcome["project_revision"], json!(43));
-        assert!(outcome["object"]["fingerprint_algorithm"].is_string());
-        assert!(outcome["effect"]["fingerprint_algorithm"].is_string());
-        // セレクターは方式を運ぶ。省略された指定と区別できる形で返す。
-        assert!(outcome["object"]["selector"]["fingerprint_algorithm"].is_string());
 
         let state = serde_json::to_value(SelectionState::observed(
             EPOCH,
@@ -1928,7 +1923,6 @@ mod tests {
         .unwrap();
         assert_eq!(state["project_epoch"], json!(EPOCH));
         assert_eq!(state["project_revision"], json!(42));
-        assert!(state["focus"]["fingerprint_algorithm"].is_string());
     }
 
     #[test]

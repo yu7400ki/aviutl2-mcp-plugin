@@ -1,8 +1,6 @@
 //! effect の読み取り DTO と種別列挙。
 
-use crate::fingerprint::{
-    EffectFingerprintInput, Fingerprint, FingerprintAlgorithm, effect_fingerprint,
-};
+use crate::fingerprint::{EffectFingerprintInput, Fingerprint, effect_fingerprint};
 use crate::item_value::ItemValue;
 use crate::number::FiniteF64;
 use crate::selector::{EffectSelector, ObjectSelector};
@@ -41,8 +39,6 @@ pub struct EffectInfo {
     pub selector: EffectSelector,
     /// 同一性検証用の fingerprint。
     pub fingerprint: Fingerprint,
-    /// fingerprint の算出方式。
-    pub fingerprint_algorithm: FingerprintAlgorithm,
 }
 
 impl EffectInfo {
@@ -62,7 +58,6 @@ impl EffectInfo {
                 fingerprint: fingerprint.clone(),
             },
             fingerprint,
-            fingerprint_algorithm: FingerprintAlgorithm::GENERATED,
         }
     }
 }
@@ -807,18 +802,16 @@ mod tests {
     fn effect_info_shares_one_fingerprint_with_selector() {
         let info = sample_effect_info();
         assert_eq!(info.fingerprint, info.selector.fingerprint);
-        assert_eq!(info.fingerprint_algorithm, FingerprintAlgorithm::GENERATED);
     }
 
     #[test]
-    fn effect_info_still_reports_the_fingerprint_algorithm() {
-        // セレクターは方式を持たないが、応答は返し続ける。往復型として送り
-        // 返されれば照合が働き、第 2 の方式が生まれたときに要求元の変更なしで
-        // 効き始める。
+    fn effect_info_does_not_report_a_fingerprint_algorithm() {
+        // 方式は digest の材料であって運ぶ値ではない。セレクターが受け取らない
+        // 値を応答へ載せても、要求元には送り返す先が無い。
         let value = serde_json::to_value(sample_effect_info()).unwrap();
-        assert_eq!(
-            value["fingerprint_algorithm"],
-            serde_json::json!(FingerprintAlgorithm::GENERATED.as_str())
+        assert!(
+            value.get("fingerprint_algorithm").is_none(),
+            "{value} が算出方式を返しています"
         );
     }
 

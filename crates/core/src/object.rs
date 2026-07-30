@@ -40,15 +40,12 @@ pub struct ObjectSummary {
     pub selector: ObjectSelector,
     /// 同一性検証用の fingerprint。
     pub fingerprint: Fingerprint,
-    /// fingerprint の算出方式。
-    pub fingerprint_algorithm: FingerprintAlgorithm,
 }
 
 impl ObjectSummary {
     /// 概要とセレクターを、単一の fingerprint 算出結果から組み立てる。
     pub fn new(project_epoch: impl Into<String>, input: ObjectFingerprintInput<'_>) -> Self {
         let fingerprint = crate::fingerprint::object_fingerprint(input);
-        let algorithm = FingerprintAlgorithm::GENERATED;
         Self {
             layer: input.layer,
             frame_start: input.frame_start,
@@ -61,10 +58,9 @@ impl ObjectSummary {
                 frame: input.frame_start,
                 name: input.name.map(str::to_string),
                 fingerprint: fingerprint.clone(),
-                fingerprint_algorithm: Some(algorithm.clone()),
+                fingerprint_algorithm: Some(FingerprintAlgorithm::GENERATED),
             },
             fingerprint,
-            fingerprint_algorithm: algorithm,
         }
     }
 }
@@ -196,13 +192,15 @@ mod tests {
     fn object_summary_shares_one_fingerprint_with_selector() {
         let summary = sample_object_summary();
         assert_eq!(summary.fingerprint, summary.selector.fingerprint);
-        assert_eq!(
-            summary.selector.fingerprint_algorithm.as_ref(),
-            Some(&summary.fingerprint_algorithm)
-        );
-        assert_eq!(
-            summary.fingerprint_algorithm,
-            FingerprintAlgorithm::GENERATED
+    }
+
+    #[test]
+    fn object_summary_does_not_report_a_fingerprint_algorithm() {
+        // 方式は digest の材料であって運ぶ値ではない。
+        let value = serde_json::to_value(sample_object_summary()).unwrap();
+        assert!(
+            value.get("fingerprint_algorithm").is_none(),
+            "{value} が算出方式を返しています"
         );
     }
 

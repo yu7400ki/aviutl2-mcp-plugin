@@ -273,7 +273,6 @@ fn object_summary() -> Value {
         ("name", nullable_string()),
         ("selector", object_selector()),
         ("fingerprint", string()),
-        ("fingerprint_algorithm", string()),
     ])
 }
 
@@ -311,7 +310,6 @@ fn effect_info() -> Value {
         ("items", array(effect_item())),
         ("selector", effect_selector()),
         ("fingerprint", string()),
-        ("fingerprint_algorithm", string()),
     ])
 }
 

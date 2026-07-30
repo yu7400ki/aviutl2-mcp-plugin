@@ -2233,10 +2233,6 @@ mod tests {
         let adapter = adapter();
         for summary in adapter.list_objects_page(0, None).unwrap().items {
             assert_eq!(summary.fingerprint, summary.selector.fingerprint);
-            assert_eq!(
-                summary.fingerprint_algorithm,
-                FingerprintAlgorithm::GENERATED
-            );
         }
     }
 
