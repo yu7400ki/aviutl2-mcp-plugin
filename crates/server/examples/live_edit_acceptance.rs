@@ -183,7 +183,11 @@ fn run(report: &mut Report) -> Result<(), String> {
         section_completion(&harness, report, &a, &b)
     });
 
-    prompt("すべての確認が終わりました。AviUtl2 を保存せずに閉じてから Enter を押してください。");
+    prompt(
+        "いま行ったこと: すべての確認が終わりました。プロジェクトは書き換えたままです。\n\
+         お願いすること: AviUtl2 を 2 つとも、保存せずに閉じてください。\n\
+         回答: 閉じたら Enter を押してください。判定の一覧を表示します。",
+    );
     Ok(())
 }
 
@@ -1818,8 +1822,11 @@ fn restore_layer_name(
 /// 2 プロセスが揃い、いずれも複製を開いていることを確かめる。
 fn prepare(harness: &Harness, report: &mut Report) -> Result<(Instance, Instance), String> {
     prompt(&format!(
-        "AviUtl2 を {REQUIRED_INSTANCES} プロセス起動し、それぞれで固定サンプルプロジェクトの\n\
-         別の複製を開いてください。plugin が ready になったら Enter を押してください。"
+        "お願いすること: AviUtl2 を {REQUIRED_INSTANCES} プロセス起動してください。\n\
+         そのうえで、固定サンプルプロジェクトの複製を 1 つずつ、別々のプロセスで開いてください。\n\
+         2 つのプロセスで同じファイルを開かないでください。\n\
+         確認する場所: それぞれの AviUtl2 のタイトルバー。plugin が読み込まれていること。\n\
+         回答: 2 つとも開き終えたら Enter を押してください。"
     ));
 
     let response = wait_for_instances(harness)?;
@@ -2592,15 +2599,26 @@ fn check_layer_lock(
     let original_name = resolve_object(harness, instance, context.scene_id, context.target)?.name;
 
     prompt(&format!(
-        "AviUtl2 のインスタンス {} で、レイヤー {}（0 始まり）をロックしてから Enter を押してください。",
-        instance.label, context.target.layer
+        "いま行ったこと: 対象オブジェクトの名前を控えました。プロジェクトはまだ変えていません。\n\
+         お願いすること: インスタンス {} の AviUtl2 で、{} をロックしてください。\n\
+         確認する場所: タイムライン左のレイヤー見出し。そのレイヤーが鍵の掛かった表示になること。\n\
+         回答: ロックできたら Enter を押してください。",
+        instance.label,
+        layer_label(context.target.layer)
     ));
 
     // 途中で失敗しても後始末へ進む。ロックを掛けたまま抜けると、以降の確認が
     // そのレイヤー上の対象を編集できなくなる。
     let probed = probe_layer_lock(harness, report, instance, context);
 
-    prompt("レイヤーのロックを解除してから Enter を押してください。");
+    prompt(&format!(
+        "いま行ったこと: ロック中の {} に対して、MCP から移動・削除・名前変更を試しました。\n\
+         お願いすること: いまロックした {} のロックを解除してください。\n\
+         確認する場所: タイムライン左のレイヤー見出し。鍵の表示が消えること。\n\
+         回答: 解除できたら Enter を押してください。",
+        layer_label(context.target.layer),
+        layer_label(context.target.layer)
+    ));
 
     // 後始末: ロック中に通った名前変更を元へ戻す。
     let cleaned = restore_object_name(harness, instance, context, &original_name);
@@ -3875,7 +3893,11 @@ where
     }
 
     prompt(&format!(
-        "AviUtl2 のインスタンス {} で、取り消し操作を **1 回だけ** 行ってから Enter を押してください（{label} の取り消し）。",
+        "いま行ったこと: MCP から「{label}」を 1 回実行し、プロジェクトが変わったことを確かめました。\n\
+         お願いすること: インスタンス {} の AviUtl2 で「元に戻す」を 1 回だけ実行してください。\n\
+         2 回以上は実行しないでください。\n\
+         確認する場所: タイムライン上のオブジェクト。\n\
+         回答: 1 回実行したら Enter を押してください。",
         instance.label
     ));
 
@@ -4787,23 +4809,47 @@ fn section_blocked(
     instance: &Instance,
     context: &Context,
 ) -> Result<(), String> {
-    println!();
-    println!("### 5.6 編集がブロックされる状態");
+    print_section(
+        "5.6 編集がブロックされる状態",
+        "再生中と出力中に編集を 1 回ずつ試します。再生と出力の開始・停止をお願いします。",
+    );
 
     for (label, start, stop) in [
         (
             "再生中",
-            "再生を開始し、再生し続けたまま Enter を押してください。",
-            "再生を停止してから Enter を押してください。",
+            format!(
+                "お願いすること: インスタンス {} の AviUtl2 で再生を開始してください。\n\
+                 再生を止めないまま、この画面へ戻ってきてください。\n\
+                 確認する場所: AviUtl2 のプレビュー。再生位置が進んでいること。\n\
+                 回答: 再生したままの状態で Enter を押してください。",
+                instance.label
+            ),
+            format!(
+                "お願いすること: インスタンス {} の AviUtl2 で再生を停止してください。\n\
+                 確認する場所: AviUtl2 のプレビュー。再生位置が止まっていること。\n\
+                 回答: 停止したら Enter を押してください。",
+                instance.label
+            ),
         ),
         (
             "出力中",
-            "出力（エンコード）を開始し、出力中のまま Enter を押してください。\n\
-             出力できない場合はそのまま Enter を押し、次の確認で「いいえ」と答えてください。",
-            "出力を停止または完了させてから Enter を押してください。",
+            format!(
+                "お願いすること: インスタンス {} の AviUtl2 で出力（エンコード）を開始してください。\n\
+                 出力を止めないまま、この画面へ戻ってきてください。\n\
+                 確認する場所: 出力の進行状況を示すウィンドウ。\n\
+                 回答: 出力中の状態で Enter を押してください。\n\
+                 出力を開始できない場合も Enter を押してください。その場合この項目は不合格になります。",
+                instance.label
+            ),
+            format!(
+                "お願いすること: インスタンス {} の AviUtl2 で出力を停止するか、出力の完了を待ってください。\n\
+                 確認する場所: 出力の進行状況を示すウィンドウが閉じていること。\n\
+                 回答: 出力が終わったら Enter を押してください。",
+                instance.label
+            ),
         ),
     ] {
-        let attempt = check_blocked(harness, instance, context, label, start, stop);
+        let attempt = check_blocked(harness, instance, context, label, &start, &stop);
         report.record(
             "5.6",
             format!("{label}の編集"),
@@ -4857,8 +4903,8 @@ fn check_blocked(
 
     let destination = context.free_slots[0];
     prompt(&format!(
-        "AviUtl2 のインスタンス {} で、{start}",
-        instance.label
+        "いま行ったこと: 現在のオブジェクト一覧を控えました。プロジェクトはまだ変えていません。\n\
+         {start}"
     ));
     let blocked = harness.move_object(
         &instance.id,
@@ -4958,8 +5004,8 @@ fn resume_editable(harness: &Harness, instance: &Instance, stop: &str) -> Result
     let mut last = "不明".to_string();
     for _ in 0..BLOCKED_RESUME_PROMPTS {
         prompt(&format!(
-            "AviUtl2 のインスタンス {}: {stop}",
-            instance.label
+            "いま行ったこと: 編集がブロックされている間に、オブジェクトの移動を 1 回試しました。\n\
+             {stop}"
         ));
         let mut waited = Duration::ZERO;
         while waited < BLOCKED_RESUME_WAIT {
@@ -4979,7 +5025,7 @@ fn resume_editable(harness: &Harness, instance: &Instance, stop: &str) -> Result
                 .unwrap_or(POLL_INTERVAL)
                 .max(POLL_INTERVAL);
             println!(
-                "  edit_state={last} のため {} 秒後に読み直します",
+                "  AviUtl2 はまだ編集を受け付けない状態です（edit_state={last}）。{} 秒後にもう一度読み直します。",
                 interval.as_secs_f64()
             );
             std::thread::sleep(interval);
@@ -5129,9 +5175,14 @@ fn check_stale_after_ui_item_change(
 ) -> CheckResult {
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
     prompt(&format!(
-        "AviUtl2 のインスタンス {} で、レイヤー {} フレーム {} のオブジェクトの設定値を 1 つ変更してください。\n\
-         位置と名前は変えないでください。変更したら Enter を押してください。",
-        instance.label, context.target.layer, context.target.frame
+        "いま行ったこと: {} のフレーム {} にあるオブジェクトの指定を読み取りました。まだ編集していません。\n\
+         お願いすること: インスタンス {} の AviUtl2 で、そのオブジェクトの設定値を 1 つだけ変更してください。\n\
+         位置と名前は変えないでください。\n\
+         確認する場所: そのオブジェクトを選んだときの設定パネル。\n\
+         回答: 変更したら Enter を押してください。",
+        layer_label(context.target.layer),
+        context.target.frame,
+        instance.label
     ));
 
     // 前提条件は読み直す。revision の照合を通してから内容の照合へ到達させる。
@@ -5148,7 +5199,13 @@ fn check_stale_after_ui_item_change(
     );
     restore_default_name(harness, instance, applied.as_ref())?;
 
-    prompt("UI で行った設定値の変更を取り消してから Enter を押してください。");
+    prompt(&format!(
+        "いま行ったこと: 変更前の指定のまま名前変更を試し、拒まれるかどうかを確かめました。\n\
+         お願いすること: インスタンス {} の AviUtl2 で、いま行った設定値の変更を取り消してください。\n\
+         確認する場所: そのオブジェクトの設定パネル。値が変更前へ戻っていること。\n\
+         回答: 戻したら Enter を押してください。",
+        instance.label
+    ));
     outcome
 }
 
@@ -5160,9 +5217,13 @@ fn check_stale_after_ui_move(
 ) -> CheckResult {
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
     prompt(&format!(
-        "AviUtl2 のインスタンス {} で、レイヤー {} フレーム {} のオブジェクトを別の位置へ移動してください。\n\
-         移動したら Enter を押してください。",
-        instance.label, context.target.layer, context.target.frame
+        "いま行ったこと: {} のフレーム {} にあるオブジェクトの指定を読み取りました。まだ編集していません。\n\
+         お願いすること: インスタンス {} の AviUtl2 で、そのオブジェクトを別の位置へドラッグして動かしてください。\n\
+         確認する場所: タイムライン上のそのオブジェクト。\n\
+         回答: 動かしたら Enter を押してください。",
+        layer_label(context.target.layer),
+        context.target.frame,
+        instance.label
     ));
 
     let attempt = harness.set_object_name(
@@ -5174,7 +5235,15 @@ fn check_stale_after_ui_move(
     let outcome = expect_rejection(attempt, ErrorCode::NotFound, ExpectedMismatch::Absent);
     restore_default_name(harness, instance, applied.as_ref())?;
 
-    prompt("UI で行った移動を取り消し、元の位置へ戻してから Enter を押してください。");
+    prompt(&format!(
+        "いま行ったこと: 移動前の指定のまま名前変更を試し、拒まれるかどうかを確かめました。\n\
+         お願いすること: インスタンス {} の AviUtl2 で、いま行った移動を取り消してください。\n\
+         確認する場所: そのオブジェクトが {} のフレーム {} へ戻っていること。\n\
+         回答: 戻したら Enter を押してください。",
+        instance.label,
+        layer_label(context.target.layer),
+        context.target.frame
+    ));
     outcome
 }
 
@@ -5294,8 +5363,13 @@ fn check_stale_after_undo_redo(
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
 
     prompt(&format!(
-        "AviUtl2 のインスタンス {} で、取り消し操作を 1 回行い、続けてやり直し操作を 1 回行ってください。\n\
-         内容が元と同一へ戻った状態にしてから Enter を押してください。",
+        "いま行ったこと: {} のフレーム {} にあるオブジェクトの指定を読み取りました。まだ編集していません。\n\
+         お願いすること: インスタンス {} の AviUtl2 で「元に戻す」を 1 回実行してください。\n\
+         続けて「やり直し」を 1 回実行してください。\n\
+         確認する場所: タイムライン上のオブジェクト。実行前と同じ見た目へ戻っていること。\n\
+         回答: 元と同じ状態へ戻したら Enter を押してください。",
+        layer_label(context.target.layer),
+        context.target.frame,
         instance.label
     ));
 
@@ -6022,7 +6096,13 @@ fn section_scene_switch(
         outcome,
     );
 
-    prompt("元のシーンへ戻してから Enter を押してください。");
+    prompt(&format!(
+        "いま行ったこと: 切り替える前のシーンを指した指定で、名前変更とカーソル移動を試しました。\n\
+         お願いすること: インスタンス {} の AviUtl2 で、元のシーンへ戻してください。\n\
+         確認する場所: 現在のシーン名の表示。切り替える前のシーン名に戻ること。\n\
+         回答: 戻したら Enter を押してください。",
+        instance.label
+    ));
     Ok(())
 }
 
@@ -6033,9 +6113,12 @@ fn check_client_disconnect(
     context: &Context,
 ) -> CheckResult {
     prompt(&format!(
-        "別のコンソールから MCP クライアント（server 実行ファイル）を起動し、インスタンス {} への\n\
-         編集 tool を呼び出した直後にそのプロセスを強制終了してください。終わったら Enter を押してください。\n\
-         実施できない場合はそのまま Enter を押し、次の確認で「いいえ」と答えてください。",
+        "いま行ったこと: ここまでの確認を終え、次はクライアントが途中で落ちた場合を試します。\n\
+         お願いすること: 別のコンソールから MCP クライアント（server 実行ファイル）を起動してください。\n\
+         インスタンス {} への編集 tool を呼び出し、その直後にそのプロセスを強制終了してください。\n\
+         確認する場所: 強制終了した後も AviUtl2 が固まらずに操作できること。\n\
+         回答: 終わったら Enter を押してください。\n\
+         この手順を実施できない場合もそのまま Enter を押し、次の質問には n と答えてください。",
         instance.label
     ));
 
@@ -6583,9 +6666,14 @@ fn section_completion(
 
     // 手順 8: UI で内容を変えた後、手順 4 の selector が内容の差で拒否される。
     prompt(&format!(
-        "AviUtl2 のインスタンス {} で、レイヤー {} フレーム {} のオブジェクトの設定値を 1 つ変更してください。\n\
-         位置と名前は変えないでください。変更したら Enter を押してください。",
-        a.label, destination.layer, destination.frame
+        "いま行ったこと: 古くなった指定での移動を 2 回試し、どちらも拒まれることを確かめました。\n\
+         お願いすること: インスタンス {} の AviUtl2 で、{} のフレーム {} にあるオブジェクトの\n\
+         設定値を 1 つだけ変更してください。位置と名前は変えないでください。\n\
+         確認する場所: そのオブジェクトを選んだときの設定パネル。\n\
+         回答: 変更したら Enter を押してください。",
+        a.label,
+        layer_label(destination.layer),
+        destination.frame
     ));
     let attempt = harness.move_object(
         &a.id,
@@ -6610,15 +6698,26 @@ fn section_completion(
 
     // 手順 9: 手順 8 の UI 編集を戻したうえで、手順 4 の変更が 1 回の取り消しで戻る。
     prompt(&format!(
-        "AviUtl2 のインスタンス {} で、いま行った設定値の変更だけを取り消してから Enter を押してください。",
+        "いま行ったこと: 設定値を変える前の指定で移動を試し、拒まれることを確かめました。\n\
+         お願いすること: インスタンス {} の AviUtl2 で、いま行った設定値の変更だけを取り消してください。\n\
+         オブジェクトの位置は動かさないでください。\n\
+         確認する場所: そのオブジェクトの設定パネル。値が変更前へ戻っていること。\n\
+         回答: 戻したら Enter を押してください。",
         a.label
     ));
     let restored = snapshot(harness, a, scene_a)?;
     let outcome = match expect_unchanged(&after_move_a, &restored) {
         Ok(()) => {
             prompt(&format!(
-                "続けて AviUtl2 のインスタンス {} で、取り消し操作を **1 回だけ** 行ってから Enter を押してください。",
-                a.label
+                "いま行ったこと: 設定値が変更前へ戻ったことを確かめました。\n\
+                 残っているのは、このプログラムが行ったオブジェクトの移動だけです。\n\
+                 お願いすること: インスタンス {} の AviUtl2 で、続けて「元に戻す」を 1 回だけ実行してください。\n\
+                 2 回以上は実行しないでください。\n\
+                 確認する場所: そのオブジェクトが {} のフレーム {} へ戻ること。\n\
+                 回答: 1 回実行したら Enter を押してください。",
+                a.label,
+                layer_label(home.layer),
+                home.frame
             ));
             let after_undo = snapshot(harness, a, scene_a)?;
             expect_unchanged(&before_a, &after_undo)
