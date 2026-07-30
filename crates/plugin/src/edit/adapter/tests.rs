@@ -7,7 +7,7 @@
 use super::*;
 use crate::edit::fake::{
     CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, EFFECT_LIST, FakeEditHost, FakeLayer, FakeObject,
-    FakeReadHost, Fault, ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, MAX_FRAME,
+    FakeReadHost, Fault, ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX, MAX_FRAME,
     MAX_ITEM_VALUE, MAX_LAYER, MOVE_FRAME_SHIFT, MUTATIONS, PanicPoint, SCENE_ID,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
@@ -709,12 +709,25 @@ fn creation_reports_every_object_the_alias_produced() {
         .expect("2 件目を個別に削除できません");
 }
 
+/// フェイクが保持する、オブジェクトが存在する最大レイヤー番号。
+///
+/// レイヤーの本数ではない。作成で伸び、削除で縮む。
+fn occupied_layer_max(harness: &Harness) -> usize {
+    harness
+        .host
+        .scene()
+        .layers
+        .iter()
+        .rposition(|layer| !layer.objects.is_empty())
+        .unwrap_or(0)
+}
+
 #[test]
 fn creation_scans_every_layer_before_and_after() {
-    // 走査はシーン全体に及ぶ。区間へ入った時点でオブジェクトが存在する最大
-    // レイヤーまでを、作成の前後で 1 度ずつ見る。
+    // 走査はシーン全体に及ぶ。オブジェクトが存在する最大レイヤーまでを、
+    // 作成の前後で 1 度ずつ見る。
     let harness = Harness::new();
-    let layer_max = harness.host.info.layer_max;
+    let occupied = occupied_layer_max(&harness);
     harness.host.clear_calls();
     harness
         .edit
@@ -731,42 +744,61 @@ fn creation_scans_every_layer_before_and_after() {
         })
         .expect("作成に失敗しました");
 
-    let scans = harness
-        .host
-        .calls()
+    let calls = harness.host.calls();
+    let scans = calls
         .iter()
         .filter(|call| **call == "object_placements")
         .count();
+    // 配置先が既に埋まっているレイヤーであれば、作成で最大レイヤーは伸びない。
     assert_eq!(
         scans,
-        (layer_max + 1) * 2,
+        (occupied + 1) * 2,
         "シーン全体の走査が作成の前後で 1 度ずつ行われていません"
+    );
+    assert_eq!(
+        calls.iter().filter(|call| **call == LAYER_MAX).count(),
+        2,
+        "走査範囲を作成の前後で決め直していません"
     );
 }
 
 #[test]
-fn creation_reaches_a_layer_beyond_the_previous_maximum() {
-    // 作成はオブジェクトの存在する範囲を配置先まで伸ばし得る。区間へ入った
-    // 時点の最大レイヤーだけを見ると、伸びた先へ作られた分を取りこぼす。
-    let harness = Harness::new();
-    let beyond = harness.host.info.layer_max + 1;
+fn creation_reaches_a_layer_beyond_the_range_the_request_implied() {
+    // 要求から決まる範囲は「オブジェクトが存在する最大レイヤーと配置先の
+    // 大きい方」までである。alias がその先のレイヤーへ展開すると、作成後に
+    // 最大レイヤーを読み直さない限り 2 件目が応答に現れず、要求元は自分が
+    // 作ったものへ到達できない。
+    let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::CreatePair)));
+    let destination = occupied_layer_max(&harness) + 1;
     let outcome = harness
         .edit
         .create_object(&CreateObjectParams {
             source: ObjectSource::ObjectAlias {
-                alias: "[obj]".to_string(),
+                alias: "[obj][obj]".to_string(),
             },
             placement: Placement {
                 scene_id: SCENE_ID,
-                layer: beyond as u32,
+                layer: destination as u32,
                 frame: 600,
             },
             expected_project_epoch: harness.epoch(),
         })
         .expect("作成に失敗しました");
 
-    assert_eq!(outcome.created.len(), 1);
-    assert_eq!(outcome.created[0].layer, beyond);
+    let layers: Vec<usize> = outcome.created.iter().map(|item| item.layer).collect();
+    assert_eq!(
+        layers,
+        vec![destination, destination + 1],
+        "要求から決まる走査範囲の外へ作られた分が漏れています"
+    );
+
+    // 返った selector で範囲外の 1 件を個別に削除できる。
+    harness
+        .edit
+        .delete_object(&DeleteObjectParams {
+            selector: outcome.created[1].selector.clone(),
+        })
+        .expect("走査範囲の外へ作られた対象を削除できません");
 }
 
 #[test]

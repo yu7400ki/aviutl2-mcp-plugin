@@ -98,6 +98,9 @@ pub(crate) const LAYER_LOCK: &str = "get_layer_lock";
 /// 設定項目の値を項目名で直接読んだことを表す記録。
 pub(crate) const ITEM_VALUE: &str = "get_effect_item_value";
 
+/// オブジェクトが存在する最大レイヤーを読み直したことを表す記録。
+pub(crate) const LAYER_MAX: &str = "get_edit_info";
+
 /// クロージャから巻き戻しが漏れたことを表す記録。
 ///
 /// 実機ではこの位置でホストのプロセスが落ちる。記録が残る経路は、捕捉が
@@ -685,6 +688,18 @@ impl FakeSceneEditor<'_> {
 impl SceneEditor for FakeSceneEditor<'_> {
     fn reader(&self) -> &dyn SceneReader {
         self
+    }
+
+    fn occupied_layer_max(&self) -> Result<usize, EditError> {
+        self.host.record(LAYER_MAX);
+        let scene = self.host.scene.lock().unwrap();
+        // 「オブジェクトが存在する最大のレイヤー番号」であり、レイヤーの本数
+        // ではない。作成で伸び、削除で縮む。
+        Ok(scene
+            .layers
+            .iter()
+            .rposition(|layer| !layer.objects.is_empty())
+            .unwrap_or(0))
     }
 
     fn entry_edit_info(&self) -> &HostEditInfo {

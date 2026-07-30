@@ -359,14 +359,16 @@ fn effect_names(effects: &[HostEffect]) -> Vec<String> {
 /// オブジェクトが自分のレイヤーを持てるため、別のレイヤーへ作られた分が差分に
 /// 現れず、要求元は自分が作ったものを移動も削除もできなくなる。
 ///
-/// 上限は、区間へ入った時点でオブジェクトが存在する最大レイヤーと配置先の
-/// レイヤーの大きい方とする。作成はオブジェクトの存在する範囲を配置先まで
-/// 伸ばし得る。
+/// 上限は、オブジェクトが存在する最大レイヤーと `floor` の大きい方とする。
+/// 作成の前は配置先を `floor` に渡す——まだ何も無いレイヤーへ作れば最大が配置先
+/// まで伸びるためである。作成の後は作成前の上限を渡し、最大を読み直す。alias が
+/// どのレイヤーへ展開するかは事前に分からないが、作られたものは必ず「存在する
+/// 最大レイヤー」の内側にあるため、読み直した値までを見れば取りこぼさない。
 fn creation_scan_range(
     editor: &dyn SceneEditor,
-    destination_layer: usize,
-) -> RangeInclusive<usize> {
-    0..=editor.entry_edit_info().layer_max.max(destination_layer)
+    floor: usize,
+) -> Result<RangeInclusive<usize>, EditError> {
+    Ok(0..=editor.occupied_layer_max()?.max(floor))
 }
 
 /// 指定範囲のレイヤーからオブジェクトの位置を集める。
@@ -405,12 +407,17 @@ fn created_placements(
     created
 }
 
-/// 列挙に現れない設定項目名を、存在するのか不在なのかで分ける。
+/// 列挙に現れない設定項目名を、値が読めるかどうかで分ける。
 ///
 /// 設定項目の列挙は未知種別の項目を落とす。落ちた項目への書き込みを「項目が
 /// 見つからない」として返すと、要求元は存在しない問題を指す失敗を受け取り、
 /// 名前を直そうとして直らない。項目名で値を読めるなら項目は存在しており、
 /// 書き込みを公開していない種別である。
+///
+/// 読めなかった場合は不在として扱う。値の取得は名前の誤りと取得そのものの
+/// 失敗を区別しないため、この分岐は「項目が無い」と断定できていない。それでも
+/// 不在側へ倒すのは、逆へ倒すと存在しない項目を書き込み可能な対象として扱う
+/// ことになるからである。取り違えの向きは、要求元が名前を疑う側に留まる。
 ///
 /// 追加の呼び出しはこの失敗経路でだけ 1 回行う。成功する要求の費用は変わらない。
 fn unlisted_item(editor: &dyn SceneEditor, effect: &ResolvedEffect<'_>, item: &str) -> EditError {
@@ -451,7 +458,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             ensure_layer_unlocked(editor, layer)?;
             // 差分はシーン全体から取る。走査は宛先の事前確認にも使うため、
             // 作成前の走査はここ 1 回で足りる。
-            let layers = creation_scan_range(editor, layer);
+            let layers = creation_scan_range(editor, layer)?;
             let before = scene_placements(editor, layers.clone())?;
             ensure_destination_free(&before, layer, frame, None)?;
             // 拡張子だけの確認に留める。実際に読めるかを調べる確認はファイルを
@@ -476,7 +483,14 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 }
             })?;
 
-            let after = attribute(&permit, &boundary, scene_placements(editor, layers))?;
+            // 作成は最大レイヤーを配置先より先へも伸ばし得る。走査済みの範囲を
+            // 下限に、読み直した最大レイヤーまで広げてから差分を取る。
+            let grown = attribute(
+                &permit,
+                &boundary,
+                creation_scan_range(editor, *layers.end()),
+            )?;
+            let after = attribute(&permit, &boundary, scene_placements(editor, grown))?;
             let created = created_placements(&before, after);
             if created.is_empty() {
                 // 作成されたのに位置を特定できない状態であり、応答の selector を

@@ -224,6 +224,13 @@ impl SceneEditor for SdkSceneEditor<'_> {
         &self.info
     }
 
+    fn occupied_layer_max(&self) -> Result<usize, EditError> {
+        // 区間が持つ編集情報は入口の複製であり、区間内の作成を反映しない。
+        // 編集ハンドル側の取得は参照ロックが同一スレッドで再入可能であり、
+        // 区間の内側からも現在の値を読める。
+        Ok(SdkReadHost.edit_info()?.layer_max)
+    }
+
     fn bind_object(&self, layer: usize, frame_start: usize) -> Result<ObjectSlot, EditError> {
         let handle = self
             .reader
