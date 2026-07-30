@@ -511,6 +511,20 @@ proptest! {
         prop_assert_ne!(absent.compute(), empty.compute());
     }
 
+    /// alias だけが違うオブジェクトは別物である。
+    ///
+    /// alias は配下 effect の設定値とロック状態を含むため、effect の変更はこの
+    /// 経路でオブジェクトの fingerprint へ伝わる。
+    #[test]
+    fn object_fingerprint_depends_on_the_alias(
+        (input, alias) in (object_input_strategy(), ".*"),
+    ) {
+        if input.alias != alias {
+            let changed = OwnedObjectInput { alias, ..input.clone() };
+            prop_assert_ne!(input.compute(), changed.compute());
+        }
+    }
+
     #[test]
     fn effect_fingerprint_is_deterministic(input in effect_input_strategy()) {
         prop_assert_eq!(input.compute(), input.compute());
@@ -555,19 +569,6 @@ proptest! {
         }
     }
 
-    /// alias だけが違うオブジェクトは別物である。
-    ///
-    /// alias は配下 effect の設定値を含むため、effect の変更はこの経路で
-    /// オブジェクトの fingerprint へ伝わる。
-    #[test]
-    fn object_fingerprint_depends_on_the_alias(
-        (input, alias) in (object_input_strategy(), ".*"),
-    ) {
-        if input.alias != alias {
-            let changed = OwnedObjectInput { alias, ..input.clone() };
-            prop_assert_ne!(input.compute(), changed.compute());
-        }
-    }
 }
 
 // ============================================================================
