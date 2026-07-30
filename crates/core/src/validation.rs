@@ -28,6 +28,12 @@ const LAYOUT_CONTROLS: [char; 3] = ['\n', '\r', '\t'];
 /// 文字列の検証失敗。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TextSyntaxError {
+    /// 空文字列である。
+    ///
+    /// 空を「値を消す」意味へ黙って読み替える場所があるため、明示的な取り消しを
+    /// 別に持つ指定では空を受け取らない。
+    #[error("空文字列は指定できません")]
+    Empty,
     /// NUL を含む。
     #[error("NUL を含む文字列は指定できません")]
     ContainsNul,
@@ -58,6 +64,7 @@ impl TextSyntaxError {
     /// 検証対象の文字列そのものを含まない。
     pub fn reason(&self) -> &'static str {
         match self {
+            TextSyntaxError::Empty => "empty",
             TextSyntaxError::ContainsNul => "contains_nul",
             TextSyntaxError::ContainsControl => "contains_control",
             TextSyntaxError::TooLongUtf16 { .. } | TextSyntaxError::TooLongBytes { .. } => {

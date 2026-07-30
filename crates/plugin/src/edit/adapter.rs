@@ -846,11 +846,13 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
         self.ensure_editable()?;
         let project = self.project.as_ref();
         let layer = index(params.layer);
-        let name = params.name.as_ref().map(|change| {
-            // SDK は `None` と空文字のどちらでも標準名へ戻す。読み直した名前は
-            // 標準名のとき `None` になるため、照合の前に空文字を寄せておく。
-            requested_name(change.requested())
-        });
+        // 標準名へ戻す指定だけが `None` になる。空文字は要求の検証が弾いている
+        // ため、ここで `None` へ寄せ直さない。寄せると、要求元が言っていない
+        // 「標準名へ戻す」を行って成功を返すことになる。
+        let name = params
+            .name
+            .as_ref()
+            .map(aviutl2_mcp_core::LayerNameChange::requested);
 
         self.edit_section(move |editor| {
             let boundary = verify_boundary(
@@ -882,8 +884,8 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             }
 
             // 3 つの setter はいずれも戻り値を持たない。同一区間内で読み直し、
-            // 要求した値になっていることを確かめる。レイヤーは 3 つの属性を
-            // まとめて 1 度で読める。
+            // 要求した軸が要求値になっていることを確かめる。3 つの属性は
+            // レイヤー 1 つあたりの読み取り 1 回で揃う。
             let state = attribute(&permit, &boundary, editor.reader().layer(layer))?;
             if !layer_state_applied(&state, name, params.enabled, params.locked) {
                 return Err(permit.attribute(
@@ -893,6 +895,10 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                     },
                 ));
             }
+            // 応答へ載せる概要は件数も含む。**件数の取得はレイヤー内の走査で
+            // あり、オブジェクト数に比例した SDK 呼び出しを伴う。** 属性の
+            // 照合を通ってから読むことで、反映されなかった要求ではこの走査を
+            // 行わない。
             let object_count = attribute(&permit, &boundary, editor.reader().object_count(layer))?;
             Ok(LayerStateOutcome {
                 project_epoch: boundary.epoch().to_string(),

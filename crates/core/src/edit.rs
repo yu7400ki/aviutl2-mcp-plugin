@@ -187,8 +187,13 @@ pub enum FocusChange {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LayerNameChange {
     /// 指定した名前にする。
+    ///
+    /// 空文字列は受け付けない。ホストは空を標準名へ戻す指定として扱うため、
+    /// 受け付ければ [`LayerNameChange::Reset`] を要求していない呼び出しに対して
+    /// 標準名へ戻す変更を行い、それを成功として返すことになる。**取り消しの
+    /// 指定は既にワイヤ上にある**ため、そこへ黙って合流させる理由が無い。
     Set {
-        /// 新しいレイヤー名。
+        /// 新しいレイヤー名。空文字列は指定できない。
         name: String,
     },
     /// 標準の名前へ戻す。
@@ -200,6 +205,12 @@ impl LayerNameChange {
     pub fn validate(&self) -> Result<(), EditInputError> {
         match self {
             LayerNameChange::Set { name } => {
+                if name.is_empty() {
+                    return Err(EditInputError::Text {
+                        field: FIELD_NAME,
+                        source: TextSyntaxError::Empty,
+                    });
+                }
                 validate_name(name).map_err(|source| EditInputError::Text {
                     field: FIELD_NAME,
                     source,
@@ -210,6 +221,9 @@ impl LayerNameChange {
     }
 
     /// 設定する名前。標準名へ戻す指定では `None`。
+    ///
+    /// [`LayerNameChange::validate`] を通った値では、`Some` の中身が空になる
+    /// ことはない。呼び出し側は空を `None` へ寄せ直さずにそのまま渡す。
     pub fn requested(&self) -> Option<&str> {
         match self {
             LayerNameChange::Set { name } => Some(name),
@@ -1476,6 +1490,32 @@ mod tests {
                 value: over,
                 max: MAX_POSITION,
             })
+        );
+
+        // 空の名前は標準名へ戻す指定と同じ結果になるため受け付けない。要求元が
+        // 言っていない変更を、成功として返すことになる。
+        assert_eq!(
+            SetLayerStateParams {
+                name: Some(LayerNameChange::Set {
+                    name: String::new(),
+                }),
+                ..sample_set_layer_state()
+            }
+            .validate(),
+            Err(EditInputError::Text {
+                field: FIELD_NAME,
+                source: TextSyntaxError::Empty,
+            })
+        );
+        // オブジェクト名は空を標準名へ戻す指定として受け付け続ける。取り消しを
+        // 表す別の指定を持たないためである。
+        assert_eq!(
+            SetObjectNameParams {
+                selector: sample_object_selector(),
+                name: Some(String::new()),
+            }
+            .validate(),
+            Ok(())
         );
 
         // 名前の規則はオブジェクト名と共有する。

@@ -2430,26 +2430,127 @@ fn resetting_the_layer_name_hands_the_sdk_no_name() {
 
     assert_eq!(outcome.layer.name, None, "標準名へ戻っていません");
     assert_eq!(harness.host.scene().layers[0].name, None);
+    // 標準名へ戻す指定は、空の名前ではなく「名前を渡さない」ことで表す。
+    assert_eq!(
+        harness.host.layer_name_arguments(),
+        vec![Some("背景".to_string()), None],
+        "標準名へ戻す指定が空の名前として渡りました"
+    );
+}
+
+/// レイヤーの状態のうち、要求できる軸。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayerAxis {
+    Name,
+    Enabled,
+    Locked,
+}
+
+impl LayerAxis {
+    /// 全軸。
+    ///
+    /// 要素数と内容は `layer_axes_are_exhaustive` が固定する。
+    const ALL: [LayerAxis; 3] = [LayerAxis::Name, LayerAxis::Enabled, LayerAxis::Locked];
+
+    /// 記録に残す軸の名前。
+    fn label(self) -> &'static str {
+        match self {
+            LayerAxis::Name => "name",
+            LayerAxis::Enabled => "enabled",
+            LayerAxis::Locked => "locked",
+        }
+    }
+
+    /// この軸だけを、現在と異なる値へ変える要求を組み立てる。
+    ///
+    /// **網羅 match で書く。** 軸を足すとここがコンパイルエラーになるため、
+    /// read-back の確認から漏れることがない。要求値は必ず現在値と異なる——
+    /// 同じ値を要求すると、照合が働かなくても一致してしまう。
+    fn request(self, params: SetLayerStateParams) -> SetLayerStateParams {
+        match self {
+            LayerAxis::Name => SetLayerStateParams {
+                name: Some(LayerNameChange::Set {
+                    name: "背景".to_string(),
+                }),
+                ..params
+            },
+            LayerAxis::Enabled => SetLayerStateParams {
+                enabled: Some(false),
+                ..params
+            },
+            LayerAxis::Locked => SetLayerStateParams {
+                locked: Some(true),
+                ..params
+            },
+        }
+    }
+}
+
+#[test]
+fn layer_axes_are_exhaustive() {
+    // 網羅 match は軸の追加を止めるが、`ALL` は手書きである。両方を突き合わせる。
+    fn assert_listed(axis: LayerAxis) {
+        match axis {
+            LayerAxis::Name | LayerAxis::Enabled | LayerAxis::Locked => {}
+        }
+        assert!(
+            LayerAxis::ALL.contains(&axis),
+            "{} が LayerAxis::ALL に含まれていません",
+            axis.label()
+        );
+    }
+
+    assert_listed(LayerAxis::Name);
+    assert_listed(LayerAxis::Enabled);
+    assert_listed(LayerAxis::Locked);
+    assert_eq!(LayerAxis::ALL.len(), 3);
 }
 
 #[test]
 fn a_layer_state_that_did_not_take_effect_is_not_reported_as_a_success() {
     // 3 つの setter は戻り値を持たない。無言で無視されたことは読み直しでしか
-    // 分からない。
-    let harness =
-        Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::IgnoreLayerState)));
-    let error = harness
-        .edit
-        .set_layer_state(&SetLayerStateParams {
-            enabled: Some(false),
-            ..layer_state_params(&harness, 0)
-        })
-        .expect_err("反映されていない変更が成功として返りました");
+    // 分からず、read-back が唯一の防波堤である。**軸ごとに確かめる。** 1 つの
+    // 軸で通しても、他の軸の照合が抜けていれば、その軸の無言の拒否は成功と
+    // して返る。
+    for axis in LayerAxis::ALL {
+        let name = axis.label();
+        let harness =
+            Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::IgnoreLayerState)));
+        let params = axis.request(layer_state_params(&harness, 0));
+        let error = harness
+            .edit
+            .set_layer_state(&params)
+            .err()
+            .unwrap_or_else(|| panic!("{name} の反映されていない変更が成功として返りました"));
 
-    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
-    assert_eq!(error.details()["reason"], json!("change_not_applied"));
-    // SDK へは届いている。届いた以上は変更が入った側へ倒す。
-    assert_eq!(error.details()["mutation_issued"], json!(true));
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::UnsupportedOperation,
+            "{name}"
+        );
+        assert_eq!(
+            error.details()["reason"],
+            json!("change_not_applied"),
+            "{name}"
+        );
+        // SDK へは届いている。届いた以上は変更が入った側へ倒す。
+        assert_eq!(error.details()["mutation_issued"], json!(true), "{name}");
+    }
+}
+
+#[test]
+fn every_layer_axis_is_applied_when_the_host_accepts_it() {
+    // 上の確認の対になる。要求が通る状態で失敗するなら、read-back の照合が
+    // 厳しすぎることになる。
+    for axis in LayerAxis::ALL {
+        let name = axis.label();
+        let harness = Harness::new();
+        let params = axis.request(layer_state_params(&harness, 0));
+        harness
+            .edit
+            .set_layer_state(&params)
+            .unwrap_or_else(|error| panic!("{name} の変更が拒否されました: {error}"));
+    }
 }
 
 #[test]

@@ -291,6 +291,8 @@ pub(crate) struct FakeEditHost {
     enter_calls: AtomicUsize,
     edit_state_calls: AtomicUsize,
     calls: Mutex<Vec<&'static str>>,
+    /// レイヤー名の設定へ渡された引数を、渡された順に覚える。
+    layer_names: Mutex<Vec<Option<String>>>,
 }
 
 impl FakeEditHost {
@@ -305,6 +307,7 @@ impl FakeEditHost {
             enter_calls: AtomicUsize::new(0),
             edit_state_calls: AtomicUsize::new(0),
             calls: Mutex::new(Vec::new()),
+            layer_names: Mutex::new(Vec::new()),
         }
     }
 
@@ -348,6 +351,14 @@ impl FakeEditHost {
     /// 変更 API が 1 度でも呼ばれたか。
     pub(crate) fn mutated(&self) -> bool {
         self.calls().iter().any(|call| MUTATIONS.contains(call))
+    }
+
+    /// レイヤー名の設定へ渡された引数を、渡された順に返す。
+    ///
+    /// `None` は「名前を渡さなかった」、`Some("")` は「空の名前を渡した」を表す。
+    /// 標準名へ戻す指定が前者であることを、この記録で確かめられる。
+    pub(crate) fn layer_name_arguments(&self) -> Vec<Option<String>> {
+        self.layer_names.lock().unwrap().clone()
     }
 
     /// レイヤーのロック状態を切り替える。
@@ -1017,8 +1028,15 @@ impl SceneEditor for FakeSceneEditor<'_> {
         name: Option<&str>,
     ) -> Result<(), EditError> {
         self.mutation("set_layer_name")?;
-        // SDK は `None` と空文字のどちらでも標準名へ戻す。
-        let name = name.filter(|name| !name.is_empty()).map(str::to_string);
+        // 渡された引数をそのまま覚える。`None`（名前を渡さない）と `Some("")`
+        // （空の名前を渡す）を畳むと、標準名へ戻す指定が本当に名前を渡して
+        // いないことを確かめられなくなる。
+        self.host
+            .layer_names
+            .lock()
+            .unwrap()
+            .push(name.map(str::to_string));
+        let name = name.map(str::to_string);
         self.with_layer(layer, "set_layer_name", |fake| fake.name = name)
     }
 

@@ -942,6 +942,8 @@ impl AviUtl2McpServer {
     /// レイヤーの名前・表示・ロック状態を変更する。
     /// name と enabled と locked の 3 つ全てを省略した要求は受け付けない。
     /// name に {"type": "reset"} を指定すると標準のレイヤー名へ戻す。
+    /// name に {"type": "set"} を指定する場合、空の名前は受け付けず
+    /// invalid_argument となる。標準名へ戻すには reset を指定する。
     /// layer 番号は 0 始まりであり UI の表示とは異なる。
     /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
     /// project_epoch をそのまま指定する。省略はできない。レイヤーは selector も
@@ -1949,20 +1951,26 @@ mod tests {
         }
     }
 
-    /// 失敗応答が対象の現在の姿を返し得る tool。
+    /// tool 名から、失敗応答が対象の現在の姿を返し得るかを引く。
     ///
-    /// 対象を指す selector を持つ tool に限る。作成は対象がまだ無く、レイヤーの
-    /// 状態変更は対象が selector も fingerprint も持たない。
-    const TOOLS_RETURNING_A_CURRENT_OBJECT: &[&str] = &[
-        "aviutl2_move_object",
-        "aviutl2_set_object_name",
-        "aviutl2_set_object_item",
-        "aviutl2_add_effect",
-        "aviutl2_set_effect_enabled",
-        "aviutl2_delete_effect",
-        "aviutl2_delete_object",
-        "aviutl2_set_selection",
-    ];
+    /// 未知の tool 名で落とす。返し得るのは対象を指す selector を解決する tool
+    /// だけであり、作成は対象がまだ無く、レイヤーの状態変更は対象が selector も
+    /// fingerprint も持たない。**一覧を const で持つと、どちらにも書かれていない
+    /// 新しい tool が「触れない」側の既定へ黙って落ちる。**
+    fn returns_a_current_object(name: &str) -> bool {
+        match name {
+            "aviutl2_move_object"
+            | "aviutl2_set_object_name"
+            | "aviutl2_set_object_item"
+            | "aviutl2_add_effect"
+            | "aviutl2_set_effect_enabled"
+            | "aviutl2_delete_effect"
+            | "aviutl2_delete_object"
+            | "aviutl2_set_selection" => true,
+            "aviutl2_create_object" | "aviutl2_set_layer_state" => false,
+            other => panic!("{other} が現在の姿を返すかが定義されていません"),
+        }
+    }
 
     #[test]
     fn tools_that_return_the_current_object_say_so() {
@@ -1972,7 +1980,7 @@ mod tests {
             let description = description_of(name);
             assert_eq!(
                 description.contains("details.current_object"),
-                TOOLS_RETURNING_A_CURRENT_OBJECT.contains(name),
+                returns_a_current_object(name),
                 "{name} の説明と現在の姿を返す tool の一覧が食い違います"
             );
         }

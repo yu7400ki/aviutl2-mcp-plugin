@@ -556,8 +556,8 @@ impl SetEffectEnabledInput {
 pub enum LayerNameChangeInput {
     /// 指定した名前にする。
     Set {
-        /// 新しいレイヤー名。
-        #[schemars(length(max = MAX_NAME_CHARS))]
+        /// 新しいレイヤー名。空文字列は指定できない。標準名へ戻すには reset を使う。
+        #[schemars(length(min = 1, max = MAX_NAME_CHARS))]
         name: String,
     },
     /// 標準の名前へ戻す。
@@ -1410,6 +1410,24 @@ mod tests {
         assert_eq!(
             input.to_params().expect("params へ変換できる").name,
             Some(aviutl2_mcp_core::LayerNameChange::Reset {})
+        );
+    }
+
+    #[test]
+    fn an_empty_layer_name_is_rejected_instead_of_meaning_reset() {
+        // ホストは空を標準名へ戻す指定として扱う。受け付ければ、reset を要求して
+        // いない呼び出しに対して標準名へ戻す変更を行い、成功として返すことになる。
+        let input: SetLayerStateInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "expected_scene_id": 3,
+            "layer": 1,
+            "name": { "type": "set", "name": "" },
+            "expected_project_epoch": SAMPLE_EPOCH,
+        }))
+        .expect("入力型としては受理される");
+        assert_eq!(
+            input.to_params().expect_err("空の名前は拒否される").code,
+            ErrorCode::InvalidArgument
         );
     }
 
