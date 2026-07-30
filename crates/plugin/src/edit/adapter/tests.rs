@@ -777,24 +777,101 @@ fn locking_an_effect_changes_the_object_fingerprint() {
     );
 }
 
+/// 変更を受け付けない状態変更が、SDK を呼ぶ前に弾かれることを確かめる。
+///
+/// 3 つを 1 つのテストへ並べる。1 つだけ直して他が回帰しても気付けない形にすると、
+/// 「SDK が無言で拒否する変更を成功として返さない」という約束が片側から崩れる。
+///
+/// **出力項目のロックはここが唯一の防波堤である。** 読み直しは出力項目について
+/// 常に偽を返すため、偽への変更は read-back で一致と見なされてしまう。
 #[test]
-fn an_output_effect_is_rejected_before_the_section_when_the_type_is_known() {
-    let harness = Harness::with(|host| {
-        let mut scene = host.scene.lock().unwrap();
-        scene.layers[1].objects[0].effects[0].name = "標準描画".to_string();
-        drop(scene);
-    });
-    let error = harness
-        .edit
-        .set_effect_state(&SetEffectStateParams {
-            selector: harness.effect_selector(1, 100, "標準描画", 0),
+fn changes_the_host_never_applies_are_refused_before_the_sdk_is_called() {
+    /// 変更を受け付けない対象と、それへ要求する状態変更。
+    struct Immutable {
+        /// 何を確かめているか。
+        label: &'static str,
+        /// 差し替える effect 名。
+        effect_name: &'static str,
+        /// 差し替える effect 列の位置。
+        position: usize,
+        /// 要求する有効・無効。
+        enabled: Option<bool>,
+        /// 要求するロック状態。
+        locked: Option<bool>,
+    }
+
+    let scenarios = [
+        // 出力項目の有効・無効。
+        Immutable {
+            label: "出力項目の enabled",
+            effect_name: "標準描画",
+            position: 0,
             enabled: Some(false),
             locked: None,
-        })
-        .expect_err("出力項目の有効・無効が変更できました");
+        },
+        // 音声だけを扱う effect のロック。
+        Immutable {
+            label: "音声 effect の locked",
+            effect_name: "音声フェード",
+            position: 1,
+            enabled: None,
+            locked: Some(true),
+        },
+        // 出力項目のロック。読み直しは常に偽を返すため、偽への変更は
+        // read-back では捕まえられない。
+        Immutable {
+            label: "出力項目の locked",
+            effect_name: "標準描画",
+            position: 0,
+            enabled: None,
+            locked: Some(false),
+        },
+    ];
 
-    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
-    assert_eq!(harness.host.enter_calls(), 0);
+    for Immutable {
+        label,
+        effect_name,
+        position,
+        enabled,
+        locked,
+    } in scenarios
+    {
+        let name = effect_name.to_string();
+        let harness = Harness::with(move |host| {
+            let mut scene = host.scene.lock().unwrap();
+            scene.layers[1].objects[0].effects[position].name = name;
+            drop(scene);
+        });
+        let selector = harness.effect_selector(1, 100, effect_name, 0);
+        let Err(error) = harness.edit.set_effect_state(&SetEffectStateParams {
+            selector,
+            enabled,
+            locked,
+        }) else {
+            panic!("{label} が変更できました");
+        };
+
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::UnsupportedOperation,
+            "{label}"
+        );
+        assert_eq!(
+            error.details()["reason"],
+            json!("effect_state_immutable"),
+            "{label}"
+        );
+        assert_eq!(
+            harness.host.enter_calls(),
+            0,
+            "{label} で編集区間へ入りました"
+        );
+        harness.assert_untouched();
+        assert!(
+            !harness.project.modified(),
+            "{label} で未保存の変更が記録されました"
+        );
+    }
 }
 
 #[test]
@@ -2328,9 +2405,9 @@ fn an_audio_only_effect_refuses_a_lock_change_before_the_section() {
 #[test]
 fn an_effect_that_handles_video_as_well_is_not_refused_by_the_flags_alone() {
     // フラグは画像と音声が同時に立ち得る。音声のフラグだけを見て弾くと、
-    // 変更できる対象まで拒否する。
+    // 変更できる対象まで拒否する。入力項目のロックは変更できる。
     let harness = Harness::new();
-    harness
+    let outcome = harness
         .edit
         .set_effect_state(&SetEffectStateParams {
             selector: harness.effect_selector(1, 100, "動画ファイル", 0),
@@ -2338,4 +2415,6 @@ fn an_effect_that_handles_video_as_well_is_not_refused_by_the_flags_alone() {
             locked: Some(true),
         })
         .expect("画像も扱う effect のロック変更が拒否されました");
+
+    assert!(outcome.effect.expect("変更後の effect").locked);
 }

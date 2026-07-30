@@ -161,10 +161,15 @@ impl<H: EditHost> HostEditAdapter<H> {
     /// 入った側へ倒して revision を進めるほかない。呼ぶ前に分かる対象は呼ばずに
     /// 弾けば、何も変わっていないのに revision が進むことを避けられる。
     ///
-    /// 判定できるのは 2 つだけである。出力項目は有効・無効を変更できない。
-    /// 音声だけを扱う effect はロックを変更できない。フラグは画像と音声が同時に
-    /// 立ち得るため、音声のフラグが立っていることだけでは音声 effect と断定
-    /// できない。画像を扱わないことまで確かめる。
+    /// 出力項目は有効・無効を変更できない。ロックを変更できないのは、音声だけを
+    /// 扱う effect と出力項目である。フラグは画像と音声が同時に立ち得るため、
+    /// 音声のフラグが立っていることだけでは音声 effect と断定できない。画像を
+    /// 扱わないことまで確かめる。
+    ///
+    /// 出力項目のロックについては、ここが唯一の防波堤になる。ロックは入力項目と
+    /// 出力項目をまとめた単位で掛かるのに、読み直しは出力項目について常に偽を
+    /// 返す。要求値も偽であれば read-back は一致と見なし、何も変わっていない
+    /// 変更を成功として報告してしまう。
     fn ensure_effect_state_writable(
         &self,
         effect_name: &str,
@@ -177,9 +182,10 @@ impl<H: EditHost> HostEditAdapter<H> {
         let Some(effect) = catalog.iter().find(|effect| effect.name == effect_name) else {
             return Ok(());
         };
-        let immutable_enabled =
-            params.enabled.is_some() && effect.effect_type == EffectType::Output;
-        let immutable_locked = params.locked.is_some() && effect.flags.audio && !effect.flags.video;
+        let output = effect.effect_type == EffectType::Output;
+        let audio_only = effect.flags.audio && !effect.flags.video;
+        let immutable_enabled = params.enabled.is_some() && output;
+        let immutable_locked = params.locked.is_some() && (audio_only || output);
         if immutable_enabled || immutable_locked {
             return Err(EditError::UnsupportedTarget {
                 reason: UnsupportedReason::EffectStateImmutable,

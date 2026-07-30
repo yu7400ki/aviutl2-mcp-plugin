@@ -30,6 +30,10 @@ pub struct EffectInfo {
     /// effect が有効か。
     pub enabled: bool,
     /// effect がロックされているか。
+    ///
+    /// ロックは入力項目と出力項目をまとめた単位で掛かるが、SDK は出力項目
+    /// （標準描画等）について常に偽を返す。**出力項目についてはこの値は実態を
+    /// 反映しない。** 誤り方は一貫しているため fingerprint の決定性は保たれる。
     pub locked: bool,
     /// 設定項目と値。
     pub items: Vec<EffectItem>,

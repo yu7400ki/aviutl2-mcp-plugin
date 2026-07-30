@@ -435,6 +435,8 @@ impl AviUtl2McpServer {
     /// オブジェクトの詳細（alias・中間点区間・effect・revision）を取得する。
     /// frame 番号と layer 番号はいずれも 0 始まりである。
     /// selector には aviutl2_list_objects が返した値をそのまま指定する。
+    /// effect の locked は出力項目（標準描画等）については実態を反映せず、
+    /// 常に false になる。ロックは入力項目と出力項目をまとめた単位で掛かる。
     #[tool(
         name = "aviutl2_get_object",
         annotations(
