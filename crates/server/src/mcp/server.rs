@@ -962,7 +962,6 @@ impl AviUtl2McpServer {
     /// この tool 自身はロックの影響を受けない。ロックされたレイヤーでもロックを外せる。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
-    /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "aviutl2_set_layer_state",
         annotations(
@@ -1824,6 +1823,8 @@ mod tests {
         OneUnit,
         /// 取り消し単位を作らず、取り消しが 1 つ前の編集へ飛ぶと述べる。
         NoUnitAndJumpsBack,
+        /// 取り消しについて何も述べない。
+        Silent,
     }
 
     /// tool 名から、説明が取り消しについて述べる内容を引く。
@@ -1839,9 +1840,10 @@ mod tests {
             | "aviutl2_add_effect"
             | "aviutl2_set_effect_enabled"
             | "aviutl2_delete_effect"
-            | "aviutl2_delete_object"
-            | "aviutl2_set_layer_state" => UndoStatement::OneUnit,
+            | "aviutl2_delete_object" => UndoStatement::OneUnit,
             "aviutl2_set_selection" => UndoStatement::NoUnitAndJumpsBack,
+            // レイヤー系の setter については取り消しの扱いを保証しない。
+            "aviutl2_set_layer_state" => UndoStatement::Silent,
             other => panic!("{other} の取り消しの説明が定義されていません"),
         }
     }
@@ -1872,6 +1874,10 @@ mod tests {
                         "{name} の説明が取り消し単位を作ると読めます"
                     );
                 }
+                UndoStatement::Silent => assert!(
+                    !description.contains("取り消し"),
+                    "{name} の説明が保証していない取り消しの扱いを述べています"
+                ),
             }
         }
     }
