@@ -129,39 +129,193 @@ fn run(report: &mut Report) -> Result<(), String> {
     let (a, b) = prepare(&harness, report)?;
     let context = Context::new(&harness, &a)?;
 
-    // 区間の途中で続行不能になっても、残りの区間は実行する。完了条件の検証は
-    // 最後に置かれており、手前の区間の環境不備でそこへ到達しないと、確かめたい
-    // ことが 1 件も確かめられないまま終わる。
-    let advance = match section_fingerprint_premises(&harness, report, &a, &context) {
-        Ok(advance) => advance,
-        Err(reason) => {
-            record_section_failure(report, "5.9", reason);
-            RevisionAdvance::none()
-        }
-    };
+    // 1 つの区間が続行不能になっても、前提が保たれている限り残りの区間は実行
+    // する。完了条件の検証は最後に置かれており、手前の区間の環境不備でそこへ
+    // 到達しないと、確かめたいことが 1 件も確かめられないまま終わる。
+    //
+    // 前提そのものが崩れた場合は別である。以降の区間は全て同じ理由で落ち、
+    // どこで壊れたのかが読めなくなる。崩れを 1 件の不合格として記録し、以降は
+    // 未実施として残す。
+    let mut premise = Premise::intact();
+    let advance = section_fingerprint_premises(&harness, report, &a, &context, &mut premise);
 
-    let outcome = section_basic_edits(&harness, report, &a, &context);
-    record_section_failure_if_any(report, "5.1", outcome);
-    let outcome = section_undo(&harness, report, &a, &context);
-    record_section_failure_if_any(report, "5.2", outcome);
-    let outcome = section_silent_rejection(&harness, report, &a, &context);
-    record_section_failure_if_any(report, "5.3", outcome);
-    let outcome = section_item_round_trip(&harness, report, &a, &context);
-    record_section_failure_if_any(report, "5.4", outcome);
+    let guard = SectionGuard {
+        harness: &harness,
+        instance: &a,
+        context: &context,
+    };
+    guard.run(report, &mut premise, "5.1", |report| {
+        section_basic_edits(&harness, report, &a, &context)
+    });
+    guard.run(report, &mut premise, "5.2", |report| {
+        section_undo(&harness, report, &a, &context)
+    });
+    guard.run(report, &mut premise, "5.3", |report| {
+        section_silent_rejection(&harness, report, &a, &context)
+    });
+    guard.run(report, &mut premise, "5.4", |report| {
+        section_item_round_trip(&harness, report, &a, &context)
+    });
     section_revision(report, &advance);
-    let outcome = section_blocked(&harness, report, &a, &context);
-    record_section_failure_if_any(report, "5.6", outcome);
-    let outcome = section_target_confusion(&harness, report, &a, &b, &context);
-    record_section_failure_if_any(report, "5.7", outcome);
-    let outcome = section_misc(&harness, report, &a, &context);
-    record_section_failure_if_any(report, "5.8", outcome);
-    let outcome = section_layer_bounds(&harness, report, &a, &context);
-    record_section_failure_if_any(report, "5.10", outcome);
-    let outcome = section_completion(&harness, report, &a, &b);
-    record_section_failure_if_any(report, "6", outcome);
+    guard.run(report, &mut premise, "5.6", |report| {
+        section_blocked(&harness, report, &a, &context)
+    });
+    guard.run(report, &mut premise, "5.7", |report| {
+        section_target_confusion(&harness, report, &a, &b, &context)
+    });
+    guard.run(report, &mut premise, "5.8", |report| {
+        section_misc(&harness, report, &a, &context)
+    });
+    guard.run(report, &mut premise, "5.10", |report| {
+        section_layer_bounds(&harness, report, &a, &context)
+    });
+    guard.run(report, &mut premise, "6", |report| {
+        section_completion(&harness, report, &a, &b)
+    });
 
     prompt("すべての確認が終わりました。AviUtl2 を保存せずに閉じてから Enter を押してください。");
     Ok(())
+}
+
+/// 前提の崩れを記録する見出し。
+const PREMISE_SECTION: &str = "前提";
+
+/// 以降の確認が依って立つ前提が保たれているか。
+///
+/// 前提は 2 つ。編集がブロックされていないことと、主たる対象を元の位置へ
+/// 読み直せることである。どちらかが崩れたまま先へ進むと、以降の確認は全て
+/// 同じ理由で落ち、どこで壊れたのかが読めなくなる。崩れた時点で打ち切り、
+/// 壊した確認の名を添えて 1 件の不合格として残す。
+struct Premise {
+    /// 前提を壊した確認または区間の呼び名。保たれていれば `None`。
+    broken_by: Option<String>,
+    /// 崩れ方。
+    reason: String,
+}
+
+impl Premise {
+    /// 前提が保たれている状態。
+    fn intact() -> Self {
+        Self {
+            broken_by: None,
+            reason: String::new(),
+        }
+    }
+
+    fn is_broken(&self) -> bool {
+        self.broken_by.is_some()
+    }
+
+    /// 実施を見送る理由。
+    fn skip_reason(&self) -> String {
+        match &self.broken_by {
+            Some(who) => format!("{who} が前提を壊したため実施しません: {}", self.reason),
+            None => String::new(),
+        }
+    }
+
+    /// 直前に実行した確認の後で、前提が保たれているかを見る。
+    fn verify_after(
+        &mut self,
+        harness: &Harness,
+        report: &mut Report,
+        instance: &Instance,
+        context: &Context,
+        who: String,
+    ) {
+        if self.is_broken() {
+            return;
+        }
+        let Err(reason) = check_premise(harness, instance, context) else {
+            return;
+        };
+        report.record(
+            PREMISE_SECTION,
+            format!("{who} の後の前提"),
+            "編集がブロックされておらず、主たる対象を元の位置へ読み直せる",
+            Mode::Auto,
+            Err(reason.clone()),
+        );
+        self.broken_by = Some(who);
+        self.reason = reason;
+    }
+}
+
+/// 前提が保たれているかを確かめる。
+fn check_premise(harness: &Harness, instance: &Instance, context: &Context) -> Result<(), String> {
+    let info = require(harness.edit_info(&instance.id), "編集情報を取得できません")?;
+    if info.scene.id != context.scene_id {
+        return Err(format!(
+            "現在シーンが {} から {} へ変わっています",
+            context.scene_id, info.scene.id
+        ));
+    }
+    resolve_object(harness, instance, context.scene_id, context.target).map(|_| ())
+}
+
+/// 前提を見張りながら区間を実行する役。
+struct SectionGuard<'a> {
+    harness: &'a Harness,
+    instance: &'a Instance,
+    context: &'a Context,
+}
+
+impl SectionGuard<'_> {
+    /// 前提が保たれている間だけ区間を実行し、実行後に前提を検分する。
+    fn run<F>(&self, report: &mut Report, premise: &mut Premise, section: &'static str, body: F)
+    where
+        F: FnOnce(&mut Report) -> Result<(), String>,
+    {
+        if premise.is_broken() {
+            report.skip(
+                section,
+                format!("{section} の実行"),
+                "区間の全項目を最後まで実行できる",
+                Mode::Auto,
+                premise.skip_reason(),
+            );
+            return;
+        }
+        let outcome = body(report);
+        record_section_failure_if_any(report, section, outcome);
+        premise.verify_after(
+            self.harness,
+            report,
+            self.instance,
+            self.context,
+            format!("区間 {section}"),
+        );
+    }
+
+    /// 前提が保たれている間だけ確認 1 件を実行し、実行後に前提を検分する。
+    ///
+    /// 5.9 は対象を動かす確認が並ぶ。区間の入口だけを見ると、壊したのがどの
+    /// 確認かが分からないため、1 件ごとに見る。
+    fn check<F>(
+        &self,
+        report: &mut Report,
+        premise: &mut Premise,
+        title: &'static str,
+        verified: impl Into<String>,
+        mode: Mode,
+        body: F,
+    ) where
+        F: FnOnce(&mut Report) -> CheckResult,
+    {
+        if premise.is_broken() {
+            report.skip("5.9", title, verified, mode, premise.skip_reason());
+            return;
+        }
+        let outcome = body(report);
+        report.record("5.9", title, verified, mode, outcome);
+        premise.verify_after(
+            self.harness,
+            report,
+            self.instance,
+            self.context,
+            format!("5.9 の「{title}」"),
+        );
+    }
 }
 
 /// 区間が続行不能になった場合に、その区間の不合格として記録する。
@@ -1663,90 +1817,96 @@ impl RevisionAdvance {
 /// fingerprint の前提を最初に確かめる。
 ///
 /// ここが破れていると以降の全ての編集が成立しないため、他のどの確認よりも先に
-/// 実施する。
+/// 実施する。対象を動かす確認が並ぶ区間であるため、1 件ごとに前提を検分し、
+/// 崩れたらその 1 件の名を添えて打ち切る。
 fn section_fingerprint_premises(
     harness: &Harness,
     report: &mut Report,
     instance: &Instance,
     context: &Context,
-) -> Result<RevisionAdvance, String> {
+    premise: &mut Premise,
+) -> RevisionAdvance {
     println!();
     println!("### 5.9 fingerprint の前提");
 
-    let outcome = check_alias_stability(harness, report, instance, context);
-    report.record(
-        "5.9",
+    let guard = SectionGuard {
+        harness,
+        instance,
+        context,
+    };
+    guard.check(
+        report,
+        premise,
         "alias の安定性",
         format!(
             "無変更のオブジェクトを {STABILITY_READS} 回読み、fingerprint と alias が全て一致する"
         ),
         Mode::Auto,
-        outcome,
+        |report| check_alias_stability(harness, report, instance, context),
     );
-
-    let outcome = check_alias_covers_effects(harness, report, instance, context);
-    report.record(
-        "5.9",
+    guard.check(
+        report,
+        premise,
         "effect の変更がオブジェクト fingerprint へ及ぶこと",
         "effect の設定値と有効状態を変えるとオブジェクトの fingerprint が変わる",
         Mode::Auto,
-        outcome,
+        |report| check_alias_covers_effects(harness, report, instance, context),
     );
-
-    let outcome = check_effect_index_shift(harness, report, instance, context);
-    report.record(
-        "5.9",
+    guard.check(
+        report,
+        premise,
         "effect の index シフトの検出",
         "同名 effect を 2 つ付与して前方を削除すると、削除前の selector での編集が拒否される",
         Mode::Auto,
-        outcome,
+        |report| check_effect_index_shift(harness, report, instance, context),
     );
-
-    let outcome = check_unrelated_edit_keeps_the_precondition(harness, report, instance, context);
-    report.record(
-        "5.9",
+    guard.check(
+        report,
+        premise,
         "他の対象の編集を挟んだ前提の再利用",
         "対象を読んだ後に別の対象を編集しても、読んだ時点の expected のままその対象を編集できる",
         Mode::Auto,
-        outcome,
+        |report| check_unrelated_edit_keeps_the_precondition(harness, report, instance, context),
     );
-
-    let outcome = check_layer_lock(harness, report, instance, context);
-    report.record(
-        "5.9",
+    guard.check(
+        report,
+        premise,
         "レイヤーのロック",
         "ロックしたレイヤー上の対象への移動・削除が precondition_failed（layer_locked）になり、名前変更は成功する",
         Mode::Operator,
-        outcome,
+        |report| check_layer_lock(harness, report, instance, context),
     );
-
-    let outcome = check_layer_lock_scope(harness, instance, context);
-    report.record(
-        "5.9",
+    guard.check(
+        report,
+        premise,
         "ロックが守る範囲",
         "ロックされたレイヤー上で名前変更・設定値変更・effect の付与/状態変更/削除・レイヤー状態の変更が成功し、作成・移動・削除が precondition_failed（layer_locked）になる",
         Mode::Auto,
-        outcome,
+        |_report| check_layer_lock_scope(harness, instance, context),
     );
-
-    let outcome = check_layer_lock_release(harness, report, instance, context);
-    report.record(
-        "5.9",
+    guard.check(
+        report,
+        premise,
         "ロックの解除による行き止まりの解消",
         "aviutl2_set_layer_state でロックを掛けた対象の移動が拒否され、同じ tool でロックを解除すると移動できる",
         Mode::Auto,
-        outcome,
+        |report| check_layer_lock_release(harness, report, instance, context),
     );
 
-    let (outcome, advance) = check_revision_chain(harness, instance, context);
-    report.record(
-        "5.9",
+    let mut advance = RevisionAdvance::none();
+    guard.check(
+        report,
+        premise,
         "応答が返した値による連続編集",
         format!(
             "応答が返した selector と project_revision をそのまま次の前提に使う編集を {REVISION_CHAIN_STEPS} 回連続し、いずれも 1 回の送信で成功する"
         ),
         Mode::Auto,
-        outcome,
+        |_report| {
+            let (outcome, measured) = check_revision_chain(harness, instance, context);
+            advance = measured;
+            outcome
+        },
     );
     report.observe(
         "revision_advance",
@@ -1754,7 +1914,7 @@ fn section_fingerprint_premises(
         advance.summary(),
     );
 
-    Ok(advance)
+    advance
 }
 
 /// 無変更のオブジェクトを繰り返し読み、同一性の材料が揺れないことを確かめる。
