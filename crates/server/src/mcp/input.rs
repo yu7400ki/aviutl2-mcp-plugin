@@ -40,9 +40,6 @@ pub(crate) const FINGERPRINT_PATTERN: &str = r"^sha256:[0-9a-f]{64}$";
 /// オブジェクト名・レイヤー名に許す最大文字数。
 pub(crate) const MAX_NAME_CHARS: u32 = 1_024;
 
-/// fingerprint 算出方式名に許す最大文字数。
-pub(crate) const MAX_ALGORITHM_CHARS: u32 = 64;
-
 /// プロジェクト epoch に許す最大文字数。
 pub(crate) const MAX_EPOCH_CHARS: u32 = 64;
 
@@ -221,10 +218,6 @@ pub struct ObjectSelectorInput {
     /// 同一性検証用の fingerprint。
     #[schemars(pattern(FINGERPRINT_PATTERN))]
     pub fingerprint: String,
-    /// fingerprint の算出方式。応答が返した値を指定した場合だけ照合される。
-    #[serde(default)]
-    #[schemars(length(min = 1, max = MAX_ALGORITHM_CHARS))]
-    pub fingerprint_algorithm: Option<String>,
 }
 
 /// `aviutl2_list_available_effects` の入力。
@@ -384,14 +377,6 @@ impl ObjectSelectorInput {
         if let Some(name) = &self.name {
             ensure_length("selector.name", name, 0, MAX_NAME_CHARS)?;
         }
-        if let Some(algorithm) = &self.fingerprint_algorithm {
-            ensure_length(
-                "selector.fingerprint_algorithm",
-                algorithm,
-                1,
-                MAX_ALGORITHM_CHARS,
-            )?;
-        }
         Ok(())
     }
 
@@ -405,7 +390,6 @@ impl ObjectSelectorInput {
             "frame": self.frame,
             "name": self.name,
             "fingerprint": self.fingerprint,
-            "fingerprint_algorithm": self.fingerprint_algorithm,
         });
         serde_json::from_value(value).map_err(|_| {
             invalid_argument(
@@ -428,7 +412,7 @@ impl ListAvailableEffectsInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::{ErrorCode, FingerprintAlgorithm};
+    use aviutl2_mcp_core::ErrorCode;
 
     const SAMPLE_ID: &str = "8df98c04-e7c2-4f98-b3ce-fc1c39d76414";
     const SAMPLE_FINGERPRINT: &str =
@@ -442,7 +426,6 @@ mod tests {
             "frame": 120,
             "name": "立ち絵",
             "fingerprint": SAMPLE_FINGERPRINT,
-            "fingerprint_algorithm": "sha256-raw-v1",
         })
     }
 
@@ -543,10 +526,6 @@ mod tests {
         let cases = [
             ("project_epoch", "x".repeat(MAX_EPOCH_CHARS as usize + 1)),
             ("name", "あ".repeat(MAX_NAME_CHARS as usize + 1)),
-            (
-                "fingerprint_algorithm",
-                "x".repeat(MAX_ALGORITHM_CHARS as usize + 1),
-            ),
         ];
 
         for (field, value) in cases {
@@ -566,18 +545,16 @@ mod tests {
 
     #[test]
     fn selector_strings_reject_empty_where_declared() {
-        for field in ["project_epoch", "fingerprint_algorithm"] {
-            let mut selector = selector_json();
-            selector[field] = serde_json::json!("");
-            let input = GetObjectInput {
-                instance_id: SAMPLE_ID.to_string(),
-                selector: serde_json::from_value(selector).expect("入力型としては受理される"),
-            };
-            let error = input
-                .to_params()
-                .expect_err(&format!("{field} の空文字列が受理されました"));
-            assert_eq!(error.code, ErrorCode::InvalidArgument);
-        }
+        let mut selector = selector_json();
+        selector["project_epoch"] = serde_json::json!("");
+        let input = GetObjectInput {
+            instance_id: SAMPLE_ID.to_string(),
+            selector: serde_json::from_value(selector).expect("入力型としては受理される"),
+        };
+        let error = input
+            .to_params()
+            .expect_err("project_epoch の空文字列が受理されました");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
     }
 
     #[test]
@@ -675,33 +652,26 @@ mod tests {
         assert_eq!(params.selector.frame, 120);
         assert_eq!(params.selector.name.as_deref(), Some("立ち絵"));
         assert_eq!(params.selector.fingerprint.as_str(), SAMPLE_FINGERPRINT);
-        assert_eq!(
-            params
-                .selector
-                .fingerprint_algorithm
-                .as_ref()
-                .map(FingerprintAlgorithm::as_str),
-            Some("sha256-raw-v1")
-        );
     }
 
     #[test]
-    fn get_object_input_accepts_a_selector_without_a_fingerprint_algorithm() {
-        // 算出方式は省略できる。方式が違えば digest も違うため、名乗らない指定は
-        // fingerprint の照合が捕まえる。
+    fn get_object_input_ignores_a_fingerprint_algorithm() {
+        // 算出方式は要求の一部ではない。往復型は未知フィールドを拒否しないため
+        // 名乗る指定も受理されるが、値は接続先へ渡らずに捨てられる。
         let mut selector = selector_json();
-        selector
-            .as_object_mut()
-            .expect("selector は object")
-            .remove("fingerprint_algorithm");
+        selector["fingerprint_algorithm"] = serde_json::json!("sha256-alias-v1");
         let input: GetObjectInput = serde_json::from_value(serde_json::json!({
             "instance_id": SAMPLE_ID,
             "selector": selector,
         }))
-        .expect("算出方式を持たない selector を受理する");
+        .expect("算出方式を名乗る selector を受理する");
 
         let params = input.to_params().expect("params へ変換できる");
-        assert_eq!(params.selector.fingerprint_algorithm, None);
+        let sent = serde_json::to_value(&params.selector).expect("直列化できる");
+        assert!(
+            sent.get("fingerprint_algorithm").is_none(),
+            "{sent} が算出方式を運んでいます"
+        );
     }
 
     #[test]

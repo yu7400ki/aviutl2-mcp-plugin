@@ -705,7 +705,6 @@ mod tests {
             "effect_name": "動画ファイル",
             "effect_index": 0,
             "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            "fingerprint_algorithm": "sha256-raw-v1",
         })
     }
 
@@ -847,51 +846,39 @@ mod tests {
     }
 
     #[test]
-    fn every_edit_input_accepts_the_selectors_of_both_shapes() {
-        // effect セレクターが算出方式を運ぶ形も、オブジェクトセレクターが
-        // 運ばない形も、どちらも受理する。
+    fn every_edit_input_ignores_a_fingerprint_algorithm_in_its_selectors() {
+        // セレクターは算出方式を運ばないが、往復型なので名乗る指定も拒否せず、
+        // 値を接続先へ渡さずに捨てる。
         for operation in EditOperation::ALL {
             let name = operation.as_str();
             let mut input = current_input(operation);
-            let value = serde_json::to_string(&input).expect("直列化できる");
-            let carries_effect_selector = value.contains("effect_index");
-            let carries_object_selector = value.contains("project_epoch");
-
-            if carries_effect_selector {
-                let mut old = input.clone();
-                old["selector"]["fingerprint_algorithm"] = json!("sha256-raw-v1");
-                assert!(
-                    decode_input(operation, &old).is_ok(),
-                    "{name} が effect セレクターの算出方式を拒否しました"
-                );
-            }
-            if carries_object_selector {
-                strip_object_algorithms(&mut input);
-                assert!(
-                    decode_input(operation, &input).is_ok(),
-                    "{name} が算出方式を持たないセレクターを拒否しました"
-                );
-            }
+            add_algorithms(&mut input);
+            let params = decode_input(operation, &input)
+                .unwrap_or_else(|_| panic!("{name} がセレクターの算出方式を拒否しました"));
+            assert!(
+                !params.to_string().contains("fingerprint_algorithm"),
+                "{name} が算出方式を接続先へ運びました: {params}"
+            );
         }
     }
 
-    /// JSON を辿り、全てのオブジェクトセレクターから算出方式を落とす。
+    /// JSON を辿り、全てのセレクターへ算出方式を足す。
     ///
-    /// 要求の形ごとに selector の位置を知らずに済むよう、`project_epoch` を持つ
+    /// 要求の形ごとに selector の位置を知らずに済むよう、`fingerprint` を持つ
     /// オブジェクトをセレクターと見なす。
-    fn strip_object_algorithms(value: &mut Value) {
+    fn add_algorithms(value: &mut Value) {
         match value {
             Value::Object(map) => {
-                if map.contains_key("project_epoch") {
-                    map.remove("fingerprint_algorithm");
+                if map.contains_key("fingerprint") {
+                    map.insert("fingerprint_algorithm".to_string(), json!("sha256-raw-v1"));
                 }
                 for nested in map.values_mut() {
-                    strip_object_algorithms(nested);
+                    add_algorithms(nested);
                 }
             }
             Value::Array(items) => {
                 for item in items {
-                    strip_object_algorithms(item);
+                    add_algorithms(item);
                 }
             }
             _ => {}

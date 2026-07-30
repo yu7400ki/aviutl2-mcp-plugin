@@ -10,7 +10,6 @@ use crate::read::host::{
     ReadHost, SceneReader,
 };
 use crate::read::{Page, ProjectStatus, ReadAdapter, Snapshot};
-use aviutl2_mcp_core::FingerprintAlgorithm;
 use aviutl2_mcp_core::{
     AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFingerprintInput, EffectInfo,
     EffectType, Extent, FiniteF64, FrameRange, LayerInfo, ObjectDetail, ObjectFilter,
@@ -267,7 +266,6 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
         if epoch != selector.project_epoch {
             return Err(ReadError::EpochMismatch);
         }
-        ensure_fingerprint_algorithm(selector.fingerprint_algorithm.as_ref())?;
 
         let scene_id = info.scene_id;
         let epoch = epoch.as_str();
@@ -410,25 +408,6 @@ fn verified_summary(
         });
     }
     Ok(summary)
-}
-
-/// セレクターの算出方式が現在生成できる方式と一致することを確かめる。
-///
-/// 省略された指定は照合しない。方式が違えば digest も違うため、名乗らない
-/// 指定は fingerprint の照合が捕まえる。
-pub(crate) fn ensure_fingerprint_algorithm(
-    requested: Option<&FingerprintAlgorithm>,
-) -> Result<(), ReadError> {
-    let Some(requested) = requested else {
-        return Ok(());
-    };
-    if *requested == FingerprintAlgorithm::GENERATED {
-        return Ok(());
-    }
-    Err(ReadError::FingerprintAlgorithmMismatch {
-        requested: requested.to_string(),
-        supported: FingerprintAlgorithm::GENERATED.to_string(),
-    })
 }
 
 /// 開始フレームの完全一致で候補を 1 件へ絞る。
@@ -1928,46 +1907,17 @@ mod tests {
     }
 
     #[test]
-    fn get_object_reports_precondition_failed_for_algorithm_mismatch() {
+    fn a_selector_carrying_a_tampered_fingerprint_is_rejected() {
+        // 要求は算出方式を運ばない。方式が変われば digest も変わるため、対象の
+        // 同一性は fingerprint の照合だけで守られる。
         let adapter = adapter();
         let mut selector = sample_selector(&adapter);
-        selector.fingerprint_algorithm = Some(FingerprintAlgorithm::NormalizedAliasV1);
-
-        let error = adapter.get_object(&selector).unwrap_err();
-        assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
-        assert_eq!(
-            error.details()["requested_fingerprint_algorithm"],
-            "sha256-alias-v1"
-        );
-        assert!(
-            !adapter.host.calls().contains(&"enter_read_section"),
-            "方式不一致で参照区間へ入りました"
-        );
-    }
-
-    #[test]
-    fn get_object_accepts_a_selector_without_a_fingerprint_algorithm() {
-        // 方式は省略できる。方式が違えば digest も違うため、名乗らない指定でも
-        // fingerprint の照合が食い違いを捕まえる。
-        let adapter = adapter();
-        let mut selector = sample_selector(&adapter);
-        selector.fingerprint_algorithm = None;
-
-        adapter
-            .get_object(&selector)
-            .expect("算出方式を持たない指定が拒否されました");
-    }
-
-    #[test]
-    fn a_selector_without_an_algorithm_still_checks_the_fingerprint() {
-        let adapter = adapter();
-        let mut selector = sample_selector(&adapter);
-        selector.fingerprint_algorithm = None;
         selector.fingerprint = format!("sha256:{}", "0".repeat(64))
             .parse()
             .expect("差し替えた fingerprint の書式");
 
         let error = adapter.get_object(&selector).unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
         assert!(
             matches!(error, ReadError::FingerprintMismatch { .. }),
             "{error} が fingerprint の食い違いとして返っていません"

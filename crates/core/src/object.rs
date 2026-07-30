@@ -3,7 +3,7 @@
 //! frame 番号・layer 番号はいずれも 0 始まりである。
 
 use crate::effect::EffectInfo;
-use crate::fingerprint::{Fingerprint, FingerprintAlgorithm, ObjectFingerprintInput};
+use crate::fingerprint::{Fingerprint, ObjectFingerprintInput};
 use crate::selector::ObjectSelector;
 use serde::{Deserialize, Serialize};
 
@@ -58,7 +58,6 @@ impl ObjectSummary {
                 frame: input.frame_start,
                 name: input.name.map(str::to_string),
                 fingerprint: fingerprint.clone(),
-                fingerprint_algorithm: Some(FingerprintAlgorithm::GENERATED),
             },
             fingerprint,
         }

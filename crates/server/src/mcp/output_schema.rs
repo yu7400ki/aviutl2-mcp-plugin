@@ -284,7 +284,6 @@ fn object_selector() -> Value {
         ("frame", unsigned()),
         ("name", nullable_string()),
         ("fingerprint", string()),
-        ("fingerprint_algorithm", string()),
     ])
 }
 

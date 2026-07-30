@@ -1282,6 +1282,8 @@ fn edit_tool_call_and_resource_read_survive_overlapping() {
                         "frame": 120,
                         "name": null,
                         "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                        // セレクターは往復型であり、要求の一部ではない算出方式を
+                        // 名乗っても入口で拒否されない。
                         "fingerprint_algorithm": "sha256-raw-v1",
                     },
                 },

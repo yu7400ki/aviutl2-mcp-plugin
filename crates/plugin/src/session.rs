@@ -2004,10 +2004,6 @@ mod tests {
                 current: SCENE_ID,
             },
             || ReadError::EpochMismatch,
-            || ReadError::FingerprintAlgorithmMismatch {
-                requested: "sha256-future-v9".to_string(),
-                supported: "sha256-alias-v1".to_string(),
-            },
             || ReadError::FingerprintMismatch {
                 current_object: Box::new(crate::test_support::sample_object_summary()),
             },
@@ -2317,7 +2313,6 @@ mod edit_tests {
             "effect_name": "動画ファイル",
             "effect_index": 0,
             "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            "fingerprint_algorithm": "sha256-raw-v1",
         })
     }
 
@@ -2514,24 +2509,17 @@ mod edit_tests {
             decode_request(operation, &current)
                 .unwrap_or_else(|error| panic!("{name} の現在の形が拒否されました: {error:?}"));
 
-            // effect セレクターが算出方式を運ぶ。往復型なので受理する。
-            let mut old = current.clone();
-            for_each_effect_selector(&mut old, &|map| {
+            // セレクターは算出方式を運ばないが、往復型なので名乗る指定も
+            // 拒否せず、値を解釈せずに捨てる。
+            let mut with_algorithm = current.clone();
+            let insert = |map: &mut serde_json::Map<String, Value>| {
                 map.insert("fingerprint_algorithm".to_string(), json!("sha256-raw-v1"));
-            });
+            };
+            for_each_object_selector(&mut with_algorithm, &insert);
+            for_each_effect_selector(&mut with_algorithm, &insert);
             assert!(
-                decode_request(operation, &old).is_ok(),
-                "{name} が effect セレクターの算出方式を拒否しました"
-            );
-
-            // オブジェクトセレクターは算出方式を運ばない。
-            let mut without = current.clone();
-            for_each_object_selector(&mut without, &|map| {
-                map.remove("fingerprint_algorithm");
-            });
-            assert!(
-                decode_request(operation, &without).is_ok(),
-                "{name} が算出方式を持たないセレクターを拒否しました"
+                decode_request(operation, &with_algorithm).is_ok(),
+                "{name} がセレクターの算出方式を拒否しました"
             );
 
             // 未知フィールドは拒否する。

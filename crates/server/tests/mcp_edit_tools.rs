@@ -265,10 +265,6 @@ fn selector_input() -> ObjectSelectorInput {
         frame: selector.frame as u32,
         name: selector.name,
         fingerprint: selector.fingerprint.as_str().to_string(),
-        fingerprint_algorithm: selector
-            .fingerprint_algorithm
-            .as_ref()
-            .map(|algorithm| algorithm.as_str().to_string()),
     }
 }
 

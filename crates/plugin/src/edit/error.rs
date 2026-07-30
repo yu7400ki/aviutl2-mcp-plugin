@@ -154,8 +154,6 @@ pub enum Mismatch {
     FocusProjectEpoch,
     /// 現在シーンの ID。
     SceneId,
-    /// fingerprint の算出方式。
-    FingerprintAlgorithm,
     /// 対象の fingerprint。
     Fingerprint,
 }
@@ -168,7 +166,6 @@ impl Mismatch {
             Mismatch::ExpectedProjectEpoch => "expected_project_epoch",
             Mismatch::FocusProjectEpoch => "focus_project_epoch",
             Mismatch::SceneId => "scene_id",
-            Mismatch::FingerprintAlgorithm => "fingerprint_algorithm",
             Mismatch::Fingerprint => "fingerprint",
         }
     }
@@ -328,9 +325,6 @@ impl EditError {
                 EpochSource::Focus => Mismatch::FocusProjectEpoch,
             }),
             EditError::Read(ReadError::SceneMismatch { .. }) => Some(Mismatch::SceneId),
-            EditError::Read(ReadError::FingerprintAlgorithmMismatch { .. }) => {
-                Some(Mismatch::FingerprintAlgorithm)
-            }
             EditError::Read(ReadError::FingerprintMismatch { .. })
             | EditError::EffectFingerprintMismatch => Some(Mismatch::Fingerprint),
             EditError::AfterMutation { source, .. } => source.mismatch(),
@@ -484,10 +478,6 @@ mod tests {
                 current: 3,
             }),
             EditError::Read(ReadError::EpochMismatch),
-            EditError::Read(ReadError::FingerprintAlgorithmMismatch {
-                requested: "sha256-future-v9".to_string(),
-                supported: "sha256-raw-v1".to_string(),
-            }),
             EditError::Read(ReadError::FingerprintMismatch {
                 current_object: Box::new(sample_object_summary()),
             }),
@@ -687,7 +677,6 @@ mod tests {
                 ErrorCode::PreconditionFailed,
                 ErrorCode::PreconditionFailed,
                 ErrorCode::PreconditionFailed,
-                ErrorCode::PreconditionFailed,
                 ErrorCode::NotFound,
                 ErrorCode::AmbiguousSelector,
                 ErrorCode::SdkError,
@@ -827,13 +816,6 @@ mod tests {
                 "scene_id",
             ),
             (
-                EditError::Read(ReadError::FingerprintAlgorithmMismatch {
-                    requested: "x".to_string(),
-                    supported: "y".to_string(),
-                }),
-                "fingerprint_algorithm",
-            ),
-            (
                 EditError::Read(ReadError::FingerprintMismatch {
                     current_object: Box::new(sample_object_summary()),
                 }),
@@ -948,8 +930,6 @@ mod tests {
             "current_scene_id",
             "current_project_revision",
             "mismatch",
-            "requested_fingerprint_algorithm",
-            "supported_fingerprint_algorithm",
             "candidate_count",
             "reason",
             "layer",
@@ -969,7 +949,6 @@ mod tests {
             "name",
             "selector",
             "fingerprint",
-            "fingerprint_algorithm",
             "project_epoch",
             "scene_id",
         ];

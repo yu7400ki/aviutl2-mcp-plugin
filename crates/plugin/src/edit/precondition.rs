@@ -62,7 +62,6 @@
 use crate::edit::error::{EditError, EpochSource};
 use crate::project::ProjectState;
 use crate::read::ReadError;
-use crate::read::adapter::ensure_fingerprint_algorithm;
 use crate::read::host::HostEditInfo;
 use aviutl2_mcp_core::ObjectSelector;
 use std::cell::Cell;
@@ -279,7 +278,7 @@ fn epoch_mismatch(source: Option<EpochSource>) -> EditError {
     }
 }
 
-/// 判定 1〜4 を要求全体へ適用する。
+/// 判定 1〜3 を要求全体へ適用する。
 ///
 /// 前提の epoch を運ぶのは、対象を指すセレクターを持たない要求だけである。
 /// セレクターを持つ要求は [`ExpectedEpoch::Absent`] を渡す。判定 2 が同じ値を
@@ -321,10 +320,6 @@ pub(crate) fn verify_boundary(
     for selector in selectors {
         ensure_scene(selector.scene_id, scene_id)?;
     }
-    // 4. fingerprint の算出方式。
-    for selector in selectors {
-        ensure_fingerprint_algorithm(selector.fingerprint_algorithm.as_ref())?;
-    }
 
     Ok(Boundary {
         observed,
@@ -345,9 +340,7 @@ fn ensure_scene(expected: i32, current: i32) -> Result<(), EditError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::{
-        ErrorCode, FingerprintAlgorithm, ObjectFingerprintInput, ObjectSummary,
-    };
+    use aviutl2_mcp_core::{ErrorCode, ObjectFingerprintInput, ObjectSummary};
     use serde_json::json;
     use std::sync::Arc;
 
@@ -493,13 +486,28 @@ mod tests {
     }
 
     #[test]
-    fn scene_is_checked_before_the_fingerprint_algorithm() {
+    fn the_epoch_is_checked_before_the_scene() {
+        // 判定は段ごとに全対象へ適用する。複数の段が同時に食い違う要求でも、
+        // 名乗る食い違いは段の順序で定まる。
+        let mut stale = selector("別のプロジェクト");
+        stale.scene_id = 9;
+        let error = verify_boundary(
+            &state(),
+            &edit_info(0),
+            ExpectedEpoch::Absent,
+            EditKind::Content,
+            &[],
+            &[&stale],
+        )
+        .expect_err("別プロジェクトのセレクターが受理されました");
+        assert_eq!(error.details()["mismatch"], json!("project_epoch"));
+    }
+
+    #[test]
+    fn a_stale_scene_is_rejected() {
         let project = state();
         let epoch = project.epoch();
         let mut stale = selector(&epoch);
-        stale.fingerprint_algorithm = Some(FingerprintAlgorithm::Unknown(
-            "sha256-future-v9".to_string(),
-        ));
         stale.scene_id = 9;
         let error = verify_boundary(
             &project,
@@ -513,26 +521,6 @@ mod tests {
         assert_eq!(error.details()["mismatch"], json!("scene_id"));
         assert_eq!(error.details()["expected_scene_id"], json!(9));
         assert_eq!(error.details()["current_scene_id"], json!(0));
-    }
-
-    #[test]
-    fn unknown_fingerprint_algorithm_is_rejected() {
-        let project = state();
-        let epoch = project.epoch();
-        let mut stale = selector(&epoch);
-        stale.fingerprint_algorithm = Some(FingerprintAlgorithm::Unknown(
-            "sha256-future-v9".to_string(),
-        ));
-        let error = verify_boundary(
-            &project,
-            &edit_info(0),
-            ExpectedEpoch::Absent,
-            EditKind::Content,
-            &[],
-            &[&stale],
-        )
-        .expect_err("未知の算出方式が受理されました");
-        assert_eq!(error.details()["mismatch"], json!("fingerprint_algorithm"));
     }
 
     #[test]

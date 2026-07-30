@@ -40,14 +40,6 @@ pub enum ReadError {
     /// プロジェクトの epoch が要求の前提と異なる。
     #[error("プロジェクトの epoch が要求の前提と一致しません")]
     EpochMismatch,
-    /// fingerprint の算出方式が要求と異なる。
-    #[error("fingerprint の算出方式が要求と一致しません")]
-    FingerprintAlgorithmMismatch {
-        /// 要求が指定した算出方式。
-        requested: String,
-        /// 現在生成できる算出方式。
-        supported: String,
-    },
     /// 候補の fingerprint が要求と一致しない。
     #[error("対象の fingerprint が要求と一致しません")]
     FingerprintMismatch {
@@ -96,7 +88,6 @@ impl ReadError {
             ReadError::EditBlocked { .. } => ErrorCode::EditBlocked,
             ReadError::SceneMismatch { .. }
             | ReadError::EpochMismatch
-            | ReadError::FingerprintAlgorithmMismatch { .. }
             | ReadError::FingerprintMismatch { .. } => ErrorCode::PreconditionFailed,
             ReadError::ObjectNotFound { .. } => ErrorCode::NotFound,
             ReadError::AmbiguousObject { .. } => ErrorCode::AmbiguousSelector,
@@ -136,13 +127,6 @@ impl ReadError {
                 "current_scene_id": current,
             }),
             ReadError::EpochMismatch => json!({}),
-            ReadError::FingerprintAlgorithmMismatch {
-                requested,
-                supported,
-            } => json!({
-                "requested_fingerprint_algorithm": requested,
-                "supported_fingerprint_algorithm": supported,
-            }),
             ReadError::FingerprintMismatch { current_object } => {
                 json!({ "current_object": current_object })
             }
@@ -176,10 +160,6 @@ mod tests {
                 current: 3,
             },
             ReadError::EpochMismatch,
-            ReadError::FingerprintAlgorithmMismatch {
-                requested: "sha256-future-v9".to_string(),
-                supported: "sha256-raw-v1".to_string(),
-            },
             ReadError::FingerprintMismatch {
                 current_object: Box::new(sample_object_summary()),
             },
@@ -203,7 +183,6 @@ mod tests {
                 ErrorCode::HostBusy,
                 ErrorCode::EditBlocked,
                 ErrorCode::EditBlocked,
-                ErrorCode::PreconditionFailed,
                 ErrorCode::PreconditionFailed,
                 ErrorCode::PreconditionFailed,
                 ErrorCode::PreconditionFailed,
@@ -261,8 +240,6 @@ mod tests {
             "edit_state",
             "expected_scene_id",
             "current_scene_id",
-            "requested_fingerprint_algorithm",
-            "supported_fingerprint_algorithm",
             "candidate_count",
             "sdk_operation",
             // 読み直した対象の概要と、それが内包するセレクター。
@@ -273,7 +250,6 @@ mod tests {
             "name",
             "selector",
             "fingerprint",
-            "fingerprint_algorithm",
             "project_epoch",
             "scene_id",
             "frame",

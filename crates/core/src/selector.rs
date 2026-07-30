@@ -1,6 +1,6 @@
 //! opaque handle を公開せずに対象を再指定するセレクター。
 
-use crate::fingerprint::{Fingerprint, FingerprintAlgorithm};
+use crate::fingerprint::Fingerprint;
 use serde::{Deserialize, Serialize};
 
 /// オブジェクトを再指定するセレクター。
@@ -24,24 +24,16 @@ pub struct ObjectSelector {
     /// 名前が変わった対象は fingerprint の照合が捕まえる。
     pub name: Option<String>,
     /// 同一性検証用の fingerprint。
-    pub fingerprint: Fingerprint,
-    /// fingerprint の算出方式。
     ///
-    /// 省略できる。指定された場合だけ、現在生成できる方式との一致を照合する。
-    /// 方式が違えば digest も違うため、省略しても fingerprint の照合が食い違いを
-    /// 捕まえる。応答は常に返すので、そのまま送り返せば従来どおり方式の段で
-    /// 落ちる。
-    #[serde(default)]
-    pub fingerprint_algorithm: Option<FingerprintAlgorithm>,
+    /// 算出方式は運ばない。方式は digest の材料であり、方式が違えば digest も
+    /// 違うため、方式の食い違いは fingerprint の照合が捕まえる。
+    pub fingerprint: Fingerprint,
 }
 
 /// オブジェクト内の effect を再指定するセレクター。
 ///
 /// 同名 effect の順序は `effect_index` で表し、利用者へ名前の文字列結合を
 /// 要求しない。[`ObjectSelector`] と同じ理由で未知フィールドを拒否しない。
-///
-/// fingerprint の算出方式は持たない。方式の照合は `object` が持つ値に対して
-/// 行われ、effect 側の値は解決のどの段でも読まれない。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectSelector {
     /// effect が属するオブジェクト。
@@ -78,7 +70,6 @@ mod tests {
             frame: 120,
             name: Some("立ち絵".to_string()),
             fingerprint: sample_fingerprint("alias"),
-            fingerprint_algorithm: Some(FingerprintAlgorithm::GENERATED),
         }
     }
 
@@ -112,18 +103,16 @@ mod tests {
     }
 
     #[test]
-    fn object_selector_allows_omitting_the_fingerprint_algorithm() {
+    fn object_selector_ignores_a_fingerprint_algorithm() {
+        // 往復型は未知フィールドを拒否しない。方式を名乗る指定も拒否されず、
+        // 値は解釈されずに捨てられる。
         let mut value = serde_json::to_value(sample_object_selector()).unwrap();
-        assert!(
-            value
-                .as_object_mut()
-                .unwrap()
-                .remove("fingerprint_algorithm")
-                .is_some(),
-            "応答が算出方式を返していません"
+        value.as_object_mut().unwrap().insert(
+            "fingerprint_algorithm".to_string(),
+            serde_json::json!("sha256-alias-v1"),
         );
         let restored: ObjectSelector = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.fingerprint_algorithm, None);
+        assert_eq!(restored, sample_object_selector());
     }
 
     #[test]
@@ -181,14 +170,18 @@ mod tests {
     }
 
     #[test]
-    fn effect_selector_does_not_carry_a_fingerprint_algorithm() {
-        // 方式の照合は所属オブジェクトの指定に対して行う。読まれない値を
-        // 要求元へ組み立てさせない。
-        let value = serde_json::to_value(sample_effect_selector()).unwrap();
-        assert!(
-            value.get("fingerprint_algorithm").is_none(),
-            "{value} が算出方式を持っています"
-        );
+    fn selectors_do_not_carry_a_fingerprint_algorithm() {
+        // 方式は digest の材料であって運ぶ値ではない。読まれない値を要求元へ
+        // 組み立てさせない。
+        for value in [
+            serde_json::to_value(sample_object_selector()).unwrap(),
+            serde_json::to_value(sample_effect_selector()).unwrap(),
+        ] {
+            assert!(
+                value.get("fingerprint_algorithm").is_none(),
+                "{value} が算出方式を持っています"
+            );
+        }
     }
 
     #[test]
