@@ -5,14 +5,14 @@ mod support;
 use aviutl2_mcp_core::{
     AuthSecret, Cursor, EditOutcome, EffectFingerprintInput, EffectInfo, EffectItem,
     EffectItemType, ErrorCode, ErrorObject, FrameRange, InstanceId, InstanceState, ItemValue,
-    ObjectFingerprintInput, ObjectSelector, ObjectSummary, RequestEnvelope, SelectionField,
-    SelectionState,
+    LayerInfo, LayerStateOutcome, ObjectFingerprintInput, ObjectSelector, ObjectSummary,
+    RequestEnvelope, SelectionField, SelectionState,
 };
 use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, CreateObjectInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
-    DestinationInput, EffectSelectorInput, FocusChangeInput, ItemValueInput, MoveObjectInput,
-    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetObjectItemInput,
-    SetObjectNameInput, SetSelectionInput,
+    DestinationInput, EffectSelectorInput, FocusChangeInput, ItemValueInput, LayerNameChangeInput,
+    MoveObjectInput, ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput,
+    SetLayerStateInput, SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::ObjectSelectorInput;
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
@@ -238,6 +238,21 @@ fn selection_state() -> Value {
         vec![SelectionField::Cursor, SelectionField::Focus],
         vec![SelectionField::SelectedRange],
     ))
+    .expect("直列化できる")
+}
+
+fn layer_state() -> Value {
+    serde_json::to_value(LayerStateOutcome {
+        project_epoch: EPOCH.to_string(),
+        project_revision: APPLIED_REVISION,
+        layer: LayerInfo {
+            index: 2,
+            name: Some("背景".to_string()),
+            enabled: true,
+            locked: false,
+            object_count: 3,
+        },
+    })
     .expect("直列化できる")
 }
 
@@ -594,6 +609,47 @@ async fn set_selection_tool_sends_the_scene_guard_and_changes() {
     );
     let text = text_of(&result);
     assert!(text.contains("適用できた項目: cursor focus"), "{text}");
+}
+
+#[tokio::test]
+async fn set_layer_state_tool_sends_the_three_axes_and_the_scene_guard() {
+    let expected = layer_state();
+    let harness = Harness::start(responses("set_layer_state", expected.clone()));
+
+    let result = harness
+        .server
+        .aviutl2_set_layer_state(Parameters(SetLayerStateInput {
+            instance_id: harness.instance_id(),
+            expected_scene_id: SCENE_ID,
+            layer: 2,
+            name: Some(LayerNameChangeInput::Reset {}),
+            enabled: Some(true),
+            locked: Some(false),
+            expected_project_epoch: EPOCH.to_string(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+
+    let request = harness.only_request();
+    assert_eq!(request.operation, "set_layer_state");
+    assert_eq!(
+        request.params,
+        json!({
+            "expected_scene_id": SCENE_ID,
+            "layer": 2,
+            "name": { "type": "reset" },
+            "enabled": true,
+            "locked": false,
+            "expected_project_epoch": EPOCH,
+        }),
+    );
+    let text = text_of(&result);
+    assert!(text.contains("layer=2"), "{text}");
+    assert!(text.contains("project_revision=43"), "{text}");
+    // レイヤーは fingerprint を持たない。応答の値で確認するよう案内する。
+    assert!(text.contains("fingerprint"), "{text}");
 }
 
 /// 編集要求へ載る期限を確かめるために縮めた予算。

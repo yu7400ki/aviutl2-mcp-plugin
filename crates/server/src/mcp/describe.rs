@@ -10,9 +10,9 @@
 use crate::api::ListInstancesResponse;
 use crate::mcp::summary::{TextBuilder, clamp_chars};
 use aviutl2_mcp_core::{
-    EditInfo, EditOutcome, GetCurrentSceneResult, InstanceInfo, ListAvailableEffectsResult,
-    ListLayersResult, ListObjectsResult, ObjectDetail, ObjectSummary, PageMeta, SelectionField,
-    SelectionState,
+    EditInfo, EditOutcome, GetCurrentSceneResult, InstanceInfo, LayerStateOutcome,
+    ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, ObjectDetail, ObjectSummary,
+    PageMeta, SelectionField, SelectionState,
 };
 
 /// 名前をそのまま行に載せるときの最大文字数。
@@ -264,6 +264,24 @@ pub fn delete_object(outcome: &EditOutcome) -> String {
     text.push_line(format!("project_revision={}", outcome.project_revision));
     text.push_line(
         "削除した対象の selector は以後使えません。別の対象を編集する場合は読み直してください",
+    );
+    text.finish()
+}
+
+/// `aviutl2_set_layer_state` の text content。
+pub fn layer_state(outcome: &LayerStateOutcome) -> String {
+    let layer = &outcome.layer;
+    let mut text = TextBuilder::new();
+    text.push_line(format!(
+        "layer={} name={} enabled={} locked={}（layer は 0 始まり）",
+        layer.index,
+        optional_name(layer.name.as_deref()),
+        layer.enabled,
+        layer.locked,
+    ));
+    text.push_line(format!("project_revision={}", outcome.project_revision));
+    text.push_line(
+        "上の値は変更後に読み直した実際の状態です。レイヤーは fingerprint を持たないため、読み取り時からの変化は検出できません",
     );
     text.finish()
 }
@@ -807,9 +825,29 @@ mod tests {
             ),
             ("aviutl2_delete_effect", delete_effect(&object_changed)),
             ("aviutl2_delete_object", delete_object(&deleted)),
+            (
+                "aviutl2_set_layer_state",
+                layer_state(&LayerStateOutcome {
+                    project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+                    project_revision: 43,
+                    layer: LayerInfo {
+                        index: 2,
+                        name: Some("背景".to_string()),
+                        enabled: false,
+                        locked: true,
+                        object_count: 3,
+                    },
+                }),
+            ),
             ("aviutl2_set_selection", selection_state(&selection)),
         ]
     }
+
+    /// 応答が対象オブジェクトの位置を運ばない tool。
+    ///
+    /// 削除では対象が消えており、レイヤーの状態変更ではそもそも対象が
+    /// オブジェクトではない。
+    const TOOLS_WITHOUT_AN_OBJECT: &[&str] = &["aviutl2_delete_object", "aviutl2_set_layer_state"];
 
     #[test]
     fn edit_text_states_the_change_the_revision_and_the_next_step() {
@@ -828,8 +866,7 @@ mod tests {
     #[test]
     fn edit_text_locates_the_target() {
         for (tool, text) in every_edit_text() {
-            if tool == "aviutl2_delete_object" {
-                // 対象は消えているため位置を示さない。
+            if TOOLS_WITHOUT_AN_OBJECT.contains(&tool) {
                 continue;
             }
             assert!(

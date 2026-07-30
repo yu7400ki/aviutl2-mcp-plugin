@@ -125,6 +125,18 @@ pub fn delete_effect() -> Value {
     edit_outcome(object_summary(), null(), nothing_created())
 }
 
+/// `aviutl2_set_layer_state` の出力。
+///
+/// `layer` には変更後に読み直した状態が入る。レイヤーは fingerprint を持たない
+/// ため、要求元はこの値で実際の状態を確かめる。
+pub fn set_layer_state() -> Value {
+    object(&[
+        ("project_epoch", string()),
+        ("project_revision", unsigned()),
+        ("layer", layer_info()),
+    ])
+}
+
 /// `aviutl2_set_selection` の出力。
 pub fn set_selection() -> Value {
     object(&[
@@ -959,6 +971,27 @@ mod tests {
         for schema in [set_object_item(), add_effect(), set_effect_enabled()] {
             assert_conforms(schema, &value);
         }
+    }
+
+    #[test]
+    fn set_layer_state_schema_matches_dto() {
+        let outcome = aviutl2_mcp_core::LayerStateOutcome {
+            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            project_revision: 43,
+            layer: LayerInfo {
+                index: 2,
+                name: Some("背景".to_string()),
+                enabled: false,
+                locked: true,
+                object_count: 3,
+            },
+        };
+        assert_conforms(set_layer_state(), &to_value(&outcome));
+
+        // 標準名のままのレイヤーは名前を持たない。
+        let mut value = to_value(&outcome);
+        value["layer"]["name"] = json!(null);
+        assert_conforms(set_layer_state(), &value);
     }
 
     #[test]

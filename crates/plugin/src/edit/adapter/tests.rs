@@ -2532,9 +2532,13 @@ fn changing_the_layer_state_advances_the_revision_once_for_all_three_axes() {
 ///
 /// 第 2 引数は「この要求はどのプロジェクトのどのシーンの、どの対象を指すか」の
 /// 表明である。対象を持つ operation はこれをそのまま selector として渡し、対象
-/// を持たない作成は epoch を前提へ、シーンを配置先へ写す。どちらも同じ表明で
-/// あり、食い違わせたときに拒否されることを同じ形で確かめられる。
-type ContentEdit = fn(&Harness, ObjectSelector) -> Result<EditOutcome, EditError>;
+/// を持たない作成とレイヤーの状態変更は epoch を前提へ、シーンを guard へ、
+/// レイヤー番号を対象へ写す。どれも同じ表明であり、食い違わせたときに拒否される
+/// ことを同じ形で確かめられる。
+///
+/// 返すのは応答が載せる revision だけである。応答の型は operation ごとに
+/// 異なるが、この表が確かめるのはどれにも共通する 1 つの値である。
+type ContentEdit = fn(&Harness, ObjectSelector) -> Result<u64, EditError>;
 
 /// operation を 1 つ実行する手続きを引く。
 ///
@@ -2552,65 +2556,113 @@ fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
                 scene_id,
                 ..
             } = target;
-            harness.edit.create_object(&CreateObjectParams {
-                source: ObjectSource::ObjectAlias {
-                    alias: "[obj]".to_string(),
-                },
-                placement: Placement {
-                    scene_id,
-                    layer: 1,
-                    frame: 600,
-                },
-                expected_project_epoch: project_epoch,
-            })
+            harness
+                .edit
+                .create_object(&CreateObjectParams {
+                    source: ObjectSource::ObjectAlias {
+                        alias: "[obj]".to_string(),
+                    },
+                    placement: Placement {
+                        scene_id,
+                        layer: 1,
+                        frame: 600,
+                    },
+                    expected_project_epoch: project_epoch,
+                })
+                .map(revision_of)
         },
         EditOperation::MoveObject => |harness: &Harness, target| {
-            harness.edit.move_object(&MoveObjectParams {
-                selector: target,
-                destination: Destination {
-                    layer: 1,
-                    frame: 500,
-                },
-            })
+            harness
+                .edit
+                .move_object(&MoveObjectParams {
+                    selector: target,
+                    destination: Destination {
+                        layer: 1,
+                        frame: 500,
+                    },
+                })
+                .map(revision_of)
         },
         EditOperation::DeleteObject => |harness: &Harness, target| {
             harness
                 .edit
                 .delete_object(&DeleteObjectParams { selector: target })
+                .map(revision_of)
         },
         EditOperation::SetObjectName => |harness: &Harness, target| {
-            harness.edit.set_object_name(&SetObjectNameParams {
-                selector: target,
-                name: Some("名前".to_string()),
-            })
+            harness
+                .edit
+                .set_object_name(&SetObjectNameParams {
+                    selector: target,
+                    name: Some("名前".to_string()),
+                })
+                .map(revision_of)
         },
         EditOperation::SetObjectItem => |harness: &Harness, target| {
-            harness.edit.set_object_item(&SetObjectItemParams {
-                selector: harness.effect_selector_of(target, "ぼかし", 0),
-                item: "範囲".to_string(),
-                value: ItemValue::Integer { value: 30 },
-            })
+            harness
+                .edit
+                .set_object_item(&SetObjectItemParams {
+                    selector: harness.effect_selector_of(target, "ぼかし", 0),
+                    item: "範囲".to_string(),
+                    value: ItemValue::Integer { value: 30 },
+                })
+                .map(revision_of)
         },
         EditOperation::AddEffect => |harness: &Harness, target| {
-            harness.edit.add_effect(&AddEffectParams {
-                object: target,
-                effect_name: "ぼかし".to_string(),
-            })
+            harness
+                .edit
+                .add_effect(&AddEffectParams {
+                    object: target,
+                    effect_name: "ぼかし".to_string(),
+                })
+                .map(revision_of)
         },
         EditOperation::DeleteEffect => |harness: &Harness, target| {
-            harness.edit.delete_effect(&DeleteEffectParams {
-                selector: harness.effect_selector_of(target, "ぼかし", 0),
-            })
+            harness
+                .edit
+                .delete_effect(&DeleteEffectParams {
+                    selector: harness.effect_selector_of(target, "ぼかし", 0),
+                })
+                .map(revision_of)
         },
         EditOperation::SetEffectEnabled => |harness: &Harness, target| {
-            harness.edit.set_effect_enabled(&SetEffectEnabledParams {
-                selector: harness.effect_selector_of(target, "ぼかし", 0),
-                enabled: false,
-            })
+            harness
+                .edit
+                .set_effect_enabled(&SetEffectEnabledParams {
+                    selector: harness.effect_selector_of(target, "ぼかし", 0),
+                    enabled: false,
+                })
+                .map(revision_of)
+        },
+        EditOperation::SetLayerState => |harness: &Harness, target: ObjectSelector| {
+            let ObjectSelector {
+                project_epoch,
+                scene_id,
+                layer,
+                ..
+            } = target;
+            harness
+                .edit
+                .set_layer_state(&SetLayerStateParams {
+                    expected_scene_id: scene_id,
+                    layer: layer as u32,
+                    name: Some(LayerNameChange::Set {
+                        name: "レイヤー".to_string(),
+                    }),
+                    enabled: None,
+                    locked: None,
+                    expected_project_epoch: project_epoch,
+                })
+                .map(|outcome| outcome.project_revision)
         },
         // 選択状態はプロジェクトの内容ではない。revision を進めない。
         EditOperation::SetSelection => return None,
     })
+}
+
+/// 応答が載せる revision を取り出す。
+fn revision_of(outcome: EditOutcome) -> u64 {
+    outcome.project_revision
 }
 
 /// 内容を変える operation を全て、名前つきで列挙する。
@@ -2662,7 +2714,7 @@ fn every_content_edit_advances_the_revision_once() {
     for (name, run) in content_edits() {
         let harness = Harness::new();
         let target = harness.selector(1, 100);
-        let outcome = run(&harness, target).unwrap_or_else(|error| {
+        let revision = run(&harness, target).unwrap_or_else(|error| {
             panic!("{name} が失敗しました: {error}");
         });
 
@@ -2672,7 +2724,7 @@ fn every_content_edit_advances_the_revision_once() {
             "{name} が revision を進めていません"
         );
         assert_eq!(
-            outcome.project_revision, 1,
+            revision, 1,
             "{name} の応答が加算後の revision を返していません"
         );
         assert!(
@@ -2710,7 +2762,9 @@ fn locked_layer(operation: EditOperation) -> Option<LockedLayer> {
         | EditOperation::SetObjectItem
         | EditOperation::AddEffect
         | EditOperation::DeleteEffect
-        | EditOperation::SetEffectEnabled => LockedLayer::Allowed,
+        | EditOperation::SetEffectEnabled
+        // ロックを外す手段そのものをロックで止めると、行き止まりが解けなくなる。
+        | EditOperation::SetLayerState => LockedLayer::Allowed,
         EditOperation::SetSelection => return None,
     })
 }

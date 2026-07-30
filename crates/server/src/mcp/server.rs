@@ -9,7 +9,8 @@ use crate::api::{ListInstancesResponse, aviutl2_list_instances};
 use crate::discovery::{DiscoveryConfig, list_registered_instances, resolve_instance};
 use crate::mcp::edit_input::{
     AddEffectInput, CreateObjectInput, DeleteEffectInput, DeleteObjectInput, MoveObjectInput,
-    SetEffectEnabledInput, SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
+    SetEffectEnabledInput, SetLayerStateInput, SetObjectItemInput, SetObjectNameInput,
+    SetSelectionInput,
 };
 use crate::mcp::input::{
     GetObjectInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput, ListLayersInput,
@@ -20,14 +21,15 @@ use crate::mcp::{describe, failure};
 use crate::redact;
 use aviutl2_mcp_core::{
     EditInfo, EditOutcome, ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult,
-    GetEditInfoParams, InstanceId, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
-    MAX_PAGE_LIMIT, OPERATION_ADD_EFFECT, OPERATION_CREATE_OBJECT, OPERATION_DELETE_EFFECT,
-    OPERATION_DELETE_OBJECT, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
-    OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
-    OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT, OPERATION_SET_EFFECT_ENABLED,
-    OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail,
-    RequestBudgetKind, SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET,
-    SERVER_RESOLVE_BUDGET, SelectionState, request_budget_kind,
+    GetEditInfoParams, InstanceId, LayerStateOutcome, ListAvailableEffectsResult, ListLayersResult,
+    ListObjectsResult, MAX_PAGE_LIMIT, OPERATION_ADD_EFFECT, OPERATION_CREATE_OBJECT,
+    OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT, OPERATION_GET_CURRENT_SCENE,
+    OPERATION_GET_EDIT_INFO, OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS,
+    OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT,
+    OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
+    OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail, RequestBudgetKind,
+    SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, SelectionState,
+    request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -916,6 +918,60 @@ impl AviUtl2McpServer {
         .await
     }
 
+    /// レイヤーの名前・表示・ロック状態を変更する。
+    /// name と enabled と locked の 3 つ全てを省略した要求は受け付けない。
+    /// name に {"type": "reset"} を指定すると標準のレイヤー名へ戻す。
+    /// layer 番号は 0 始まりであり UI の表示とは異なる。
+    /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
+    /// project_epoch をそのまま指定する。省略はできない。レイヤーは selector も
+    /// fingerprint も持たないため、これがプロジェクト境界を照合する唯一の材料である。
+    /// 要求は project_revision を運ばない。読み取りから変更までに revision が進んで
+    /// いても拒否されない。
+    /// レイヤーには fingerprint が無いため、読み取った時点から状態が変わっていても
+    /// 検出できない。応答が返す layer には変更後に読み直した実際の状態が入るので、
+    /// 意図どおりかはその値で確認する。
+    /// レイヤーのロックが止めるのはオブジェクトの削除と時間軸上の移動であり、MCP では
+    /// aviutl2_move_object と aviutl2_delete_object と aviutl2_create_object が
+    /// precondition_failed（layer_locked）になる。設定値の変更や effect の増減は止めない。
+    /// この tool 自身はロックの影響を受けない。ロックされたレイヤーでもロックを外せる。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    #[tool(
+        name = "aviutl2_set_layer_state",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::set_layer_state()
+        )
+    )]
+    pub async fn aviutl2_set_layer_state(
+        &self,
+        Parameters(input): Parameters<SetLayerStateInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits;
+        self.run("aviutl2_set_layer_state", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: LayerStateOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_SET_LAYER_STATE,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::layer_state(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
     /// カーソル位置・選択範囲・フォーカス対象を変更する。
     /// cursor と selected_range と focus の 3 つ全てを省略した要求は受け付けない。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
@@ -1431,6 +1487,7 @@ mod tests {
         "aviutl2_set_effect_enabled",
         "aviutl2_delete_effect",
         "aviutl2_delete_object",
+        "aviutl2_set_layer_state",
         "aviutl2_set_selection",
     ];
 
@@ -1462,6 +1519,9 @@ mod tests {
         ("aviutl2_set_effect_enabled", false, true),
         ("aviutl2_delete_effect", true, true),
         ("aviutl2_delete_object", true, true),
+        // 表示を切ってもロックを掛けても内容は失われず、同じ tool で戻せる。
+        // 同じ状態を 2 度設定しても追加の変更を起こさない。
+        ("aviutl2_set_layer_state", false, true),
         ("aviutl2_set_selection", false, true),
     ];
 
@@ -1552,6 +1612,7 @@ mod tests {
             "aviutl2_set_effect_enabled" => schema::set_effect_enabled(),
             "aviutl2_delete_effect" => schema::delete_effect(),
             "aviutl2_delete_object" => schema::delete_object(),
+            "aviutl2_set_layer_state" => schema::set_layer_state(),
             "aviutl2_set_selection" => schema::set_selection(),
             other => panic!("{other} の outputSchema が定義されていません"),
         }
@@ -1606,8 +1667,11 @@ mod tests {
     ///
     /// 対象を指す selector を持たないため、これがプロジェクト境界を照合する
     /// 材料になる。
-    const TOOLS_CARRYING_AN_EXPECTED_EPOCH: &[&str] =
-        &["aviutl2_create_object", "aviutl2_set_selection"];
+    const TOOLS_CARRYING_AN_EXPECTED_EPOCH: &[&str] = &[
+        "aviutl2_create_object",
+        "aviutl2_set_layer_state",
+        "aviutl2_set_selection",
+    ];
 
     #[test]
     fn edit_tool_descriptions_state_what_costs_the_caller_if_assumed_wrong() {
@@ -1692,32 +1756,69 @@ mod tests {
         }
     }
 
+    /// tool の説明が取り消しについて述べる内容。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum UndoStatement {
+        /// 1 回の呼び出しが 1 つの取り消し単位になると述べる。
+        OneUnit,
+        /// 取り消し単位を作らず、取り消しが 1 つ前の編集へ飛ぶと述べる。
+        NoUnitAndJumpsBack,
+        /// 取り消しについて何も述べない。
+        Silent,
+    }
+
+    /// tool 名から、説明が取り消しについて述べる内容を引く。
+    ///
+    /// 未知の tool 名で落とす。**説明は保証である**ため、述べるか黙るかの判断を
+    /// tool ごとに 1 か所へ置き、tool を足したときに素通りしないようにする。
+    fn undo_statement(name: &str) -> UndoStatement {
+        match name {
+            "aviutl2_create_object"
+            | "aviutl2_move_object"
+            | "aviutl2_set_object_name"
+            | "aviutl2_set_object_item"
+            | "aviutl2_add_effect"
+            | "aviutl2_set_effect_enabled"
+            | "aviutl2_delete_effect"
+            | "aviutl2_delete_object" => UndoStatement::OneUnit,
+            "aviutl2_set_selection" => UndoStatement::NoUnitAndJumpsBack,
+            // レイヤー系の setter については取り消しの扱いを保証しない。
+            "aviutl2_set_layer_state" => UndoStatement::Silent,
+            other => panic!("{other} の取り消しの説明が定義されていません"),
+        }
+    }
+
     #[test]
     fn edit_tool_descriptions_state_the_undo_boundary() {
         for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
             let description = description_of(name);
-            if *name == "aviutl2_set_selection" {
-                // 「戻る保証が無い」は「戻るかもしれない」と読める。実際は戻ら
-                // ないうえに取り消しが 1 つ前の編集まで飛ぶため、失うものを
-                // 名指しする。
-                assert!(
-                    description.contains("取り消し単位を作らない"),
-                    "{name} の説明に取り消し単位を作らない旨がありません"
-                );
-                assert!(
-                    description.contains("その前に行った編集が取り消される"),
-                    "{name} の説明が取り消しの飛び先を述べていません"
-                );
-                assert!(
-                    !description.contains("1 つの取り消し単位"),
-                    "{name} の説明が取り消し単位を作ると読めます"
-                );
-                continue;
+            match undo_statement(name) {
+                UndoStatement::OneUnit => assert!(
+                    description.contains("1 つの取り消し単位"),
+                    "{name} の説明に取り消し単位がありません"
+                ),
+                UndoStatement::NoUnitAndJumpsBack => {
+                    // 「戻る保証が無い」は「戻るかもしれない」と読める。実際は
+                    // 戻らないうえに取り消しが 1 つ前の編集まで飛ぶため、失う
+                    // ものを名指しする。
+                    assert!(
+                        description.contains("取り消し単位を作らない"),
+                        "{name} の説明に取り消し単位を作らない旨がありません"
+                    );
+                    assert!(
+                        description.contains("その前に行った編集が取り消される"),
+                        "{name} の説明が取り消しの飛び先を述べていません"
+                    );
+                    assert!(
+                        !description.contains("1 つの取り消し単位"),
+                        "{name} の説明が取り消し単位を作ると読めます"
+                    );
+                }
+                UndoStatement::Silent => assert!(
+                    !description.contains("取り消し"),
+                    "{name} の説明が保証していない取り消しの扱いを述べています"
+                ),
             }
-            assert!(
-                description.contains("1 つの取り消し単位"),
-                "{name} の説明に取り消し単位がありません"
-            );
         }
     }
 
@@ -1739,6 +1840,16 @@ mod tests {
             (
                 "aviutl2_set_selection",
                 &["原子的", "クランプ", "全てを省略"],
+            ),
+            (
+                "aviutl2_set_layer_state",
+                &[
+                    "fingerprint",
+                    "全てを省略した要求は受け付けない",
+                    "この tool 自身はロックの影響を受けない",
+                    "aviutl2_move_object",
+                    "reset",
+                ],
             ),
         ];
         for (name, keywords) in hazards {

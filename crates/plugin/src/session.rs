@@ -25,8 +25,9 @@ use aviutl2_mcp_core::{
     ObjectFilterError, PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT,
     PLUGIN_WRITE_TIMEOUT, PageError, PageRequest, PongProject, PongResult, ProtocolVersion,
     RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult,
-    SetEffectEnabledParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
-    compute_client_mac, compute_server_mac, deserialize_json, negotiate, take_page, verify_mac,
+    SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
+    SetSelectionParams, compute_client_mac, compute_server_mac, deserialize_json, negotiate,
+    take_page, verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -835,6 +836,7 @@ enum EditRequest {
     AddEffect(Box<AddEffectParams>),
     DeleteEffect(Box<DeleteEffectParams>),
     SetEffectEnabled(Box<SetEffectEnabledParams>),
+    SetLayerState(Box<SetLayerStateParams>),
     SetSelection(Box<SetSelectionParams>),
 }
 
@@ -872,6 +874,9 @@ fn decode_edit_request(
         EditOperation::SetEffectEnabled => {
             decoded!(SetEffectEnabledParams, EditRequest::SetEffectEnabled)
         }
+        EditOperation::SetLayerState => {
+            decoded!(SetLayerStateParams, EditRequest::SetLayerState)
+        }
         EditOperation::SetSelection => decoded!(SetSelectionParams, EditRequest::SetSelection),
     })
 }
@@ -905,6 +910,9 @@ fn dispatch_edit(adapter: &dyn EditAdapter, request: EditRequest) -> Result<Valu
         }
         EditRequest::SetEffectEnabled(params) => {
             to_result(&adapter.set_effect_enabled(&params).map_err(edit_error)?)
+        }
+        EditRequest::SetLayerState(params) => {
+            to_result(&adapter.set_layer_state(&params).map_err(edit_error)?)
         }
         EditRequest::SetSelection(params) => {
             to_result(&adapter.set_selection(&params).map_err(edit_error)?)
@@ -2508,6 +2516,12 @@ mod edit_tests {
                 "selector": fake_effect_selector(),
                 "enabled": true,
             }),
+            EditOperation::SetLayerState => json!({
+                "expected_scene_id": SCENE_ID,
+                "layer": 1,
+                "name": { "type": "set", "name": "背景" },
+                "expected_project_epoch": EPOCH,
+            }),
             EditOperation::SetSelection => selection_params(),
         }
     }
@@ -2524,6 +2538,7 @@ mod edit_tests {
             EditRequest::AddEffect(params) => serde_json::to_value(params),
             EditRequest::DeleteEffect(params) => serde_json::to_value(params),
             EditRequest::SetEffectEnabled(params) => serde_json::to_value(params),
+            EditRequest::SetLayerState(params) => serde_json::to_value(params),
             EditRequest::SetSelection(params) => serde_json::to_value(params),
         };
         Ok(encoded.expect("params は直列化できる"))
@@ -2671,6 +2686,7 @@ mod edit_tests {
             carriers,
             vec![
                 EditOperation::CreateObject.as_str(),
+                EditOperation::SetLayerState.as_str(),
                 EditOperation::SetSelection.as_str()
             ]
         );

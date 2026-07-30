@@ -30,9 +30,9 @@ use crate::mcp::input::{
 use aviutl2_mcp_core::{
     AddEffectParams, CreateObjectParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
     Destination, EditInputError, EffectSelector, ErrorObject, FiniteF64, FocusChange, ItemValue,
-    MAX_ALIAS_BYTES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MoveObjectParams, ObjectSource,
-    Placement, RangeChange, SetEffectEnabledParams, SetObjectItemParams, SetObjectNameParams,
-    SetSelectionParams,
+    LayerNameChange, MAX_ALIAS_BYTES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MoveObjectParams,
+    ObjectSource, Placement, RangeChange, SetEffectEnabledParams, SetLayerStateParams,
+    SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -550,6 +550,71 @@ impl SetEffectEnabledInput {
     }
 }
 
+/// レイヤー名の変更。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LayerNameChangeInput {
+    /// 指定した名前にする。
+    Set {
+        /// 新しいレイヤー名。
+        #[schemars(length(max = MAX_NAME_CHARS))]
+        name: String,
+    },
+    /// 標準の名前へ戻す。
+    Reset {},
+}
+
+impl LayerNameChangeInput {
+    fn to_change(&self) -> LayerNameChange {
+        match self {
+            LayerNameChangeInput::Set { name } => LayerNameChange::Set { name: name.clone() },
+            LayerNameChangeInput::Reset {} => LayerNameChange::Reset {},
+        }
+    }
+}
+
+/// `aviutl2_set_layer_state` の入力。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetLayerStateInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// 現在シーンの一致確認に使うシーン ID。
+    pub expected_scene_id: i32,
+    /// 0 始まりのレイヤー番号。
+    #[schemars(range(max = MAX_POSITION))]
+    pub layer: u32,
+    /// レイヤー名。省略時は変更しない。標準名へ戻すには {"type": "reset"} を指定する。
+    #[serde(default)]
+    pub name: Option<LayerNameChangeInput>,
+    /// 表示の有効・無効。省略時は変更しない。
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// ロックの有無。省略時は変更しない。
+    #[serde(default)]
+    pub locked: Option<bool>,
+    /// 直前の読み取りまたは編集の応答が返した project_epoch。レイヤーは selector を持たないため、これがプロジェクト境界を照合する唯一の材料である。
+    #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
+    pub expected_project_epoch: String,
+}
+
+impl SetLayerStateInput {
+    /// IPC の params へ変換する。
+    pub fn to_params(&self) -> Result<SetLayerStateParams, ErrorObject> {
+        let params = SetLayerStateParams {
+            expected_scene_id: self.expected_scene_id,
+            layer: self.layer,
+            name: self.name.as_ref().map(LayerNameChangeInput::to_change),
+            enabled: self.enabled,
+            locked: self.locked,
+            expected_project_epoch: expected_project_epoch(&self.expected_project_epoch)?,
+        };
+        params.validate().map_err(from_input_error)?;
+        Ok(params)
+    }
+}
+
 /// `aviutl2_set_selection` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -691,6 +756,13 @@ mod tests {
                 "selector": effect_selector_json(),
                 "enabled": true,
             }),
+            EditOperation::SetLayerState => json!({
+                "instance_id": SAMPLE_ID,
+                "expected_scene_id": 3,
+                "layer": 1,
+                "name": { "type": "set", "name": "背景" },
+                "expected_project_epoch": SAMPLE_EPOCH,
+            }),
             EditOperation::SetSelection => json!({
                 "instance_id": SAMPLE_ID,
                 "expected_scene_id": 3,
@@ -721,6 +793,7 @@ mod tests {
             EditOperation::AddEffect => decoded!(AddEffectInput),
             EditOperation::DeleteEffect => decoded!(DeleteEffectInput),
             EditOperation::SetEffectEnabled => decoded!(SetEffectEnabledInput),
+            EditOperation::SetLayerState => decoded!(SetLayerStateInput),
             EditOperation::SetSelection => decoded!(SetSelectionInput),
         })
     }
@@ -1292,6 +1365,83 @@ mod tests {
             }))
             .is_err(),
             "enabled の欠落が受理されました"
+        );
+    }
+
+    #[test]
+    fn layer_state_requires_at_least_one_change() {
+        let input: SetLayerStateInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "expected_scene_id": 3,
+            "layer": 1,
+            "expected_project_epoch": SAMPLE_EPOCH,
+        }))
+        .expect("入力型としては受理される");
+        assert_eq!(
+            input.to_params().expect_err("全省略は拒否される").code,
+            ErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn layer_state_reset_rejects_a_name() {
+        // 構造体 variant であるため、未知フィールドの拒否が判別子つきの分岐でも
+        // 効く。unit variant では黙って読み飛ばされる。
+        assert!(
+            serde_json::from_value::<SetLayerStateInput>(json!({
+                "instance_id": SAMPLE_ID,
+                "expected_scene_id": 3,
+                "layer": 1,
+                "name": { "type": "reset", "name": "x" },
+                "expected_project_epoch": SAMPLE_EPOCH,
+            }))
+            .is_err(),
+            "標準名へ戻す指定が名前を読み飛ばしました"
+        );
+
+        let input: SetLayerStateInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "expected_scene_id": 3,
+            "layer": 1,
+            "name": { "type": "reset" },
+            "expected_project_epoch": SAMPLE_EPOCH,
+        }))
+        .expect("標準名へ戻す指定は受理される");
+        assert_eq!(
+            input.to_params().expect("params へ変換できる").name,
+            Some(aviutl2_mcp_core::LayerNameChange::Reset {})
+        );
+    }
+
+    #[test]
+    fn layer_state_rejects_a_layer_beyond_the_declared_maximum() {
+        let input: SetLayerStateInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "expected_scene_id": 3,
+            "layer": MAX_POSITION + 1,
+            "locked": false,
+            "expected_project_epoch": SAMPLE_EPOCH,
+        }))
+        .expect("入力型としては受理される");
+        assert_eq!(
+            input.to_params().expect_err("範囲外は拒否される").code,
+            ErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn layer_name_over_the_limit_is_rejected() {
+        let input: SetLayerStateInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "expected_scene_id": 3,
+            "layer": 1,
+            "name": { "type": "set", "name": "a".repeat(MAX_NAME_CHARS as usize + 1) },
+            "expected_project_epoch": SAMPLE_EPOCH,
+        }))
+        .expect("入力型としては受理される");
+        assert_eq!(
+            input.to_params().expect_err("上限超過は拒否される").code,
+            ErrorCode::InvalidArgument
         );
     }
 
