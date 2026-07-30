@@ -282,9 +282,12 @@ impl EditError {
             EditError::AfterMutation { .. } => RetryRequires::Refetch,
             EditError::Read(ReadError::NotReady)
             | EditError::Read(ReadError::EditBlocked { .. }) => RetryRequires::Resend,
-            EditError::DestinationOccupied { .. } | EditError::LayerLocked { .. } => {
-                RetryRequires::Refetch
-            }
+            // 読み直せば宛先の空きが分かる。
+            EditError::DestinationOccupied { .. } => RetryRequires::Refetch,
+            // ロックの解除は別の operation であり、同じ要求を送り直しても対象を
+            // 読み直しても解消しない。3 値のどれにも当たらないため、値を増やさず
+            // 「再試行では解消しない」とする。次に取るべき操作の案内は本文が担う。
+            EditError::LayerLocked { .. } => RetryRequires::None,
             other => match other.error_code() {
                 ErrorCode::PreconditionFailed => RetryRequires::Refetch,
                 _ => RetryRequires::None,
@@ -628,18 +631,36 @@ mod tests {
     }
 
     #[test]
-    fn precondition_failures_ask_for_a_refetch() {
+    fn precondition_failures_ask_for_a_refetch_unless_a_reread_cannot_help() {
         for error in all_errors() {
             if error.error_code() != ErrorCode::PreconditionFailed {
                 continue;
             }
-            assert_eq!(
-                error.details()["retry_requires"],
-                json!("refetch"),
-                "{error} がそのままの再送を案内しています"
-            );
             assert!(error.retryable(), "{error} が再試行不可になりました");
+            let details = error.details();
+            // ロックの解除は別の operation である。読み直しを案内すると、
+            // 要求元は解消しない読み直しを繰り返す。
+            let expected = if details["reason"] == json!("layer_locked") {
+                "none"
+            } else {
+                "refetch"
+            };
+            assert_eq!(
+                details["retry_requires"],
+                json!(expected),
+                "{error} が案内する再試行のしかたが想定と異なります"
+            );
         }
+    }
+
+    #[test]
+    fn an_occupied_destination_still_asks_for_a_refetch() {
+        // 宛先の空きは読み直せば分かる。ロックと同じ扱いにはしない。
+        let error = EditError::DestinationOccupied {
+            layer: 3,
+            frame: 240,
+        };
+        assert_eq!(error.details()["retry_requires"], json!("refetch"));
     }
 
     #[test]

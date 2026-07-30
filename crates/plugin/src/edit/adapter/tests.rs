@@ -520,7 +520,8 @@ fn a_locked_layer_is_rejected() {
     assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
     assert_eq!(error.details()["reason"], json!("layer_locked"));
     assert_eq!(error.details()["layer"], json!(2));
-    assert_eq!(error.details()["retry_requires"], json!("refetch"));
+    // ロックの解除は別の operation であり、読み直しても要求は通らない。
+    assert_eq!(error.details()["retry_requires"], json!("none"));
     harness.assert_untouched();
 }
 
