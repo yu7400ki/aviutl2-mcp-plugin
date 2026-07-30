@@ -10,11 +10,13 @@
 //!   fingerprint
 //! - 一覧取得: ページ要求・応答メタと切り出し規則
 //! - read operation の名前と params / result、編集・render operation の名前
+//! - 一括適用と描画の params / result
 //! - IPC 1 往復の期限配分
 //!
 //! SDK や Windows API には依存しない。所有型のみを定義し、SDK からの変換は
 //! plugin 側が行う。
 
+pub mod batch;
 pub mod budget;
 pub mod descriptor;
 pub mod edit;
@@ -32,6 +34,7 @@ pub mod number;
 pub mod object;
 pub mod operation;
 pub mod page;
+pub mod render;
 pub mod selector;
 pub mod state;
 pub mod validation;
@@ -40,6 +43,10 @@ pub mod wire_format;
 #[cfg(test)]
 mod tests;
 
+pub use batch::{
+    ApplyBatchParams, BatchInputError, BatchOperation, BatchOutcome, BatchStepOutcome,
+    MAX_BATCH_OPERATIONS,
+};
 pub use budget::{
     PLUGIN_BATCH_TIMEOUT, PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT,
     PLUGIN_RENDER_ARTIFACT_TIMEOUT, PLUGIN_RENDER_WAIT_TIMEOUT, PLUGIN_WRITE_TIMEOUT,
@@ -98,6 +105,7 @@ pub use operation::{
     ReadOperation, RenderOperation,
 };
 pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
+pub use render::{RenderFormat, RenderFrameParams, RenderFrameResult, RenderInputError};
 pub use selector::{EffectSelector, ObjectSelector};
 pub use state::InstanceState;
 pub use validation::{

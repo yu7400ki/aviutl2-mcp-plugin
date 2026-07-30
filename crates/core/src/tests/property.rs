@@ -1,8 +1,10 @@
 //! property-based テスト。
 
+use crate::batch::{ApplyBatchParams, BatchOperation, MAX_BATCH_OPERATIONS};
 use crate::edit::{
-    AddEffectParams, CreateObjectParams, DeleteEffectParams, DeleteObjectParams, MoveObjectParams,
-    SetEffectEnabledParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+    AddEffectParams, CreateObjectParams, DeleteEffectParams, DeleteObjectParams, Destination,
+    MoveObjectParams, SetEffectEnabledParams, SetObjectItemParams, SetObjectNameParams,
+    SetSelectionParams,
 };
 use crate::effect::{EffectItem, EffectItemType, TrackInfo};
 use crate::fingerprint::{
@@ -14,6 +16,8 @@ use crate::identifier::{InstanceId, ProtocolVersion};
 use crate::item_value::{ItemValue, ItemWriteError, encode_item_value, validate_item_value};
 use crate::json::{JsonStrictError, parse_json};
 use crate::number::FiniteF64;
+use crate::render::RenderFrameParams;
+use crate::selector::ObjectSelector;
 use crate::validation::{MAX_PATH_UTF16_UNITS, PathSyntaxError, validate_path};
 use proptest::prelude::*;
 use proptest::string::string_regex;
@@ -775,6 +779,8 @@ proptest! {
         assert_decodes_or_errors!(DeleteEffectParams);
         assert_decodes_or_errors!(SetEffectEnabledParams);
         assert_decodes_or_errors!(SetSelectionParams);
+        assert_decodes_or_errors!(ApplyBatchParams);
+        assert_decodes_or_errors!(RenderFrameParams);
     }
 
     #[test]
@@ -797,5 +803,65 @@ proptest! {
         assert_decodes_or_errors!(DeleteEffectParams);
         assert_decodes_or_errors!(SetEffectEnabledParams);
         assert_decodes_or_errors!(SetSelectionParams);
+        assert_decodes_or_errors!(ApplyBatchParams);
+        assert_decodes_or_errors!(RenderFrameParams);
+    }
+
+    /// 長大な `operations` を運ぶ要求でも、確保する要素数が実際に現れた件数を
+    /// 大きく超えないことを確かめる。
+    ///
+    /// JSON は件数を前置きしないため、復号器は読み進めた分だけを確保する。
+    /// 件数を名乗る値を信用して先に確保する実装へ変わると、上限を超える件数を
+    /// 名乗るだけの短い要求で大きな確保を起こせるようになる。
+    #[test]
+    fn batch_params_decoder_does_not_over_allocate_for_long_arrays(
+        // 一様乱数では上限の前後にほとんど当たらないため、0 の近く・上限の
+        // 前後・上限の 10 倍を混ぜる。
+        count in prop_oneof![0..4usize, 95..106usize, 990..1_010usize],
+    ) {
+        let elements: Vec<String> = (0..count)
+            .map(|layer| serde_json::to_string(&batch_move_operation(layer)).unwrap())
+            .collect();
+        let body = format!("{{\"operations\":[{}]}}", elements.join(","));
+
+        let params: ApplyBatchParams = serde_json::from_str(&body).unwrap();
+        prop_assert_eq!(params.operations.len(), count);
+        prop_assert!(
+            params.operations.capacity() <= count.saturating_mul(2) + 8,
+            "件数 {} に対して確保が {} まで膨らんでいる",
+            count,
+            params.operations.capacity()
+        );
+
+        // 上限を超える件数は、復号できても検証で落ちる。
+        prop_assert_eq!(
+            params.validate().is_ok(),
+            (1..=MAX_BATCH_OPERATIONS).contains(&count)
+        );
+    }
+}
+
+/// 与えたレイヤーのオブジェクトを動かす sub-operation を作る。
+///
+/// レイヤーごとにセレクターが変わるため、並べても同じ状態を指さない。
+fn batch_move_operation(layer: usize) -> BatchOperation {
+    let input = ObjectFingerprintInput {
+        scene_id: 0,
+        layer,
+        frame_start: 120,
+        frame_end: 240,
+        name: None,
+        alias: "alias",
+    };
+    BatchOperation::MoveObject {
+        selector: ObjectSelector {
+            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            scene_id: 0,
+            layer,
+            frame: 120,
+            name: None,
+            fingerprint: object_fingerprint(input),
+        },
+        destination: Destination { layer: 0, frame: 0 },
     }
 }
