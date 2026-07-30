@@ -369,6 +369,27 @@ fn descriptor_project(path: &std::path::Path) -> DescriptorProject {
     }
 }
 
+/// 終了へ向けてレンダリングの後始末をする。
+///
+/// **接続受理を止めた後に呼ぶ。** 止める前に在庫を数えると、その後に投入された
+/// タスクを取りこぼす。
+///
+/// 本体を、後始末に要る口だけを受け取る関数へ切り出してある。終了手順の側を
+/// 委譲だけにすることで、ここで行うことが plugin の他の状態に依存しないことを
+/// 型で示し、SDK 無しでも確かめられるようにしている。
+#[cfg(windows)]
+fn shutdown_renders<D>(render_adapter: Option<&Arc<D>>)
+where
+    D: render::RenderDrain + 'static,
+{
+    let Some(render_adapter) = render_adapter else {
+        return;
+    };
+    render::drain_render_tasks(render_adapter, render::RENDER_DRAIN_TIMEOUT);
+    // 以後この instance が成果物を書くことはない。
+    render_adapter.discard_artifacts();
+}
+
 /// 終了手順を段ごとに panic から隔離して順に実行する。
 ///
 /// 各段はログ出力を伴い、ログ出力そのものが panic し得る。ログの出力先は
@@ -414,13 +435,7 @@ impl Drop for AviUtl2McpPlugin {
                     pipe_server.stop(pipe::STOP_TIMEOUT);
                 }
             },
-            || {
-                if let Some(render_adapter) = &render_adapter {
-                    render::drain_render_tasks(render_adapter, render::RENDER_DRAIN_TIMEOUT);
-                    // 以後この instance が成果物を書くことはない。
-                    render::RenderDrain::discard_artifacts(render_adapter.as_ref());
-                }
-            },
+            || shutdown_renders(render_adapter.as_ref()),
             || {
                 if let Some(lifecycle) = &lifecycle
                     && let Err(e) = lifecycle.shutdown()
@@ -485,6 +500,62 @@ mod tests {
             removed.get(),
             "前段の panic で descriptor の削除が飛ばされました"
         );
+    }
+
+    /// 在庫と後始末の呼び出しを記録する終了口。
+    #[derive(Default)]
+    struct FakeRenderDrain {
+        outstanding: usize,
+        calls: std::sync::Mutex<Vec<&'static str>>,
+    }
+
+    impl FakeRenderDrain {
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl render::RenderDrain for FakeRenderDrain {
+        fn outstanding(&self) -> usize {
+            self.outstanding
+        }
+
+        fn wait_all_tasks(&self) {
+            self.calls.lock().unwrap().push("wait_all_tasks");
+        }
+
+        fn discard_artifacts(&self) {
+            self.calls.lock().unwrap().push("discard_artifacts");
+        }
+    }
+
+    #[test]
+    fn shutting_down_waits_for_the_renders_and_then_clears_the_artifacts() {
+        // 待つ前に成果物を消しても、後で書かれた分が残る。順序も含めて固定する。
+        let drain = Arc::new(FakeRenderDrain {
+            outstanding: 1,
+            ..FakeRenderDrain::default()
+        });
+
+        shutdown_renders(Some(&drain));
+
+        assert_eq!(drain.calls(), vec!["wait_all_tasks", "discard_artifacts"]);
+    }
+
+    #[test]
+    fn shutting_down_without_renders_still_clears_the_artifacts() {
+        // 在庫が空でも、前の要求が残した成果物は消す。
+        let drain = Arc::new(FakeRenderDrain::default());
+
+        shutdown_renders(Some(&drain));
+
+        assert_eq!(drain.calls(), vec!["discard_artifacts"]);
+    }
+
+    #[test]
+    fn shutting_down_before_the_render_adapter_exists_does_nothing() {
+        // 登録が途中で打ち切られた場合、実行口は無い。
+        shutdown_renders(Option::<&Arc<FakeRenderDrain>>::None);
     }
 
     #[test]
