@@ -160,12 +160,10 @@ pub(crate) fn resolve_effect_of<'sec>(
             operation: "get_effect_list",
         })?;
     if info.fingerprint != selector.fingerprint {
-        // 所属オブジェクトは解決済みであり、その概要から effect の一覧を
-        // 引き直せる。effect の食い違いでも、要求元が次に読む対象は変わらない。
-        return Err(crate::read::ReadError::FingerprintMismatch {
-            current_object: Box::new(object.summary().clone()),
-        }
-        .into());
+        // オブジェクト側の照合はここへ来る前に通っている。読み直すべきは
+        // effect の一覧であり、オブジェクトの概要は要求元が既に持っている値と
+        // 同じである。
+        return Err(EditError::EffectFingerprintMismatch);
     }
     let slot = editor.bind_effect(object.slot(), position)?;
     Ok(ResolvedEffect {

@@ -561,6 +561,49 @@ fn an_effect_edit_checks_both_the_object_and_the_effect_fingerprint() {
     harness.assert_untouched();
 }
 
+/// effect の食い違いでは現在の対象を名乗らないことを確かめる。
+///
+/// ここへ到達する時点で所属オブジェクトの照合は通っている。オブジェクトの概要を
+/// 添えても要求元が送ってきた値と同じであり、「そのまま次の要求へ渡せば通る」と
+/// いう案内に従うと同じ失敗が返り続ける。読み直すべきは effect の一覧である。
+#[test]
+fn an_effect_mismatch_does_not_name_a_current_object() {
+    let harness = Harness::new();
+    let mut selector = harness.effect_selector(1, 100, "ぼかし", 0);
+    selector.fingerprint = tamper(&selector.fingerprint);
+
+    let error = harness
+        .edit
+        .delete_effect(&DeleteEffectParams { selector })
+        .expect_err("effect の fingerprint 改竄が通りました");
+    let details = error.details();
+    assert_eq!(details["mismatch"], json!("fingerprint"));
+    assert_eq!(details["retry_requires"], json!("refetch"));
+    assert!(
+        details.get("current_object").is_none(),
+        "要求元が既に持っている値を現在の姿として返しました: {details}"
+    );
+    harness.assert_untouched();
+}
+
+/// 同じ effect の指定でも、食い違いが対象の側なら現在の対象を名乗ることを
+/// 確かめる。
+#[test]
+fn an_object_mismatch_under_an_effect_selector_names_the_current_object() {
+    let harness = Harness::new();
+    let mut selector = harness.effect_selector(1, 100, "ぼかし", 0);
+    selector.object.fingerprint = tamper(&selector.object.fingerprint);
+
+    let error = harness
+        .edit
+        .delete_effect(&DeleteEffectParams { selector })
+        .expect_err("オブジェクトの fingerprint 改竄が通りました");
+    let details = error.details();
+    assert_eq!(details["mismatch"], json!("fingerprint"));
+    assert_eq!(details["current_object"]["frame_start"], json!(100));
+    harness.assert_untouched();
+}
+
 #[test]
 fn a_missing_effect_is_not_found() {
     let harness = Harness::new();

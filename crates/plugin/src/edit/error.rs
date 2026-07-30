@@ -211,6 +211,15 @@ pub enum EditError {
         /// ロックされているレイヤー番号。
         layer: usize,
     },
+    /// 解決した effect の fingerprint がセレクターの値と一致しない。
+    ///
+    /// 所属オブジェクトの照合は既に通っている。オブジェクトの概要を添えても、
+    /// それは要求元が送ってきたセレクターと同じ位置・同じ fingerprint であり、
+    /// 復帰の手掛かりを 1 つも増やさない。添えれば要求元は「そのまま送り返せば
+    /// 通る」という契約に従って同じ失敗を繰り返す。**要求元は effect の一覧を
+    /// 読み直す必要がある**ため、現在の姿を名乗らずに読み直しを促す。
+    #[error("対象 effect の fingerprint が要求と一致しません")]
+    EffectFingerprintMismatch,
     /// セレクターが指す effect が存在しない。
     #[error("セレクターに一致する effect がありません: {effect_name}")]
     EffectNotFound {
@@ -290,7 +299,8 @@ impl EditError {
             EditError::Read(error) => error.error_code(),
             EditError::DestinationOccupied { .. }
             | EditError::LayerLocked { .. }
-            | EditError::EpochMismatch { .. } => ErrorCode::PreconditionFailed,
+            | EditError::EpochMismatch { .. }
+            | EditError::EffectFingerprintMismatch => ErrorCode::PreconditionFailed,
             EditError::EffectNotFound { .. } => ErrorCode::NotFound,
             EditError::ItemWrite(error) => error.error_code(),
             EditError::UnsupportedTarget { .. } => ErrorCode::UnsupportedOperation,
@@ -321,7 +331,8 @@ impl EditError {
             EditError::Read(ReadError::FingerprintAlgorithmMismatch { .. }) => {
                 Some(Mismatch::FingerprintAlgorithm)
             }
-            EditError::Read(ReadError::FingerprintMismatch { .. }) => Some(Mismatch::Fingerprint),
+            EditError::Read(ReadError::FingerprintMismatch { .. })
+            | EditError::EffectFingerprintMismatch => Some(Mismatch::Fingerprint),
             EditError::AfterMutation { source, .. } => source.mismatch(),
             _ => None,
         }
@@ -389,7 +400,7 @@ impl EditError {
                 details.insert("layer".to_string(), json!(layer));
             }
             // 食い違った側は `mismatch` が名乗る。
-            EditError::EpochMismatch { .. } => {}
+            EditError::EpochMismatch { .. } | EditError::EffectFingerprintMismatch => {}
             EditError::EffectNotFound {
                 effect_name,
                 effect_index,
@@ -503,6 +514,7 @@ mod tests {
                 origin: EpochSource::Focus,
             },
             EditError::LayerLocked { layer: 3 },
+            EditError::EffectFingerprintMismatch,
             EditError::EffectNotFound {
                 effect_name: "ぼかし".to_string(),
                 effect_index: 1,
@@ -564,6 +576,7 @@ mod tests {
             EditError::DestinationOccupied { .. } => "DestinationOccupied",
             EditError::EpochMismatch { .. } => "EpochMismatch",
             EditError::LayerLocked { .. } => "LayerLocked",
+            EditError::EffectFingerprintMismatch => "EffectFingerprintMismatch",
             EditError::EffectNotFound { .. } => "EffectNotFound",
             EditError::ItemWrite(_) => "ItemWrite",
             EditError::UnsupportedTarget { .. } => "UnsupportedTarget",
@@ -584,6 +597,7 @@ mod tests {
             "DestinationOccupied",
             "EpochMismatch",
             "LayerLocked",
+            "EffectFingerprintMismatch",
             "EffectNotFound",
             "ItemWrite",
             "UnsupportedTarget",
@@ -682,6 +696,8 @@ mod tests {
                 // 前提の epoch と focus の epoch を別々に名乗る 2 つ。
                 ErrorCode::PreconditionFailed,
                 ErrorCode::PreconditionFailed,
+                ErrorCode::PreconditionFailed,
+                // 所属オブジェクトは一致したが effect が変わっていた。
                 ErrorCode::PreconditionFailed,
                 ErrorCode::NotFound,
                 ErrorCode::NotFound,
@@ -823,6 +839,9 @@ mod tests {
                 }),
                 "fingerprint",
             ),
+            // 対象と effect のどちらが食い違っても名乗る値は同じである。要求元が
+            // 分岐に使うのは食い違いの種類であり、どの層で落ちたかではない。
+            (EditError::EffectFingerprintMismatch, "fingerprint"),
         ];
         for (error, mismatch) in expected {
             assert_eq!(error.details()["mismatch"], json!(mismatch), "{error}");
@@ -873,14 +892,24 @@ mod tests {
     }
 
     #[test]
-    fn only_a_content_mismatch_carries_the_current_object() {
+    fn only_an_object_content_mismatch_carries_the_current_object() {
+        // effect の食い違いは含まれない。所属オブジェクトの照合はその手前で
+        // 通っており、概要を添えても要求元が送ってきた値と同じものになる。
         for error in all_errors() {
             let carried = error.details().get("current_object").is_some();
-            let expected = matches!(
-                error,
-                EditError::Read(ReadError::FingerprintMismatch { .. })
-            );
-            assert_eq!(carried, expected, "{error}");
+            assert_eq!(carried, resolves_to_an_object_mismatch(&error), "{error}");
+        }
+    }
+
+    /// 変更の発行後に包み直された失敗も辿って、対象の食い違いかを判定する。
+    ///
+    /// 外側の variant だけを見ると、包み直した代表値を足したときに正しい挙動が
+    /// 落ちる。
+    fn resolves_to_an_object_mismatch(error: &EditError) -> bool {
+        match error {
+            EditError::Read(ReadError::FingerprintMismatch { .. }) => true,
+            EditError::AfterMutation { source, .. } => resolves_to_an_object_mismatch(source),
+            _ => false,
         }
     }
 
