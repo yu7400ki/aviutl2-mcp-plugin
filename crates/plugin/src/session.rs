@@ -3668,83 +3668,63 @@ mod render_tests {
         assert!(!outcome.to_string().contains(HANDOFF_TOKEN));
     }
 
-    /// レンダリングの失敗の分類。実行口が返し得る全 variant を 1 つずつ表す。
+    /// レンダリングの失敗の分類と、その代表値を 1 つの宣言から作る。
     ///
-    /// **`RenderError` を直接並べない。** 失敗は複製できないため一覧は
-    /// 生成関数の列になり、生成関数の列は網羅性を型で縛れない。variant を
-    /// 表すこの列挙を挟むと、[`RenderFailure::error`] の網羅 `match` が
-    /// variant の追加でコンパイルを止める。
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum RenderFailure {
-        Read,
-        ReadEditBlocked,
-        SceneMismatch,
-        FrameOutOfRange,
-        FrameTooLarge,
-        WaitTimeout,
-        ShuttingDown,
-        TooManyAbandoned,
-        InvalidBuffer,
-        ArtifactEncode,
-        ArtifactWrite,
-        Sdk,
-        Panicked,
+    /// **`RenderError` を直接並べない。** 失敗は複製できないため一覧は生成
+    /// 関数の列になり、生成関数の列は網羅性を型で縛れない。分類の列挙を挟むと、
+    /// [`RenderFailure::error`] の網羅 `match` が分類の追加でコンパイルを止める。
+    ///
+    /// **一覧と生成を別々に書かない。** 分けると、一覧から 1 件落ちても生成側は
+    /// 動いたままに見える。同じ `RenderError` variant を 2 つの分類が指す場合、
+    /// 落ちた 1 件は variant の網羅を見るテストからも隠れてしまう。
+    macro_rules! render_failures {
+        ($($variant:ident => $error:expr),+ $(,)?) => {
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            enum RenderFailure {
+                $($variant),+
+            }
+
+            impl RenderFailure {
+                /// 全分類。宣言と同じ並びで、落とすことも増やすこともできない。
+                const ALL: &'static [RenderFailure] = &[$(RenderFailure::$variant),+];
+
+                /// 対応する失敗の代表値を作る。
+                fn error(self) -> RenderError {
+                    match self {
+                        $(RenderFailure::$variant => $error),+
+                    }
+                }
+            }
+        };
     }
 
-    impl RenderFailure {
-        /// 全分類。ここから漏れた分類はどのテストにも掛からない。
-        const ALL: [RenderFailure; 13] = [
-            RenderFailure::Read,
-            RenderFailure::ReadEditBlocked,
-            RenderFailure::SceneMismatch,
-            RenderFailure::FrameOutOfRange,
-            RenderFailure::FrameTooLarge,
-            RenderFailure::WaitTimeout,
-            RenderFailure::ShuttingDown,
-            RenderFailure::TooManyAbandoned,
-            RenderFailure::InvalidBuffer,
-            RenderFailure::ArtifactEncode,
-            RenderFailure::ArtifactWrite,
-            RenderFailure::Sdk,
-            RenderFailure::Panicked,
-        ];
-
-        /// 対応する失敗の代表値を作る。
-        ///
-        /// **`_` を使わない網羅 `match` で書く。** 分類を足すと腕が足りず
-        /// コンパイルが落ちる。
-        fn error(self) -> RenderError {
-            match self {
-                RenderFailure::Read => RenderError::Read(crate::read::ReadError::NotReady),
-                RenderFailure::ReadEditBlocked => {
-                    RenderError::Read(crate::read::ReadError::EditBlocked {
-                        state: crate::read::EditState::Save,
-                    })
-                }
-                RenderFailure::SceneMismatch => RenderError::SceneMismatch {
-                    expected: SCENE_ID,
-                    current: SCENE_ID + 1,
-                },
-                RenderFailure::FrameOutOfRange => RenderError::FrameOutOfRange,
-                RenderFailure::FrameTooLarge => RenderError::FrameTooLarge,
-                RenderFailure::WaitTimeout => RenderError::WaitTimeout,
-                RenderFailure::ShuttingDown => RenderError::ShuttingDown,
-                RenderFailure::TooManyAbandoned => RenderError::TooManyAbandoned,
-                RenderFailure::InvalidBuffer => RenderError::InvalidBuffer {
-                    rule: crate::render::BufferRule::PitchTooSmall,
-                },
-                RenderFailure::ArtifactEncode => RenderError::Artifact {
-                    stage: crate::render::ArtifactStage::Encode,
-                },
-                RenderFailure::ArtifactWrite => RenderError::Artifact {
-                    stage: crate::render::ArtifactStage::Write,
-                },
-                RenderFailure::Sdk => RenderError::Sdk {
-                    operation: "rendering_scene_video",
-                },
-                RenderFailure::Panicked => RenderError::Panicked,
-            }
-        }
+    render_failures! {
+        Read => RenderError::Read(crate::read::ReadError::NotReady),
+        ReadEditBlocked => RenderError::Read(crate::read::ReadError::EditBlocked {
+            state: crate::read::EditState::Save,
+        }),
+        SceneMismatch => RenderError::SceneMismatch {
+            expected: SCENE_ID,
+            current: SCENE_ID + 1,
+        },
+        FrameOutOfRange => RenderError::FrameOutOfRange,
+        FrameTooLarge => RenderError::FrameTooLarge,
+        WaitTimeout => RenderError::WaitTimeout,
+        ShuttingDown => RenderError::ShuttingDown,
+        TooManyAbandoned => RenderError::TooManyAbandoned,
+        InvalidBuffer => RenderError::InvalidBuffer {
+            rule: crate::render::BufferRule::PitchTooSmall,
+        },
+        ArtifactEncode => RenderError::Artifact {
+            stage: crate::render::ArtifactStage::Encode,
+        },
+        ArtifactWrite => RenderError::Artifact {
+            stage: crate::render::ArtifactStage::Write,
+        },
+        Sdk => RenderError::Sdk {
+            operation: "rendering_scene_video",
+        },
+        Panicked => RenderError::Panicked,
     }
 
     #[test]
@@ -3783,7 +3763,7 @@ mod render_tests {
         ];
 
         let mut covered: Vec<&str> = RenderFailure::ALL
-            .into_iter()
+            .iter()
             .map(|failure| variant_name(&failure.error()))
             .collect();
         covered.sort_unstable();
@@ -3796,7 +3776,7 @@ mod render_tests {
 
     #[test]
     fn render_failures_keep_their_code_and_details() {
-        for failure in RenderFailure::ALL {
+        for &failure in RenderFailure::ALL {
             let expected = failure.error();
             let adapter = FakeRenderAdapter::failing(failure.error());
 
@@ -3819,7 +3799,7 @@ mod render_tests {
     #[test]
     fn render_failures_never_produce_cancelled() {
         // 受信から実行までの窓も保留キューも無いため、取り消しは生成しない。
-        for failure in RenderFailure::ALL {
+        for &failure in RenderFailure::ALL {
             let adapter = FakeRenderAdapter::failing(failure.error());
             let error = execute_render(
                 &adapter,
@@ -3867,7 +3847,7 @@ mod render_tests {
             "sdk_operation",
             "retry_requires",
         ];
-        for failure in RenderFailure::ALL {
+        for &failure in RenderFailure::ALL {
             let adapter = FakeRenderAdapter::failing(failure.error());
             let error = execute_render(
                 &adapter,
@@ -3893,7 +3873,7 @@ mod render_tests {
         // 引き渡し用の識別子を渡せば、それだけで成果物の在り処が分かる。画像
         // には利用者のプロジェクトの内容が写る。どちらも失敗の応答へ出さない。
         let mut documents = Vec::new();
-        for failure in RenderFailure::ALL {
+        for &failure in RenderFailure::ALL {
             let adapter = FakeRenderAdapter::failing(failure.error());
             let error = execute_render(
                 &adapter,
