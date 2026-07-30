@@ -55,6 +55,11 @@ pub enum UnsupportedReason {
     ///
     /// ホストが無言で拒否した場合にここへ来る。成功として返してはならない。
     ChangeNotApplied,
+    /// 逆操作の材料を変更前に読み取れない。
+    ///
+    /// 逆操作を組み立てられない変更は発行しない。実行してから組み立てられないと
+    /// 分かる経路を作らないための拒否である。
+    InverseUnavailable,
 }
 
 impl UnsupportedReason {
@@ -66,6 +71,7 @@ impl UnsupportedReason {
             UnsupportedReason::MediaNotSupported => "media_not_supported",
             UnsupportedReason::ItemTypeNotWritable => "item_type_not_writable",
             UnsupportedReason::ChangeNotApplied => "change_not_applied",
+            UnsupportedReason::InverseUnavailable => "inverse_unavailable",
         }
     }
 }
@@ -80,6 +86,7 @@ impl std::fmt::Display for UnsupportedReason {
                 "この種別の設定項目への書き込みには対応していません"
             }
             UnsupportedReason::ChangeNotApplied => "要求した変更が反映されませんでした",
+            UnsupportedReason::InverseUnavailable => "逆操作の材料を読み取れませんでした",
         };
         f.write_str(text)
     }
@@ -116,6 +123,35 @@ impl std::fmt::Display for NotIssuedReason {
         };
         f.write_str(text)
     }
+}
+
+/// 一括適用が失敗したあと、発行済みの変更をどこまで戻せたか。
+///
+/// 巻き戻しは 1 件失敗しても止めず、全件を試みたうえで結末を名乗る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RollbackOutcome {
+    /// 巻き戻しを試みていない。変更を 1 つも発行していない失敗で用いる。
+    NotAttempted,
+    /// 発行済みの変更を全て戻した。
+    Complete {
+        /// 戻した件数。
+        count: usize,
+    },
+    /// 戻せなかった変更がある。プロジェクトは中途半端な状態にある。
+    Incomplete {
+        /// 戻せた件数。
+        ///
+        /// **復旧の手掛かりであって、被害の正確な計量ではない。** 移動の
+        /// 逆操作が 1 件失敗すると、その対象は先行する移動の元位置を塞いだ
+        /// ままになり、個別に試みれば戻せたはずの逆操作が連鎖して失敗し得る。
+        /// したがってこの値は「戻せたはずの件数」を下回り得る。
+        count: usize,
+    },
+    /// 巻き戻しを実行できなかった。中途半端な状態が残った可能性がある。
+    ///
+    /// 区間の panic は逆操作を保持する計画ごと巻き戻すため、どこまで適用した
+    /// かも、巻き戻しの途中だったかも分からない。
+    Impossible,
 }
 
 /// 宛先を塞いでいる既存オブジェクトが占めるフレーム範囲。
@@ -225,6 +261,15 @@ pub enum EditError {
         /// 要求された同名 effect 内の位置。
         effect_index: usize,
     },
+    /// 解決した結果、2 つの sub-operation が同じ状態を書き換えると分かった。
+    ///
+    /// 要求内容だけの検証はセレクターの文字列としての同一性を見る。名前を
+    /// 指定したセレクターと指定しないセレクターは文字列として異なるが、同じ
+    /// 対象へ解決し得るため、そこだけでは取りこぼす。すり抜けると、後から
+    /// 適用する変更の逆操作が先の変更の結果を指すことになり、逆操作を事前に
+    /// 完全へ組み立てられない要求がそのまま実行される。
+    #[error("同じ状態を書き換える sub-operation が複数あります")]
+    DuplicateTarget,
     /// 設定項目への書き込みを受け付けられない。
     #[error(transparent)]
     ItemWrite(ItemWriteError),
@@ -272,6 +317,25 @@ pub enum EditError {
         /// 加算後の revision。
         project_revision: u64,
     },
+    /// 一括適用の失敗。
+    ///
+    /// エラーコードは適用相までの失敗の理由をそのまま保つ。要求元が知るべきは
+    /// 「なぜ一括適用が失敗したか」であり、巻き戻せたかどうかは別のキーが
+    /// 担う。**戻せなかった場合だけは書き換える** — 元の理由が何であれ、要求元
+    /// が直面している問題は「プロジェクトが中途半端な状態にある」ことへ
+    /// 変わっているからである。
+    #[error("{source}")]
+    Batch {
+        /// 失敗そのもの。
+        #[source]
+        source: Box<EditError>,
+        /// 落ちた sub-operation の 0 始まりの位置。
+        ///
+        /// どこで落ちたか分からない失敗（区間の panic）では `None`。
+        failed_index: Option<usize>,
+        /// 発行済みの変更をどこまで戻せたか。
+        rollback: RollbackOutcome,
+    },
 }
 
 impl EditError {
@@ -299,6 +363,7 @@ impl EditError {
             | EditError::EpochMismatch { .. }
             | EditError::EffectFingerprintMismatch => ErrorCode::PreconditionFailed,
             EditError::EffectNotFound { .. } => ErrorCode::NotFound,
+            EditError::DuplicateTarget => ErrorCode::InvalidArgument,
             EditError::ItemWrite(error) => error.error_code(),
             EditError::UnsupportedTarget { .. } => ErrorCode::UnsupportedOperation,
             EditError::Sdk { .. } => ErrorCode::SdkError,
@@ -308,6 +373,13 @@ impl EditError {
             },
             EditError::Panicked | EditError::MutationPermitReissued => ErrorCode::InternalError,
             EditError::AfterMutation { source, .. } => source.error_code(),
+            // 戻せなかった変更が残っている場合だけ、失敗の理由を
+            // 「中途半端な状態にある」ことへ寄せる。
+            EditError::Batch {
+                rollback: RollbackOutcome::Incomplete { .. },
+                ..
+            } => ErrorCode::SdkError,
+            EditError::Batch { source, .. } => source.error_code(),
         }
     }
 
@@ -327,7 +399,9 @@ impl EditError {
             EditError::Read(ReadError::SceneMismatch { .. }) => Some(Mismatch::SceneId),
             EditError::Read(ReadError::FingerprintMismatch { .. })
             | EditError::EffectFingerprintMismatch => Some(Mismatch::Fingerprint),
-            EditError::AfterMutation { source, .. } => source.mismatch(),
+            EditError::AfterMutation { source, .. } | EditError::Batch { source, .. } => {
+                source.mismatch()
+            }
             _ => None,
         }
     }
@@ -337,6 +411,9 @@ impl EditError {
         match self {
             // 変更が入った可能性がある以上、そのまま再送してよい状況は無い。
             EditError::AfterMutation { .. } => RetryRequires::Refetch,
+            // 一括適用の案内は失敗そのものが決める。巻き戻せなかった場合は
+            // 内側が発行後の失敗になっているため、読み直しへ倒れる。
+            EditError::Batch { source, .. } => source.retry_requires(),
             EditError::Read(ReadError::NotReady)
             | EditError::Read(ReadError::EditBlocked { .. }) => RetryRequires::Resend,
             // 読み直せば宛先の空きが分かる。
@@ -402,6 +479,9 @@ impl EditError {
                 details.insert("effect_name".to_string(), json!(truncate(effect_name)));
                 details.insert("effect_index".to_string(), json!(effect_index));
             }
+            EditError::DuplicateTarget => {
+                details.insert("reason".to_string(), json!("duplicate_target"));
+            }
             EditError::ItemWrite(error) => fill_item_write_details(details, error),
             EditError::UnsupportedTarget { reason } => {
                 details.insert("reason".to_string(), json!(reason.as_str()));
@@ -423,6 +503,37 @@ impl EditError {
                     "current_project_revision".to_string(),
                     json!(project_revision),
                 );
+            }
+            EditError::Batch {
+                source,
+                failed_index,
+                rollback,
+            } => {
+                source.fill_details(details);
+                // 読み直した対象の現在の姿は、何番目の sub-operation の対象か
+                // と対でなければ差し替えに使えない。一括適用では位置を伴う名前
+                // で載せる。
+                if let Some(object) = details.remove("current_object") {
+                    details.insert("failed_object".to_string(), object);
+                }
+                if let Some(index) = failed_index {
+                    details.insert("failed_index".to_string(), json!(index));
+                }
+                match rollback {
+                    RollbackOutcome::NotAttempted => {}
+                    RollbackOutcome::Complete { count } => {
+                        details.insert("rolled_back".to_string(), json!(true));
+                        details.insert("rolled_back_count".to_string(), json!(count));
+                    }
+                    RollbackOutcome::Incomplete { count } => {
+                        details.insert("rolled_back".to_string(), json!(false));
+                        details.insert("rolled_back_count".to_string(), json!(count));
+                        details.insert("consistency_unknown".to_string(), json!(true));
+                    }
+                    RollbackOutcome::Impossible => {
+                        details.insert("consistency_unknown".to_string(), json!(true));
+                    }
+                }
             }
         }
     }
@@ -509,6 +620,7 @@ mod tests {
                 effect_name: "ぼかし".to_string(),
                 effect_index: 1,
             },
+            EditError::DuplicateTarget,
             EditError::ItemWrite(ItemWriteError::ItemNotFound {
                 item: "範囲".to_string(),
             }),
@@ -537,6 +649,9 @@ mod tests {
             EditError::UnsupportedTarget {
                 reason: UnsupportedReason::ChangeNotApplied,
             },
+            EditError::UnsupportedTarget {
+                reason: UnsupportedReason::InverseUnavailable,
+            },
             EditError::NotIssued {
                 reason: NotIssuedReason::TargetMissing,
             },
@@ -552,6 +667,47 @@ mod tests {
                 operation: "create_effect",
             }
             .after_mutation(44),
+            // 事前解決相で落ちた一括適用。変更は 1 つも発行されていない。
+            EditError::Batch {
+                source: Box::new(EditError::Read(ReadError::FingerprintMismatch {
+                    current_object: Box::new(sample_object_summary()),
+                })),
+                failed_index: Some(2),
+                rollback: RollbackOutcome::NotAttempted,
+            },
+            // 適用相で落ち、発行済みの変更を全て戻した一括適用。
+            EditError::Batch {
+                source: Box::new(
+                    EditError::DestinationOccupied {
+                        layer: 3,
+                        frame: 240,
+                        occupied_by: OccupiedRange {
+                            frame_start: 200,
+                            frame_end: 260,
+                        },
+                    }
+                    .after_mutation(44),
+                ),
+                failed_index: Some(1),
+                rollback: RollbackOutcome::Complete { count: 1 },
+            },
+            // 巻き戻しに失敗した一括適用。
+            EditError::Batch {
+                source: Box::new(
+                    EditError::Sdk {
+                        operation: "move_object",
+                    }
+                    .after_mutation(44),
+                ),
+                failed_index: Some(1),
+                rollback: RollbackOutcome::Incomplete { count: 0 },
+            },
+            // 区間の panic。どこまで適用したかも分からない。
+            EditError::Batch {
+                source: Box::new(EditError::Panicked.after_mutation(44)),
+                failed_index: None,
+                rollback: RollbackOutcome::Impossible,
+            },
         ]
     }
 
@@ -568,6 +724,7 @@ mod tests {
             EditError::LayerLocked { .. } => "LayerLocked",
             EditError::EffectFingerprintMismatch => "EffectFingerprintMismatch",
             EditError::EffectNotFound { .. } => "EffectNotFound",
+            EditError::DuplicateTarget => "DuplicateTarget",
             EditError::ItemWrite(_) => "ItemWrite",
             EditError::UnsupportedTarget { .. } => "UnsupportedTarget",
             EditError::Sdk { .. } => "Sdk",
@@ -575,6 +732,7 @@ mod tests {
             EditError::Panicked => "Panicked",
             EditError::MutationPermitReissued => "MutationPermitReissued",
             EditError::AfterMutation { .. } => "AfterMutation",
+            EditError::Batch { .. } => "Batch",
         }
     }
 
@@ -589,6 +747,7 @@ mod tests {
             "LayerLocked",
             "EffectFingerprintMismatch",
             "EffectNotFound",
+            "DuplicateTarget",
             "ItemWrite",
             "UnsupportedTarget",
             "Sdk",
@@ -596,6 +755,7 @@ mod tests {
             "Panicked",
             "MutationPermitReissued",
             "AfterMutation",
+            "Batch",
         ];
         let covered: Vec<&str> = all_errors().iter().map(variant_name).collect();
         for variant in VARIANTS {
@@ -624,6 +784,7 @@ mod tests {
             UnsupportedReason::MediaNotSupported,
             UnsupportedReason::ItemTypeNotWritable,
             UnsupportedReason::ChangeNotApplied,
+            UnsupportedReason::InverseUnavailable,
         ];
         for reason in unsupported {
             match reason {
@@ -631,7 +792,8 @@ mod tests {
                 | UnsupportedReason::EffectStateImmutable
                 | UnsupportedReason::MediaNotSupported
                 | UnsupportedReason::ItemTypeNotWritable
-                | UnsupportedReason::ChangeNotApplied => {}
+                | UnsupportedReason::ChangeNotApplied
+                | UnsupportedReason::InverseUnavailable => {}
             }
         }
         let not_issued = [
@@ -689,6 +851,9 @@ mod tests {
                 // 所属オブジェクトは一致したが effect が変わっていた。
                 ErrorCode::PreconditionFailed,
                 ErrorCode::NotFound,
+                // 解決した結果、同じ状態を書き換える組が現れた。要求の誤りで
+                // あり、対象を読み直しても解消しない。
+                ErrorCode::InvalidArgument,
                 ErrorCode::NotFound,
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::InvalidArgument,
@@ -699,6 +864,8 @@ mod tests {
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
+                ErrorCode::UnsupportedOperation,
+                // 逆操作の材料を読めなかった。
                 ErrorCode::UnsupportedOperation,
                 // 対象が失われていた。要求の対象が無いのだから見つからない。
                 ErrorCode::NotFound,
@@ -709,6 +876,12 @@ mod tests {
                 // 前提の作り方の誤りであり、要求を作り直しても解消しない。
                 ErrorCode::InternalError,
                 ErrorCode::SdkError,
+                // 一括適用は失敗の理由をそのまま保つ。
+                ErrorCode::PreconditionFailed,
+                ErrorCode::PreconditionFailed,
+                // 戻せなかった変更が残っている場合だけ書き換える。
+                ErrorCode::SdkError,
+                ErrorCode::InternalError,
             ]
         );
     }
@@ -877,10 +1050,111 @@ mod tests {
     fn only_an_object_content_mismatch_carries_the_current_object() {
         // effect の食い違いは含まれない。所属オブジェクトの照合はその手前で
         // 通っており、概要を添えても要求元が送ってきた値と同じものになる。
+        //
+        // 一括適用は同じ値を位置つきの名前で載せる。どちらの名前で載っている
+        // かは問わず、載っているかどうかだけを見る。
         for error in all_errors() {
-            let carried = error.details().get("current_object").is_some();
+            let details = error.details();
+            let carried =
+                details.get("current_object").is_some() || details.get("failed_object").is_some();
             assert_eq!(carried, resolves_to_an_object_mismatch(&error), "{error}");
         }
+    }
+
+    #[test]
+    fn a_batch_names_the_failing_object_together_with_its_position() {
+        // 一括適用の応答は「何番目が落ちたか」と「その対象がいまどうなって
+        // いるか」を対で運ぶ。位置を伴わない名前で載せると、要求元は多数の
+        // sub-operation のどれを差し替えればよいか分からない。
+        let summary = sample_object_summary();
+        let error = EditError::Batch {
+            source: Box::new(EditError::Read(ReadError::FingerprintMismatch {
+                current_object: Box::new(summary.clone()),
+            })),
+            failed_index: Some(2),
+            rollback: RollbackOutcome::NotAttempted,
+        };
+        let details = error.details();
+        assert_eq!(details["failed_index"], json!(2));
+        assert_eq!(
+            details["failed_object"],
+            serde_json::to_value(&summary).unwrap()
+        );
+        assert!(details.get("current_object").is_none());
+        assert_eq!(details["mismatch"], json!("fingerprint"));
+        assert_eq!(details["retry_requires"], json!("refetch"));
+    }
+
+    #[test]
+    fn an_effect_mismatch_in_a_batch_names_only_the_position() {
+        // effect の食い違いで返せる対象の姿は、要求元が既に持っている値と
+        // 同じになる。位置だけを名乗り、差し替えの材料にならない値は載せない。
+        let error = EditError::Batch {
+            source: Box::new(EditError::EffectFingerprintMismatch),
+            failed_index: Some(1),
+            rollback: RollbackOutcome::NotAttempted,
+        };
+        let details = error.details();
+        assert_eq!(details["failed_index"], json!(1));
+        assert!(details.get("failed_object").is_none());
+        assert_eq!(details["mismatch"], json!("fingerprint"));
+    }
+
+    #[test]
+    fn a_rolled_back_batch_keeps_the_code_of_the_failure_that_stopped_it() {
+        // 要求元が知るべきは「なぜ一括適用が失敗したか」である。巻き戻せた
+        // かどうかは別のキーが担う。
+        let error = EditError::Batch {
+            source: Box::new(
+                EditError::DestinationOccupied {
+                    layer: 3,
+                    frame: 240,
+                    occupied_by: OccupiedRange {
+                        frame_start: 200,
+                        frame_end: 260,
+                    },
+                }
+                .after_mutation(44),
+            ),
+            failed_index: Some(1),
+            rollback: RollbackOutcome::Complete { count: 1 },
+        };
+        assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+        let details = error.details();
+        assert_eq!(details["rolled_back"], json!(true));
+        assert_eq!(details["rolled_back_count"], json!(1));
+        assert_eq!(details["mutation_issued"], json!(true));
+        assert_eq!(details["retry_requires"], json!("refetch"));
+        // 元へ戻ったのだから、中途半端な状態は残っていない。
+        assert!(details.get("consistency_unknown").is_none());
+    }
+
+    #[test]
+    fn a_batch_that_could_not_be_rolled_back_reports_an_unknown_state() {
+        // 元の失敗の理由が何であれ、要求元が直面している問題は「プロジェクトが
+        // 中途半端な状態にある」ことへ変わっている。
+        let error = EditError::Batch {
+            source: Box::new(
+                EditError::DestinationOccupied {
+                    layer: 3,
+                    frame: 240,
+                    occupied_by: OccupiedRange {
+                        frame_start: 200,
+                        frame_end: 260,
+                    },
+                }
+                .after_mutation(44),
+            ),
+            failed_index: Some(2),
+            rollback: RollbackOutcome::Incomplete { count: 1 },
+        };
+        assert_eq!(error.error_code(), ErrorCode::SdkError);
+        assert!(!error.retryable());
+        let details = error.details();
+        assert_eq!(details["consistency_unknown"], json!(true));
+        assert_eq!(details["rolled_back"], json!(false));
+        assert_eq!(details["rolled_back_count"], json!(1));
+        assert_eq!(details["retry_requires"], json!("refetch"));
     }
 
     /// 変更の発行後に包み直された失敗も辿って、対象の食い違いかを判定する。
@@ -890,7 +1164,9 @@ mod tests {
     fn resolves_to_an_object_mismatch(error: &EditError) -> bool {
         match error {
             EditError::Read(ReadError::FingerprintMismatch { .. }) => true,
-            EditError::AfterMutation { source, .. } => resolves_to_an_object_mismatch(source),
+            EditError::AfterMutation { source, .. } | EditError::Batch { source, .. } => {
+                resolves_to_an_object_mismatch(source)
+            }
             _ => false,
         }
     }
@@ -943,6 +1219,14 @@ mod tests {
             "mutation_issued",
             "change_applied",
             "mutation_origin",
+            // 一括適用。件数と真偽値だけであり、設定値も元値も漏らさない。
+            "failed_index",
+            "rolled_back",
+            "rolled_back_count",
+            "consistency_unknown",
+            // 落ちた sub-operation の対象の現在の概要。単独編集の
+            // `current_object` と同じ値であり、alias もパスも持たない。
+            "failed_object",
             // 読み直した対象の概要と、それが内包するセレクター。概要は要約で
             // あり alias も設定値もパスも持たない。
             "current_object",
