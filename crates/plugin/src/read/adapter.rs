@@ -568,6 +568,9 @@ mod tests {
         ObjectPlacements,
     }
 
+    /// 配下 effect の一覧を引いたことを表す記録。
+    const EFFECT_LIST: &str = "get_effect_list";
+
     /// テスト用のオブジェクト。
     ///
     /// 同一性の材料と配下 effect を別に保つ。読み取り経路がそれぞれを別の呼び
@@ -825,6 +828,9 @@ mod tests {
                 });
             }
             let object = self.find(layer, frame_start)?;
+            // effect の一覧を引くのはこの経路だけである。記録しておくことで、
+            // effect を読まないはずの経路が読んでいないことを確かめられる。
+            self.host.record(EFFECT_LIST);
             if self.host.effects_fail_at == Some(frame_start) {
                 return Err(ReadError::Sdk {
                     operation: "get_effect_list",
@@ -2123,8 +2129,8 @@ mod tests {
 
     /// 配下 effect を持つ対象でも両経路が一致することを確かめる。
     ///
-    /// effect が 0 件の対象だけで検証すると、effect を材料に含めていない実装
-    /// でも通ってしまう。
+    /// 一方が effect を読み、他方が読まない経路を通るため、材料が食い違えば
+    /// ここで落ちる。
     #[test]
     fn object_fingerprint_agrees_for_an_object_that_has_effects() {
         let adapter = adapter();
@@ -2141,44 +2147,135 @@ mod tests {
         assert_eq!(detail.summary.fingerprint, summary.fingerprint);
     }
 
+    /// 立ち絵オブジェクトの effect を差し替えたホストを組み立てる。
+    fn host_with_effects(effects: Vec<HostEffect>) -> FakeHost {
+        let mut layers = fake_layers();
+        layers[1].objects[0] = object_with_effects(1, 100, 200, Some("立ち絵"), effects);
+        FakeHost {
+            layers,
+            ..FakeHost::new()
+        }
+    }
+
+    /// 列挙からレイヤー 1・フレーム 100 の概要を取り出す。
+    fn listed_sample(adapter: &HostReadAdapter<FakeHost>) -> ObjectSummary {
+        adapter
+            .list_objects_page(0, None)
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.layer == 1 && item.frame_start == 100)
+            .expect("対象がありません")
+    }
+
     /// effect の設定を変えると、そのオブジェクトの fingerprint も変わることを
     /// 確かめる。
     ///
     /// 変わらなければ、effect を書き換えた後も変更前のセレクターが一致し続け、
-    /// 古いセレクターでの変更を拒否できない。epoch を揃えるためプロジェクト
-    /// 状態は共用し、差分を effect の設定だけにする。
+    /// 古いセレクターでの変更を拒否できない。材料に effect の列は無く、alias が
+    /// 配下 effect の設定値を含むことだけがこの性質を支えている。列挙は effect を
+    /// 読まないため、ここで変わるのは alias 経由でしかあり得ない。
+    ///
+    /// epoch を揃えるためプロジェクト状態は共用し、差分を effect の設定だけに
+    /// する。
     #[test]
     fn object_fingerprint_changes_when_an_effect_setting_changes() {
         let project = Arc::new(ProjectState::new());
-        let host_with = |path: &'static str| {
-            let mut layers = fake_layers();
-            layers[1].objects[0] = object_with_effects(
-                1,
-                100,
-                200,
-                Some("立ち絵"),
-                vec![file_effect("動画ファイル", 0, path)],
-            );
-            FakeHost {
-                layers,
-                ..FakeHost::new()
-            }
-        };
         let fingerprint_of = |path: &'static str| {
-            HostReadAdapter::new(host_with(path), Arc::clone(&project))
-                .list_objects_page(0, None)
-                .unwrap()
-                .items
-                .into_iter()
-                .find(|item| item.layer == 1 && item.frame_start == 100)
-                .expect("対象がありません")
-                .fingerprint
+            let adapter = HostReadAdapter::new(
+                host_with_effects(vec![file_effect("動画ファイル", 0, path)]),
+                Arc::clone(&project),
+            );
+            let fingerprint = listed_sample(&adapter).fingerprint;
+            assert!(
+                !adapter.host.calls().contains(&EFFECT_LIST),
+                "列挙が effect を読みました: {:?}",
+                adapter.host.calls()
+            );
+            fingerprint
         };
 
         assert_ne!(
             fingerprint_of(r"C:\movie.mp4"),
             fingerprint_of(r"C:\another.mp4"),
             "effect の設定を変えても fingerprint が変わりません"
+        );
+    }
+
+    /// 列挙が配下 effect を読まないことを確かめる。
+    ///
+    /// 読めば 1 ページあたりの SDK 呼び出しが effect 数と設定項目数に比例して
+    /// 増え、窓内の 1 件の effect が読めないだけでページ全体が失敗する。
+    #[test]
+    fn list_objects_does_not_read_effects() {
+        let adapter = adapter();
+        let page = adapter.list_objects_page(0, None).unwrap();
+
+        assert_eq!(page.items.len(), 3);
+        assert!(
+            !adapter.host.calls().contains(&EFFECT_LIST),
+            "列挙が effect を読みました: {:?}",
+            adapter.host.calls()
+        );
+        assert_eq!(detail_reads(&adapter), 0);
+    }
+
+    /// 対象を指定する取得は配下 effect を読むことを確かめる。
+    ///
+    /// 応答が effect の一覧を返すため、読まなければ組み立てられない。
+    #[test]
+    fn get_object_reads_effects() {
+        let adapter = adapter();
+        let selector = sample_selector(&adapter);
+        let detail = adapter.get_object(&selector).unwrap();
+
+        assert!(!detail.effects.is_empty());
+        assert!(
+            adapter.host.calls().contains(&EFFECT_LIST),
+            "effect を読まずに一覧を返しました: {:?}",
+            adapter.host.calls()
+        );
+    }
+
+    /// 配下 effect が読めなくても列挙が成功することを確かめる。
+    ///
+    /// 列挙が effect を読んでいれば、窓に入った 1 件の失敗がページ全体を SDK の
+    /// 失敗へ落とす。対象を 1 つも指定していない要求が、応答に現れない値の
+    /// 読み取り失敗で丸ごと失敗する経路である。
+    #[test]
+    fn list_objects_survives_a_failing_effect_read() {
+        let adapter = adapter_with(|_| FakeHost {
+            effects_fail_at: Some(100),
+            ..FakeHost::new()
+        });
+
+        let page = adapter
+            .list_objects_page(0, None)
+            .expect("effect の読み取り失敗が列挙を巻き込みました");
+        assert_eq!(page.items.len(), 3);
+    }
+
+    /// 配下 effect が読めなくても対象の fingerprint が変わらないことを確かめる。
+    ///
+    /// effect の一覧は 0 件と取得失敗を区別しない。推定が同一性の材料に入って
+    /// いれば、一過性の失敗で fingerprint が揺れ、直前に返したセレクターが
+    /// 拒否される。
+    #[test]
+    fn a_failing_effect_read_does_not_shift_the_object_fingerprint() {
+        let project = Arc::new(ProjectState::new());
+        let healthy = HostReadAdapter::new(FakeHost::new(), Arc::clone(&project));
+        let failing = HostReadAdapter::new(
+            FakeHost {
+                effects_fail_at: Some(100),
+                ..FakeHost::new()
+            },
+            Arc::clone(&project),
+        );
+
+        assert_eq!(
+            listed_sample(&healthy).fingerprint,
+            listed_sample(&failing).fingerprint,
+            "effect の読み取り失敗で fingerprint が揺れました"
         );
     }
 
@@ -2189,22 +2286,9 @@ mod tests {
     /// 先頭と同じ fingerprint になり、別のインスタンスへ変更が当たる。
     #[test]
     fn effect_fingerprint_changes_when_the_preceding_effect_is_removed() {
-        let adapter_for = |effects: Vec<HostEffect>| {
-            let mut layers = fake_layers();
-            layers[1].objects[0] = object_with_effects(1, 100, 200, Some("立ち絵"), effects);
-            adapter_with(|_| FakeHost {
-                layers,
-                ..FakeHost::new()
-            })
-        };
+        let adapter_for = |effects: Vec<HostEffect>| adapter_with(|_| host_with_effects(effects));
         let fingerprints_of = |adapter: &HostReadAdapter<FakeHost>| {
-            let summary = adapter
-                .list_objects_page(0, None)
-                .unwrap()
-                .items
-                .into_iter()
-                .find(|item| item.layer == 1 && item.frame_start == 100)
-                .expect("対象がありません");
+            let summary = listed_sample(adapter);
             adapter
                 .get_object(&summary.selector)
                 .unwrap()
@@ -2227,6 +2311,21 @@ mod tests {
             fingerprints_of(&after)[0],
             "繰り上がった effect が取り除く前の先頭と同じ値になりました"
         );
+    }
+
+    /// 列挙の失敗へ畳んだ後も、不在を検出した呼び出しを指すことを確かめる。
+    ///
+    /// 検出元を決め打ちすると、切り分けが誤った系統へ向かう。
+    #[test]
+    fn enumeration_failure_keeps_the_detecting_call() {
+        for detected_by in ["find_object", "get_effect_list"] {
+            let folded = enumeration_failure(ReadError::ObjectNotFound { detected_by });
+            assert_eq!(folded.error_code(), ErrorCode::SdkError);
+            assert_eq!(folded.details()["sdk_operation"], detected_by);
+        }
+        // 不在以外の失敗は分類を変えない。
+        let untouched = enumeration_failure(ReadError::FingerprintMismatch);
+        assert_eq!(untouched.error_code(), ErrorCode::PreconditionFailed);
     }
 
     #[test]

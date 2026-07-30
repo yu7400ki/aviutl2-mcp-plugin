@@ -78,6 +78,9 @@ pub(crate) enum PanicPoint {
     AfterMutation,
 }
 
+/// 配下 effect の一覧を引いたことを表す記録。
+pub(crate) const EFFECT_LIST: &str = "get_effect_list";
+
 /// クロージャから巻き戻しが漏れたことを表す記録。
 ///
 /// 実機ではこの位置でホストのプロセスが落ちる。記録が残る経路は、捕捉が
@@ -275,6 +278,14 @@ impl FakeEditHost {
     /// 記録された呼び出しを順序どおり返す。
     pub(crate) fn calls(&self) -> Vec<&'static str> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// 記録を捨てる。
+    ///
+    /// 要求の組み立てに使う読み取りと、編集そのものの呼び出しを切り分けるために
+    /// 用いる。
+    pub(crate) fn clear_calls(&self) {
+        self.calls.lock().unwrap().clear();
     }
 
     /// 編集区間へ入った回数。
@@ -578,6 +589,9 @@ impl SceneReader for FakeSceneEditor<'_> {
         frame_start: usize,
     ) -> Result<HostObjectDetail, ReadError> {
         self.host.record("object_detail");
+        // effect の一覧を引くのはこの経路だけである。記録しておくことで、
+        // effect を必要としない operation が読んでいないことを確かめられる。
+        self.host.record(EFFECT_LIST);
         self.on_object_read()?;
         let scene = self.host.scene.lock().unwrap();
         Ok(scene

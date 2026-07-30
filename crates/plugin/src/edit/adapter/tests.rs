@@ -6,8 +6,9 @@
 
 use super::*;
 use crate::edit::fake::{
-    CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, FakeEditHost, FakeLayer, FakeObject, FakeReadHost, Fault,
-    Knobs, MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER, MUTATIONS, PanicPoint, SCENE_ID,
+    CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, EFFECT_LIST, FakeEditHost, FakeLayer, FakeObject,
+    FakeReadHost, Fault, Knobs, MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER, MUTATIONS, PanicPoint,
+    SCENE_ID,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
@@ -789,6 +790,59 @@ fn deletion_confirms_that_the_target_is_gone() {
     assert!(
         deleted < confirmed,
         "削除後の読み直しが行われていません: {calls:?}"
+    );
+}
+
+/// 配下 effect を要しない operation が effect を読まないことを確かめる。
+///
+/// オブジェクトの同一性は alias だけで決まる。読めば、応答に現れない値の
+/// 読み取り失敗が対象の解決と反映確認を巻き込む。
+#[test]
+fn edits_that_do_not_need_effects_never_read_them() {
+    let harness = Harness::new();
+    let selector = harness.selector(1, 100);
+    // 要求の組み立てに使った読み取りは対象外にする。
+    harness.host.clear_calls();
+
+    harness
+        .edit
+        .set_object_name(&SetObjectNameParams {
+            selector,
+            name: Some("新しい名前".to_string()),
+            expected: harness.expected(),
+        })
+        .expect("改名に失敗しました");
+
+    assert!(
+        !harness.host.calls().contains(&EFFECT_LIST),
+        "effect を要しない operation が effect を読みました: {:?}",
+        harness.host.calls()
+    );
+}
+
+/// effect を指定する operation は effect を読むことを確かめる。
+///
+/// 列全体の位置と総数を材料にするため、対象の effect だけを読むことはできない。
+#[test]
+fn edits_that_target_an_effect_read_them() {
+    let harness = Harness::new();
+    let selector = harness.effect_selector(1, 100, "ぼかし", 0);
+    harness.host.clear_calls();
+
+    harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector,
+            item: "範囲".to_string(),
+            value: ItemValue::Integer { value: 30 },
+            expected: harness.expected(),
+        })
+        .expect("設定項目の変更に失敗しました");
+
+    assert!(
+        harness.host.calls().contains(&EFFECT_LIST),
+        "effect を読まずに effect を書き換えました: {:?}",
+        harness.host.calls()
     );
 }
 
