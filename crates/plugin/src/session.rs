@@ -301,10 +301,10 @@ fn run_request_loop(
         //
         // 上限は分類した operation から 1 か所で引く。族ごとに引き直すと、
         // 予算区分を足したときに一部の族だけが古い上限のまま残る。
-        let execution_deadline = resolve_request_deadline(
+        let execution_deadline = resolve_execution_deadline(
             Instant::now(),
             Utc::now().timestamp_millis(),
-            execution_timeout(operation),
+            operation,
             request.deadline_unix_ms,
         );
 
@@ -493,6 +493,25 @@ fn classify_operation(name: &str) -> Result<Operation, ErrorObject> {
 /// **どちらの `match` も `_` を使わない網羅 `match` で書く。** operation の族
 /// も予算の区分も、足すと腕が足りずコンパイルが落ちる。上限を決めないまま
 /// 新しい operation が既定へ落ちることがない。
+/// operation ごとの上限と要求の期限から、実行に採用する期限を決める。
+///
+/// 上限の選択と期限の突き合わせを 1 つの関数にまとめる。要求処理はこれを
+/// 呼ぶだけになり、operation ごとの上限が期限の判定へ実際に効いていることを
+/// 実時間を待たずに確かめられる。
+fn resolve_execution_deadline(
+    now: Instant,
+    now_unix_ms: i64,
+    operation: Operation,
+    deadline_unix_ms: Option<u64>,
+) -> RequestDeadline {
+    resolve_request_deadline(
+        now,
+        now_unix_ms,
+        execution_timeout(operation),
+        deadline_unix_ms,
+    )
+}
+
 fn execution_timeout(operation: Operation) -> Duration {
     let known = match operation {
         Operation::Ping => return WRITE_TIMEOUT,
@@ -2177,21 +2196,45 @@ mod tests {
     fn every_operation_draws_the_execution_budget_of_its_kind() {
         // 上限を引く経路は要求処理に 1 つしかない。ここが operation ごとに
         // 意図どおりの値を返すことが、全 operation の期限判定の根拠になる。
+        //
+        // 引いた上限が期限の判定へ実際に効いていることまで見る。要求が期限を
+        // 運ばなければ、採用される期限は operation ごとの上限そのものになる。
+        let now = Instant::now();
+        let deadline = |operation| resolve_execution_deadline(now, NOW_UNIX_MS, operation, None);
+
         assert_eq!(execution_timeout(Operation::Ping), WRITE_TIMEOUT);
+        assert_eq!(
+            deadline(Operation::Ping),
+            RequestDeadline::Within(now + WRITE_TIMEOUT)
+        );
 
         for operation in ReadOperation::ALL {
             assert_eq!(
-                execution_timeout(Operation::Read(operation)),
-                READ_TIMEOUT,
+                deadline(Operation::Read(operation)),
+                RequestDeadline::Within(now + READ_TIMEOUT),
                 "{} が読み取りの上限から外れました",
+                operation.as_str()
+            );
+        }
+
+        for operation in EditOperation::ALL {
+            let expected = if operation == EditOperation::ApplyBatch {
+                BATCH_TIMEOUT
+            } else {
+                EDIT_TIMEOUT
+            };
+            assert_eq!(
+                deadline(Operation::Edit(operation)),
+                RequestDeadline::Within(now + expected),
+                "{} が編集の上限から外れました",
                 operation.as_str()
             );
         }
 
         for operation in aviutl2_mcp_core::RenderOperation::ALL {
             assert_eq!(
-                execution_timeout(Operation::Render(operation)),
-                RENDER_TIMEOUT,
+                deadline(Operation::Render(operation)),
+                RequestDeadline::Within(now + RENDER_TIMEOUT),
                 "{} がレンダリングの上限から外れました",
                 operation.as_str()
             );
