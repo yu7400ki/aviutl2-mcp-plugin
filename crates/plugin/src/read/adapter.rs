@@ -244,15 +244,15 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
                 Err(error) => return Ok(Err(error)),
             };
 
-            // alias と配下 effect を読むのは窓に入った対象だけにする。応答へ
-            // 載せない対象まで読むと、参照区間の保持時間が要求ページではなく
-            // プロジェクトの規模で決まってしまう。
+            // alias を読むのは窓に入った対象だけにする。応答へ載せない対象まで
+            // 読むと、参照区間の保持時間が要求ページではなくプロジェクトの規模で
+            // 決まってしまう。配下 effect は概要に現れないため読まない。
             let mut items = Vec::with_capacity(window.len());
             for placement in window {
-                let detail = scene
-                    .object_detail(placement.layer, placement.frame_start)
+                let object = scene
+                    .object_identity(placement.layer, placement.frame_start)
                     .map_err(enumeration_failure)?;
-                items.push(object_summary(epoch, scene_id, &detail.object));
+                items.push(object_summary(epoch, scene_id, &object));
             }
             Ok(Ok(Page { items, meta }))
         })
@@ -275,7 +275,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
 
         self.read_section(move |scene| {
             let revision = project.revision();
-            let (summary, detail) = resolve_selected_object(scene, epoch, scene_id, selector)?;
+            let (summary, detail) = resolve_selected_detail(scene, epoch, scene_id, selector)?;
             Ok(object_detail(summary, revision, detail))
         })
     }
@@ -351,28 +351,64 @@ fn layer_range(filter: Option<&ObjectFilter>, layer_max: usize) -> RangeInclusiv
 /// シーンの照合は呼び出し側が済ませておく。読み取りは参照区間の外で、編集は
 /// 編集区間の内側で判定するため、判定の場所を共有できない。
 ///
-/// 詳細の読み取りと fingerprint の算出を同じ呼び出しの中で行うので、照合した
-/// 対象と返す対象が同じ読み取りに由来することが構造として保証される。
+/// 同一性の材料の読み取りと fingerprint の算出を同じ呼び出しの中で行うので、
+/// 照合した対象と返す対象が同じ読み取りに由来することが構造として保証される。
 pub(crate) fn resolve_selected_object(
     scene: &dyn SceneReader,
     epoch: &str,
     scene_id: i32,
     selector: &ObjectSelector,
+) -> Result<(ObjectSummary, HostObject), ReadError> {
+    let candidate = resolve_candidate_of(scene, selector)?;
+    let object = scene.object_identity(selector.layer, candidate.frame_start)?;
+    let summary = verified_summary(epoch, scene_id, &object, selector)?;
+    Ok((summary, object))
+}
+
+/// セレクターが指す対象を、配下 effect と中間点まで含めて解決する。
+///
+/// 照合は [`resolve_selected_object`] と同じ材料・同じ判定で行う。effect の一覧を
+/// 必要とする経路だけがこちらを使う。
+pub(crate) fn resolve_selected_detail(
+    scene: &dyn SceneReader,
+    epoch: &str,
+    scene_id: i32,
+    selector: &ObjectSelector,
 ) -> Result<(ObjectSummary, HostObjectDetail), ReadError> {
-    // 候補の絞り込みは位置と名前だけで決まる。ここでレイヤー内の全対象の
-    // alias と effect まで読むと、無関係な対象の読み取り失敗が要求全体を
-    // 巻き込み、対象自体は健全なのに取得できなくなる。
-    let candidate = resolve_candidate(
+    let candidate = resolve_candidate_of(scene, selector)?;
+    let detail = scene.object_detail(selector.layer, candidate.frame_start)?;
+    let summary = verified_summary(epoch, scene_id, &detail.object, selector)?;
+    Ok((summary, detail))
+}
+
+/// セレクターが指す候補を 1 件へ絞る。
+///
+/// 絞り込みは位置と名前だけで決まる。ここでレイヤー内の全対象の alias まで
+/// 読むと、無関係な対象の読み取り失敗が要求全体を巻き込み、対象自体は健全なのに
+/// 取得できなくなる。
+fn resolve_candidate_of(
+    scene: &dyn SceneReader,
+    selector: &ObjectSelector,
+) -> Result<HostObjectPlacement, ReadError> {
+    resolve_candidate(
         scene.object_placements(selector.layer)?,
         selector.frame,
         selector.name.as_deref(),
-    )?;
-    let detail = scene.object_detail(selector.layer, candidate.frame_start)?;
-    let summary = object_summary(epoch, scene_id, &detail.object);
+    )
+}
+
+/// 読み直した対象の概要を、セレクターの fingerprint と照合してから返す。
+fn verified_summary(
+    epoch: &str,
+    scene_id: i32,
+    object: &HostObject,
+    selector: &ObjectSelector,
+) -> Result<ObjectSummary, ReadError> {
+    let summary = object_summary(epoch, scene_id, object);
     if summary.fingerprint != selector.fingerprint {
         return Err(ReadError::FingerprintMismatch);
     }
-    Ok((summary, detail))
+    Ok(summary)
 }
 
 /// セレクターの算出方式が現在生成できる方式と一致することを確かめる。
@@ -462,7 +498,7 @@ pub(crate) fn object_summary(epoch: &str, scene_id: i32, object: &HostObject) ->
 
 /// オブジェクトの詳細を、算出済みの概要と組み合わせて組み立てる。
 fn object_detail(summary: ObjectSummary, revision: u64, detail: HostObjectDetail) -> ObjectDetail {
-    let effects = effect_fingerprint_inputs(&detail.object.effects)
+    let effects = effect_fingerprint_inputs(&detail.effects)
         .map(|input| EffectInfo::new(summary.selector.clone(), input))
         .collect();
     ObjectDetail {
@@ -532,13 +568,23 @@ mod tests {
         ObjectPlacements,
     }
 
+    /// テスト用のオブジェクト。
+    ///
+    /// 同一性の材料と配下 effect を別に保つ。読み取り経路がそれぞれを別の呼び
+    /// 出しで返すため、フェイクも同じ形で保持する。
+    #[derive(Debug, Clone)]
+    struct FakeObject {
+        identity: HostObject,
+        effects: Vec<HostEffect>,
+    }
+
     /// テスト用のレイヤー。
     #[derive(Debug, Clone)]
     struct FakeLayer {
         name: Option<String>,
         enabled: bool,
         locked: bool,
-        objects: Vec<HostObject>,
+        objects: Vec<FakeObject>,
     }
 
     /// SDK の代わりに定型データを返すホスト。
@@ -557,14 +603,18 @@ mod tests {
         layers: Vec<FakeLayer>,
         catalog: Vec<AvailableEffect>,
         panic_at: Option<PanicPoint>,
-        /// 詳細の読み取りを失敗させる対象の開始フレーム。
+        /// 同一性の材料の読み取りを失敗させる対象の開始フレーム。
         ///
         /// 特定のオブジェクトだけが読めない状況を作り、他の対象の読み取りが
         /// 巻き込まれないことを確かめるために用いる。
         detail_fails_at: Option<usize>,
-        /// 走査には現れるのに詳細を読めない対象の開始フレーム。
+        /// 配下 effect の読み取りだけを失敗させる対象の開始フレーム。
         ///
-        /// 走査と詳細の読み取りの間に対象が消えた状況を作る。
+        /// 同一性の材料は読めるのに effect の一覧だけが取れない状況を作る。
+        effects_fail_at: Option<usize>,
+        /// 走査には現れるのに読み直せない対象の開始フレーム。
+        ///
+        /// 走査と読み直しの間に対象が消えた状況を作る。
         detail_missing_at: Option<usize>,
         /// 参照区間の確保そのものを失敗させる。
         section_fails: bool,
@@ -593,6 +643,7 @@ mod tests {
                 catalog: fake_catalog(),
                 panic_at: None,
                 detail_fails_at: None,
+                effects_fail_at: None,
                 detail_missing_at: None,
                 section_fails: false,
                 bump_on_enter: 0,
@@ -739,10 +790,25 @@ mod tests {
                 .map(|fake| {
                     fake.objects
                         .iter()
-                        .map(|object| object.placement.clone())
+                        .map(|object| object.identity.placement.clone())
                         .collect()
                 })
                 .unwrap_or_default())
+        }
+
+        fn object_identity(
+            &self,
+            layer: usize,
+            frame_start: usize,
+        ) -> Result<HostObject, ReadError> {
+            self.host.record("object_identity");
+            if self.host.detail_missing_at == Some(frame_start) {
+                // 対象の探索が不在を検出する。alias を読む前に分かる。
+                return Err(ReadError::ObjectNotFound {
+                    detected_by: "find_object",
+                });
+            }
+            Ok(self.find(layer, frame_start)?.identity.clone())
         }
 
         fn object_detail(
@@ -758,6 +824,29 @@ mod tests {
                     detected_by: "get_effect_list",
                 });
             }
+            let object = self.find(layer, frame_start)?;
+            if self.host.effects_fail_at == Some(frame_start) {
+                return Err(ReadError::Sdk {
+                    operation: "get_effect_list",
+                });
+            }
+            Ok(HostObjectDetail {
+                object: object.identity.clone(),
+                effects: object.effects.clone(),
+                sections: vec![SectionRange {
+                    start: object.identity.placement.frame_start,
+                    end: object.identity.placement.frame_end,
+                }],
+            })
+        }
+    }
+
+    impl FakeScene<'_> {
+        /// 開始フレームで対象を引く。
+        ///
+        /// 対象そのものが読めない状況をここで再現する。同一性の材料を読む経路と
+        /// 詳細を読む経路の双方が通る。
+        fn find(&self, layer: usize, frame_start: usize) -> Result<&FakeObject, ReadError> {
             let object = self
                 .host
                 .layers
@@ -765,23 +854,17 @@ mod tests {
                 .and_then(|fake| {
                     fake.objects
                         .iter()
-                        .find(|object| object.placement.frame_start == frame_start)
+                        .find(|object| object.identity.placement.frame_start == frame_start)
                 })
                 .ok_or(ReadError::ObjectNotFound {
                     detected_by: "find_object",
                 })?;
             if self.host.detail_fails_at == Some(frame_start) {
                 return Err(ReadError::Sdk {
-                    operation: "get_effect_item_value",
+                    operation: "get_object_alias",
                 });
             }
-            Ok(HostObjectDetail {
-                sections: vec![SectionRange {
-                    start: object.placement.frame_start,
-                    end: object.placement.frame_end,
-                }],
-                object: object.clone(),
-            })
+            Ok(object)
         }
     }
 
@@ -811,15 +894,17 @@ mod tests {
         frame_start: usize,
         frame_end: usize,
         name: Option<&str>,
-    ) -> HostObject {
-        HostObject {
-            placement: HostObjectPlacement {
-                layer,
-                frame_start,
-                frame_end,
-                name: name.map(str::to_string),
+    ) -> FakeObject {
+        FakeObject {
+            identity: HostObject {
+                placement: HostObjectPlacement {
+                    layer,
+                    frame_start,
+                    frame_end,
+                    name: name.map(str::to_string),
+                },
+                alias: format!("[{layer}:{frame_start}]"),
             },
-            alias: format!("[{layer}:{frame_start}]"),
             effects: Vec::new(),
         }
     }
@@ -835,12 +920,14 @@ mod tests {
         frame_end: usize,
         name: Option<&str>,
         effects: Vec<HostEffect>,
-    ) -> HostObject {
+    ) -> FakeObject {
         let base = object(layer, frame_start, frame_end, name);
-        HostObject {
-            alias: alias_with_effects(&base.alias, &effects),
+        FakeObject {
+            identity: HostObject {
+                alias: alias_with_effects(&base.identity.alias, &effects),
+                ..base.identity
+            },
             effects,
-            ..base
         }
     }
 
@@ -964,11 +1051,11 @@ mod tests {
 
     /// レイヤー 1・フレーム 100 のオブジェクトを指すセレクター。
     ///
-    /// 材料はホストが保持する値から採る。配下 effect も fingerprint の材料で
-    /// あるため、位置と名前だけを写した複製からは正しい値を組み立てられない。
+    /// 材料はホストが保持する値から採る。alias は配下 effect の設定値を含むため、
+    /// 位置と名前だけを写した複製からは正しい値を組み立てられない。
     fn sample_selector(adapter: &HostReadAdapter<FakeHost>) -> ObjectSelector {
         let object = fake_layers()[1].objects[0].clone();
-        object_summary(&adapter.project.epoch(), 0, &object).selector
+        object_summary(&adapter.project.epoch(), 0, &object.identity).selector
     }
 
     #[test]
@@ -1307,7 +1394,7 @@ mod tests {
 
         let calls = adapter.host.calls();
         assert!(calls.contains(&"object_count"), "{calls:?}");
-        for forbidden in ["object_placements", "object_detail"] {
+        for forbidden in ["object_placements", "object_identity", "object_detail"] {
             assert!(
                 !calls.contains(&forbidden),
                 "件数のために {forbidden} を呼んでいます: {calls:?}"
@@ -1394,17 +1481,27 @@ mod tests {
         }
     }
 
-    /// 参照区間の内側で詳細を読んだ回数。
-    fn detail_reads(adapter: &HostReadAdapter<FakeHost>) -> usize {
+    /// 参照区間の内側で指定の呼び出しを行った回数。
+    fn calls_of(adapter: &HostReadAdapter<FakeHost>, call: &str) -> usize {
         adapter
             .host
             .calls()
             .iter()
-            .filter(|call| **call == "object_detail")
+            .filter(|recorded| **recorded == call)
             .count()
     }
 
-    /// ページ窓の外にある対象の詳細を読まないことを確かめる。
+    /// 同一性の材料を読んだ回数。
+    fn identity_reads(adapter: &HostReadAdapter<FakeHost>) -> usize {
+        calls_of(adapter, "object_identity")
+    }
+
+    /// 配下 effect を含む詳細を読んだ回数。
+    fn detail_reads(adapter: &HostReadAdapter<FakeHost>) -> usize {
+        calls_of(adapter, "object_detail")
+    }
+
+    /// ページ窓の外にある対象を読まないことを確かめる。
     #[test]
     fn list_objects_reads_details_only_within_the_page() {
         let adapter = adapter();
@@ -1429,11 +1526,7 @@ mod tests {
         assert_eq!(page.items[0].layer, 1);
         assert_eq!(page.items[0].frame_start, 100);
 
-        assert_eq!(
-            detail_reads(&adapter),
-            1,
-            "窓の外の対象まで詳細を読んでいます"
-        );
+        assert_eq!(identity_reads(&adapter), 1, "窓の外の対象まで読んでいます");
     }
 
     /// 重い読み取りの回数が、プロジェクトの規模ではなく要求ページの件数で
@@ -1474,7 +1567,7 @@ mod tests {
 
         assert_eq!(page.meta.total_count, TOTAL as u32);
         assert_eq!(page.items.len(), LIMIT as usize);
-        assert_eq!(detail_reads(&adapter), LIMIT as usize);
+        assert_eq!(identity_reads(&adapter), LIMIT as usize);
     }
 
     /// 列挙が「対象が見つからない」を返さないことを確かめる。
@@ -1491,9 +1584,8 @@ mod tests {
 
         let error = adapter.list_objects_page(0, None).unwrap_err();
         assert_eq!(error.error_code(), ErrorCode::SdkError);
-        // 畳んだ後も、実際に不在を検出した呼び出しを指す。対象の探索へ
-        // 決め打ちすると、切り分けが誤った系統へ向かう。
-        assert_eq!(error.details()["sdk_operation"], "get_effect_list");
+        // 畳んだ後も、実際に不在を検出した呼び出しを指す。
+        assert_eq!(error.details()["sdk_operation"], "find_object");
     }
 
     /// 対象を指定する取得では、不在がそのまま不在として返ることを確かめる。
@@ -1538,7 +1630,7 @@ mod tests {
 
             assert_eq!(error, PageError::LimitOutOfRange(limit));
         }
-        assert_eq!(detail_reads(&adapter), 0);
+        assert_eq!(identity_reads(&adapter), 0);
     }
 
     /// スナップショット revision が一致しない要求で、重い読み取りへ進まない
@@ -1566,7 +1658,7 @@ mod tests {
                 current: 0,
             }
         );
-        assert_eq!(detail_reads(&adapter), 0);
+        assert_eq!(identity_reads(&adapter), 0);
     }
 
     #[test]
@@ -1597,23 +1689,22 @@ mod tests {
         let selector = sample_selector(&adapter);
         adapter.get_object(&selector).unwrap();
 
-        let details = adapter
-            .host
-            .calls()
-            .iter()
-            .filter(|call| **call == "object_detail")
-            .count();
-        assert_eq!(details, 1, "候補以外の詳細まで読んでいます");
+        assert_eq!(detail_reads(&adapter), 1, "候補以外の詳細まで読んでいます");
+        assert_eq!(
+            identity_reads(&adapter),
+            0,
+            "詳細と同一性の材料を二重に読んでいます"
+        );
     }
 
     /// 同じレイヤーにある無関係な対象が読めなくても、対象の取得が成功することを
     /// 確かめる。
     ///
-    /// 候補の絞り込みでレイヤー内の全対象の alias と effect を読むと、無関係な
-    /// 対象の不調が対象の取得を巻き込んで失敗させる。
+    /// 候補の絞り込みでレイヤー内の全対象の alias を読むと、無関係な対象の不調が
+    /// 対象の取得を巻き込んで失敗させる。
     #[test]
     fn get_object_is_unaffected_by_a_failing_sibling() {
-        // レイヤー 1 には開始フレーム 100 と 300 の対象がある。300 の詳細だけを
+        // レイヤー 1 には開始フレーム 100 と 300 の対象がある。300 の読み取りだけを
         // 失敗させ、100 を取得する。
         let adapter = adapter_with(|_| FakeHost {
             detail_fails_at: Some(300),
@@ -1687,7 +1778,7 @@ mod tests {
         let adapter = adapter_with(|_| {
             let mut layers = fake_layers();
             // 位置と名前は同じまま alias だけ変える。
-            layers[1].objects[0].alias = "[changed]".to_string();
+            layers[1].objects[0].identity.alias = "[changed]".to_string();
             FakeHost {
                 layers,
                 ..FakeHost::new()
@@ -1785,7 +1876,7 @@ mod tests {
             // 元の対象は動き、空いた位置に同名で別内容の対象が入る。
             layers[1].objects[0] = object(1, 105, 205, Some("立ち絵"));
             let mut intruder = object(1, 100, 150, Some("立ち絵"));
-            intruder.alias = "[1:100]#2".to_string();
+            intruder.identity.alias = "[1:100]#2".to_string();
             layers[1].objects.push(intruder);
             FakeHost {
                 layers,
@@ -2140,7 +2231,7 @@ mod tests {
 
     #[test]
     fn resolve_candidate_requires_exact_start_frame() {
-        let objects = vec![object(1, 100, 200, None).placement];
+        let objects = vec![object(1, 100, 200, None).identity.placement];
         assert!(matches!(
             resolve_candidate(objects.clone(), 150, None),
             Err(ReadError::ObjectNotFound { .. })
@@ -2166,8 +2257,8 @@ mod tests {
         let base = object(1, 100, 200, Some("立ち絵"));
         let moved = object(1, 101, 200, Some("立ち絵"));
         assert_ne!(
-            object_summary("epoch", 0, &base).fingerprint,
-            object_summary("epoch", 0, &moved).fingerprint
+            object_summary("epoch", 0, &base.identity).fingerprint,
+            object_summary("epoch", 0, &moved.identity).fingerprint
         );
     }
 

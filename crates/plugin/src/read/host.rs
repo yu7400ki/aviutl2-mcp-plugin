@@ -113,17 +113,15 @@ pub struct HostObjectPlacement {
 
 /// オブジェクトの位置と同一性の材料。
 ///
-/// 配下 effect も同一性の材料であるため、この型が併せて保持する。オブジェクトの
-/// fingerprint は配下 effect の fingerprint 列を含むので、effect を伴わない読み
-/// 取り結果からは算出できない。
-#[derive(Debug, Clone, PartialEq)]
+/// alias は配下 effect の設定値を含むため、オブジェクトの fingerprint はこの型
+/// だけから算出できる。effect を読まずに同一性を確定できることが、列挙で
+/// effect を読まない根拠である。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostObject {
     /// 位置と名前。
     pub placement: HostObjectPlacement,
     /// 正規化前の alias。
     pub alias: String,
-    /// 付与された effect を、付与された順に並べた列。
-    pub effects: Vec<HostEffect>,
 }
 
 /// オブジェクトの詳細。
@@ -131,6 +129,8 @@ pub struct HostObject {
 pub struct HostObjectDetail {
     /// 位置と同一性の材料。
     pub object: HostObject,
+    /// 付与された effect を、付与された順に並べた列。
+    pub effects: Vec<HostEffect>,
     /// 中間点で区切られた区間。
     pub sections: Vec<SectionRange>,
 }
@@ -172,15 +172,23 @@ pub trait SceneReader {
     /// レイヤー内のオブジェクトの位置と名前を開始フレームの昇順で全件返す。
     ///
     /// alias も effect も読まない。対象の絞り込みと並び順の決定はこの結果だけで
-    /// 行い、同一性の材料は対象が確定してから [`Self::object_detail`] で読む。
+    /// 行い、同一性の材料は対象が確定してから [`Self::object_identity`] で読む。
     ///
     /// 途中で走査を打ち切った不完全な一覧は返さない。全件を返せない場合は失敗する。
     fn object_placements(&self, layer: usize) -> Result<Vec<HostObjectPlacement>, ReadError>;
 
+    /// 開始フレームが完全一致するオブジェクトの同一性の材料を返す。
+    ///
+    /// alias を読み、配下 effect は読まない。fingerprint はこの結果か
+    /// [`Self::object_detail`] が含む同じ型からだけ算出する。
+    ///
+    /// 一致する対象が無い場合は [`ReadError::ObjectNotFound`] を返す。
+    fn object_identity(&self, layer: usize, frame_start: usize) -> Result<HostObject, ReadError>;
+
     /// 開始フレームが完全一致するオブジェクトの詳細を返す。
     ///
-    /// alias と配下 effect を含む同一性の材料は、この経路だけが返す。fingerprint は
-    /// 必ずここから算出する。
+    /// 同一性の材料に加えて配下 effect と中間点の区間を読む。effect の一覧を
+    /// 必要とする経路だけがここを通る。
     ///
     /// 一致する対象が無い場合は [`ReadError::ObjectNotFound`] を返す。
     fn object_detail(

@@ -785,7 +785,7 @@ fn deletion_confirms_that_the_target_is_gone() {
     // 削除の確認は同一区間内の読み直しで行う。
     let calls = harness.host.calls();
     let deleted = calls.iter().position(|call| *call == "delete_object");
-    let confirmed = calls.iter().rposition(|call| *call == "object_detail");
+    let confirmed = calls.iter().rposition(|call| *call == "object_identity");
     assert!(
         deleted < confirmed,
         "削除後の読み直しが行われていません: {calls:?}"

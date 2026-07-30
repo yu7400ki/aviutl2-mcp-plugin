@@ -148,9 +148,10 @@ impl SdkSceneReader<'_> {
             .section
             .get_object_layer_frame(handle)
             .map_err(|_| sdk("get_object_layer_frame"))?;
-        let detail =
-            self.object_detail(non_negative(position.layer), non_negative(position.start))?;
-        Ok(Some(detail.object))
+        // 応答へ載せるのは概要だけであり、配下 effect は読まない。
+        let object =
+            self.object_identity(non_negative(position.layer), non_negative(position.start))?;
+        Ok(Some(object))
     }
 }
 

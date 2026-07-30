@@ -157,17 +157,19 @@ impl SceneReader for SdkSceneReader<'_> {
         })
     }
 
+    fn object_identity(&self, layer: usize, frame_start: usize) -> Result<HostObject, ReadError> {
+        let handle = self.locate_object(layer, frame_start)?;
+        ensure_start_frame(self.object_at(handle)?, frame_start)
+    }
+
     fn object_detail(
         &self,
         layer: usize,
         frame_start: usize,
     ) -> Result<HostObjectDetail, ReadError> {
-        let handle =
-            self.find_object_from(layer, frame_start)?
-                .ok_or(ReadError::ObjectNotFound {
-                    detected_by: "find_object",
-                })?;
+        let handle = self.locate_object(layer, frame_start)?;
         let object = ensure_start_frame(self.object_at(handle)?, frame_start)?;
+        let effects = self.effects_of(handle)?;
 
         let sections = to_inclusive_sections(
             self.section
@@ -175,7 +177,11 @@ impl SceneReader for SdkSceneReader<'_> {
                 .map_err(|_| sdk("get_object_section_frame"))?,
         );
 
-        Ok(HostObjectDetail { object, sections })
+        Ok(HostObjectDetail {
+            object,
+            effects,
+            sections,
+        })
     }
 }
 
@@ -189,6 +195,14 @@ impl SdkSceneReader<'_> {
         self.section
             .find_object_after(layer, frame)
             .map_err(|_| sdk("find_object"))
+    }
+
+    /// 開始フレームで対象を引く。対象が無ければ不在として返す。
+    fn locate_object(&self, layer: usize, frame: usize) -> Result<ObjectHandle, ReadError> {
+        self.find_object_from(layer, frame)?
+            .ok_or(ReadError::ObjectNotFound {
+                detected_by: "find_object",
+            })
     }
 
     /// ハンドルが指すオブジェクトの位置と名前を所有型へ写す。
@@ -212,19 +226,15 @@ impl SdkSceneReader<'_> {
 
     /// ハンドルが指すオブジェクトを、同一性の材料まで含めて所有型へ写す。
     ///
-    /// alias と effect を読むのはこの 1 か所だけであり、fingerprint の材料は
-    /// 必ずここで揃う。
+    /// alias を読むのはこの 1 か所だけであり、fingerprint の材料は必ずここで
+    /// 揃う。alias は配下 effect の設定値を含むため、effect を読む必要はない。
     fn object_at(&self, handle: ObjectHandle) -> Result<HostObject, ReadError> {
         let placement = self.placement_at(handle)?;
         let alias = self
             .section
             .get_object_alias(handle)
             .map_err(|_| sdk("get_object_alias"))?;
-        Ok(HostObject {
-            placement,
-            alias,
-            effects: self.effects_of(handle)?,
-        })
+        Ok(HostObject { placement, alias })
     }
 
     /// オブジェクトに付与された effect を所有型へ写す。
@@ -593,7 +603,6 @@ mod tests {
         HostObject {
             placement: placement(frame_start, frame_end),
             alias: format!("[{frame_start}]"),
-            effects: Vec::new(),
         }
     }
 

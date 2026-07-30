@@ -97,15 +97,26 @@ pub(crate) struct FakeObject {
 }
 
 impl FakeObject {
-    /// 読み取りが返す形へ写す。
+    /// 同一性の材料へ写す。
     ///
     /// alias は配下 effect の設定値を含む。effect を変える編集の後に読み直せば
     /// alias も変わり、対象の同一性が追随する。
-    fn host(&self) -> HostObject {
+    fn identity(&self) -> HostObject {
         HostObject {
             placement: self.placement.clone(),
             alias: alias_with_effects(&self.alias, &self.effects),
+        }
+    }
+
+    /// 配下 effect と中間点を含む詳細へ写す。
+    fn detail(&self) -> HostObjectDetail {
+        HostObjectDetail {
+            object: self.identity(),
             effects: self.effects.clone(),
+            sections: vec![SectionRange {
+                start: self.placement.frame_start,
+                end: self.placement.frame_end,
+            }],
         }
     }
 }
@@ -344,7 +355,7 @@ impl EditHost for FakeEditHost {
             focus: scene
                 .focus
                 .and_then(|id| scene.by_id(id))
-                .map(FakeObject::host),
+                .map(FakeObject::identity),
         })
     }
 
@@ -549,12 +560,41 @@ impl SceneReader for FakeSceneEditor<'_> {
             .unwrap_or_default())
     }
 
+    fn object_identity(&self, layer: usize, frame_start: usize) -> Result<HostObject, ReadError> {
+        self.host.record("object_identity");
+        self.on_object_read()?;
+        let scene = self.host.scene.lock().unwrap();
+        Ok(scene
+            .find(layer, frame_start)
+            .ok_or(ReadError::ObjectNotFound {
+                detected_by: "find_object",
+            })?
+            .identity())
+    }
+
     fn object_detail(
         &self,
         layer: usize,
         frame_start: usize,
     ) -> Result<HostObjectDetail, ReadError> {
         self.host.record("object_detail");
+        self.on_object_read()?;
+        let scene = self.host.scene.lock().unwrap();
+        Ok(scene
+            .find(layer, frame_start)
+            .ok_or(ReadError::ObjectNotFound {
+                detected_by: "find_object",
+            })?
+            .detail())
+    }
+}
+
+impl FakeSceneEditor<'_> {
+    /// 対象を読むたびに働く仕込みを適用する。
+    ///
+    /// 同一性の材料だけを読む経路と詳細を読む経路のどちらも通る。片方だけに
+    /// 置くと、仕込みが働くかどうかが読み取りの粒度で変わってしまう。
+    fn on_object_read(&self) -> Result<(), ReadError> {
         if self.host.mutated() {
             assert_ne!(
                 self.host.knobs().panic_at,
@@ -598,19 +638,7 @@ impl SceneReader for FakeSceneEditor<'_> {
                 operation: "get_object_alias",
             });
         }
-        let scene = self.host.scene.lock().unwrap();
-        let object = scene
-            .find(layer, frame_start)
-            .ok_or(ReadError::ObjectNotFound {
-                detected_by: "find_object",
-            })?;
-        Ok(HostObjectDetail {
-            sections: vec![SectionRange {
-                start: object.placement.frame_start,
-                end: object.placement.frame_end,
-            }],
-            object: object.host(),
-        })
+        Ok(())
     }
 }
 

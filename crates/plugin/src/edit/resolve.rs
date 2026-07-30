@@ -11,7 +11,9 @@
 use crate::edit::error::EditError;
 use crate::edit::host::{EffectSlot, ObjectSlot, SceneEditor};
 use crate::edit::precondition::Boundary;
-use crate::read::adapter::{effect_fingerprint_inputs, resolve_selected_object};
+use crate::read::adapter::{
+    effect_fingerprint_inputs, resolve_selected_detail, resolve_selected_object,
+};
 use crate::read::host::HostEffect;
 use aviutl2_mcp_core::{EffectInfo, EffectSelector, ObjectSelector, ObjectSummary};
 use std::marker::PhantomData;
@@ -23,7 +25,6 @@ use std::marker::PhantomData;
 pub struct ResolvedObject<'sec> {
     slot: ObjectSlot,
     summary: ObjectSummary,
-    effects: Vec<HostEffect>,
     _section: PhantomData<&'sec ()>,
 }
 
@@ -36,11 +37,6 @@ impl ResolvedObject<'_> {
     /// 解決時に読み直した対象の概要。
     pub(crate) fn summary(&self) -> &ObjectSummary {
         &self.summary
-    }
-
-    /// 解決時に読み直した配下 effect の列。
-    pub(crate) fn effects(&self) -> &[HostEffect] {
-        &self.effects
     }
 
     /// 対象が属するレイヤー番号。
@@ -85,22 +81,50 @@ impl ResolvedEffect<'_> {
 /// 候補の探索と fingerprint の照合は読み取り経路と同一の実装を用いる。判定
 /// 1〜4（epoch・シーン・算出方式）は呼び出し側が [`Boundary`] を得た時点で
 /// 済んでおり、その [`Boundary`] を要求することで順序を型として要求している。
+///
+/// 配下 effect は読まない。オブジェクトの同一性は alias だけで決まるため、
+/// effect を必要としない operation が effect の読み取り失敗に巻き込まれない。
 pub(crate) fn resolve_object<'sec>(
     editor: &'sec dyn SceneEditor,
     boundary: &Boundary,
     selector: &ObjectSelector,
 ) -> Result<ResolvedObject<'sec>, EditError> {
-    let (summary, detail) = resolve_selected_object(
+    let (summary, _) = resolve_selected_object(
         editor.reader(),
         boundary.epoch(),
         boundary.scene_id(),
         selector,
     )?;
+    bind(editor, summary)
+}
+
+/// セレクターが指すオブジェクトを、配下 effect の列とともに解決する。
+///
+/// 照合は [`resolve_object`] と同じ材料で行う。effect の列を必要とする
+/// operation だけがこちらを使う。
+pub(crate) fn resolve_object_with_effects<'sec>(
+    editor: &'sec dyn SceneEditor,
+    boundary: &Boundary,
+    selector: &ObjectSelector,
+) -> Result<(ResolvedObject<'sec>, Vec<HostEffect>), EditError> {
+    let (summary, detail) = resolve_selected_detail(
+        editor.reader(),
+        boundary.epoch(),
+        boundary.scene_id(),
+        selector,
+    )?;
+    Ok((bind(editor, summary)?, detail.effects))
+}
+
+/// 照合済みの概要から解決済みトークンを作る。
+fn bind<'sec>(
+    editor: &'sec dyn SceneEditor,
+    summary: ObjectSummary,
+) -> Result<ResolvedObject<'sec>, EditError> {
     let slot = editor.bind_object(summary.layer, summary.frame_start)?;
     Ok(ResolvedObject {
         slot,
         summary,
-        effects: detail.object.effects,
         _section: PhantomData,
     })
 }
@@ -114,8 +138,8 @@ pub(crate) fn resolve_effect<'sec>(
     boundary: &Boundary,
     selector: &EffectSelector,
 ) -> Result<(ResolvedObject<'sec>, ResolvedEffect<'sec>), EditError> {
-    let object = resolve_object(editor, boundary, &selector.object)?;
-    let effect = resolve_effect_of(editor, &object, selector)?;
+    let (object, effects) = resolve_object_with_effects(editor, boundary, &selector.object)?;
+    let effect = resolve_effect_of(editor, &object, &effects, selector)?;
     Ok((object, effect))
 }
 
@@ -123,22 +147,18 @@ pub(crate) fn resolve_effect<'sec>(
 pub(crate) fn resolve_effect_of<'sec>(
     editor: &'sec dyn SceneEditor,
     object: &ResolvedObject<'sec>,
+    effects: &[HostEffect],
     selector: &EffectSelector,
 ) -> Result<ResolvedEffect<'sec>, EditError> {
-    let position = find_effect_position(
-        object.effects(),
-        &selector.effect_name,
-        selector.effect_index,
-    )
-    .ok_or_else(|| EditError::EffectNotFound {
-        effect_name: selector.effect_name.clone(),
-        effect_index: selector.effect_index,
-    })?;
-    let info = effect_info_at(&object.summary().selector, object.effects(), position).ok_or(
-        EditError::Sdk {
+    let position = find_effect_position(effects, &selector.effect_name, selector.effect_index)
+        .ok_or_else(|| EditError::EffectNotFound {
+            effect_name: selector.effect_name.clone(),
+            effect_index: selector.effect_index,
+        })?;
+    let info =
+        effect_info_at(&object.summary().selector, effects, position).ok_or(EditError::Sdk {
             operation: "get_effect_list",
-        },
-    )?;
+        })?;
     if info.fingerprint != selector.fingerprint {
         return Err(crate::read::ReadError::FingerprintMismatch.into());
     }

@@ -829,6 +829,14 @@ mod tests {
             panic!("参照区間の内側で panic させます")
         }
 
+        fn object_identity(
+            &self,
+            _layer: usize,
+            _frame_start: usize,
+        ) -> Result<crate::read::host::HostObject, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
         fn object_detail(
             &self,
             _layer: usize,

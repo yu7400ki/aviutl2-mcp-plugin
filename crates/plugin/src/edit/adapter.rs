@@ -16,7 +16,9 @@ use crate::edit::EditAdapter;
 use crate::edit::error::{EditError, UnsupportedReason};
 use crate::edit::host::{EditHost, HostSelection, SceneEditor};
 use crate::edit::precondition::{Boundary, EditKind, MutationPermit, verify_boundary};
-use crate::edit::resolve::{ResolvedObject, effect_info_at, resolve_effect, resolve_object};
+use crate::edit::resolve::{
+    ResolvedObject, effect_info_at, resolve_effect, resolve_object, resolve_object_with_effects,
+};
 use crate::project::ProjectState;
 use crate::read::ReadError;
 use crate::read::adapter::object_summary;
@@ -240,8 +242,26 @@ fn ensure_destination_free(
     Ok(())
 }
 
-/// 変更後の対象を読み直し、応答へ載せる概要と effect 列を得る。
+/// 変更後の対象を読み直し、応答へ載せる概要を得る。
+///
+/// 配下 effect は読まない。応答が effect を含まない operation では、effect の
+/// 読み取り失敗が反映済みの変更を失敗として報告させてしまう。
 fn reread(
+    editor: &dyn SceneEditor,
+    boundary: &Boundary,
+    layer: usize,
+    frame_start: usize,
+) -> Result<ObjectSummary, EditError> {
+    let object = editor.reader().object_identity(layer, frame_start)?;
+    Ok(object_summary(
+        boundary.epoch(),
+        boundary.scene_id(),
+        &object,
+    ))
+}
+
+/// 変更後の対象を、配下 effect の列とともに読み直す。
+fn reread_with_effects(
     editor: &dyn SceneEditor,
     boundary: &Boundary,
     layer: usize,
@@ -249,7 +269,7 @@ fn reread(
 ) -> Result<(ObjectSummary, Vec<HostEffect>), EditError> {
     let detail = editor.reader().object_detail(layer, frame_start)?;
     let summary = object_summary(boundary.epoch(), boundary.scene_id(), &detail.object);
-    Ok((summary, detail.object.effects))
+    Ok((summary, detail.effects))
 }
 
 /// 変更後の対象から、指定位置の effect 情報を読み直す。
@@ -259,7 +279,8 @@ fn reread_effect(
     object: &ResolvedObject<'_>,
     position: usize,
 ) -> Result<(ObjectSummary, EffectInfo), EditError> {
-    let (summary, effects) = reread(editor, boundary, object.layer(), object.frame_start())?;
+    let (summary, effects) =
+        reread_with_effects(editor, boundary, object.layer(), object.frame_start())?;
     let info = effect_info_at(&summary.selector, &effects, position).ok_or(EditError::Sdk {
         operation: "get_effect_list",
     })?;
@@ -379,7 +400,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
 
             let mut summaries = Vec::with_capacity(created.len());
             for frame_start in created {
-                let (summary, _) = attribute(
+                let summary = attribute(
                     &permit,
                     &boundary,
                     reread(editor, &boundary, layer, frame_start),
@@ -421,8 +442,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 editor.move_object(ticket, &object, layer, frame)
             })?;
 
-            let (summary, _) =
-                attribute(&permit, &boundary, reread(editor, &boundary, layer, frame))?;
+            let summary = attribute(&permit, &boundary, reread(editor, &boundary, layer, frame))?;
             Ok(EditOutcome::object_changed(
                 boundary.epoch(),
                 permit.project_revision(&boundary),
@@ -453,7 +473,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             // 削除は戻り値を持たない。同一区間内で解決し直し、不在を確かめる。
             match editor
                 .reader()
-                .object_detail(object.layer(), object.frame_start())
+                .object_identity(object.layer(), object.frame_start())
             {
                 Err(ReadError::ObjectNotFound { .. }) => Ok(EditOutcome::deleted(
                     boundary.epoch(),
@@ -493,7 +513,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             })?;
 
             // 名前の設定は戻り値を持たない。読み直して反映を確かめる。
-            let (summary, _) = attribute(
+            let summary = attribute(
                 &permit,
                 &boundary,
                 reread(editor, &boundary, object.layer(), object.frame_start()),
@@ -572,9 +592,10 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 &[],
                 &[&params.object],
             )?;
-            let object = resolve_object(editor, &boundary, &params.object)?;
+            // 付与位置は前後の差分から求めるため、付与前の effect 列が必要になる。
+            let (object, effects) = resolve_object_with_effects(editor, &boundary, &params.object)?;
             ensure_layer_unlocked(editor, object.layer())?;
-            let before = effect_names(object.effects());
+            let before = effect_names(&effects);
 
             let permit = boundary.revalidate(project)?;
             permit.issue(&boundary, |ticket| {
@@ -584,7 +605,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             let (summary, effects) = attribute(
                 &permit,
                 &boundary,
-                reread(editor, &boundary, object.layer(), object.frame_start()),
+                reread_with_effects(editor, &boundary, object.layer(), object.frame_start()),
             )?;
             let position =
                 added_effect_position(&before, &effect_names(&effects)).ok_or_else(|| {
@@ -633,7 +654,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 editor.delete_effect(ticket, &object, &effect)
             })?;
 
-            let (summary, _) = attribute(
+            let summary = attribute(
                 &permit,
                 &boundary,
                 reread(editor, &boundary, object.layer(), object.frame_start()),
