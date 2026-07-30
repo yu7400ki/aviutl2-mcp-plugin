@@ -21,8 +21,14 @@ pub struct ObjectSelector {
     pub name: Option<String>,
     /// 同一性検証用の fingerprint。
     pub fingerprint: Fingerprint,
-    /// fingerprint の算出方式。再計算時に同じ方式を選ぶために持つ。
-    pub fingerprint_algorithm: FingerprintAlgorithm,
+    /// fingerprint の算出方式。
+    ///
+    /// 省略できる。指定された場合だけ、現在生成できる方式との一致を照合する。
+    /// 方式が違えば digest も違うため、省略しても fingerprint の照合が食い違いを
+    /// 捕まえる。応答は常に返すので、そのまま送り返せば従来どおり方式の段で
+    /// 落ちる。
+    #[serde(default)]
+    pub fingerprint_algorithm: Option<FingerprintAlgorithm>,
 }
 
 /// オブジェクト内の effect を再指定するセレクター。
@@ -68,7 +74,7 @@ mod tests {
             frame: 120,
             name: Some("立ち絵".to_string()),
             fingerprint: sample_fingerprint("alias"),
-            fingerprint_algorithm: FingerprintAlgorithm::GENERATED,
+            fingerprint_algorithm: Some(FingerprintAlgorithm::GENERATED),
         }
     }
 
@@ -99,6 +105,21 @@ mod tests {
         assert_eq!(value["name"], serde_json::Value::Null);
         let restored: ObjectSelector = serde_json::from_value(value).unwrap();
         assert_eq!(restored, selector);
+    }
+
+    #[test]
+    fn object_selector_allows_omitting_the_fingerprint_algorithm() {
+        let mut value = serde_json::to_value(sample_object_selector()).unwrap();
+        assert!(
+            value
+                .as_object_mut()
+                .unwrap()
+                .remove("fingerprint_algorithm")
+                .is_some(),
+            "応答が算出方式を返していません"
+        );
+        let restored: ObjectSelector = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.fingerprint_algorithm, None);
     }
 
     #[test]

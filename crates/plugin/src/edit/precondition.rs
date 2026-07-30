@@ -267,7 +267,7 @@ pub(crate) fn verify_boundary(
     }
     // 4. fingerprint の算出方式。
     for selector in selectors {
-        ensure_fingerprint_algorithm(&selector.fingerprint_algorithm)?;
+        ensure_fingerprint_algorithm(selector.fingerprint_algorithm.as_ref())?;
     }
 
     Ok(Boundary {
@@ -455,7 +455,9 @@ mod tests {
         let project = state();
         let epoch = project.epoch();
         let mut stale = selector(&epoch);
-        stale.fingerprint_algorithm = FingerprintAlgorithm::Unknown("sha256-future-v9".to_string());
+        stale.fingerprint_algorithm = Some(FingerprintAlgorithm::Unknown(
+            "sha256-future-v9".to_string(),
+        ));
         stale.scene_id = 9;
         let error = verify_boundary(
             &project,
@@ -476,7 +478,9 @@ mod tests {
         let project = state();
         let epoch = project.epoch();
         let mut stale = selector(&epoch);
-        stale.fingerprint_algorithm = FingerprintAlgorithm::Unknown("sha256-future-v9".to_string());
+        stale.fingerprint_algorithm = Some(FingerprintAlgorithm::Unknown(
+            "sha256-future-v9".to_string(),
+        ));
         let error = verify_boundary(
             &project,
             &edit_info(0),

@@ -52,8 +52,8 @@
 
 use aviutl2_mcp_core::{
     AvailableEffect, EditInfo, EditOutcome, EffectInfo, EffectItem, EffectItemType, EffectSelector,
-    EffectType, ErrorCode, ErrorObject, ItemValue, LayerInfo, ObjectDetail, ObjectSelector,
-    ObjectSummary, SelectionState,
+    EffectType, ErrorCode, ErrorObject, FingerprintAlgorithm, ItemValue, LayerInfo, ObjectDetail,
+    ObjectSelector, ObjectSummary, SelectionState,
 };
 use aviutl2_mcp_server::api::ListInstancesResponse;
 use aviutl2_mcp_server::discovery::default_registry_dir;
@@ -893,7 +893,10 @@ fn object_selector_input(selector: &ObjectSelector) -> ObjectSelectorInput {
         frame: selector.frame as u32,
         name: selector.name.clone(),
         fingerprint: selector.fingerprint.to_string(),
-        fingerprint_algorithm: selector.fingerprint_algorithm.to_string(),
+        fingerprint_algorithm: selector
+            .fingerprint_algorithm
+            .as_ref()
+            .map(FingerprintAlgorithm::to_string),
     }
 }
 

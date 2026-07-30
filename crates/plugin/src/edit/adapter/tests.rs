@@ -298,8 +298,9 @@ fn a_scene_guard_mismatch_is_checked_before_the_algorithm() {
     let harness = Harness::new();
     let mut params = move_params(&harness);
     params.selector.scene_id = 9;
-    params.selector.fingerprint_algorithm =
-        aviutl2_mcp_core::FingerprintAlgorithm::Unknown("sha256-future-v9".to_string());
+    params.selector.fingerprint_algorithm = Some(aviutl2_mcp_core::FingerprintAlgorithm::Unknown(
+        "sha256-future-v9".to_string(),
+    ));
 
     let error = harness.edit.move_object(&params).expect_err("シーン不一致");
     assert_eq!(error.details()["mismatch"], json!("scene_id"));
@@ -311,13 +312,39 @@ fn a_scene_guard_mismatch_is_checked_before_the_algorithm() {
 fn an_unknown_fingerprint_algorithm_is_checked_before_the_resolution() {
     let harness = Harness::new();
     let mut params = move_params(&harness);
-    params.selector.fingerprint_algorithm =
-        aviutl2_mcp_core::FingerprintAlgorithm::Unknown("sha256-future-v9".to_string());
+    params.selector.fingerprint_algorithm = Some(aviutl2_mcp_core::FingerprintAlgorithm::Unknown(
+        "sha256-future-v9".to_string(),
+    ));
     // 解決できない座標を併せて指定しても、方式の段で落ちる。
     params.selector.frame = 9_999;
 
     let error = harness.edit.move_object(&params).expect_err("方式不一致");
     assert_eq!(error.details()["mismatch"], json!("fingerprint_algorithm"));
+    harness.assert_untouched();
+}
+
+#[test]
+fn a_selector_without_an_algorithm_is_accepted_but_still_matched() {
+    // 方式を名乗らない指定は照合を素通りする。対象が変化していれば fingerprint が
+    // 捕まえるため、素通りしても別対象への適用は起きない。
+    let harness = Harness::new();
+    let mut params = move_params(&harness);
+    params.selector.fingerprint_algorithm = None;
+    harness
+        .edit
+        .move_object(&params)
+        .expect("算出方式を持たない指定が拒否されました");
+
+    let harness = Harness::new();
+    let mut params = move_params(&harness);
+    params.selector.fingerprint_algorithm = None;
+    params.selector.fingerprint = tamper(&params.selector.fingerprint);
+
+    let error = harness
+        .edit
+        .move_object(&params)
+        .expect_err("fingerprint の食い違いが受理されました");
+    assert_eq!(error.details()["mismatch"], json!("fingerprint"));
     harness.assert_untouched();
 }
 

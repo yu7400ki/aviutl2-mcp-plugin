@@ -221,9 +221,10 @@ pub struct ObjectSelectorInput {
     /// 同一性検証用の fingerprint。
     #[schemars(pattern(FINGERPRINT_PATTERN))]
     pub fingerprint: String,
-    /// fingerprint の算出方式。
+    /// fingerprint の算出方式。応答が返した値を指定した場合だけ照合される。
+    #[serde(default)]
     #[schemars(length(min = 1, max = MAX_ALGORITHM_CHARS))]
-    pub fingerprint_algorithm: String,
+    pub fingerprint_algorithm: Option<String>,
 }
 
 /// `aviutl2_list_available_effects` の入力。
@@ -383,12 +384,14 @@ impl ObjectSelectorInput {
         if let Some(name) = &self.name {
             ensure_length("selector.name", name, 0, MAX_NAME_CHARS)?;
         }
-        ensure_length(
-            "selector.fingerprint_algorithm",
-            &self.fingerprint_algorithm,
-            1,
-            MAX_ALGORITHM_CHARS,
-        )?;
+        if let Some(algorithm) = &self.fingerprint_algorithm {
+            ensure_length(
+                "selector.fingerprint_algorithm",
+                algorithm,
+                1,
+                MAX_ALGORITHM_CHARS,
+            )?;
+        }
         Ok(())
     }
 
@@ -425,7 +428,7 @@ impl ListAvailableEffectsInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::ErrorCode;
+    use aviutl2_mcp_core::{ErrorCode, FingerprintAlgorithm};
 
     const SAMPLE_ID: &str = "8df98c04-e7c2-4f98-b3ce-fc1c39d76414";
     const SAMPLE_FINGERPRINT: &str =
@@ -673,9 +676,32 @@ mod tests {
         assert_eq!(params.selector.name.as_deref(), Some("立ち絵"));
         assert_eq!(params.selector.fingerprint.as_str(), SAMPLE_FINGERPRINT);
         assert_eq!(
-            params.selector.fingerprint_algorithm.as_str(),
-            "sha256-raw-v1"
+            params
+                .selector
+                .fingerprint_algorithm
+                .as_ref()
+                .map(FingerprintAlgorithm::as_str),
+            Some("sha256-raw-v1")
         );
+    }
+
+    #[test]
+    fn get_object_input_accepts_a_selector_without_a_fingerprint_algorithm() {
+        // 算出方式は省略できる。方式が違えば digest も違うため、名乗らない指定は
+        // fingerprint の照合が捕まえる。
+        let mut selector = selector_json();
+        selector
+            .as_object_mut()
+            .expect("selector は object")
+            .remove("fingerprint_algorithm");
+        let input: GetObjectInput = serde_json::from_value(serde_json::json!({
+            "instance_id": SAMPLE_ID,
+            "selector": selector,
+        }))
+        .expect("算出方式を持たない selector を受理する");
+
+        let params = input.to_params().expect("params へ変換できる");
+        assert_eq!(params.selector.fingerprint_algorithm, None);
     }
 
     #[test]

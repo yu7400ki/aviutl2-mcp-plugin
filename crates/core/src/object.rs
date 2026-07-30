@@ -61,7 +61,7 @@ impl ObjectSummary {
                 frame: input.frame_start,
                 name: input.name.map(str::to_string),
                 fingerprint: fingerprint.clone(),
-                fingerprint_algorithm: algorithm.clone(),
+                fingerprint_algorithm: Some(algorithm.clone()),
             },
             fingerprint,
             fingerprint_algorithm: algorithm,
@@ -197,8 +197,8 @@ mod tests {
         let summary = sample_object_summary();
         assert_eq!(summary.fingerprint, summary.selector.fingerprint);
         assert_eq!(
-            summary.fingerprint_algorithm,
-            summary.selector.fingerprint_algorithm
+            summary.selector.fingerprint_algorithm.as_ref(),
+            Some(&summary.fingerprint_algorithm)
         );
         assert_eq!(
             summary.fingerprint_algorithm,

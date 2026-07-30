@@ -267,7 +267,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
         if epoch != selector.project_epoch {
             return Err(ReadError::EpochMismatch);
         }
-        ensure_fingerprint_algorithm(&selector.fingerprint_algorithm)?;
+        ensure_fingerprint_algorithm(selector.fingerprint_algorithm.as_ref())?;
 
         let scene_id = info.scene_id;
         let epoch = epoch.as_str();
@@ -412,9 +412,15 @@ fn verified_summary(
 }
 
 /// セレクターの算出方式が現在生成できる方式と一致することを確かめる。
+///
+/// 省略された指定は照合しない。方式が違えば digest も違うため、名乗らない
+/// 指定は fingerprint の照合が捕まえる。
 pub(crate) fn ensure_fingerprint_algorithm(
-    requested: &FingerprintAlgorithm,
+    requested: Option<&FingerprintAlgorithm>,
 ) -> Result<(), ReadError> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
     if *requested == FingerprintAlgorithm::GENERATED {
         return Ok(());
     }
@@ -1835,7 +1841,7 @@ mod tests {
     fn get_object_reports_precondition_failed_for_algorithm_mismatch() {
         let adapter = adapter();
         let mut selector = sample_selector(&adapter);
-        selector.fingerprint_algorithm = FingerprintAlgorithm::NormalizedAliasV1;
+        selector.fingerprint_algorithm = Some(FingerprintAlgorithm::NormalizedAliasV1);
 
         let error = adapter.get_object(&selector).unwrap_err();
         assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
@@ -1846,6 +1852,35 @@ mod tests {
         assert!(
             !adapter.host.calls().contains(&"enter_read_section"),
             "方式不一致で参照区間へ入りました"
+        );
+    }
+
+    #[test]
+    fn get_object_accepts_a_selector_without_a_fingerprint_algorithm() {
+        // 方式は省略できる。方式が違えば digest も違うため、名乗らない指定でも
+        // fingerprint の照合が食い違いを捕まえる。
+        let adapter = adapter();
+        let mut selector = sample_selector(&adapter);
+        selector.fingerprint_algorithm = None;
+
+        adapter
+            .get_object(&selector)
+            .expect("算出方式を持たない指定が拒否されました");
+    }
+
+    #[test]
+    fn a_selector_without_an_algorithm_still_checks_the_fingerprint() {
+        let adapter = adapter();
+        let mut selector = sample_selector(&adapter);
+        selector.fingerprint_algorithm = None;
+        selector.fingerprint = format!("sha256:{}", "0".repeat(64))
+            .parse()
+            .expect("差し替えた fingerprint の書式");
+
+        let error = adapter.get_object(&selector).unwrap_err();
+        assert!(
+            matches!(error, ReadError::FingerprintMismatch),
+            "{error} が fingerprint の食い違いとして返っていません"
         );
     }
 
