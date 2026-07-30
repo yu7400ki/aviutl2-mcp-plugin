@@ -182,6 +182,11 @@ pub trait SceneReader {
     /// alias を読み、配下 effect は読まない。fingerprint はこの結果か
     /// [`Self::object_detail`] が含む同じ型からだけ算出する。
     ///
+    /// **実装の義務**: 同じ対象に対して [`Self::object_detail`] と同じ
+    /// [`HostObject`] を返す。両者が別の材料を読めば、一覧が返した fingerprint と
+    /// 詳細が返した fingerprint が食い違い、一覧の selector で詳細を引けなくなる。
+    /// 一致は型では強制されないため、片方を変えるときは必ず両方を見る。
+    ///
     /// 一致する対象が無い場合は [`ReadError::ObjectNotFound`] を返す。
     fn object_identity(&self, layer: usize, frame_start: usize) -> Result<HostObject, ReadError>;
 
@@ -189,6 +194,9 @@ pub trait SceneReader {
     ///
     /// 同一性の材料に加えて配下 effect と中間点の区間を読む。effect の一覧を
     /// 必要とする経路だけがここを通る。
+    ///
+    /// **実装の義務**: 含める [`HostObject`] は [`Self::object_identity`] が同じ
+    /// 対象に対して返すものと一致させる。
     ///
     /// 一致する対象が無い場合は [`ReadError::ObjectNotFound`] を返す。
     fn object_detail(

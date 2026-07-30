@@ -479,9 +479,17 @@ pub(crate) fn effect_fingerprint_inputs(
 
 /// オブジェクトの概要を組み立てる。
 ///
-/// 入力になる [`HostObject`] は同一性の材料を読む経路だけが返すため、一覧も
-/// 詳細も同じ材料から同じ fingerprint を得る。位置と名前だけの軽量走査の結果は
-/// この関数へ渡せない。
+/// fingerprint を算出するのはこの 1 か所だけである。
+///
+/// **型が守るのは 1 点だけである。** 入力は [`HostObject`] であり、位置と名前
+/// だけの軽量走査が返す [`HostObjectPlacement`] は渡せない。軽量走査の結果から
+/// fingerprint を算出することは、この署名によって不可能になっている。
+///
+/// **同じ材料であることは型では守られていない。** [`HostObject`] を返す経路は
+/// [`SceneReader::object_identity`] と [`SceneReader::object_detail`] の 2 つが
+/// あり、両者が同じ材料を読むことは trait の契約と、SDK 実装が同じ写し取りを
+/// 共有していることによって約束されているだけである。片方の読み取りだけを
+/// 変えても署名は通るため、変えるときは両方を同時に見る必要がある。
 pub(crate) fn object_summary(epoch: &str, scene_id: i32, object: &HostObject) -> ObjectSummary {
     ObjectSummary::new(
         epoch,
