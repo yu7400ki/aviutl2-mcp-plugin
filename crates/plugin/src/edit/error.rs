@@ -46,6 +46,11 @@ pub enum UnsupportedReason {
     EffectStateImmutable,
     /// SDK が対応しないメディアファイル。
     MediaNotSupported,
+    /// 設定項目は存在するが、その種別への書き込みを公開していない。
+    ///
+    /// 対象 effect の設定項目の列挙は未知種別の項目を落とすため、列挙に現れない
+    /// 項目が存在し得る。名前で値を読めた場合はここへ来る。
+    ItemTypeNotWritable,
     /// 戻り値を持たない変更 API を呼んだが、読み直した状態が要求値と異なる。
     ///
     /// ホストが無言で拒否した場合にここへ来る。成功として返してはならない。
@@ -59,6 +64,7 @@ impl UnsupportedReason {
             UnsupportedReason::EffectNotRegistered => "effect_not_registered",
             UnsupportedReason::EffectStateImmutable => "effect_state_immutable",
             UnsupportedReason::MediaNotSupported => "media_not_supported",
+            UnsupportedReason::ItemTypeNotWritable => "item_type_not_writable",
             UnsupportedReason::ChangeNotApplied => "change_not_applied",
         }
     }
@@ -72,6 +78,9 @@ impl std::fmt::Display for UnsupportedReason {
                 "対象 effect の有効・ロック状態は変更できません"
             }
             UnsupportedReason::MediaNotSupported => "対応していないメディアファイルです",
+            UnsupportedReason::ItemTypeNotWritable => {
+                "この種別の設定項目への書き込みには対応していません"
+            }
             UnsupportedReason::ChangeNotApplied => "要求した変更が反映されませんでした",
         };
         f.write_str(text)
@@ -520,6 +529,9 @@ mod tests {
                 reason: UnsupportedReason::MediaNotSupported,
             },
             EditError::UnsupportedTarget {
+                reason: UnsupportedReason::ItemTypeNotWritable,
+            },
+            EditError::UnsupportedTarget {
                 reason: UnsupportedReason::ChangeNotApplied,
             },
             EditError::NotIssued {
@@ -605,6 +617,7 @@ mod tests {
             UnsupportedReason::EffectNotRegistered,
             UnsupportedReason::EffectStateImmutable,
             UnsupportedReason::MediaNotSupported,
+            UnsupportedReason::ItemTypeNotWritable,
             UnsupportedReason::ChangeNotApplied,
         ];
         for reason in unsupported {
@@ -612,6 +625,7 @@ mod tests {
                 UnsupportedReason::EffectNotRegistered
                 | UnsupportedReason::EffectStateImmutable
                 | UnsupportedReason::MediaNotSupported
+                | UnsupportedReason::ItemTypeNotWritable
                 | UnsupportedReason::ChangeNotApplied => {}
             }
         }
@@ -675,6 +689,7 @@ mod tests {
                 ErrorCode::InvalidArgument,
                 ErrorCode::InvalidArgument,
                 ErrorCode::InvalidArgument,
+                ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,

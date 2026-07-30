@@ -281,6 +281,17 @@ impl SceneEditor for SdkSceneEditor<'_> {
             .collect())
     }
 
+    fn effect_item_value(
+        &self,
+        effect: &ResolvedEffect<'_>,
+        item: &str,
+    ) -> Result<String, EditError> {
+        self.reader
+            .section
+            .get_effect_item_value(self.effect(effect.slot())?, item)
+            .map_err(|_| sdk("get_effect_item_value"))
+    }
+
     fn supports_media_file(&self, path: &str) -> Result<bool, EditError> {
         self.reader
             .section

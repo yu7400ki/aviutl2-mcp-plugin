@@ -7,14 +7,14 @@
 use super::*;
 use crate::edit::fake::{
     CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, EFFECT_LIST, FakeEditHost, FakeLayer, FakeObject,
-    FakeReadHost, Fault, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER,
-    MOVE_FRAME_SHIFT, MUTATIONS, PanicPoint, SCENE_ID,
+    FakeReadHost, Fault, ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, MAX_FRAME,
+    MAX_ITEM_VALUE, MAX_LAYER, MOVE_FRAME_SHIFT, MUTATIONS, PanicPoint, SCENE_ID,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
 use aviutl2_mcp_core::{
-    CursorPosition, Destination, EditOperation, EffectSelector, ErrorCode, Fingerprint, ItemValue,
-    ObjectSelector, PageRequest, Placement,
+    CursorPosition, Destination, EditOperation, EffectItem, EffectItemType, EffectSelector,
+    ErrorCode, Fingerprint, ItemValue, ObjectSelector, PageRequest, Placement,
 };
 use serde_json::json;
 use std::sync::mpsc::channel;
@@ -1118,7 +1118,81 @@ fn an_unknown_item_name_is_not_found() {
 
     assert_eq!(error.error_code(), ErrorCode::NotFound);
     assert_eq!(error.details()["item"], json!("存在しない項目"));
+    assert_eq!(
+        harness
+            .host
+            .calls()
+            .iter()
+            .filter(|call| **call == ITEM_VALUE)
+            .count(),
+        1,
+        "項目の存在を確かめる読み取りが行われていません"
+    );
     harness.assert_untouched();
+}
+
+/// 設定項目の列挙に現れない項目名を持つフェイクを組む。
+///
+/// 列挙は effect カタログが公開する一覧から作られる。カタログに無い項目を
+/// オブジェクト側だけに持たせると、列挙には現れないが名前で値を読める状態を
+/// 再現できる。
+fn harness_with_unlisted_item() -> Harness {
+    Harness::with(|host| {
+        let mut scene = host.scene.lock().unwrap();
+        scene.layers[1].objects[0].effects[1]
+            .items
+            .push(EffectItem {
+                name: "未知種別の項目".to_string(),
+                item_type: EffectItemType::Unknown(99),
+                value: ItemValue::Unknown {
+                    raw: "future=1".to_string(),
+                },
+                track: None,
+            });
+        drop(scene);
+    })
+}
+
+#[test]
+fn an_item_missing_from_the_listing_but_readable_is_not_writable() {
+    // 列挙は未知種別の項目を落とす。落ちた項目への書き込みを「項目が見つから
+    // ない」として返すと、要求元は存在しない問題を指す失敗を受け取る。
+    let harness = harness_with_unlisted_item();
+    let error = harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector: harness.effect_selector(1, 100, "ぼかし", 0),
+            item: "未知種別の項目".to_string(),
+            value: ItemValue::Integer { value: 1 },
+        })
+        .expect_err("未知種別の項目へ書き込めました");
+
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(error.details()["reason"], json!("item_type_not_writable"));
+    harness.assert_untouched();
+}
+
+#[test]
+fn a_successful_item_write_never_probes_the_value() {
+    // 追加の読み取りは失敗経路でだけ行う。成功する要求の費用は変わらない。
+    let harness = harness_with_unlisted_item();
+    let selector = harness.effect_selector(1, 100, "ぼかし", 0);
+    harness.host.clear_calls();
+
+    harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector,
+            item: "範囲".to_string(),
+            value: ItemValue::Integer { value: 30 },
+        })
+        .expect("設定項目の変更に失敗しました");
+
+    assert!(
+        !harness.host.calls().contains(&ITEM_VALUE),
+        "成功経路で項目の値を読み直しました: {:?}",
+        harness.host.calls()
+    );
 }
 
 #[test]

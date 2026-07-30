@@ -19,7 +19,8 @@ use crate::edit::precondition::{
     Boundary, EditKind, ExpectedEpoch, MutationPermit, verify_boundary,
 };
 use crate::edit::resolve::{
-    ResolvedObject, effect_info_at, resolve_effect, resolve_object, resolve_object_with_effects,
+    ResolvedEffect, ResolvedObject, effect_info_at, resolve_effect, resolve_object,
+    resolve_object_with_effects,
 };
 use crate::project::ProjectState;
 use crate::read::ReadError;
@@ -27,8 +28,8 @@ use crate::read::adapter::object_summary;
 use crate::read::host::{EditState, HostEffect, HostObjectPlacement};
 use aviutl2_mcp_core::{
     AddEffectParams, CreateObjectParams, Cursor, DeleteEffectParams, DeleteObjectParams,
-    EditOutcome, EffectInfo, EffectType, FocusChange, FrameRange, MoveObjectParams, ObjectSource,
-    ObjectSummary, RangeChange, SelectionField, SelectionState, SetEffectStateParams,
+    EditOutcome, EffectInfo, EffectType, FocusChange, FrameRange, ItemWriteError, MoveObjectParams,
+    ObjectSource, ObjectSummary, RangeChange, SelectionField, SelectionState, SetEffectStateParams,
     SetObjectItemParams, SetObjectNameParams, SetSelectionParams, prepare_item_write,
 };
 use std::ops::RangeInclusive;
@@ -404,6 +405,25 @@ fn created_placements(
     created
 }
 
+/// 列挙に現れない設定項目名を、存在するのか不在なのかで分ける。
+///
+/// 設定項目の列挙は未知種別の項目を落とす。落ちた項目への書き込みを「項目が
+/// 見つからない」として返すと、要求元は存在しない問題を指す失敗を受け取り、
+/// 名前を直そうとして直らない。項目名で値を読めるなら項目は存在しており、
+/// 書き込みを公開していない種別である。
+///
+/// 追加の呼び出しはこの失敗経路でだけ 1 回行う。成功する要求の費用は変わらない。
+fn unlisted_item(editor: &dyn SceneEditor, effect: &ResolvedEffect<'_>, item: &str) -> EditError {
+    match editor.effect_item_value(effect, item) {
+        Ok(_) => EditError::UnsupportedTarget {
+            reason: UnsupportedReason::ItemTypeNotWritable,
+        },
+        Err(_) => EditError::ItemWrite(ItemWriteError::ItemNotFound {
+            item: item.to_string(),
+        }),
+    }
+}
+
 /// オブジェクト名の要求値を、標準名へ戻す指定と区別できる形へ揃える。
 ///
 /// SDK は `None` と空文字のどちらでも標準名へ戻す。読み直した名前は標準名の
@@ -630,8 +650,13 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             // 設定項目の実在と種別の照合は、対象 effect が公開する一覧に対して
             // 行う。要求内容だけでは判定できない。
             let items = editor.effect_items(&effect)?;
-            let value = prepare_item_write(&items, &params.item, &params.value)
-                .map_err(EditError::ItemWrite)?;
+            let value = match prepare_item_write(&items, &params.item, &params.value) {
+                Ok(value) => value,
+                Err(ItemWriteError::ItemNotFound { item }) => {
+                    return Err(unlisted_item(editor, &effect, &item));
+                }
+                Err(error) => return Err(EditError::ItemWrite(error)),
+            };
 
             let permit = boundary.issue_permit(project)?;
             permit.issue(&boundary, |ticket| {

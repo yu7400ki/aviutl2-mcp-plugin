@@ -96,6 +96,17 @@ pub trait SceneEditor {
         effect: &ResolvedEffect<'_>,
     ) -> Result<Vec<AvailableEffectItem>, EditError>;
 
+    /// 対象 effect の設定項目の値を、項目名を直接指定して読む。
+    ///
+    /// [`Self::effect_items`] の列挙は未知種別の項目を落とすため、列挙に現れ
+    /// ない項目が存在し得る。この経路は列挙に依存しないので、項目が存在する
+    /// のか名前が違うのかをここで分けられる。
+    fn effect_item_value(
+        &self,
+        effect: &ResolvedEffect<'_>,
+        item: &str,
+    ) -> Result<String, EditError>;
+
     /// SDK が拡張子の上でメディアファイルに対応しているか。
     ///
     /// ファイルを開かない確認に限る。編集区間はホストのメインスレッド上で走り、

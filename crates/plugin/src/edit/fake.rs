@@ -95,6 +95,9 @@ pub(crate) const LAYER_ATTRIBUTES: &str = "get_layer_attributes";
 /// レイヤーのロック状態だけを読んだことを表す記録。
 pub(crate) const LAYER_LOCK: &str = "get_layer_lock";
 
+/// 設定項目の値を項目名で直接読んだことを表す記録。
+pub(crate) const ITEM_VALUE: &str = "get_effect_item_value";
+
 /// クロージャから巻き戻しが漏れたことを表す記録。
 ///
 /// 実機ではこの位置でホストのプロセスが落ちる。記録が残る経路は、捕捉が
@@ -747,6 +750,24 @@ impl SceneEditor for FakeSceneEditor<'_> {
             })
     }
 
+    fn effect_item_value(
+        &self,
+        effect: &ResolvedEffect<'_>,
+        item: &str,
+    ) -> Result<String, EditError> {
+        self.host.record(ITEM_VALUE);
+        let (id, position) = self.effect_ref(effect.slot())?;
+        let scene = self.host.scene.lock().unwrap();
+        scene
+            .by_id(id)
+            .and_then(|object| object.effects.get(position))
+            .and_then(|effect| effect.items.iter().find(|entry| entry.name == item))
+            .map(|entry| raw_item_value(&entry.value))
+            .ok_or(EditError::Sdk {
+                operation: "get_effect_item_value",
+            })
+    }
+
     fn supports_media_file(&self, path: &str) -> Result<bool, EditError> {
         self.host.record("is_support_media_file");
         Ok(path.ends_with(".mp4"))
@@ -1076,6 +1097,17 @@ pub(crate) const MAX_LAYER: usize = 9;
 pub(crate) const MAX_FRAME: usize = 999;
 /// ホストが設定項目の値を丸める上限。
 pub(crate) const MAX_ITEM_VALUE: i64 = 100;
+
+/// ホストが項目名に対して返す生の設定値。
+///
+/// 呼び出し側は値そのものを使わず、読めたかどうかで項目の存在を判定する。
+fn raw_item_value(value: &ItemValue) -> String {
+    match value {
+        ItemValue::Unknown { raw } => raw.clone(),
+        ItemValue::Integer { value } => value.to_string(),
+        other => other.kind().to_string(),
+    }
+}
 
 /// 同名 effect の順序を出現順で振り直す。
 fn renumber(effects: &mut [HostEffect]) {
