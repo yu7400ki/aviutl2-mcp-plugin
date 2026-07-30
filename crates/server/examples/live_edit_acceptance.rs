@@ -1410,6 +1410,97 @@ fn clear_layer(
     ))
 }
 
+/// 対象を指定した位置へ戻す。
+///
+/// 移動の応答は要求した宛先ではなく実際の配置を返す。成功したことだけでは
+/// 戻ったことにならないため、着地点が元の位置であることまで確かめる。
+fn move_home(
+    harness: &Harness,
+    instance: &Instance,
+    selector: &ObjectSelector,
+    home: Placement,
+) -> Result<(), String> {
+    let moved = require(
+        harness.move_object(
+            &instance.id,
+            selector,
+            DestinationInput {
+                layer: home.layer as u32,
+                frame: home.frame as u32,
+            },
+        ),
+        "対象を元の位置へ戻せません",
+    )?;
+    let landed = moved
+        .object
+        .ok_or_else(|| "移動の応答が対象を返しませんでした".to_string())?;
+    if landed.layer != home.layer || landed.frame_start != home.frame {
+        return Err(format!(
+            "layer={} frame={} へ戻したはずが layer={} frame={} に居ます",
+            home.layer, home.frame, landed.layer, landed.frame_start
+        ));
+    }
+    Ok(())
+}
+
+/// 主たる対象が元の位置に居ることを確かめ、離れていれば戻す。
+///
+/// 探す先は元の位置と、その確認が動かし得る位置に限る。どちらにも居なければ、
+/// 戻せなかったことを失敗として返す。
+fn restore_target(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    strayed: Placement,
+) -> Result<(), String> {
+    if resolve_object(harness, instance, context.scene_id, context.target).is_ok() {
+        return Ok(());
+    }
+    let object = resolve_object(harness, instance, context.scene_id, strayed)
+        .map_err(|reason| format!("対象が元の位置にも移動先にも居ません: {reason}"))?;
+    move_home(harness, instance, &object.selector, context.target)
+}
+
+/// 主たる対象の名前を控えた値へ戻す。
+fn restore_object_name(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    original: &Option<String>,
+) -> Result<(), String> {
+    let object = resolve_object(harness, instance, context.scene_id, context.target)?;
+    if &object.name == original {
+        return Ok(());
+    }
+    require(
+        harness.set_object_name(&instance.id, &object.selector, original.clone()),
+        "対象の名前を戻せません",
+    )?;
+    Ok(())
+}
+
+/// レイヤーのロック状態を設定する。
+fn set_layer_locked(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    layer: usize,
+    locked: bool,
+) -> Result<(), String> {
+    let epoch = precondition(harness, instance)?;
+    require(
+        harness.set_layer_state(
+            &instance.id,
+            context.scene_id,
+            layer,
+            LayerStateChange::locked(locked),
+            epoch,
+        ),
+        "レイヤーのロック状態を設定できません",
+    )?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // 準備
 // ---------------------------------------------------------------------------
@@ -1721,12 +1812,48 @@ fn check_alias_covers_effects(
     let Some((selector, item, next)) = alterable_item(&detail) else {
         return Err("値を書き換えられる設定項目が対象にありません。".to_string());
     };
-    let before_alias = detail.alias.clone();
-    let before_fingerprint = object.fingerprint.clone();
     let original = item.value.clone();
 
+    // 途中で失敗しても後始末へ進む。変えたまま抜けると、以降の確認が別の内容の
+    // 対象に対して走る。
+    let probed =
+        probe_alias_covers_effects(harness, report, instance, context, &selector, &item, &next);
+    // 後始末: 有効状態と設定値を元へ戻す。
+    let cleaned = cleanup_alias_covers_effects(
+        harness,
+        instance,
+        context,
+        &selector.effect_name,
+        &item.name,
+        &original,
+    );
+    match (probed, cleaned) {
+        (Ok(notes), Ok(())) => Ok(notes),
+        (Ok(_), Err(reason)) => Err(format!("後始末に失敗しました: {reason}")),
+        (Err(reason), _) => Err(reason),
+    }
+}
+
+/// 設定値と有効状態を変え、fingerprint と alias が追随するかを測る。
+fn probe_alias_covers_effects(
+    harness: &Harness,
+    report: &mut Report,
+    instance: &Instance,
+    context: &Context,
+    selector: &EffectSelector,
+    item: &EffectItem,
+    next: &ItemValue,
+) -> CheckResult {
+    let object = resolve_object(harness, instance, context.scene_id, context.target)?;
+    let before_fingerprint = object.fingerprint.clone();
+    let before_alias = require(
+        harness.object(&instance.id, &object.selector),
+        "対象の詳細を取得できません",
+    )?
+    .alias;
+
     let changed = require(
-        harness.set_object_item(&instance.id, &selector, &item.name, &next),
+        harness.set_object_item(&instance.id, selector, &item.name, next),
         "設定値を変更できません",
     )?;
     let after_item = changed
@@ -1749,7 +1876,7 @@ fn check_alias_covers_effects(
         .map(|effect| effect.selector.clone())
         .ok_or_else(|| "変更した effect を再取得できませんでした".to_string())?;
     let toggled = harness.set_effect_enabled(&instance.id, &effect_selector, false);
-    let (enabled_changed_fingerprint, enabled_changed_alias, toggled_object) = match &toggled {
+    let (enabled_changed_fingerprint, enabled_changed_alias) = match &toggled {
         Ok(outcome) => {
             let object = outcome.object.clone();
             let alias = match &object {
@@ -1763,10 +1890,9 @@ fn check_alias_covers_effects(
                 object.as_ref().map(|object| object.fingerprint.clone())
                     != Some(after_item.fingerprint.clone()),
                 alias != detail_after_item.alias,
-                object,
             )
         }
-        Err(_) => (false, false, None),
+        Err(_) => (false, false),
     };
 
     report.observe(
@@ -1776,27 +1902,6 @@ fn check_alias_covers_effects(
             "設定値変更で alias が変化={item_changed_alias} / 有効状態変更で alias が変化={enabled_changed_alias}"
         ),
     );
-
-    // 後始末: 有効状態と設定値を元へ戻す。
-    if let (Ok(_), Some(object)) = (&toggled, &toggled_object)
-        && let Some(effect) = require(
-            harness.object(&instance.id, &object.selector),
-            "戻す前の詳細を取得できません",
-        )?
-        .effects
-        .iter()
-        .find(|effect| effect.name == selector.effect_name)
-    {
-        let _ = harness.set_effect_enabled(&instance.id, &effect.selector, true);
-    }
-    restore_item(
-        harness,
-        instance,
-        context,
-        &selector.effect_name,
-        &item.name,
-        &original,
-    )?;
 
     if !item_changed_fingerprint {
         return Err(
@@ -1815,6 +1920,36 @@ fn check_alias_covers_effects(
             Err(error) => describe_error(error),
         }
     )])
+}
+
+/// 有効状態と設定値を元へ戻す。
+fn cleanup_alias_covers_effects(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    effect_name: &str,
+    item_name: &str,
+    value: &ItemValue,
+) -> Result<(), String> {
+    let object = resolve_object(harness, instance, context.scene_id, context.target)?;
+    let detail = require(
+        harness.object(&instance.id, &object.selector),
+        "戻す対象の詳細を取得できません",
+    )?;
+    let Some(effect) = detail
+        .effects
+        .iter()
+        .find(|effect| effect.name == effect_name)
+    else {
+        return Err("戻す対象の effect が見つかりません".to_string());
+    };
+    if !effect.enabled {
+        require(
+            harness.set_effect_enabled(&instance.id, &effect.selector, true),
+            "effect の有効状態を戻せません",
+        )?;
+    }
+    restore_item(harness, instance, context, effect_name, item_name, value)
 }
 
 /// 設定値を元の値へ戻す。
@@ -1853,6 +1988,26 @@ fn check_effect_index_shift(
     context: &Context,
 ) -> CheckResult {
     let original_count = count_effects(harness, instance, context, &context.effect_name)?;
+    // 付与の途中で失敗しても後始末へ進む。積んだままにすると、以降の確認が
+    // 元とは違う effect 構成の対象に対して走る。
+    let probed = probe_effect_index_shift(harness, report, instance, context, original_count);
+    // 後始末: 付与した分だけを削除し、元々あった同名 effect は残す。
+    let cleaned = cleanup_added_effects(harness, instance, context, original_count);
+    match (probed, cleaned) {
+        (Ok(notes), Ok(())) => Ok(notes),
+        (Ok(_), Err(reason)) => Err(format!("後始末に失敗しました: {reason}")),
+        (Err(reason), _) => Err(reason),
+    }
+}
+
+/// 同名 effect を 2 つ積み、前方を削除してから削除前の selector で編集を試みる。
+fn probe_effect_index_shift(
+    harness: &Harness,
+    report: &mut Report,
+    instance: &Instance,
+    context: &Context,
+    original_count: usize,
+) -> CheckResult {
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
     let first = require(
         harness.add_effect(&instance.id, &object.selector, &context.effect_name),
@@ -1929,7 +2084,16 @@ fn check_effect_index_shift(
         },
     );
 
-    // 後始末: 付与した分だけを削除し、元々あった同名 effect は残す。
+    outcome
+}
+
+/// 付与した分の同名 effect を削除し、元々あった件数へ戻す。
+fn cleanup_added_effects(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    original_count: usize,
+) -> Result<(), String> {
     while count_effects(harness, instance, context, &context.effect_name)? > original_count {
         let object_now = resolve_object(harness, instance, context.scene_id, context.target)?;
         let detail = require(
@@ -1941,15 +2105,14 @@ fn check_effect_index_shift(
             .iter()
             .find(|effect| effect.name == context.effect_name)
         else {
-            break;
+            return Err("付与した effect を引き直せません".to_string());
         };
         require(
             harness.delete_effect(&instance.id, &effect.selector),
             "付与した effect を削除できません",
         )?;
     }
-
-    outcome
+    Ok(())
 }
 
 /// 対象に積まれた同名 effect の件数を数える。
@@ -2086,13 +2249,7 @@ fn cleanup_unrelated_edit(
     slot: Placement,
     original_name: &Option<String>,
 ) -> Result<(), String> {
-    let target = resolve_object(harness, instance, context.scene_id, context.target)?;
-    if &target.name != original_name {
-        require(
-            harness.set_object_name(&instance.id, &target.selector, original_name.clone()),
-            "元の対象の名前を戻せません",
-        )?;
-    }
+    restore_object_name(harness, instance, context, original_name)?;
 
     let other = resolve_object(harness, instance, context.scene_id, slot)?;
     require(
@@ -2109,11 +2266,36 @@ fn check_layer_lock(
     instance: &Instance,
     context: &Context,
 ) -> CheckResult {
+    // 名前はロック中の確認で書き換わる。ロックを掛ける前に控えておく。
+    let original_name = resolve_object(harness, instance, context.scene_id, context.target)?.name;
+
     prompt(&format!(
         "AviUtl2 のインスタンス {} で、レイヤー {}（0 始まり）をロックしてから Enter を押してください。",
         instance.label, context.target.layer
     ));
 
+    // 途中で失敗しても後始末へ進む。ロックを掛けたまま抜けると、以降の確認が
+    // そのレイヤー上の対象を編集できなくなる。
+    let probed = probe_layer_lock(harness, report, instance, context);
+
+    prompt("レイヤーのロックを解除してから Enter を押してください。");
+
+    // 後始末: ロック中に通った名前変更を元へ戻す。
+    let cleaned = restore_object_name(harness, instance, context, &original_name);
+    match (probed, cleaned) {
+        (Ok(notes), Ok(())) => Ok(notes),
+        (Ok(_), Err(reason)) => Err(format!("後始末に失敗しました: {reason}")),
+        (Err(reason), _) => Err(reason),
+    }
+}
+
+/// ロック中の移動・削除・名前変更の可否を確かめる。
+fn probe_layer_lock(
+    harness: &Harness,
+    report: &mut Report,
+    instance: &Instance,
+    context: &Context,
+) -> CheckResult {
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
     let destination = context.free_slots[0];
     let moved = harness.move_object(
@@ -2153,8 +2335,6 @@ fn check_layer_lock(
             if sdk.is_empty() { "未回答" } else { &sdk }
         ),
     );
-
-    prompt("レイヤーのロックを解除してから Enter を押してください。");
 
     let mut notes = Vec::new();
     for (label, outcome) in [
@@ -2471,7 +2651,8 @@ fn cleanup_lock_scope(
 /// ロックによる行き止まりが MCP だけで解けることを確かめる。
 ///
 /// レイヤーをロックするのも解除するのも `aviutl2_set_layer_state` で行うため、
-/// 実行者の操作を要しない。後始末で元のロック状態へ戻す。
+/// 実行者の操作を要しない。対象を一度レイヤーの外へ動かし、実行者へ取り消し
+/// 操作まで求めるため、どこで抜けても後始末が対象の位置とロック状態を戻す。
 fn check_layer_lock_release(
     harness: &Harness,
     report: &mut Report,
@@ -2479,6 +2660,7 @@ fn check_layer_lock_release(
     context: &Context,
 ) -> CheckResult {
     let layer = context.target.layer;
+    let away = context.free_slots[0];
     let layers = require(
         harness.layers(&instance.id, context.scene_id),
         "レイヤーを列挙できません",
@@ -2489,6 +2671,27 @@ fn check_layer_lock_release(
         .map(|listed| listed.locked)
         .ok_or_else(|| format!("レイヤー {layer} が列挙に現れません"))?;
 
+    let probed = probe_layer_lock_release(harness, report, instance, context, away, original);
+    // 後始末: 対象を元の位置へ戻し、ロックも元の状態へ戻す。実行者へ取り消し
+    // 操作を求めた後であるため、対象が元の位置に居るとは限らない。
+    let cleaned = cleanup_layer_lock_release(harness, instance, context, away, original);
+    match (probed, cleaned) {
+        (Ok(notes), Ok(())) => Ok(notes),
+        (Ok(_), Err(reason)) => Err(format!("後始末に失敗しました: {reason}")),
+        (Err(reason), _) => Err(reason),
+    }
+}
+
+/// ロックで移動が止まることと、同じ tool での解除で通るようになることを見る。
+fn probe_layer_lock_release(
+    harness: &Harness,
+    report: &mut Report,
+    instance: &Instance,
+    context: &Context,
+    away: Placement,
+    original: bool,
+) -> CheckResult {
+    let layer = context.target.layer;
     let epoch = precondition(harness, instance)?;
     let locked = require(
         harness.set_layer_state(
@@ -2505,13 +2708,12 @@ fn check_layer_lock_release(
     }
 
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
-    let away = context.free_slots[0];
     let destination = DestinationInput {
         layer: away.layer as u32,
         frame: away.frame as u32,
     };
     let refused =
-        expect_layer_locked(harness.move_object(&instance.id, &object.selector, destination));
+        expect_layer_locked(harness.move_object(&instance.id, &object.selector, destination))?;
 
     // 行き止まりを塞ぐ。ロックされたレイヤーでも、この tool は通る。
     let epoch = precondition(harness, instance)?;
@@ -2538,29 +2740,11 @@ fn check_layer_lock_release(
         .object
         .ok_or_else(|| "移動の応答が対象を返しません".to_string())?;
 
-    // 後始末: 対象を元の位置へ戻し、ロックも元の状態へ戻す。
-    require(
-        harness.move_object(
-            &instance.id,
-            &moved_to.selector,
-            DestinationInput {
-                layer: context.target.layer as u32,
-                frame: context.target.frame as u32,
-            },
-        ),
-        "対象を元の位置へ戻せません",
-    )?;
-    let epoch = precondition(harness, instance)?;
-    require(
-        harness.set_layer_state(
-            &instance.id,
-            context.scene_id,
-            layer,
-            LayerStateChange::locked(original),
-            epoch,
-        ),
-        "レイヤーのロックを元へ戻せません",
-    )?;
+    // 取り消しの単位を尋ねる前に、対象の位置とロック状態を戻しておく。直前の
+    // 編集をレイヤー状態の変更にしておかないと、実行者が取り消すのは別の編集に
+    // なり、問いへの答えが取り消し単位を表さない。
+    move_home(harness, instance, &moved_to.selector, context.target)?;
+    set_layer_locked(harness, instance, context, layer, original)?;
 
     let undo = ask(
         "直前のレイヤー状態の変更に対して AviUtl2 で「元に戻す」を 1 回実行すると、何が戻りますか。\n\
@@ -2573,13 +2757,29 @@ fn check_layer_lock_release(
         format!("回答: {}", if undo.is_empty() { "未回答" } else { &undo }),
     );
 
-    let refused = refused?;
     Ok(vec![format!(
         "ロック中の移動: {}。解除後は layer={} frame={} へ移動できた",
         refused.join(" / "),
         moved_to.layer,
         moved_to.frame_start
     )])
+}
+
+/// 対象の位置とレイヤーのロック状態を、確認を始める前の状態へ戻す。
+///
+/// 取り消し操作は対象を移動先へ戻し得る。ロックが掛かったままだと戻す移動が
+/// 通らないため、先に解除してから位置を直し、最後にロック状態を合わせる。
+fn cleanup_layer_lock_release(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    away: Placement,
+    original: bool,
+) -> Result<(), String> {
+    let layer = context.target.layer;
+    set_layer_locked(harness, instance, context, layer, false)?;
+    restore_target(harness, instance, context, away)?;
+    set_layer_locked(harness, instance, context, layer, original)
 }
 
 /// ロックされたレイヤーに対する拒否であることを確かめる。
@@ -2610,7 +2810,15 @@ fn check_revision_chain(
     context: &Context,
 ) -> (CheckResult, RevisionAdvance) {
     let mut advance = RevisionAdvance::none();
-    let result = run_revision_chain(harness, instance, context, &mut advance);
+    let away = context.free_slots[0];
+    let probed = run_revision_chain(harness, instance, context, away, &mut advance);
+    // 後始末: 往復の途中で失敗しても対象を元の位置へ戻す。
+    let cleaned = restore_target(harness, instance, context, away);
+    let result = match (probed, cleaned) {
+        (Ok(notes), Ok(())) => Ok(notes),
+        (Ok(_), Err(reason)) => Err(format!("後始末に失敗しました: {reason}")),
+        (Err(reason), _) => Err(reason),
+    };
     (result, advance)
 }
 
@@ -2619,11 +2827,11 @@ fn run_revision_chain(
     harness: &Harness,
     instance: &Instance,
     context: &Context,
+    away: Placement,
     advance: &mut RevisionAdvance,
 ) -> CheckResult {
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
     let home = context.target;
-    let away = context.free_slots[0];
 
     let mut previous =
         require(harness.edit_info(&instance.id), "編集情報を取得できません")?.project_revision;
@@ -2668,25 +2876,6 @@ fn run_revision_chain(
         previous = next.project_revision;
         current = next;
         at_home = !at_home;
-    }
-
-    // 後始末: 元の位置へ戻す。
-    if !at_home {
-        let selector = current
-            .object
-            .clone()
-            .ok_or_else(|| "移動の応答が対象を返しませんでした".to_string())?
-            .selector;
-        harness
-            .move_object(
-                &instance.id,
-                &selector,
-                DestinationInput {
-                    layer: home.layer as u32,
-                    frame: home.frame as u32,
-                },
-            )
-            .map_err(|error| format!("元の位置へ戻せません: {}", describe_error(&error)))?;
     }
 
     Ok(vec![format!(
@@ -4347,17 +4536,7 @@ fn restore_position(
         .clone()
         .ok_or_else(|| "移動の応答が対象を返しませんでした".to_string())?
         .selector;
-    harness
-        .move_object(
-            &instance.id,
-            &selector,
-            DestinationInput {
-                layer: home.layer as u32,
-                frame: home.frame as u32,
-            },
-        )
-        .map_err(|error| format!("元の位置へ戻せません: {}", describe_error(&error)))?;
-    Ok(())
+    move_home(harness, instance, &selector, home)
 }
 
 // ---------------------------------------------------------------------------
