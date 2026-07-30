@@ -1221,6 +1221,7 @@ const WRITABLE_ITEM_TYPES: &[EffectItemType] = &[
     EffectItemType::Font,
     EffectItemType::Color,
     EffectItemType::Select,
+    EffectItemType::Combo,
 ];
 
 /// 書き込みを公開している種別か。

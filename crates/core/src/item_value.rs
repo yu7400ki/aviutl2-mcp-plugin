@@ -215,9 +215,13 @@ pub fn validate_item_value(value: &ItemValue) -> Result<(), ItemWriteError> {
 
 /// 書き込みを公開している種別か。
 ///
-/// 複合種別（`scene` / `range` / `combo` / `mask` / `figure` / `data`）と
-/// 未知種別は、値の表記が確定していないため公開しない。推測した表記で
-/// 書き込むと、検証を通ったのに意図と異なる値が入る。
+/// 複合種別のうち `scene` / `range` / `mask` / `figure` / `data` と未知種別は、
+/// 値の表記が確定していないため公開しない。推測した表記で書き込むと、検証を
+/// 通ったのに意図と異なる値が入る。
+///
+/// `combo` は表記が確定しているため公開する。読み取りは `select` と同じ
+/// [`ItemValue::Choice`] で返し、有効な値を知る手段も `select` と同じ——
+/// 既存のオブジェクトから読む——である。
 fn is_writable(item_type: &EffectItemType) -> bool {
     matches!(
         item_type,
@@ -231,6 +235,7 @@ fn is_writable(item_type: &EffectItemType) -> bool {
             | EffectItemType::Font
             | EffectItemType::Color
             | EffectItemType::Select
+            | EffectItemType::Combo
     )
 }
 
@@ -249,7 +254,10 @@ fn accepts(item_type: &EffectItemType, value: &ItemValue) -> bool {
             | (EffectItemType::Folder, ItemValue::Folder { .. })
             | (EffectItemType::Font, ItemValue::Font { .. })
             | (EffectItemType::Color, ItemValue::Color { .. })
-            | (EffectItemType::Select, ItemValue::Choice { .. })
+            | (
+                EffectItemType::Select | EffectItemType::Combo,
+                ItemValue::Choice { .. }
+            )
     )
 }
 
@@ -478,6 +486,14 @@ mod tests {
                 },
                 "通常",
             ),
+            (
+                EffectItemType::Combo,
+                ItemValue::Choice {
+                    value: "通常".to_string(),
+                    index: Some(2),
+                },
+                "通常",
+            ),
         ]
     }
 
@@ -486,7 +502,6 @@ mod tests {
         vec![
             EffectItemType::Scene,
             EffectItemType::Range,
-            EffectItemType::Combo,
             EffectItemType::Mask,
             EffectItemType::Figure,
             EffectItemType::Data,
@@ -553,6 +568,30 @@ mod tests {
     }
 
     #[test]
+    fn every_known_item_type_is_listed_as_writable_or_not() {
+        // 既知の種別が公開・非公開のどちらの一覧にも現れないまま検査を素通り
+        // することを防ぐ。
+        let writable: Vec<EffectItemType> = writable_pairs()
+            .into_iter()
+            .map(|(item_type, _, _)| item_type)
+            .collect();
+        let non_writable = non_writable_item_types();
+        for raw in 1..=16 {
+            let item_type = EffectItemType::from_raw(raw);
+            assert_ne!(
+                item_type,
+                EffectItemType::Unknown(raw),
+                "既知の種別ではない"
+            );
+            assert_eq!(
+                writable.contains(&item_type),
+                !non_writable.contains(&item_type),
+                "{item_type} がどちらの一覧にも現れないか、両方に現れます"
+            );
+        }
+    }
+
+    #[test]
     fn write_rejects_non_writable_item_types() {
         // 複合種別と未知種別は、値の形にかかわらず未対応として拒否する。
         let value = ItemValue::Text {
@@ -611,20 +650,70 @@ mod tests {
     #[test]
     fn write_ignores_the_choice_index() {
         // 選択肢の並びはホスト側の都合で変わり得るため、index を正としない。
-        let encoded: Vec<String> = [Some(0), Some(7), None]
-            .into_iter()
-            .map(|index| {
-                encode_item_value(
-                    &EffectItemType::Select,
-                    &ItemValue::Choice {
-                        value: "通常".to_string(),
-                        index,
-                    },
-                )
-                .unwrap()
-            })
-            .collect();
-        assert_eq!(encoded, vec!["通常".to_string(); 3]);
+        for item_type in [EffectItemType::Select, EffectItemType::Combo] {
+            let encoded: Vec<String> = [Some(0), Some(7), None]
+                .into_iter()
+                .map(|index| {
+                    encode_item_value(
+                        &item_type,
+                        &ItemValue::Choice {
+                            value: "通常".to_string(),
+                            index,
+                        },
+                    )
+                    .unwrap()
+                })
+                .collect();
+            assert_eq!(encoded, vec!["通常".to_string(); 3], "{item_type}");
+        }
+    }
+
+    #[test]
+    fn combo_shares_the_select_write_path() {
+        // 表記が同じであることを、専用の分岐を持たないことで示す。同じ値に
+        // 対して受理・拒否・変換結果のすべてが一致する。
+        let cases = [
+            ItemValue::Choice {
+                value: "左寄せ[上]".to_string(),
+                index: None,
+            },
+            ItemValue::Choice {
+                value: "通常".to_string(),
+                index: Some(3),
+            },
+            // 形が対応しない値。
+            ItemValue::Text {
+                value: "通常".to_string(),
+            },
+            // 単一行の文字列として拒否される値。
+            ItemValue::Choice {
+                value: "通常\n".to_string(),
+                index: None,
+            },
+        ];
+        for value in cases {
+            let select = encode_item_value(&EffectItemType::Select, &value);
+            let combo = encode_item_value(&EffectItemType::Combo, &value);
+            // 種別名だけは異なるため、エラーはその点を除いて比べる。
+            match (select, combo) {
+                (Ok(select), Ok(combo)) => assert_eq!(select, combo, "{}", value.kind()),
+                (Err(select), Err(combo)) => {
+                    assert_eq!(select.error_code(), combo.error_code(), "{}", value.kind());
+                    assert_eq!(
+                        std::mem::discriminant(&select),
+                        std::mem::discriminant(&combo),
+                        "{}",
+                        value.kind()
+                    );
+                }
+                (select, combo) => {
+                    panic!(
+                        "{} で結果が分かれました: {select:?} / {combo:?}",
+                        value.kind()
+                    )
+                }
+            }
+        }
     }
 
     #[test]
