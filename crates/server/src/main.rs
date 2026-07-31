@@ -26,7 +26,7 @@ async fn main() -> ExitCode {
 
     // 描画成果物の保管庫は起動時に開く。保管庫はこのサービスが破棄されるときに
     // ディレクトリごと消えるため、寿命はプロセスの寿命と一致する。
-    let server = match AviUtl2McpServer::open(registry_dir) {
+    let server = match AviUtl2McpServer::new(registry_dir) {
         Ok(server) => server,
         Err(e) => {
             tracing::error!(error = %e, "描画成果物の保管庫を開けませんでした");

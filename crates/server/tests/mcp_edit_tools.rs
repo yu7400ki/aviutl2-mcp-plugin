@@ -65,7 +65,7 @@ impl Harness {
         mock.write_descriptor(&registry_dir);
         std::thread::sleep(MOCK_STARTUP_GRACE);
         Self {
-            server: AviUtl2McpServer::with_limits(registry_dir.clone(), limits),
+            server: AviUtl2McpServer::without_artifact_store(registry_dir.clone(), limits),
             mock,
             registry_dir,
         }
@@ -93,7 +93,7 @@ impl Harness {
         mock.write_descriptor(&registry_dir);
         std::thread::sleep(MOCK_STARTUP_GRACE);
         Self {
-            server: AviUtl2McpServer::with_limits(registry_dir.clone(), limits),
+            server: AviUtl2McpServer::without_artifact_store(registry_dir.clone(), limits),
             mock,
             registry_dir,
         }

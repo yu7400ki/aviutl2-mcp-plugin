@@ -279,7 +279,7 @@ pub fn delete_object(outcome: &EditOutcome) -> String {
 
 /// `aviutl2_apply_batch` の text content。
 ///
-/// 書き出すのは先頭 [`MAX_BATCH_LINES`] 件までで、残りは件数だけを示す。
+/// 書き出すのは先頭 10 件までで、残りは件数だけを示す。
 pub fn apply_batch(outcome: &BatchOutcome) -> String {
     let mut text = TextBuilder::new();
     text.push_line(format!(

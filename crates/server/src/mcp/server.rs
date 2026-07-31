@@ -72,7 +72,7 @@ const RESOURCE_MIME_TYPE: &str = "application/json";
 /// 使った段の途中で予算が尽きる。
 ///
 /// 要求フェーズの予算は operation の区分ごとに異なる。どれを使うかは
-/// [`request_budget`](CallLimits::request_budget) が operation 名から選ぶ。
+/// [`ipc_request_budget`](CallLimits::ipc_request_budget) が operation 名から選ぶ。
 #[derive(Debug, Clone, Copy)]
 pub struct CallLimits {
     /// インスタンス解決（接続・handshake・ping）の期限。
@@ -130,8 +130,16 @@ impl CallLimits {
     /// どの層の期限にも捕まらないまま予算を超える。
     pub fn ipc_request_budget(&self, operation: &str) -> Duration {
         let kind = request_budget_kind(operation);
-        self.phase_budget(kind)
-            .saturating_sub(self.post_response_reserve(kind))
+        let phase = self.phase_budget(kind);
+        let reserve = self.post_response_reserve(kind);
+        // 取り分が予算を上回ると、飽和した引き算は 0 を返して期限が「今」になり、
+        // 要求が必ず期限超過で返る。既定値は core が不等式ごと固定しているが、
+        // [`CallLimits`] のフィールドは公開されており任意の組を作れる。
+        debug_assert!(
+            reserve < phase,
+            "応答後の取り分が要求フェーズの予算以上です: {reserve:?} >= {phase:?}"
+        );
+        phase.saturating_sub(reserve)
     }
 
     /// 区分ごとの要求フェーズ全体の期限。
@@ -198,32 +206,15 @@ struct ToolSuccess {
 impl AviUtl2McpServer {
     /// registry ディレクトリを指定してサーバーを作る。
     ///
-    /// 描画成果物の保管庫は開かない。描画を提供するには [`Self::open`] を使う。
-    pub fn new(registry_dir: PathBuf) -> Self {
+    /// 描画成果物の保管庫を開く。保管庫は registry と同じ基底の下に作られ、
+    /// **このサーバーが破棄されるときにディレクトリごと消える**。成果物は
+    /// このプロセスだけが読むものであり、プロセスの終了後に残す理由が無い。
+    pub fn new(registry_dir: PathBuf) -> Result<Self, ArtifactStoreError> {
         Self::with_limits(registry_dir, CallLimits::default())
     }
 
-    /// 実行予算を指定してサーバーを作る。保管庫は開かない。
-    pub fn with_limits(registry_dir: PathBuf, limits: CallLimits) -> Self {
-        Self {
-            registry_dir: Arc::new(registry_dir),
-            artifacts: None,
-            limits,
-            tool_router: Self::tool_router(),
-        }
-    }
-
-    /// 描画成果物の保管庫を開いてサーバーを作る。
-    ///
-    /// 保管庫は registry と同じ基底の下に作られ、**このサーバーが破棄される
-    /// ときにディレクトリごと消える**。成果物はこのプロセスだけが読むもので
-    /// あり、プロセスの終了後に残す理由が無い。
-    pub fn open(registry_dir: PathBuf) -> Result<Self, ArtifactStoreError> {
-        Self::open_with_limits(registry_dir, CallLimits::default())
-    }
-
-    /// 実行予算を指定し、保管庫を開いてサーバーを作る。
-    pub fn open_with_limits(
+    /// 実行予算を指定してサーバーを作る。保管庫は [`Self::new`] と同じく開く。
+    pub fn with_limits(
         registry_dir: PathBuf,
         limits: CallLimits,
     ) -> Result<Self, ArtifactStoreError> {
@@ -243,7 +234,25 @@ impl AviUtl2McpServer {
     ) -> Self {
         Self {
             artifacts: Some(artifacts),
-            ..Self::with_limits(registry_dir, limits)
+            ..Self::without_artifact_store(registry_dir, limits)
+        }
+    }
+
+    /// 保管庫を持たないサーバーを作る。
+    ///
+    /// **`aviutl2_render_frame` は使えない。** 呼ぶと成果物を保管できないため
+    /// `internal_error` になる（接続先へは要求を送らない）。成果物 resource も
+    /// 1 件も並ばない。
+    ///
+    /// 保管庫は基底へ保護された DACL を書き込むため、描画を使わない利用者に
+    /// それを強いないための構築口である。描画を提供する場合は [`Self::new`] を
+    /// 使う。
+    pub fn without_artifact_store(registry_dir: PathBuf, limits: CallLimits) -> Self {
+        Self {
+            registry_dir: Arc::new(registry_dir),
+            artifacts: None,
+            limits,
+            tool_router: Self::tool_router(),
         }
     }
 
@@ -2003,8 +2012,16 @@ mod tests {
         assert_eq!(covered, expected);
     }
 
+    /// tool 定義と応答の組み立てだけを見るサーバー。
+    ///
+    /// 保管庫を開かない構築口を使う。開くと registry から導いた基底へ保護された
+    /// DACL を書き込むため、実在しないパスや相対パスを渡す検査で実際の
+    /// ディレクトリへ触れてしまう。描画の経路は統合テストが確かめる。
     fn server() -> AviUtl2McpServer {
-        AviUtl2McpServer::new(PathBuf::from(r"C:\nonexistent-registry"))
+        AviUtl2McpServer::without_artifact_store(
+            PathBuf::from(r"C:\nonexistent-registry"),
+            CallLimits::default(),
+        )
     }
 
     fn tools() -> Vec<Tool> {
@@ -2984,7 +3001,7 @@ mod tests {
             render_request: Duration::from_millis(910),
             artifact_ingest: Duration::from_millis(130),
         };
-        let server = AviUtl2McpServer::with_limits(PathBuf::from("registry"), limits);
+        let server = AviUtl2McpServer::without_artifact_store(PathBuf::from("registry"), limits);
         assert_eq!(server.limits.resolve, Duration::from_millis(120));
         assert_eq!(server.limits.request, Duration::from_millis(340));
         assert_eq!(server.limits.edit_request, Duration::from_millis(560));

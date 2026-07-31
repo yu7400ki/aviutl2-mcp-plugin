@@ -1,7 +1,7 @@
 //! 描画 tool の入出力型。
 //!
 //! **応答の型を IPC の result と分ける。** 接続先が返す
-//! [`RenderFrameResult`](aviutl2_mcp_core::RenderFrameResult) は引き渡しファイルの
+//! [`RenderFrameResult`] は引き渡しファイルの
 //! 識別子を持ち、そのまま `structuredContent` へ流すと要求元がそのファイル名を
 //! 知ることになる。[`RenderFrameOutput`] に対応するフィールドが無いため、
 //! 素通しはコンパイルエラーになる。

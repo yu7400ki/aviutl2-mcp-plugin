@@ -420,7 +420,10 @@ async fn a_server_without_a_store_never_asks_the_host_to_render() {
     // 保管庫が無いまま要求を送ると、ホストの計算資源を使って作らせた成果物を
     // 受け取れずに捨てることになる。
     let harness = Harness::start(honest_render_result());
-    let server = AviUtl2McpServer::with_limits(harness.registry_dir.clone(), CallLimits::default());
+    let server = AviUtl2McpServer::without_artifact_store(
+        harness.registry_dir.clone(),
+        CallLimits::default(),
+    );
 
     let result = server
         .aviutl2_render_frame(Parameters(RenderFrameInput {

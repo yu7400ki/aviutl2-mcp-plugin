@@ -61,7 +61,7 @@ impl Harness {
         mock.write_descriptor(&registry_dir);
         std::thread::sleep(MOCK_STARTUP_GRACE);
         Self {
-            server: AviUtl2McpServer::with_limits(registry_dir.clone(), limits),
+            server: AviUtl2McpServer::without_artifact_store(registry_dir.clone(), limits),
             mock,
             registry_dir,
         }
@@ -461,7 +461,8 @@ async fn dead_instance_becomes_instance_stale() {
     )
     .expect("descriptor を書ける");
 
-    let server = AviUtl2McpServer::new(registry_dir.clone());
+    let server =
+        AviUtl2McpServer::without_artifact_store(registry_dir.clone(), CallLimits::default());
     let result = server
         .aviutl2_get_edit_info(Parameters(InstanceInput {
             instance_id: descriptor.instance_id.to_string(),
