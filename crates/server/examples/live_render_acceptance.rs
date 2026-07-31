@@ -2001,8 +2001,11 @@ fn check_repeated_shutdown(
         println!("--- {round} 回目 / {SHUTDOWN_REPEATS} 回 ---");
 
         let before = detach_marks();
-        let render =
-            describe_render(&short.render_frame(&target.id, target.scene_id, target.frames()[0]));
+        let result = short.render_frame(&target.id, target.scene_id, target.frames()[0]);
+        // 期限内に終わってしまった回は、完了を待っている描画を残せていない。
+        // 終了が速かったのは、待つものが無かったからかもしれない。
+        let left_outstanding = matches!(&result, Err(error) if error.code == ErrorCode::Timeout);
+        let render = describe_render(&result);
         prompt(&format!(
             "いま行ったこと: 期限を短縮した描画を 1 件要求しました（結果: {render}）。\n\
              接続先はまだ完了の合図を待っています。\n\
@@ -2011,11 +2014,18 @@ fn check_repeated_shutdown(
         ));
         let elapsed = wait_until_descriptor_gone(registry_dir, &target.id, SHUTDOWN_LIMIT);
         let detached = detached_since(before);
+        let crashed = !confirm(
+            "お願いすること: AviUtl2 が異常終了したことを示す表示が出ていないかを見てください。\n\
+             確認する場所: 画面全体。エラーダイアログや、応答なしのウィンドウ。\n\
+             回答: 異常終了の表示が無ければ y、出ていれば n を入力してください。",
+        );
         rounds.push(DrainRound {
             round,
             render,
+            left_outstanding,
             elapsed,
             detached,
+            crashed,
         });
 
         if round < SHUTDOWN_REPEATS {
@@ -2040,10 +2050,14 @@ struct DrainRound {
     round: usize,
     /// 期限を短縮した描画の結末。
     render: String,
+    /// 完了を待っている描画を残したまま終了できたか。
+    left_outstanding: bool,
     /// 終了に要した時間。
     elapsed: Result<Duration, String>,
     /// 完了待ちを切り離したか。
     detached: Detached,
+    /// 異常終了の表示が出たか。
+    crashed: bool,
 }
 
 /// 完了待ちを切り離したかどうか。
@@ -2072,14 +2086,16 @@ fn report_drain_rounds(report: &mut Report, rounds: &[DrainRound]) {
         .iter()
         .map(|round| {
             format!(
-                "{} 回目: 描画={} / 終了={} / 完了待ち={}",
+                "{} 回目: 描画={} / 待っている描画を残せた={} / 終了={} / 完了待ち={} / 異常終了の表示={}",
                 round.round,
                 round.render,
+                round.left_outstanding,
                 match &round.elapsed {
                     Ok(elapsed) => format!("{} ミリ秒", elapsed.as_millis()),
                     Err(reason) => reason.clone(),
                 },
-                round.detached.label()
+                round.detached.label(),
+                round.crashed
             )
         })
         .collect::<Vec<_>>()
@@ -2113,7 +2129,23 @@ fn report_drain_rounds(report: &mut Report, rounds: &[DrainRound]) {
         return;
     }
 
-    let failed: Vec<String> = rounds
+    let outstanding = rounds.iter().filter(|round| round.left_outstanding).count();
+    if outstanding == 0 {
+        report.skip(
+            "中断",
+            title,
+            verified,
+            Mode::Operator,
+            format!(
+                "{} 回とも短縮した期限内に描画が完了しており、完了を待っている描画を残したまま終了できていない。\
+                 より重いシーンで実行すると確かめられる",
+                rounds.len()
+            ),
+        );
+        return;
+    }
+
+    let mut failed: Vec<String> = rounds
         .iter()
         .filter_map(|round| {
             round
@@ -2123,6 +2155,12 @@ fn report_drain_rounds(report: &mut Report, rounds: &[DrainRound]) {
                 .map(|reason| format!("{} 回目: {reason}", round.round))
         })
         .collect();
+    failed.extend(
+        rounds
+            .iter()
+            .filter(|round| round.crashed)
+            .map(|round| format!("{} 回目: 異常終了の表示が出た", round.round)),
+    );
     if !failed.is_empty() {
         report.record(
             "中断",
@@ -2130,7 +2168,7 @@ fn report_drain_rounds(report: &mut Report, rounds: &[DrainRound]) {
             verified,
             Mode::Operator,
             Err(format!(
-                "終了が完了しない回があります: {}",
+                "期限内に終了しなかった回、または異常終了した回があります: {}",
                 failed.join(" / ")
             )),
         );
@@ -2145,6 +2183,8 @@ fn report_drain_rounds(report: &mut Report, rounds: &[DrainRound]) {
         .iter()
         .filter(|round| !matches!(round.detached, Detached::Unknown(_)))
         .count();
+    // 切り離しが常態なら、それは合格ではない。切り離した先へ届く完了の合図は
+    // アンロード済みの領域へ飛ぶ。
     let outcome = if detached * 2 > rounds.len() {
         Err(format!(
             "{} 回中 {detached} 回で完了待ちを切り離しており、切り離しが常態になっています。\
@@ -2153,7 +2193,7 @@ fn report_drain_rounds(report: &mut Report, rounds: &[DrainRound]) {
         ))
     } else {
         Ok(vec![format!(
-            "{} 回とも期限内に終了した（完了待ちの切り離し {detached} 回 / 判別できた {known} 回）",
+            "{} 回とも期限内に終了した（完了を待っている描画を残せた {outstanding} 回 / 完了待ちの切り離し {detached} 回 / 判別できた {known} 回）",
             rounds.len()
         )])
     };
