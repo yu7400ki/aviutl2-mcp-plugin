@@ -62,13 +62,16 @@
 //!
 //! 本ターゲットは MCP server ではないため、対話用の出力は stdout へ書く。
 
-use aviutl2_mcp_core::{EditInfo, ErrorCode, ErrorObject};
+use aviutl2_mcp_core::{
+    EditInfo, ErrorCode, ErrorObject, OPERATION_RENDER_FRAME, RenderFormat, RenderFrameParams,
+};
 use aviutl2_mcp_server::api::ListInstancesResponse;
 use aviutl2_mcp_server::artifact::{
-    ARTIFACT_MAX_COUNT, ARTIFACT_MEDIA_TYPE, ARTIFACT_TTL, ArtifactStore, base_dir_for_registry,
+    ARTIFACT_MAX_COUNT, ARTIFACT_MAX_TOTAL_BYTES, ARTIFACT_MEDIA_TYPE, ARTIFACT_TTL, ArtifactStore,
+    base_dir_for_registry,
 };
-use aviutl2_mcp_server::discovery::default_registry_dir;
-use aviutl2_mcp_server::mcp::input::{InstanceInput, ListInstancesInput};
+use aviutl2_mcp_server::discovery::{DiscoveryConfig, default_registry_dir, resolve_instance};
+use aviutl2_mcp_server::mcp::input::{InstanceInput, ListInstancesInput, parse_instance_id};
 use aviutl2_mcp_server::mcp::render::{RenderFormatInput, RenderFrameInput};
 use aviutl2_mcp_server::mcp::{
     ARTIFACTS_RESOURCE_URI_PREFIX, AviUtl2McpServer, CallLimits, REGISTRY_DIR_ENV,
@@ -132,7 +135,9 @@ const SHUTDOWN_REPEATS: usize = 10;
 /// 完了待ちを切り離したときに plugin が書く文言。
 ///
 /// 期限内に戻れず、待ちのスレッドを切り離して終了へ進んだことを表す。
-const DRAIN_DETACH_MARKER: &str = "レンダリングの完了待ちが";
+/// **接頭辞ではなく接尾辞で照合する。** 完了待ちについての記録は他にもあり
+/// （待ちが panic で終わった場合など）、頭だけでは切り離しと区別できない。
+const DRAIN_DETACH_MARKER: &str = "期限を超えたため切り離しました";
 /// 引き渡しの取り残しが片付くのを待つ上限。
 ///
 /// 応答を送れなかった成果物は接続先が消す。その削除は要求元の観測と同時では
@@ -212,7 +217,9 @@ fn run(report: &mut Report) -> Result<(), String> {
 /// 何をするターゲットかを実行前に告げる。
 fn print_intro() {
     println!();
-    println!("このプログラムは AviUtl2 に現在シーンのフレームを描かせ、その結果を確かめます。");
+    println!(
+        "説明: このプログラムは AviUtl2 に現在シーンのフレームを描かせ、その結果を確かめます。"
+    );
     println!("      プロジェクトの内容は書き換えませんが、確認の途中で 1 度だけ");
     println!("      シーンの解像度を変えていただきます。終了後は保存せずに閉じてください。");
     println!("      終盤では AviUtl2 の終了と再起動を繰り返しお願いします。");
@@ -910,9 +917,16 @@ fn wait_until_responsive(
 
 /// 成果物の実体を読み出す。
 ///
-/// 引き当ては保管庫が持つ一覧に対して行われる。resource として読む場合も同じ
-/// 引き当てを通るため、ここで読めることは resource として読めることと同じ材料に
-/// 依っている。識別子はパスへ連結されない。
+/// # 既知の限界: resource としての読み出しは通っていない
+///
+/// ここが行うのは保管庫からの直接の読み出しであり、**MCP の resource として
+/// 読む経路そのものではない。** 引き当ての材料は同じ（保管庫が持つ一覧に対して
+/// 引き当て、識別子をパスへ連結しない）が、URI の解釈・`Blob` としての包み方・
+/// content type の付与は通っていない。したがって本ターゲットが確かめられるのは
+/// 「応答が指す成果物の実体を識別子から取り出せること」までである。
+///
+/// 代わりが無いのは、resource の読み出しが要求文脈を要し、それを例から
+/// 組み立てられないためである。
 fn read_artifact(harness: &Harness, artifact_id: &str) -> Result<(Vec<u8>, String), String> {
     let content = harness
         .store
@@ -970,6 +984,9 @@ fn sha256_of(bytes: &[u8]) -> String {
 /// 引き渡し用のファイルも保管庫の実体も同じ拡張子を持つ。**保管庫が保持して
 /// いる件数と一致すれば、引き渡しの取り残しは無い。** ディレクトリの名前を
 /// 知らなくても、この 1 つの数で取り残しを見つけられる。
+///
+/// **見ているのはファイルであってディレクトリではない。** 中身が消えた後に
+/// 空のディレクトリが残っていても、この数には現れない。
 fn count_png_files(dir: &Path) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -1340,7 +1357,7 @@ fn section_basics(
     report.record(
         "基本",
         "成果物の受け取り",
-        "成果物が image/png として読み出せ、応答の URI が識別子から組み立てられている",
+        "成果物が識別子から image/png として読み出せ、応答の URI が識別子から組み立てられている（resource として読む経路そのものは通っていない）",
         Mode::Auto,
         judge_artifact_reference(&rendered),
     );
@@ -1542,18 +1559,34 @@ fn section_artifacts(
         check_eviction(harness, target, store),
     );
 
+    // 押し出しの規則は件数と総量の両方を見る。ここで動かせるのは件数だけで
+    // あることを、黙って落とさずに残す。
+    report.skip(
+        "成果物",
+        "総量の上限による押し出し",
+        "保持する総量が上限を超えると、古い成果物が押し出される",
+        Mode::Auto,
+        format!(
+            "総量の上限は {} MiB であり、件数の上限まで描いてもそこへ届かない。\
+             届かせるには 1 枚あたり {} MiB を超える解像度が要り、それは 1 枚の上限に掛かる",
+            ARTIFACT_MAX_TOTAL_BYTES / (1024 * 1024),
+            ARTIFACT_MAX_TOTAL_BYTES / (1024 * 1024) / ARTIFACT_MAX_COUNT as u64
+        ),
+    );
+
+    let expiry_verified = "保存時間を過ぎた成果物が引き当てられなくなる（応答としての not_found そのものは見ていない）";
     match std::env::var_os(WAIT_FOR_EXPIRY_ENV) {
         Some(_) => report.record(
             "成果物",
             "期限切れ",
-            "保存時間を過ぎた成果物が引き当てられなくなる",
+            expiry_verified,
             Mode::Auto,
             check_expiry(harness, target, store),
         ),
         None => report.skip(
             "成果物",
             "期限切れ",
-            "保存時間を過ぎた成果物が引き当てられなくなる",
+            expiry_verified,
             Mode::Auto,
             format!(
                 "保存時間は {} 秒であり、実時間で待つと実行が長くなる。{WAIT_FOR_EXPIRY_ENV} を設定すると待って確かめる",
@@ -1665,13 +1698,13 @@ fn section_interruption(
     println!("            応答は誰にも届かず、終了の途中では応答より終了が先に来ます。");
     println!("            プレビュー再生中の描画は、合否ではなく観測として先に記録済みです。");
 
-    let outcome = check_render_during_save(harness, &target);
-    report.record(
+    let attempt = check_render_during_save(harness, &target);
+    report.record_attempt(
         "中断",
         "出力中の描画",
         "出力中の描画要求が edit_blocked になり、出力の終了後に AviUtl2 が応答を続ける",
         Mode::Operator,
-        outcome,
+        attempt,
     );
 
     let attempt = check_short_deadline(harness, short, &target);
@@ -1683,13 +1716,13 @@ fn section_interruption(
         attempt,
     );
 
-    let outcome = check_doomed_client(harness, report, &target, layout, store);
-    report.record(
+    let attempt = check_doomed_client(harness, report, &target, layout, store);
+    report.record_attempt(
         "中断",
         "要求直後の要求元の消滅",
         "描画を要求した直後に要求元が消えても、AviUtl2 が応答を続け、引き渡しの取り残しが出ない",
         Mode::Auto,
-        outcome,
+        attempt,
     );
 
     let target = check_quit_during_render(harness, report, target, layout, store)?;
@@ -1698,14 +1731,18 @@ fn section_interruption(
 }
 
 /// 出力中の描画が型付きの失敗になることを確かめる。
-fn check_render_during_save(harness: &Harness, target: &Target) -> CheckResult {
-    prompt(
+fn check_render_during_save(harness: &Harness, target: &Target) -> Attempt {
+    let answer = ask(
         "お願いすること: AviUtl2 で出力（ファイル書き出し）を開始してください。\n\
          出力を止めないまま、この画面へ戻ってきてください。\n\
          確認する場所: 出力の進行状況を示すウィンドウ。\n\
          回答: 出力中の状態で Enter を押してください。\n\
-         出力を開始できない場合も Enter を押してください。その場合この項目は不合格になります。",
+         出力を開始できない場合は skip と入力してください。この項目は未実施になります。",
     );
+    if answer.eq_ignore_ascii_case("skip") {
+        return Attempt::Unmet("出力を開始できないため実施できません".to_string());
+    }
+
     let result = harness.render_frame(&target.id, target.scene_id, 0);
     prompt(
         "お願いすること: AviUtl2 で出力を停止するか、出力の完了を待ってください。\n\
@@ -1714,22 +1751,26 @@ fn check_render_during_save(harness: &Harness, target: &Target) -> CheckResult {
     );
 
     let blocked = match result {
-        Ok(_) => return Err("出力中の描画が成功として返りました".to_string()),
+        Ok(_) => return Attempt::Ran(Err("出力中の描画が成功として返りました".to_string())),
         Err(error) if error.code == ErrorCode::EditBlocked => describe_error(&error),
         Err(error) => {
-            return Err(format!(
+            return Attempt::Ran(Err(format!(
                 "edit_blocked を期待しましたが {}",
                 describe_error(&error)
-            ));
+            )));
         }
     };
 
-    let waited = wait_until_responsive(harness, &target.id, HOST_RECOVERY_WINDOW)
-        .map_err(|reason| format!("出力の終了後に AviUtl2 が応答しません: {reason}"))?;
-    Ok(vec![
-        blocked,
-        format!("出力の終了後 {} ミリ秒で応答した", waited.as_millis()),
-    ])
+    Attempt::Ran(
+        wait_until_responsive(harness, &target.id, HOST_RECOVERY_WINDOW)
+            .map_err(|reason| format!("出力の終了後に AviUtl2 が応答しません: {reason}"))
+            .map(|waited| {
+                vec![
+                    blocked,
+                    format!("出力の終了後 {} ミリ秒で応答した", waited.as_millis()),
+                ]
+            }),
+    )
 }
 
 /// 期限を短縮した描画の後も、AviUtl2 が使えることを確かめる。
@@ -1805,9 +1846,28 @@ fn check_doomed_client(
     target: &Target,
     layout: &Layout,
     store: &Arc<ArtifactStore>,
-) -> CheckResult {
-    let marker = layout.out_dir.join("doomed-client-returned.txt");
-    let _ = std::fs::remove_file(&marker);
+) -> Attempt {
+    match probe_doomed_client(harness, report, target, layout, store) {
+        Ok(attempt) => attempt,
+        Err(reason) => Attempt::Ran(Err(reason)),
+    }
+}
+
+/// 子を起こして落とし、結末を判定する。
+///
+/// 起こせなかった場合と、狙った形にならなかった場合を分ける。**前者は確認の
+/// 失敗であり、後者は前提が揃わなかっただけである。**
+fn probe_doomed_client(
+    harness: &Harness,
+    report: &mut Report,
+    target: &Target,
+    layout: &Layout,
+    store: &Arc<ArtifactStore>,
+) -> Result<Attempt, String> {
+    let started = layout.out_dir.join("doomed-client-started.txt");
+    let returned = layout.out_dir.join("doomed-client-returned.txt");
+    let _ = std::fs::remove_file(&started);
+    let _ = std::fs::remove_file(&returned);
 
     let exe =
         std::env::current_exe().map_err(|e| format!("自分の実行ファイルが分かりません: {e}"))?;
@@ -1816,7 +1876,8 @@ fn check_doomed_client(
         .arg(&target.id)
         .arg(target.scene_id.to_string())
         .arg(target.frames()[0].to_string())
-        .arg(&marker)
+        .arg(&started)
+        .arg(&returned)
         .env(REGISTRY_DIR_ENV, &layout.registry_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1829,14 +1890,23 @@ fn check_doomed_client(
     let _ = child.wait();
     killed.map_err(|e| format!("子を落とせません: {e}"))?;
 
-    if marker.exists() {
+    if returned.exists() {
         // 落とす前に応答まで進んでいた。確かめたい形になっていない。
-        let _ = std::fs::remove_file(&marker);
-        return Err(format!(
-            "子が落とされる前に描画の応答まで進んでいたため、要求元の消滅を起こせなかった。\
+        let note = std::fs::read_to_string(&returned).unwrap_or_default();
+        return Ok(Attempt::Unmet(format!(
+            "子が落とされる前に応答まで進んだため、要求元の消滅を起こせなかった（{note}）。\
              より重いシーンで実行するか、落とすまでの待ち（{} ミリ秒）を縮めると確かめられる",
             DOOMED_CLIENT_LIFETIME.as_millis()
-        ));
+        )));
+    }
+    if !started.exists() {
+        // 要求が一度も送られていない。この後に見る「ホストが応答する」ことも
+        // 「取り残しが無い」ことも自明に成立してしまうため、確認として数えない。
+        return Ok(Attempt::Unmet(format!(
+            "子が要求を送る前に落ちたため、要求元の消滅を起こせなかった。\
+             接続と handshake に {} ミリ秒では足りていない",
+            DOOMED_CLIENT_LIFETIME.as_millis()
+        )));
     }
 
     let waited = wait_until_responsive(harness, &target.id, HOST_RECOVERY_WINDOW)
@@ -1863,10 +1933,11 @@ fn check_doomed_client(
     );
 
     let leftovers = settle_leftovers(&layout.base_dir, store)?;
-    Ok(vec![
+    Ok(Attempt::Ran(Ok(vec![
+        "子は要求を送った後に落とされた".to_string(),
         format!("{} ミリ秒後に応答が戻った", waited.as_millis()),
         leftovers,
-    ])
+    ])))
 }
 
 /// 引き渡しの取り残しが無くなるまで少し待ち、結果を返す。
@@ -1983,13 +2054,11 @@ fn check_repeated_shutdown(
     registry_dir: &Path,
 ) -> Result<(), String> {
     println!();
-    println!("これから、描画を残したまま終了する手順を {SHUTDOWN_REPEATS} 回繰り返します。");
-    println!("            毎回、AviUtl2 の終了と再起動をお願いします。");
-    println!(
-        "            各回について、完了待ちが期限内に戻ったか、待ちきれずに切り離したかを記録します。"
-    );
-    println!("            切り離しが常態であれば、それは合格ではありません。アンロードの後に");
-    println!("            届く完了の合図を防げていないことを意味します。");
+    println!("繰り返し: 描画を残したまま終了する手順を {SHUTDOWN_REPEATS} 回繰り返します。");
+    println!("          毎回、AviUtl2 の終了と再起動をお願いします。");
+    println!("          各回について、完了待ちを切り離した記録が出たかどうかを見ます。");
+    println!("          切り離しが常態であれば、それは合格ではありません。アンロードの後に");
+    println!("          届く完了の合図を防げていないことを意味します。");
 
     let mut rounds: Vec<DrainRound> = Vec::new();
     let mut current = Some(target);
@@ -2110,9 +2179,62 @@ fn report_drain_rounds(report: &mut Report, rounds: &[DrainRound]) {
         },
     );
 
+    // 観測された異常を先に判定する。**繰り返しが足りなかったことや、狙った
+    // 状況を起こせなかったことで、異常終了や期限超過が飲み込まれてはならない。**
+    // 実施した回が 1 回でもあれば、その回についての主張は成り立つ。
+    report_shutdown_health(report, rounds);
+    report_repetition(report, rounds);
+}
+
+/// 実施した各回について、ホストが無事に終了したかを判定する。
+fn report_shutdown_health(report: &mut Report, rounds: &[DrainRound]) {
+    let title = "描画を残したままの終了でのホストの生死";
+    let verified =
+        "描画を残したまま終了した回のいずれでも、AviUtl2 が異常終了せず、期限内に終了する";
+    if rounds.is_empty() {
+        report.skip(
+            "中断",
+            title,
+            verified,
+            Mode::Operator,
+            "この手順を 1 回も実施していない",
+        );
+        return;
+    }
+
+    let mut failed: Vec<String> = rounds
+        .iter()
+        .filter(|round| round.crashed)
+        .map(|round| format!("{} 回目: 異常終了の表示が出た", round.round))
+        .collect();
+    failed.extend(rounds.iter().filter_map(|round| {
+        round
+            .elapsed
+            .as_ref()
+            .err()
+            .map(|reason| format!("{} 回目: {reason}", round.round))
+    }));
+
+    let outcome = if failed.is_empty() {
+        Ok(vec![format!(
+            "実施した {} 回とも、異常終了の表示が出ず期限内に終了した",
+            rounds.len()
+        )])
+    } else {
+        Err(format!(
+            "実施した {} 回のうちに、異常終了または期限内に終了しなかった回があります: {}",
+            rounds.len(),
+            failed.join(" / ")
+        ))
+    };
+    report.record("中断", title, verified, Mode::Operator, outcome);
+}
+
+/// 繰り返しが足りているかと、切り離しが常態でないかを判定する。
+fn report_repetition(report: &mut Report, rounds: &[DrainRound]) {
     let title = "描画を残したままの終了の繰り返し";
     let verified = format!(
-        "描画を残したまま終了する手順を {SHUTDOWN_REPEATS} 回繰り返し、毎回 AviUtl2 が期限内に終了し、完了待ちの切り離しが常態にならない"
+        "描画を残したまま終了する手順を {SHUTDOWN_REPEATS} 回繰り返し、完了待ちの切り離しが常態にならない"
     );
     if rounds.len() < SHUTDOWN_REPEATS {
         report.skip(
@@ -2145,43 +2267,13 @@ fn report_drain_rounds(report: &mut Report, rounds: &[DrainRound]) {
         return;
     }
 
-    let mut failed: Vec<String> = rounds
-        .iter()
-        .filter_map(|round| {
-            round
-                .elapsed
-                .as_ref()
-                .err()
-                .map(|reason| format!("{} 回目: {reason}", round.round))
-        })
-        .collect();
-    failed.extend(
-        rounds
-            .iter()
-            .filter(|round| round.crashed)
-            .map(|round| format!("{} 回目: 異常終了の表示が出た", round.round)),
-    );
-    if !failed.is_empty() {
-        report.record(
-            "中断",
-            title,
-            verified,
-            Mode::Operator,
-            Err(format!(
-                "期限内に終了しなかった回、または異常終了した回があります: {}",
-                failed.join(" / ")
-            )),
-        );
-        return;
-    }
-
     let detached = rounds
         .iter()
         .filter(|round| matches!(round.detached, Detached::Yes))
         .count();
-    let known = rounds
+    let unknown = rounds
         .iter()
-        .filter(|round| !matches!(round.detached, Detached::Unknown(_)))
+        .filter(|round| matches!(round.detached, Detached::Unknown(_)))
         .count();
     // 切り離しが常態なら、それは合格ではない。切り離した先へ届く完了の合図は
     // アンロード済みの領域へ飛ぶ。
@@ -2192,10 +2284,18 @@ fn report_drain_rounds(report: &mut Report, rounds: &[DrainRound]) {
             rounds.len()
         ))
     } else {
-        Ok(vec![format!(
-            "{} 回とも期限内に終了した（完了を待っている描画を残せた {outstanding} 回 / 完了待ちの切り離し {detached} 回 / 判別できた {known} 回）",
-            rounds.len()
-        )])
+        // **観測した範囲を超えて主張しない。** 切り離しの記録が無い回は、完了待ちが
+        // 期限内に戻ったのかもしれないし、在庫が空で待ちに入らなかったのかもしれない。
+        // plugin は待って戻ったことを記録しないため、外からは区別できない。
+        Ok(vec![
+            format!(
+                "{} 回実施し、完了を待っている描画を残せたのは {outstanding} 回、\
+                 切り離しの記録が出たのは {detached} 回（判別できなかった回 {unknown}）",
+                rounds.len()
+            ),
+            "切り離しの記録が無い回は、期限内に戻ったのか、そもそも完了待ちに入らなかったのかを区別できない"
+                .to_string(),
+        ])
     };
     report.record("中断", title, verified, Mode::Operator, outcome);
 }
@@ -2235,8 +2335,9 @@ fn detached_since(before: Option<usize>) -> Detached {
 
     let answer = ask(&format!(
         "お願いすること: plugin のログを開き、いまの終了で\n\
-         「{DRAIN_DETACH_MARKER}」で始まる警告が新しく出ているかを見てください。\n\
+         「{DRAIN_DETACH_MARKER}」で終わる警告が新しく出ているかを見てください。\n\
          これは完了待ちが期限内に戻らず、待ちを切り離して終了へ進んだことを表します。\n\
+         完了待ちについての記録は他にもあるため、この語尾まで一致するものだけを数えてください。\n\
          確認する場所: 開発用ディレクトリの data/log にある最新のログファイルの末尾。\n\
          回答: 出ていれば あり\n\
          出ていなければ なし\n\
@@ -2268,7 +2369,7 @@ fn section_leftovers(report: &mut Report, base_dir: &Path, store: &Arc<ArtifactS
     report.record(
         "後片付け",
         "AviUtl2 終了後の引き渡しの取り残し",
-        "AviUtl2 の終了後、引き渡し用のファイルが 1 つも残らない",
+        "AviUtl2 の終了後、引き渡し用のファイルが 1 つも残らない（空になったディレクトリの有無は見ていない）",
         Mode::Auto,
         outcome,
     );
@@ -2295,7 +2396,7 @@ fn section_store_removal(report: &mut Report, store: Arc<ArtifactStore>, base_di
     report.record(
         "後片付け",
         "保管庫を閉じたときの削除",
-        "保管庫を閉じると、保持していた成果物の実体が残らない",
+        "保管庫を閉じると、保持していた成果物の実体が残らない（空になったディレクトリの有無は見ていない）",
         Mode::Auto,
         outcome,
     );
@@ -2320,8 +2421,10 @@ struct DoomedRole {
     instance_id: String,
     scene_id: i32,
     frame: u32,
+    /// 要求を送る直前に置く印。
+    started: PathBuf,
     /// 落とされる前に応答まで進んだ場合に置く印。
-    marker: PathBuf,
+    returned: PathBuf,
 }
 
 /// 引数が子としての役目を表しているなら、その内容を返す。
@@ -2333,23 +2436,50 @@ fn doomed_client_role(args: &[String]) -> Option<DoomedRole> {
         instance_id: args.get(2)?.clone(),
         scene_id: args.get(3)?.parse().ok()?,
         frame: args.get(4)?.parse().ok()?,
-        marker: PathBuf::from(args.get(5)?),
+        started: PathBuf::from(args.get(5)?),
+        returned: PathBuf::from(args.get(6)?),
     })
 }
 
 /// 描画を 1 件要求し、落とされるのを待つだけの要求元として振る舞う。
 ///
-/// **応答を受け取ることは想定していない。** 受け取ってしまった場合は印を残す。
-/// 印があれば、親は「要求元の消滅」を起こせなかったと判定できる。
+/// **成果物の保管庫を開かない。** 受け取る前に落とされる役目であり、開くと
+/// 落とされた後に持ち主の居ないディレクトリが残る。要求は接続先へ直接送る。
+///
+/// 印を 2 つ置く。要求を送る直前の印が無ければ、そもそも要求が届いていない。
+/// 応答まで進んだ印があれば、落とすのが遅く、確かめたい形になっていない。
+/// **どちらも「落としてもホストが無事だった」とは違う結末であり、印が無ければ
+/// 区別できないまま確認が通ってしまう。**
 fn run_as_doomed_client(role: &DoomedRole) {
     let Ok(registry_dir) = registry_dir() else {
         return;
     };
-    let base_dir = base_dir_for_registry(&registry_dir);
-    let Ok(store) = ArtifactStore::open(base_dir) else {
+    let Ok(instance_id) = parse_instance_id(&role.instance_id) else {
         return;
     };
-    let harness = Harness::new(registry_dir, CallLimits::default(), Arc::new(store));
-    let result = harness.render_frame(&role.instance_id, role.scene_id, role.frame);
-    let _ = std::fs::write(&role.marker, describe_render(&result));
+    let limits = CallLimits::default();
+    let Ok(resolved) = resolve_instance(&registry_dir, instance_id, DiscoveryConfig::default())
+    else {
+        return;
+    };
+    let params = RenderFrameParams {
+        expected_scene_id: role.scene_id,
+        frame: role.frame,
+        format: RenderFormat::Png,
+    };
+
+    let _ = std::fs::write(&role.started, "要求を送る");
+    let deadline = Instant::now() + limits.ipc_request_budget(OPERATION_RENDER_FRAME);
+    let result = resolved.client.request_typed::<_, serde_json::Value>(
+        OPERATION_RENDER_FRAME,
+        &params,
+        deadline,
+    );
+    let _ = std::fs::write(
+        &role.returned,
+        match result {
+            Ok(_) => "応答を受け取った".to_string(),
+            Err(error) => format!("失敗を受け取った: {error}"),
+        },
+    );
 }
