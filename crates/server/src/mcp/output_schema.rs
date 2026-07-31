@@ -1178,6 +1178,20 @@ mod tests {
         // 要素ごとの revision は「各 sub-operation が自分の世代を持つ」と読める。
         // 作成の一覧は一括適用に作成が入らないため常に空である。どちらも
         // フィールドを持たないことを schema で言い切る。
+        let schema = apply_batch();
+        let declared: std::collections::BTreeSet<&str> =
+            schema["properties"]["results"]["items"]["properties"]
+                .as_object()
+                .expect("要素の properties がある")
+                .keys()
+                .map(String::as_str)
+                .collect();
+        assert_eq!(
+            declared,
+            std::collections::BTreeSet::from(["object", "effect"]),
+            "要素の schema が持たないはずのフィールドを宣言しています"
+        );
+
         for key in ["project_revision", "created"] {
             let mut value = to_value(&sample_batch_outcome());
             value["results"][0]
