@@ -146,6 +146,7 @@ name = "aviutl2-mcp-server"
 version = "0.1.0"
 dependencies = [
  "aviutl2-mcp-core",
+ "base64",
  "chrono",
  "proptest",
  "rmcp",

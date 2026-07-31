@@ -1507,3 +1507,191 @@ fn verbose_logging_does_not_leak_full_identifiers_from_any_crate() {
     drop(mock);
     remove_test_registry(&registry_dir);
 }
+
+/// 描画の応答が名乗る引き渡しの識別子。応答にもログにも現れてはならない。
+const HANDOFF_TOKEN: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+
+/// 引き渡しファイルへ書く画像の中身。
+const IMAGE_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nfake-image-body";
+
+/// `"sha256:"` と小文字十六進のダイジェスト。
+fn sha256_of(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let mut value = "sha256:".to_string();
+    for byte in sha2::Sha256::digest(bytes) {
+        value.push_str(&format!("{byte:02x}"));
+    }
+    value
+}
+
+/// 描画に応じる mock を起こし、引き渡しファイルを置く。
+fn start_rendering_mock(registry_dir: &Path) -> MockPipeServer {
+    let responses = OperationResponses::from([(
+        "render_frame".to_string(),
+        ok_result(json!({
+            "project_epoch": "78be92d1-c8c9-44c6-ae52-387548971468",
+            "project_revision": 42,
+            "scene_id": 3,
+            "frame": 120,
+            "width": 1920,
+            "height": 1080,
+            "media_type": "image/png",
+            "byte_length": IMAGE_BYTES.len(),
+            "sha256": sha256_of(IMAGE_BYTES),
+            "handoff_token": HANDOFF_TOKEN,
+        })),
+    )]);
+    let mock = MockPipeServer::start_with_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        responses,
+    );
+    mock.write_descriptor(registry_dir);
+
+    // server は自分の基底から引き渡し先を組み立てる。試験側も同じ規則で置く。
+    let base = registry_dir.parent().expect("基底がある");
+    let dir = base.join("render").join(mock.instance_id().to_string());
+    std::fs::create_dir_all(&dir).expect("引き渡しディレクトリを作れる");
+    std::fs::write(dir.join(format!("{HANDOFF_TOKEN}.png")), IMAGE_BYTES)
+        .expect("引き渡しファイルを書ける");
+
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+    mock
+}
+
+#[test]
+fn a_rendered_artifact_is_listed_and_read_back_as_a_blob() {
+    let registry_dir = temp_registry_dir();
+    let mock = start_rendering_mock(&registry_dir);
+    let instance_id = mock.instance_id().to_string();
+
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_render_frame",
+            "arguments": {
+                "instance_id": instance_id,
+                "expected_scene_id": 3,
+                "frame": 120,
+            },
+        },
+    }));
+    requests.push(json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/list" }));
+
+    // 成果物の URI は描画の応答からしか分からないため、2 回に分けて往復させる。
+    let mut server = ServerProcess::start(&registry_dir, Some("trace"));
+    for request in &requests {
+        server.send(request);
+        if let Some(id) = request.get("id") {
+            server.read_until(std::slice::from_ref(id));
+        }
+    }
+    let listing: Vec<Value> = server
+        .stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    let render_response = listing
+        .iter()
+        .find(|message| message["id"] == json!(2))
+        .expect("描画の応答がある")
+        .clone();
+    assert!(
+        render_response["result"]["isError"] != json!(true),
+        "描画が失敗しています: {render_response}"
+    );
+    let uri = render_response["result"]["structuredContent"]["artifact"]["uri"]
+        .as_str()
+        .expect("成果物の URI がある")
+        .to_string();
+
+    let list_response = listing
+        .iter()
+        .find(|message| message["id"] == json!(3))
+        .expect("一覧の応答がある")
+        .clone();
+    let listed = listed_uris(&list_response);
+    assert!(
+        listed.contains(&uri),
+        "成果物が一覧にありません: {listed:?}"
+    );
+    // instance 由来の項目のあとに並ぶ。
+    let artifact_at = listed.iter().position(|item| *item == uri).expect("位置");
+    let edit_info_at = listed
+        .iter()
+        .position(|item| item.ends_with("/edit-info"))
+        .expect("edit-info がある");
+    assert!(edit_info_at < artifact_at, "{listed:?}");
+
+    server.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "resources/read",
+        "params": { "uri": uri },
+    }));
+    server.read_until(&[json!(4)]);
+    let session = server.finish();
+
+    let contents = &session.response(4)["result"]["contents"][0];
+    assert_eq!(contents["mimeType"], json!("image/png"));
+    assert!(
+        contents["text"].is_null(),
+        "画像を text で返しています: {contents}"
+    );
+    let blob = contents["blob"].as_str().expect("blob がある");
+    use base64::Engine as _;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(blob)
+        .expect("base64 として読める");
+    assert_eq!(decoded, IMAGE_BYTES);
+
+    // 引き渡しの識別子は応答にもログにも現れない。
+    assert!(
+        !session.stdout.contains(HANDOFF_TOKEN),
+        "引き渡しの識別子が応答に出ています"
+    );
+    assert!(
+        !session.stderr.contains(HANDOFF_TOKEN),
+        "引き渡しの識別子がログに出ています: {}",
+        session.stderr
+    );
+
+    drop(mock);
+    remove_test_registry(&registry_dir);
+}
+
+#[test]
+fn an_unknown_artifact_uri_is_simply_missing() {
+    let registry_dir = temp_registry_dir();
+    std::fs::create_dir_all(&registry_dir).expect("registry を作れる");
+
+    let mut requests = initialize_requests();
+    for (id, artifact_id) in [
+        (2, "5d0b6f7a-1f2e-4a3b-9c8d-7e6f5a4b3c2d"),
+        // パスへ連結されないため、遡ろうとする識別子も引き当てで終わる。
+        (3, "../../windows/system32/config/sam"),
+    ] {
+        requests.push(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "resources/read",
+            "params": { "uri": format!("aviutl2://artifacts/{artifact_id}") },
+        }));
+    }
+
+    let session = run_session(&registry_dir, &requests);
+    for id in [2, 3] {
+        let error = &session.response(id)["error"];
+        assert!(error.is_object(), "{}", session.response(id));
+        assert_eq!(error["code"], json!(RESOURCE_NOT_FOUND_CODE), "id={id}");
+        assert_eq!(error["data"]["code"], json!("not_found"), "id={id}");
+    }
+
+    remove_test_registry(&registry_dir);
+}

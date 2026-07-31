@@ -6,7 +6,7 @@
 //! 非同期タスク間で接続が移動しないようにする。
 
 use crate::api::{ListInstancesResponse, aviutl2_list_instances};
-use crate::artifact::{ArtifactStore, ArtifactStoreError, base_dir_for_registry};
+use crate::artifact::{Artifact, ArtifactStore, ArtifactStoreError, base_dir_for_registry};
 use crate::discovery::{DiscoveryConfig, list_registered_instances, resolve_instance};
 use crate::mcp::edit_input::{
     AddEffectInput, ApplyBatchInput, CreateObjectInput, DeleteEffectInput, DeleteObjectInput,
@@ -1380,41 +1380,17 @@ impl ServerHandler for AviUtl2McpServer {
             })
             .await?;
 
-        // インスタンス一覧そのものは登録の有無によらず読めるため、先頭ページに載せる。
-        let mut resources = Vec::new();
-        if offset == 0 {
-            resources.push(
-                Resource::new(INSTANCES_RESOURCE_URI, "aviutl2 instances")
-                    .with_description("登録されている AviUtl2 インスタンス一覧")
-                    .with_mime_type(RESOURCE_MIME_TYPE),
-            );
-        }
+        // 成果物は自分の一覧を読むだけで済む。インスタンスへ接続しないという
+        // 制約を自然に満たす。期限切れは [`ArtifactStore::list`] が先に落とす。
+        let artifacts = self
+            .artifacts
+            .as_ref()
+            .map(|store| store.list())
+            .unwrap_or_default();
 
-        let page: Vec<&InstanceId> = registered
-            .iter()
-            .skip(offset)
-            .take(RESOURCES_PAGE_SIZE)
-            .collect();
-        for instance_id in &page {
-            // 表示名には完全な instance_id を載せる。URI が同じ値をそのまま
-            // 運ぶため削っても秘匿にならず、[`redact`] はログ専用である。
-            // 削った名前は同じ接頭辞を持つインスタンスを見分けられなくする。
-            resources.push(
-                Resource::new(
-                    edit_info_resource_uri(instance_id),
-                    format!("aviutl2 edit info {instance_id}"),
-                )
-                .with_description("インスタンスの現在の編集情報")
-                .with_mime_type(RESOURCE_MIME_TYPE),
-            );
-        }
-
+        let (resources, next_cursor) = resource_page(&registered, &artifacts, offset);
         let mut result = ListResourcesResult::with_all_items(resources);
-        let next_offset = offset.saturating_add(page.len());
-        if next_offset < registered.len() {
-            // 続きを黙って落とさず、次ページの位置を返す。
-            result.next_cursor = Some(encode_cursor(next_offset));
-        }
+        result.next_cursor = next_cursor;
         Ok(result)
     }
 
@@ -1426,6 +1402,7 @@ impl ServerHandler for AviUtl2McpServer {
         let uri = request.uri;
         let registry_dir = self.registry_dir();
         let limits = self.limits;
+        let artifacts = self.artifacts.clone();
 
         let target = parse_resource_uri(&uri)
             .ok_or_else(|| McpError::resource_not_found("未知の resource URI です", None))?;
@@ -1454,6 +1431,23 @@ impl ServerHandler for AviUtl2McpServer {
                         )?;
                         to_structured(&info)?
                     }
+                    ResourceTarget::Artifact(artifact_id) => {
+                        // 引き当ては保管庫が持つ一覧に対してのみ行う。識別子を
+                        // パスへ連結しないため、どのような文字列が来ても
+                        // 「見つからない」で終わる。
+                        let content = artifacts
+                            .and_then(|store| store.read(&artifact_id))
+                            .ok_or_else(artifact_not_found)?;
+                        // text の上限は blob へ適用しない。上限は「機械可読値は
+                        // structuredContent に置き text は要約に留める」という
+                        // 規約に由来し、画像にはその区別が無い。大きさを縛るのは
+                        // 引き取り時の上限である。
+                        return Ok(ResourceContents::blob(
+                            encode_base64(&content.bytes),
+                            uri_for_content,
+                        )
+                        .with_mime_type(content.artifact.media_type));
+                    }
                 };
                 Ok(
                     ResourceContents::text(resource_text(&value)?, uri_for_content)
@@ -1466,8 +1460,93 @@ impl ServerHandler for AviUtl2McpServer {
     }
 }
 
-/// resource 一覧 1 ページに載せるインスタンス数の上限。
+/// resource 一覧 1 ページに載せる項目数の上限。
+///
+/// インスタンス一覧そのものの 1 項目は数に含めない。
 const RESOURCES_PAGE_SIZE: usize = 100;
+
+/// resource 一覧の 1 ページと、続きがある場合の cursor を組み立てる。
+///
+/// cursor は連結した一覧への 10 進インデックスであり、**instance 由来の項目の
+/// あとに成果物を並べる**。成果物を持たない場合、並びも cursor も成果物を
+/// 導入する前と変わらない。
+fn resource_page(
+    registered: &[InstanceId],
+    artifacts: &[Artifact],
+    offset: usize,
+) -> (Vec<Resource>, Option<String>) {
+    let mut resources = Vec::new();
+    // インスタンス一覧そのものは登録の有無によらず読めるため、先頭ページに載せる。
+    if offset == 0 {
+        resources.push(
+            Resource::new(INSTANCES_RESOURCE_URI, "aviutl2 instances")
+                .with_description("登録されている AviUtl2 インスタンス一覧")
+                .with_mime_type(RESOURCE_MIME_TYPE),
+        );
+    }
+
+    let total = registered.len() + artifacts.len();
+    let mut count = 0;
+    for index in offset..total {
+        if count == RESOURCES_PAGE_SIZE {
+            break;
+        }
+        resources.push(match registered.get(index) {
+            Some(instance_id) => edit_info_resource(instance_id),
+            None => artifact_resource(&artifacts[index - registered.len()]),
+        });
+        count += 1;
+    }
+
+    let next_offset = offset.saturating_add(count);
+    // 続きを黙って落とさず、次ページの位置を返す。
+    let cursor = (next_offset < total).then(|| encode_cursor(next_offset));
+    (resources, cursor)
+}
+
+/// インスタンスの編集情報 resource。
+fn edit_info_resource(instance_id: &InstanceId) -> Resource {
+    // 表示名には完全な instance_id を載せる。URI が同じ値をそのまま運ぶため
+    // 削っても秘匿にならず、[`redact`] はログ専用である。削った名前は同じ
+    // 接頭辞を持つインスタンスを見分けられなくする。
+    Resource::new(
+        edit_info_resource_uri(instance_id),
+        format!("aviutl2 edit info {instance_id}"),
+    )
+    .with_description("インスタンスの現在の編集情報")
+    .with_mime_type(RESOURCE_MIME_TYPE)
+}
+
+/// 描画成果物の resource。
+///
+/// **名前にも説明にも、画像の内容を推測させる情報を入れない。** 見分けるのに
+/// 要るのは識別子と時刻だけである。
+fn artifact_resource(artifact: &Artifact) -> Resource {
+    Resource::new(
+        artifact_resource_uri(&artifact.artifact_id),
+        format!("aviutl2 render artifact {}", artifact.artifact_id),
+    )
+    .with_description(format!(
+        "描画成果物（作成 {} / 失効 {}）",
+        artifact.created_at.to_rfc3339(),
+        artifact.expires_at.to_rfc3339(),
+    ))
+    .with_mime_type(artifact.media_type)
+}
+
+/// 成果物が引き当てられなかったことを表すエラー。
+///
+/// **期限切れ・未知の識別子・保管庫を開いていないことを区別しない。** 区別すると、
+/// 過去に存在した識別子を総当たりで調べられる。
+fn artifact_not_found() -> ErrorObject {
+    failure::from_code(ErrorCode::NotFound, "指定された resource は存在しません")
+}
+
+/// バイト列を標準の base64 へ符号化する。
+fn encode_base64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
 
 /// 次ページの位置を cursor へ符号化する。
 fn encode_cursor(offset: usize) -> String {
@@ -1525,12 +1604,17 @@ fn pretty_json(value: &Value) -> Result<String, ErrorObject> {
 }
 
 /// resource URI が指す対象。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ResourceTarget {
     /// インスタンス一覧。
     Instances,
     /// 指定インスタンスの編集情報。
     EditInfo(InstanceId),
+    /// 指定 ID の描画成果物。
+    ///
+    /// 識別子は解釈せずそのまま保持する。**パスへ連結しない**ため、書式を
+    /// 課す必要が無い。引き当てに失敗すれば見つからないで終わる。
+    Artifact(String),
 }
 
 /// インスタンスの編集情報 resource の URI。
@@ -1550,6 +1634,12 @@ pub fn artifact_resource_uri(artifact_id: &str) -> String {
 fn parse_resource_uri(uri: &str) -> Option<ResourceTarget> {
     if uri == INSTANCES_RESOURCE_URI {
         return Some(ResourceTarget::Instances);
+    }
+    if let Some(artifact_id) = uri.strip_prefix(ARTIFACTS_RESOURCE_URI_PREFIX) {
+        // 識別子の書式を課さない。引き当ては保管庫が持つ一覧に対してのみ行い、
+        // パスへ連結しないため、書式を確かめても防げるものが無い。
+        return (!artifact_id.is_empty())
+            .then(|| ResourceTarget::Artifact(artifact_id.to_string()));
     }
     let rest = uri
         .strip_prefix(INSTANCES_RESOURCE_URI)?
@@ -1751,10 +1841,13 @@ fn to_mcp_error(error: &ErrorObject) -> McpError {
         // いずれも「今は取得できないが後で取得し得る resource」である。
         // `internal_error` は server 自身の不具合を意味するため、待てば解消する
         // 失敗をそこへ寄せると恒久的な障害と読まれてしまう。
+        // 失効した成果物と未知の識別子も、この server から今は取得できない
+        // resource である。両者を区別しない。
         ErrorCode::InstanceNotFound
         | ErrorCode::InstanceStale
         | ErrorCode::HostBusy
         | ErrorCode::EditBlocked
+        | ErrorCode::NotFound
         | ErrorCode::Timeout => McpError::resource_not_found(message, data),
         ErrorCode::InvalidArgument => McpError::invalid_params(message, data),
         _ => McpError::internal_error(message, data),
@@ -2885,14 +2978,234 @@ mod tests {
     #[test]
     fn unknown_resource_uri_is_rejected() {
         for uri in [
-            "aviutl2://artifacts/1",
             "aviutl2://instances/not-a-uuid/edit-info",
             "aviutl2://instances//edit-info",
             "file:///etc/passwd",
             "aviutl2://instances/8df98c04-e7c2-4f98-b3ce-fc1c39d76414",
+            // 識別子の無い成果物 URI は指す対象を持たない。
+            "aviutl2://artifacts/",
+            "aviutl2://artifacts",
         ] {
             assert_eq!(parse_resource_uri(uri), None, "{uri} を受理しています");
         }
+    }
+
+    #[test]
+    fn an_artifact_uri_is_resolved_by_lookup_alone() {
+        // 識別子はパスへ連結しない。どのような文字列が来ても、引き当てに
+        // 失敗すれば見つからないで終わる。書式を課す必要が無い。
+        for id in [
+            "5d0b6f7a-1f2e-4a3b-9c8d-7e6f5a4b3c2d",
+            "..",
+            "../../windows/system32/config/sam",
+            r"..\..\secret.png",
+            "a b c",
+            "%2e%2e",
+        ] {
+            assert_eq!(
+                parse_resource_uri(&artifact_resource_uri(id)),
+                Some(ResourceTarget::Artifact(id.to_string())),
+                "{id} を引き当ての対象として扱っていません"
+            );
+        }
+    }
+
+    /// 任意の時刻を指す時計。
+    struct FixedClock(std::sync::atomic::AtomicI64);
+
+    impl crate::artifact::ArtifactClock for FixedClock {
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            chrono::DateTime::from_timestamp(self.0.load(std::sync::atomic::Ordering::SeqCst), 0)
+                .expect("表現できる時刻")
+        }
+    }
+
+    /// 成果物を持つ保管庫と、その基底を束ねた試験環境。
+    struct StoreFixture {
+        base_dir: PathBuf,
+        clock: Arc<FixedClock>,
+        /// 後始末で基底を消す前に閉じる必要があるため、取り出せる形で持つ。
+        store: Option<ArtifactStore>,
+        instance_id: InstanceId,
+    }
+
+    impl StoreFixture {
+        fn open(ttl: Duration) -> Self {
+            let base_dir = std::env::temp_dir().join(format!(
+                "aviutl2-mcp-resource-test-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let clock = Arc::new(FixedClock(std::sync::atomic::AtomicI64::new(0)));
+            let store = ArtifactStore::open_with(base_dir.clone(), ttl, clock.clone())
+                .expect("保管庫を開ける");
+            Self {
+                base_dir,
+                clock,
+                store: Some(store),
+                instance_id: InstanceId::new_v4(),
+            }
+        }
+
+        fn store(&self) -> &ArtifactStore {
+            self.store.as_ref().expect("保管庫は後始末まで生きています")
+        }
+
+        /// 引き渡しファイルを書いて成果物として引き取る。
+        fn ingest(&self, token: &str, bytes: &[u8]) -> Artifact {
+            let dir = self
+                .base_dir
+                .join("render")
+                .join(self.instance_id.to_string());
+            std::fs::create_dir_all(&dir).expect("引き渡しディレクトリを作れる");
+            std::fs::write(dir.join(format!("{token}.png")), bytes)
+                .expect("引き渡しファイルを書ける");
+
+            let mut sha256 = "sha256:".to_string();
+            for byte in <sha2::Sha256 as sha2::Digest>::digest(bytes) {
+                sha256.push_str(&format!("{byte:02x}"));
+            }
+            self.store()
+                .ingest(&self.instance_id, token, bytes.len() as u64, &sha256)
+                .expect("申告と一致する引き渡しは引き取れます")
+        }
+
+        fn advance(&self, seconds: i64) {
+            self.clock
+                .0
+                .fetch_add(seconds, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for StoreFixture {
+        fn drop(&mut self) {
+            drop(self.store.take());
+            let _ = std::fs::remove_dir_all(&self.base_dir);
+        }
+    }
+
+    /// 有効な引き渡しの識別子を種から作る。
+    fn handoff_token(seed: u8) -> String {
+        format!("{seed:02x}").repeat(16)
+    }
+
+    #[test]
+    fn a_listing_without_artifacts_keeps_the_shape_it_had_before() {
+        // 成果物を持たない場合、並びも cursor も成果物を導入する前と変わらない。
+        let registered: Vec<InstanceId> = (0..RESOURCES_PAGE_SIZE + 5)
+            .map(|_| InstanceId::new_v4())
+            .collect();
+
+        let (first, cursor) = resource_page(&registered, &[], 0);
+        // 先頭ページはインスタンス一覧そのものを含む。
+        assert_eq!(first.len(), RESOURCES_PAGE_SIZE + 1);
+        assert_eq!(first[0].uri, INSTANCES_RESOURCE_URI);
+        assert_eq!(
+            first[1].uri,
+            edit_info_resource_uri(&registered[0]),
+            "instance 由来の項目が先に来ていません"
+        );
+        assert_eq!(cursor.as_deref(), Some("100"));
+
+        let (second, cursor) = resource_page(&registered, &[], 100);
+        assert_eq!(second.len(), 5);
+        assert!(
+            second.iter().all(|item| item.uri != INSTANCES_RESOURCE_URI),
+            "2 ページ目に一覧そのものが現れています"
+        );
+        assert_eq!(cursor, None);
+
+        // 範囲外の位置は空のページになる。
+        let (empty, cursor) = resource_page(&registered, &[], 1_000);
+        assert!(empty.is_empty());
+        assert_eq!(cursor, None);
+    }
+
+    #[test]
+    fn artifacts_are_listed_after_the_instances() {
+        let fixture = StoreFixture::open(Duration::from_secs(600));
+        let first = fixture.ingest(&handoff_token(1), b"first");
+        let second = fixture.ingest(&handoff_token(2), b"second");
+        let registered = vec![InstanceId::new_v4()];
+
+        let artifacts = fixture.store().list();
+        let (page, cursor) = resource_page(&registered, &artifacts, 0);
+        assert_eq!(cursor, None);
+        let uris: Vec<&str> = page.iter().map(|item| item.uri.as_str()).collect();
+        assert_eq!(
+            uris,
+            vec![
+                INSTANCES_RESOURCE_URI,
+                &edit_info_resource_uri(&registered[0]),
+                &artifact_resource_uri(&first.artifact_id),
+                &artifact_resource_uri(&second.artifact_id),
+            ],
+        );
+
+        // cursor は連結した一覧への位置であり、成果物までまたぐ。
+        let (page, cursor) = resource_page(&registered, &artifacts, 1);
+        assert_eq!(cursor, None);
+        assert_eq!(
+            page.iter()
+                .map(|item| item.uri.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                artifact_resource_uri(&first.artifact_id).as_str(),
+                artifact_resource_uri(&second.artifact_id).as_str(),
+            ],
+        );
+    }
+
+    #[test]
+    fn an_artifact_listing_says_nothing_about_what_the_image_shows() {
+        let fixture = StoreFixture::open(Duration::from_secs(600));
+        let artifact = fixture.ingest(&handoff_token(3), b"image");
+        let listed = artifact_resource(&artifact);
+
+        assert_eq!(listed.mime_type.as_deref(), Some("image/png"));
+        assert!(
+            listed.name.contains(&artifact.artifact_id),
+            "{}",
+            listed.name
+        );
+        let description = listed.description.clone().expect("説明がある");
+        assert!(
+            description.contains(&artifact.created_at.to_rfc3339()),
+            "{description}"
+        );
+        assert!(
+            description.contains(&artifact.expires_at.to_rfc3339()),
+            "{description}"
+        );
+        // 引き当てに要らない値を漏らさない。
+        for forbidden in [artifact.sha256.as_str(), "render", "png\\"] {
+            assert!(
+                !description.contains(forbidden),
+                "{forbidden} が説明にあります: {description}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_expired_artifact_and_an_unknown_id_are_both_simply_missing() {
+        // 区別すると、過去に存在した識別子を総当たりで調べられる。
+        let fixture = StoreFixture::open(Duration::from_secs(60));
+        let artifact = fixture.ingest(&handoff_token(4), b"image");
+        assert!(fixture.store().read(&artifact.artifact_id).is_some());
+
+        fixture.advance(61);
+        assert!(fixture.store().read(&artifact.artifact_id).is_none());
+        assert!(fixture.store().read("unknown-artifact").is_none());
+        assert!(fixture.store().list().is_empty(), "期限切れが残っています");
+
+        // どちらも同じ失敗として返る。
+        let error = to_mcp_error(&artifact_not_found());
+        assert_eq!(error.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
+    }
+
+    #[test]
+    fn artifact_bytes_are_encoded_as_standard_base64() {
+        assert_eq!(encode_base64(b""), "");
+        assert_eq!(encode_base64(b"\x89PNG\r\n\x1a\n"), "iVBORw0KGgo=");
     }
 
     #[test]
