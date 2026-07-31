@@ -257,6 +257,10 @@ fn ensure_scene(info: &HostEditInfo, expected_scene_id: i32) -> Result<(), Rende
 ///
 /// 大きさの超過を要求の誤りとして返さないのは、**シーンの解像度は要求元が
 /// 選んだものではない**からである。要求を直しても通らない。
+///
+/// ここで見るのは非圧縮の大きさだけである。符号化後の大きさは画の中身で決まり、
+/// 解像度からは求まらないため、この判定を通っても受け渡しの上限を超え得る。
+/// その判定は成果物を書き出す直前に行う（[`HandoffDir::write`]）。
 fn ensure_renderable_frame(info: &HostEditInfo, frame: u32) -> Result<(), RenderError> {
     let representable = i32::MAX as usize;
     if info.width as usize > representable
@@ -292,7 +296,9 @@ mod tests {
     use crate::render::handoff::{HANDOFF_TTL, HandoffToken};
     use crate::render::slot::{MAX_ABANDONED_RENDERS, deliver_frame_guarded, guard_callback};
     use crate::test_support::with_silent_panic_hook;
-    use aviutl2_mcp_core::{AvailableEffect, ErrorCode, InstanceId, RenderFormat};
+    use aviutl2_mcp_core::{
+        ARTIFACT_MAX_BYTES, AvailableEffect, ErrorCode, InstanceId, RenderFormat,
+    };
     use serde_json::json;
     use std::ops::Deref;
     use std::path::PathBuf;
@@ -643,8 +649,24 @@ mod tests {
     }
 
     fn fixture_with(host: FakeRenderHost, stop: Arc<dyn StopRequest>) -> Fixture {
+        fixture_full(host, stop, ARTIFACT_MAX_BYTES)
+    }
+
+    /// 書き出しの上限を小さくした実行口。
+    ///
+    /// 上限に掛かる経路を、実際に上限の大きさの画像を作らずに踏ませる。
+    fn fixture_with_artifact_cap(host: FakeRenderHost, max_artifact_bytes: u64) -> Fixture {
+        fixture_full(host, Arc::new(AtomicBool::new(false)), max_artifact_bytes)
+    }
+
+    fn fixture_full(
+        host: FakeRenderHost,
+        stop: Arc<dyn StopRequest>,
+        max_artifact_bytes: u64,
+    ) -> Fixture {
         let root = TempRoot::new();
-        let handoff = HandoffDir::under(&root.0, &InstanceId::new_v4());
+        let handoff = HandoffDir::under(&root.0, &InstanceId::new_v4())
+            .with_max_artifact_bytes(max_artifact_bytes);
         let adapter = HostRenderAdapter::new(host, Arc::new(ProjectState::new()), handoff, stop)
             // 期限を待つテストが実時間で数十秒待たないよう短くする。
             .with_wait_timeout(Duration::from_millis(150));
@@ -918,6 +940,25 @@ mod tests {
             fixture.host.issued(),
             0,
             "抱えきれない大きさのまま投入しました"
+        );
+    }
+
+    #[test]
+    fn an_artifact_too_large_to_hand_over_is_unsupported_rather_than_internal() {
+        // 符号化後の大きさは画の中身で決まり、投入前に見る非圧縮の上限では
+        // 決まらない。受け取る側が引き取れない大きさをそのまま書き出すと、
+        // 要求元は引き取りの失敗（内部エラー）しか受け取れず、何が起きたのかも
+        // どうすれば通るのかも分からない。書き出す前に落とし、直しても通らない
+        // ものとして返す。
+        let fixture = fixture_with_artifact_cap(FakeRenderHost::new(), 1);
+
+        let (code, details) = failed(&fixture, 7);
+        assert_eq!(code, ErrorCode::UnsupportedOperation);
+        assert_eq!(details["reason"], json!("frame_too_large"));
+        assert_eq!(
+            fixture.handoff.entry_count(),
+            0,
+            "引き取れない成果物を書き出しました"
         );
     }
 

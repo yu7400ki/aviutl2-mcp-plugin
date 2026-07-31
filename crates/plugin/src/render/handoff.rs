@@ -25,7 +25,7 @@ use crate::render::error::{ArtifactStage, RenderError};
 use crate::render::slot::RenderedFrame;
 use crate::security::{create_protected_directory, create_protected_file};
 use anyhow::{Context, Result};
-use aviutl2_mcp_core::InstanceId;
+use aviutl2_mcp_core::{ARTIFACT_MAX_BYTES, InstanceId};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -117,6 +117,8 @@ pub struct HandoffArtifact {
 #[derive(Debug)]
 pub struct HandoffDir {
     dir: PathBuf,
+    /// 書き出してよい成果物の大きさの上限（符号化後のバイト数）。
+    max_artifact_bytes: u64,
 }
 
 impl HandoffDir {
@@ -127,18 +129,48 @@ impl HandoffDir {
     }
 
     /// 基底を指定して自インスタンスのディレクトリを定める。
+    ///
+    /// 書き出しの上限は [`ARTIFACT_MAX_BYTES`] である。受け取る側が引き取れる
+    /// 大きさと同じ値でなければ、書き出せても引き取れない成果物が生まれる。
     pub fn under(root: &Path, instance_id: &InstanceId) -> Self {
         Self {
             dir: root.join(HANDOFF_DIR).join(instance_id.to_string()),
+            max_artifact_bytes: ARTIFACT_MAX_BYTES,
         }
+    }
+
+    /// 書き出しの上限を差し替える。
+    ///
+    /// 上限に掛かる経路を、実際に上限の大きさの画像を作らずに確かめるための口
+    /// である。
+    #[cfg(test)]
+    pub(crate) fn with_max_artifact_bytes(mut self, max_artifact_bytes: u64) -> Self {
+        self.max_artifact_bytes = max_artifact_bytes;
+        self
     }
 
     /// 画像を PNG として符号化し、原子的に書き出す。
     ///
     /// 書き込みは一時ファイルへ完全に書いて flush し、同じディレクトリの中で
     /// 名前を差し替える。受け取る側が書き込み途中の状態を読む余地を消す。
+    ///
+    /// **符号化の結果が上限を超えていれば、ファイルを作らずに失敗を返す。**
+    /// 上限は受け取る側が引き取れる大きさであり、超えたものは引き取られずに
+    /// 捨てられる。書いてから捨てると、保護された DACL のファイルを作って
+    /// 消すだけの入出力を払ったうえ、消し損ねが残る経路が増える。
+    ///
+    /// 符号化してからでなければ判定できない。PNG の大きさは画の中身で決まり、
+    /// 非圧縮の大きさからは求まらない。
     pub fn write(&self, frame: &RenderedFrame) -> Result<HandoffArtifact, RenderError> {
         let encoded = encode_png(frame.width, frame.height, &frame.pixels)?;
+        if encoded.len() as u64 > self.max_artifact_bytes {
+            // 残すのは大きさだけである。画像そのものも識別子もログへ出さない。
+            tracing::warn!(
+                byte_length = encoded.len(),
+                "符号化した成果物が上限を超えています"
+            );
+            return Err(RenderError::FrameTooLarge);
+        }
         let digest = Sha256::digest(&encoded);
 
         let token = HandoffToken::generate();
@@ -527,6 +559,42 @@ mod tests {
             &decoded[..info.buffer_size()],
             &frame.pixels[..],
             "アルファを含む画素がそのまま往復しません"
+        );
+    }
+
+    #[test]
+    fn the_write_cap_is_the_shared_encoded_cap() {
+        // 書き出す側と引き取る側が別の値を見ると、書き出せても引き取れない
+        // 大きさの帯ができる。既定値が共有の上限そのものであることを固定する。
+        let root = TempRoot::new();
+        let handoff = root.dir_for(&InstanceId::new_v4());
+        assert_eq!(handoff.max_artifact_bytes, ARTIFACT_MAX_BYTES);
+    }
+
+    #[test]
+    fn an_artifact_over_the_cap_leaves_no_file_behind() {
+        // 判定は書き出しの前に行う。書いてから捨てると、保護された DACL の
+        // ファイルを作って消すだけの入出力を払い、消し損ねが残る経路が増える。
+        let root = TempRoot::new();
+        let instance_id = InstanceId::new_v4();
+        let handoff = root.dir_for(&instance_id);
+        let kept = handoff.write(&sample_frame()).expect("書き出しに失敗");
+
+        // 同じディレクトリを、上限だけ小さくして見る。
+        let capped = root.dir_for(&instance_id).with_max_artifact_bytes(1);
+        let error = capped
+            .write(&sample_frame())
+            .expect_err("上限を超える成果物が書き出されました");
+        assert!(matches!(error, RenderError::FrameTooLarge), "{error:?}");
+
+        assert_eq!(
+            capped.entry_count(),
+            1,
+            "上限を超える成果物のファイルが残りました"
+        );
+        assert!(
+            handoff.artifact_path(&kept.token).exists(),
+            "先に書いた成果物まで失われました"
         );
     }
 
