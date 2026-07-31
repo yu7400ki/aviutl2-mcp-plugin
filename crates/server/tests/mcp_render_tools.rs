@@ -223,6 +223,20 @@ async fn render_tool_sends_the_scene_guard_and_takes_over_the_artifact() {
         json!(format!("aviutl2://artifacts/{artifact_id}"))
     );
 
+    // 失効時刻は保管庫が定めた値である。作成時刻を返すと、要求元は読める間に
+    // 読まず、あるいは読めない成果物を読もうとする。
+    let stored = harness
+        .store
+        .list()
+        .into_iter()
+        .find(|artifact| artifact.artifact_id == artifact_id)
+        .expect("保管庫に登録されています");
+    assert!(stored.expires_at > stored.created_at, "{stored:?}");
+    assert_eq!(
+        structured["artifact"]["expires_at"],
+        json!(stored.expires_at.to_rfc3339())
+    );
+
     // 所有権は 1 か所ずつ移る。引き渡し元は残らない。
     assert!(!handoff.exists(), "引き渡しファイルが残っています");
     assert_eq!(harness.store.len(), 1);
