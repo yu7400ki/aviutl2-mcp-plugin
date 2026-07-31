@@ -263,8 +263,11 @@ fn expected_annotations(name: &str) -> (bool, bool, bool) {
         | "aviutl2_list_objects"
         | "aviutl2_get_object"
         | "aviutl2_list_available_effects" => (true, false, true),
-        // 作成系は再送で重複し得るため冪等と名乗らない。
-        "aviutl2_create_object" | "aviutl2_add_effect" => (false, false, false),
+        // 作成系は再送で重複し得るため冪等と名乗らない。一括適用も、冪等かどうかが
+        // 中身に依存する以上、安全である側を主張しない。
+        "aviutl2_create_object" | "aviutl2_add_effect" | "aviutl2_apply_batch" => {
+            (false, false, false)
+        }
         "aviutl2_delete_object" | "aviutl2_delete_effect" => (false, true, true),
         "aviutl2_move_object"
         | "aviutl2_set_object_name"

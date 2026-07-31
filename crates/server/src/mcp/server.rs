@@ -8,9 +8,9 @@
 use crate::api::{ListInstancesResponse, aviutl2_list_instances};
 use crate::discovery::{DiscoveryConfig, list_registered_instances, resolve_instance};
 use crate::mcp::edit_input::{
-    AddEffectInput, CreateObjectInput, DeleteEffectInput, DeleteObjectInput, MoveObjectInput,
-    SetEffectEnabledInput, SetLayerStateInput, SetObjectItemInput, SetObjectNameInput,
-    SetSelectionInput,
+    AddEffectInput, ApplyBatchInput, CreateObjectInput, DeleteEffectInput, DeleteObjectInput,
+    MoveObjectInput, SetEffectEnabledInput, SetLayerStateInput, SetObjectItemInput,
+    SetObjectNameInput, SetSelectionInput,
 };
 use crate::mcp::input::{
     GetObjectInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput, ListLayersInput,
@@ -20,17 +20,17 @@ use crate::mcp::summary::{MAX_TEXT_CHARS, clamp_chars};
 use crate::mcp::{describe, failure};
 use crate::redact;
 use aviutl2_mcp_core::{
-    EditInfo, EditOutcome, ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult,
-    GetEditInfoParams, InstanceId, LayerStateOutcome, ListAvailableEffectsResult, ListLayersResult,
-    ListObjectsResult, MAX_PAGE_LIMIT, OPERATION_ADD_EFFECT, OPERATION_CREATE_OBJECT,
-    OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT, OPERATION_GET_CURRENT_SCENE,
-    OPERATION_GET_EDIT_INFO, OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS,
-    OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT,
-    OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
-    OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail, RequestBudgetKind,
-    SERVER_ARTIFACT_INGEST_BUDGET, SERVER_BATCH_REQUEST_BUDGET, SERVER_EDIT_REQUEST_BUDGET,
-    SERVER_READ_REQUEST_BUDGET, SERVER_RENDER_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET,
-    SelectionState, request_budget_kind,
+    BatchOutcome, EditInfo, EditOutcome, ErrorCode, ErrorObject, GetCurrentSceneParams,
+    GetCurrentSceneResult, GetEditInfoParams, InstanceId, LayerStateOutcome,
+    ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, MAX_PAGE_LIMIT,
+    OPERATION_ADD_EFFECT, OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT, OPERATION_DELETE_EFFECT,
+    OPERATION_DELETE_OBJECT, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
+    OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
+    OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT, OPERATION_SET_EFFECT_ENABLED,
+    OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME,
+    OPERATION_SET_SELECTION, ObjectDetail, RequestBudgetKind, SERVER_ARTIFACT_INGEST_BUDGET,
+    SERVER_BATCH_REQUEST_BUDGET, SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET,
+    SERVER_RENDER_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, SelectionState, request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -1116,6 +1116,75 @@ impl AviUtl2McpServer {
         })
         .await
     }
+
+    /// 複数の編集を 1 つの取り消し単位としてまとめて適用する。
+    /// operations へ入れられるのは move_object と set_object_item の 2 種だけであり、
+    /// 他の編集は対応する単独 tool を使う。件数は 1 件以上 100 件以下である。
+    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// この呼び出し 1 回の全体が 1 つの取り消し単位になる。
+    /// 1 つの batch の中では、同じ読み取り時点の selector をそのまま並べてよい。
+    /// 単独 tool を連続して呼ぶ場合と異なり、先行する変更で後続の selector が
+    /// 無効にならない。全対象を変更前にまとめて照合するためである。
+    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
+    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
+    /// 拒否されない。
+    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
+    /// 配列順に適用し、宛先の空きは適用時点で確かめる。したがって 2 つの
+    /// オブジェクトの入れ替えを 1 つの batch で書ける。
+    /// 同じ対象の同じ状態を 2 回変更する要求は受け付けない。同じオブジェクトの
+    /// 2 回の移動と、同じ設定項目への 2 回の書き込みがこれに当たる。
+    /// 途中で失敗した場合はそれまでに適用した変更を自動で巻き戻す。
+    /// 失敗したときは details.failed_index が何番目で落ちたかを返す。
+    /// オブジェクトの fingerprint が食い違った場合は details.failed_object が
+    /// その対象の現在の状態も返すので、100 件を読み直さずにその 1 件だけを
+    /// 差し替えて再要求できる。effect の fingerprint が食い違った場合は
+    /// details.failed_object が付かないため、対象オブジェクトを読み直す。
+    /// details.consistency_unknown が立っている場合は巻き戻しに失敗しており、
+    /// プロジェクトが中途半端な状態の可能性がある。必ず読み直すこと。
+    /// details.rolled_back_count は復旧の手掛かりであって被害の正確な計量ではない。
+    /// 1 件の巻き戻し失敗が後続の巻き戻しを連鎖的に失敗させ得るため、実際に
+    /// 壊れている件数を過大に見積もり得る。
+    /// ロックされたレイヤーが妨げるのは move_object だけであり、
+    /// precondition_failed（layer_locked）となる。設定値の変更はロックされた
+    /// レイヤー上でも通る。解除は aviutl2_set_layer_state で行う。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    /// 大きなプロジェクトでは適用中に AviUtl2 の UI が数秒止まり得る。
+    #[tool(
+        name = "aviutl2_apply_batch",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::apply_batch()
+        )
+    )]
+    pub async fn aviutl2_apply_batch(
+        &self,
+        Parameters(input): Parameters<ApplyBatchInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits;
+        self.run("aviutl2_apply_batch", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: BatchOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_APPLY_BATCH,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::apply_batch(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -1578,6 +1647,7 @@ mod tests {
         "aviutl2_delete_object",
         "aviutl2_set_layer_state",
         "aviutl2_set_selection",
+        "aviutl2_apply_batch",
     ];
 
     /// 読み取り専用の tool。
@@ -1614,6 +1684,31 @@ mod tests {
         ("aviutl2_set_selection", false, true),
     ];
 
+    /// 一括適用の tool 名。
+    const APPLY_BATCH: &str = "aviutl2_apply_batch";
+
+    /// 一括適用と描画の tool、および宣言する annotation。
+    ///
+    /// 値は `read_only_hint` / `destructive_hint` / `idempotent_hint` の組である。
+    /// `open_world_hint` は全 tool で偽であるため表に持たない。
+    ///
+    /// 一括適用を冪等と名乗らないのは、冪等かどうかが中身に依存する一方、
+    /// annotation は tool 単位でしか付けられないためである。作成系と同じく、
+    /// 「再送が安全である」と主張しない側へ倒す。
+    const PHASE4_TOOL_ANNOTATIONS: &[(&str, bool, bool)] = &[(APPLY_BATCH, false, false)];
+
+    /// 編集の説明規約が掛かる tool。
+    ///
+    /// 一括適用は編集 tool の表には属さないが、運ぶ selector も取り消し単位も
+    /// 編集と同じ規約に従うため、説明の検査では同じ扱いにする。
+    fn edit_like_tools() -> Vec<&'static str> {
+        EDIT_TOOL_ANNOTATIONS
+            .iter()
+            .map(|(name, _, _)| *name)
+            .chain(std::iter::once(APPLY_BATCH))
+            .collect()
+    }
+
     fn server() -> AviUtl2McpServer {
         AviUtl2McpServer::new(PathBuf::from(r"C:\nonexistent-registry"))
     }
@@ -1631,15 +1726,46 @@ mod tests {
 
     #[test]
     fn all_tools_are_registered() {
+        // 公開する tool の集合は 3 つの表の和集合と一致する。表に載せずに登録
+        // すると annotation も説明も検査されないまま公開される。
         let names: std::collections::BTreeSet<String> =
             tools().iter().map(|tool| tool.name.to_string()).collect();
         let expected: std::collections::BTreeSet<String> = READ_TOOLS
             .iter()
             .copied()
             .chain(EDIT_TOOL_ANNOTATIONS.iter().map(|(name, _, _)| *name))
+            .chain(PHASE4_TOOL_ANNOTATIONS.iter().map(|(name, _, _)| *name))
             .map(|name| name.to_string())
             .collect();
         assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn phase4_tools_are_annotated_as_documented() {
+        for (name, read_only, idempotent) in PHASE4_TOOL_ANNOTATIONS {
+            let tool = tool_named(name);
+            let annotations = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} に annotation がありません"));
+            assert_eq!(
+                annotations.read_only_hint,
+                Some(*read_only),
+                "{name} の readOnlyHint"
+            );
+            // 一括適用にも描画にも削除は入らない。
+            assert_eq!(
+                annotations.destructive_hint,
+                Some(false),
+                "{name} の destructiveHint"
+            );
+            assert_eq!(
+                annotations.idempotent_hint,
+                Some(*idempotent),
+                "{name} の idempotentHint"
+            );
+            assert_eq!(annotations.open_world_hint, Some(false), "{name}");
+        }
     }
 
     #[test]
@@ -1703,6 +1829,7 @@ mod tests {
             "aviutl2_delete_object" => schema::delete_object(),
             "aviutl2_set_layer_state" => schema::set_layer_state(),
             "aviutl2_set_selection" => schema::set_selection(),
+            "aviutl2_apply_batch" => schema::apply_batch(),
             other => panic!("{other} の outputSchema が定義されていません"),
         }
     }
@@ -1766,7 +1893,7 @@ mod tests {
     fn edit_tool_descriptions_state_what_costs_the_caller_if_assumed_wrong() {
         // いずれも誤った前提で操作すると損失が生じる事項であり、説明から
         // 落とせない。
-        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+        for name in edit_like_tools() {
             let description = description_of(name);
             for keyword in [
                 "0 始まり",
@@ -1789,9 +1916,9 @@ mod tests {
         // 前提の epoch を運ぶのは selector を持たない 2 tool だけである。他の tool の
         // 説明が求めると、呼び出し側は送れない値を探すことになる。どちらの側に
         // 属するかを表で固定するので、tool を足したときに素通りしない。
-        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+        for name in edit_like_tools() {
             let description = description_of(name);
-            if TOOLS_CARRYING_AN_EXPECTED_EPOCH.contains(name) {
+            if TOOLS_CARRYING_AN_EXPECTED_EPOCH.contains(&name) {
                 for keyword in ["expected_project_epoch", "省略はできない"] {
                     assert!(
                         description.contains(keyword),
@@ -1815,7 +1942,7 @@ mod tests {
     fn edit_tool_descriptions_admit_that_the_revision_is_not_part_of_the_request() {
         // 要求は project_revision を運ばない。説明が黙っていると、呼び出し側は
         // 拒否を避けるために revision を取り直し続ける。
-        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+        for name in edit_like_tools() {
             let description = description_of(name);
             assert!(
                 description.contains("project_revision を運ばない"),
@@ -1855,9 +1982,9 @@ mod tests {
 
     #[test]
     fn tools_that_can_land_elsewhere_say_the_response_carries_the_actual_placement() {
-        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+        for name in edit_like_tools() {
             let description = description_of(name);
-            if TOOLS_WHOSE_RESPONSE_CARRIES_THE_ACTUAL_PLACEMENT.contains(name) {
+            if TOOLS_WHOSE_RESPONSE_CARRIES_THE_ACTUAL_PLACEMENT.contains(&name) {
                 for keyword in [
                     "応答が返す位置は要求した宛先と異なり得る",
                     "配置を確かめるには応答の値を見る",
@@ -1899,7 +2026,8 @@ mod tests {
             | "aviutl2_set_effect_enabled"
             | "aviutl2_delete_effect"
             | "aviutl2_delete_object"
-            | "aviutl2_set_layer_state" => UndoStatement::OneUnit,
+            | "aviutl2_set_layer_state"
+            | "aviutl2_apply_batch" => UndoStatement::OneUnit,
             "aviutl2_set_selection" => UndoStatement::NoUnitAndJumpsBack,
             other => panic!("{other} の取り消しの説明が定義されていません"),
         }
@@ -1907,7 +2035,7 @@ mod tests {
 
     #[test]
     fn edit_tool_descriptions_state_the_undo_boundary() {
-        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+        for name in edit_like_tools() {
             let description = description_of(name);
             match undo_statement(name) {
                 UndoStatement::OneUnit => assert!(
@@ -1993,9 +2121,12 @@ mod tests {
     /// 移動であり、対象を 1 か所へ置いて tool を足したときに素通りしないようにする。
     fn layer_lock_statement(name: &str) -> LayerLockStatement {
         match name {
-            "aviutl2_create_object" | "aviutl2_move_object" | "aviutl2_delete_object" => {
-                LayerLockStatement::StoppedAndNamesTheWayOut
-            }
+            "aviutl2_create_object"
+            | "aviutl2_move_object"
+            | "aviutl2_delete_object"
+            // 一括適用が止まるのは move_object を含む場合だけだが、止まり方も
+            // 解き方も同じであるため、案内する側に属する。
+            | "aviutl2_apply_batch" => LayerLockStatement::StoppedAndNamesTheWayOut,
             "aviutl2_set_layer_state" => LayerLockStatement::DescribesTheScope,
             "aviutl2_set_object_name"
             | "aviutl2_set_object_item"
@@ -2011,7 +2142,7 @@ mod tests {
     fn tools_stopped_by_a_layer_lock_name_the_way_out() {
         // layer_locked の retry_requires は none である。案内が無ければ、契約に
         // 従う要求元は解ける状況で停止する。
-        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+        for name in edit_like_tools() {
             let description = description_of(name);
             match layer_lock_statement(name) {
                 LayerLockStatement::StoppedAndNamesTheWayOut => {
@@ -2054,7 +2185,9 @@ mod tests {
             | "aviutl2_delete_effect"
             | "aviutl2_delete_object"
             | "aviutl2_set_selection" => true,
-            "aviutl2_create_object" | "aviutl2_set_layer_state" => false,
+            // 一括適用は 100 件のうちどれが落ちたかを併せて示す必要があるため、
+            // 別のキー（failed_object）で返す。
+            "aviutl2_create_object" | "aviutl2_set_layer_state" | "aviutl2_apply_batch" => false,
             other => panic!("{other} が現在の姿を返すかが定義されていません"),
         }
     }
@@ -2063,7 +2196,7 @@ mod tests {
     fn tools_that_return_the_current_object_say_so() {
         // 失敗応答に載る値は tool schema に現れない。説明が触れなければ、
         // 呼び出し側はその存在を知る手段が無く読み直しに戻る。
-        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+        for name in edit_like_tools() {
             let description = description_of(name);
             assert_eq!(
                 description.contains("details.current_object"),
@@ -2113,7 +2246,7 @@ mod tests {
     fn input_schemas_declare_the_expected_epoch_only_where_it_is_used() {
         // 前提の epoch を持つのは、対象を指す selector を持たない tool だけで
         // ある。持つ tool へ宣言すると、同じ意味の値が 1 要求の 2 か所へ並ぶ。
-        for (name, _, _) in EDIT_TOOL_ANNOTATIONS {
+        for name in edit_like_tools() {
             let tool = tool_named(name);
             let properties = tool
                 .input_schema
@@ -2121,7 +2254,7 @@ mod tests {
                 .and_then(|v| v.as_object())
                 .unwrap_or_else(|| panic!("{name} に properties がありません"));
 
-            let carries = TOOLS_CARRYING_AN_EXPECTED_EPOCH.contains(name);
+            let carries = TOOLS_CARRYING_AN_EXPECTED_EPOCH.contains(&name);
             assert_eq!(
                 properties.contains_key("expected_project_epoch"),
                 carries,
@@ -2135,6 +2268,19 @@ mod tests {
                 .unwrap_or(false);
             assert_eq!(required, carries, "{name} の必須指定が食い違います");
         }
+    }
+
+    #[test]
+    fn the_batch_input_schema_declares_the_operation_count_it_actually_enforces() {
+        // 宣言した制約は server 側で実際に検証する。宣言だけがあって検証されない
+        // 制約を schema に残さない。件数は core の検証が判定する。
+        let tool = tool_named(APPLY_BATCH);
+        let operations = tool.input_schema["properties"]["operations"].clone();
+        assert_eq!(operations["minItems"], serde_json::json!(1));
+        assert_eq!(
+            operations["maxItems"],
+            serde_json::json!(aviutl2_mcp_core::MAX_BATCH_OPERATIONS)
+        );
     }
 
     #[test]

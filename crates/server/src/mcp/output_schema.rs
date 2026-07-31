@@ -137,6 +137,30 @@ pub fn set_layer_state() -> Value {
     ])
 }
 
+/// `aviutl2_apply_batch` の出力。
+///
+/// `results` は入力と同じ位置で並ぶ。revision は要求全体で 1 つだけ持つ。
+pub fn apply_batch() -> Value {
+    object(&[
+        ("project_epoch", string()),
+        ("project_revision", unsigned()),
+        ("results", array(batch_step_outcome())),
+    ])
+}
+
+/// 一括適用の 1 sub-operation の結果。
+///
+/// **`project_revision` と `created` を許さない。** 前者は要求全体で 1 しか
+/// 進まない値であり、要素ごとに現れると 1 つの取り消し単位であることと矛盾する。
+/// 後者は一括適用に作成が入らないため常に空になる。持たないことを schema で
+/// 言い切ることで、混入しても検出できない状態を作らない。
+fn batch_step_outcome() -> Value {
+    object(&[
+        ("object", object_summary()),
+        ("effect", nullable(effect_info())),
+    ])
+}
+
 /// `aviutl2_set_selection` の出力。
 pub fn set_selection() -> Value {
     object(&[
@@ -1088,6 +1112,54 @@ mod tests {
             assert!(
                 check(&schema, &value, "$").is_err(),
                 "effect の欠落を検出できていません"
+            );
+        }
+    }
+
+    /// 移動と設定変更を 1 件ずつ含む一括適用の結果。
+    fn sample_batch_outcome() -> aviutl2_mcp_core::BatchOutcome {
+        aviutl2_mcp_core::BatchOutcome {
+            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            project_revision: 43,
+            results: vec![
+                aviutl2_mcp_core::BatchStepOutcome {
+                    object: sample_object_summary(),
+                    effect: None,
+                },
+                aviutl2_mcp_core::BatchStepOutcome {
+                    object: sample_object_summary(),
+                    effect: Some(sample_effect_info()),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn apply_batch_schema_matches_dto() {
+        assert_conforms(apply_batch(), &to_value(&sample_batch_outcome()));
+    }
+
+    #[test]
+    fn apply_batch_schema_accepts_an_empty_result_list() {
+        let mut outcome = sample_batch_outcome();
+        outcome.results.clear();
+        assert_conforms(apply_batch(), &to_value(&outcome));
+    }
+
+    #[test]
+    fn batch_step_schema_refuses_a_revision_and_a_created_list() {
+        // 要素ごとの revision は「各 sub-operation が自分の世代を持つ」と読める。
+        // 作成の一覧は一括適用に作成が入らないため常に空である。どちらも
+        // フィールドを持たないことを schema で言い切る。
+        for key in ["project_revision", "created"] {
+            let mut value = to_value(&sample_batch_outcome());
+            value["results"][0]
+                .as_object_mut()
+                .expect("object")
+                .insert(key.to_string(), json!(1));
+            assert!(
+                check(&apply_batch(), &value, "$").is_err(),
+                "{key} の混入を検出できていません"
             );
         }
     }

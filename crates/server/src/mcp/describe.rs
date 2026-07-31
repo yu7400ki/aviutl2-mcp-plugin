@@ -10,13 +10,21 @@
 use crate::api::ListInstancesResponse;
 use crate::mcp::summary::{TextBuilder, clamp_chars};
 use aviutl2_mcp_core::{
-    EditInfo, EditOutcome, GetCurrentSceneResult, InstanceInfo, LayerStateOutcome,
-    ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, ObjectDetail, ObjectSummary,
-    PageMeta, SelectionField, SelectionState,
+    BatchOutcome, BatchStepOutcome, EditInfo, EditOutcome, GetCurrentSceneResult, InstanceInfo,
+    LayerStateOutcome, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
+    ObjectDetail, ObjectSummary, PageMeta, SelectionField, SelectionState,
 };
 
 /// 名前をそのまま行に載せるときの最大文字数。
 const MAX_NAME_CHARS: usize = 60;
+
+/// 一括適用の text content に書き出す sub-operation の件数。
+///
+/// **上限に触れてから切り詰めるのではなく、構造として届かないようにする。**
+/// 1 行は 200 文字で切り詰められるため、100 件を全て書けば 20,000 文字に達し、
+/// text content の上限へ危険なほど近づく。完全な機械可読値は
+/// `structuredContent` が運ぶ。
+const MAX_BATCH_LINES: usize = 10;
 
 /// 編集の応答に共通して添える次の操作の案内。
 const EDIT_NEXT_STEP: &str = "続けて編集する場合は structuredContent の selector をそのまま使えます。project_revision は要求には指定しません。前提条件が合わない場合は対象を読み直してください";
@@ -266,6 +274,48 @@ pub fn delete_object(outcome: &EditOutcome) -> String {
         "削除した対象の selector は以後使えません。別の対象を編集する場合は読み直してください",
     );
     text.finish()
+}
+
+/// `aviutl2_apply_batch` の text content。
+///
+/// 書き出すのは先頭 [`MAX_BATCH_LINES`] 件までで、残りは件数だけを示す。
+pub fn apply_batch(outcome: &BatchOutcome) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(format!(
+        "{} 件の操作を 1 つの取り消し単位として適用しました",
+        outcome.results.len(),
+    ));
+    for (index, step) in outcome.results.iter().take(MAX_BATCH_LINES).enumerate() {
+        text.push_line(batch_step_line(index, step));
+    }
+    if let Some(rest) = outcome
+        .results
+        .len()
+        .checked_sub(MAX_BATCH_LINES)
+        .filter(|rest| *rest > 0)
+    {
+        text.push_line(format!("他 {rest} 件"));
+    }
+    text.push_line(format!("project_revision={}", outcome.project_revision));
+    text.push_line(
+        "上の位置と selector は全 sub-operation の適用を終えたあとに読み直した値です。続けて編集する場合は structuredContent の selector をそのまま使えます",
+    );
+    text.finish()
+}
+
+/// 一括適用の 1 sub-operation の結果を示す行。
+///
+/// 設定値は載せない。何が変わったかは `structuredContent` が運ぶ。
+fn batch_step_line(index: usize, step: &BatchStepOutcome) -> String {
+    let action = match &step.effect {
+        Some(effect) => format!(
+            "設定項目を変更 effect={}:{}",
+            clamp_chars(&effect.name, MAX_NAME_CHARS),
+            effect.index,
+        ),
+        None => "移動".to_string(),
+    };
+    format!("- [{index}] {action} {}", object_line(&step.object))
 }
 
 /// `aviutl2_set_layer_state` の text content。
@@ -840,7 +890,95 @@ mod tests {
                 }),
             ),
             ("aviutl2_set_selection", selection_state(&selection)),
+            ("aviutl2_apply_batch", apply_batch(&sample_batch_outcome())),
         ]
+    }
+
+    /// 移動と設定変更を 1 件ずつ含む一括適用の結果。
+    fn sample_batch_outcome() -> BatchOutcome {
+        let summary = sample_summary();
+        let effect = secretive_effect(&summary);
+        BatchOutcome {
+            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            project_revision: 43,
+            results: vec![
+                BatchStepOutcome {
+                    object: summary.clone(),
+                    effect: None,
+                },
+                BatchStepOutcome {
+                    object: summary,
+                    effect: Some(effect),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn batch_text_distinguishes_the_two_kinds_of_sub_operation() {
+        let text = apply_batch(&sample_batch_outcome());
+        assert!(text.contains("2 件の操作"), "{text}");
+        assert!(text.contains("[0] 移動"), "{text}");
+        assert!(text.contains("[1] 設定項目を変更"), "{text}");
+        assert!(text.contains("1 つの取り消し単位"), "{text}");
+    }
+
+    #[test]
+    fn batch_text_stops_at_ten_lines_and_counts_the_rest() {
+        // 100 件を全て書けば 1 行 200 文字の切り詰めでも 20,000 文字に達し、
+        // 上限へ危険なほど近づく。上限に触れてから切り詰めるのではなく、
+        // 構造として届かないようにする。
+        let summary = ObjectSummary::new(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            ObjectFingerprintInput {
+                scene_id: 3,
+                layer: 2,
+                frame_start: 0,
+                frame_end: 10,
+                name: Some(&long_name()),
+                alias: "alias",
+            },
+        );
+        let outcome = BatchOutcome {
+            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            project_revision: 43,
+            results: (0..aviutl2_mcp_core::MAX_BATCH_OPERATIONS)
+                .map(|_| BatchStepOutcome {
+                    object: summary.clone(),
+                    effect: None,
+                })
+                .collect(),
+        };
+
+        let text = apply_batch(&outcome);
+        assert!(
+            text.chars().count() <= MAX_TEXT_CHARS,
+            "上限を超えています: {}",
+            text.chars().count()
+        );
+        assert!(text.contains("- [9] "), "10 件目がありません: {text}");
+        assert!(!text.contains("- [10] "), "11 件目が書かれています: {text}");
+        assert!(text.contains("他 90 件"), "残りの件数がありません: {text}");
+        // 打ち切りは行数で決まるため、上限に触れて捨てられたのではない。
+        assert!(!text.contains(TRUNCATION_NOTICE), "{text}");
+    }
+
+    #[test]
+    fn batch_text_of_ten_or_fewer_steps_counts_nothing_extra() {
+        let summary = sample_summary();
+        let outcome = BatchOutcome {
+            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            project_revision: 43,
+            results: (0..10)
+                .map(|_| BatchStepOutcome {
+                    object: summary.clone(),
+                    effect: None,
+                })
+                .collect(),
+        };
+        let text = apply_batch(&outcome);
+        assert!(text.contains("- [9] "), "{text}");
+        assert!(!text.contains("他 "), "{text}");
     }
 
     /// 応答が対象オブジェクトの位置を運ばない tool。

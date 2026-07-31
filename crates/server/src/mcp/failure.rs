@@ -145,6 +145,14 @@ const LAYER_LOCKED_GUIDANCE: &str = "対象のレイヤーがロックされて�
 /// 対象の現在の姿を返した失敗へ添える案内。
 const CURRENT_OBJECT_GUIDANCE: &str = "details.current_object に対象の現在の値が入っています。読み直さずにそのまま次の要求の selector として使えます";
 
+/// 一括適用で落ちた sub-operation の対象を返した失敗へ添える案内。
+const FAILED_OBJECT_GUIDANCE: &str = "details.failed_object に落ちた sub-operation の対象の現在の値が入っています。その 1 件だけを差し替えて再要求できます";
+
+/// 巻き戻しに失敗した一括適用へ添える案内。
+///
+/// **最も重大な失敗である。** 放置すると、次の編集が壊れた前提の上に積み上がる。
+const CONSISTENCY_UNKNOWN_GUIDANCE: &str = "巻き戻しに失敗しており、プロジェクトが中途半端な状態の可能性があります。次の編集を行う前に必ず対象を読み直してください";
+
 /// エラーの text content を組み立てる。
 ///
 /// 補助情報だけでは次に何をすればよいか分からない失敗には、取るべき操作を
@@ -163,19 +171,51 @@ pub fn text(error: &ErrorObject) -> String {
     );
     for line in guidance(error) {
         text.push('\n');
-        text.push_str(line);
+        text.push_str(&line);
     }
     text
 }
 
 /// 補助情報から、次に取るべき操作の案内を引く。
-fn guidance(error: &ErrorObject) -> Vec<&'static str> {
+fn guidance(error: &ErrorObject) -> Vec<String> {
+    let details = &error.details;
     let mut lines = Vec::new();
-    if error.details.get("reason").and_then(Value::as_str) == Some("layer_locked") {
-        lines.push(LAYER_LOCKED_GUIDANCE);
+    if details.get("reason").and_then(Value::as_str) == Some("layer_locked") {
+        lines.push(LAYER_LOCKED_GUIDANCE.to_string());
     }
-    if error.details.get("current_object").is_some() {
-        lines.push(CURRENT_OBJECT_GUIDANCE);
+    if details.get("current_object").is_some() {
+        lines.push(CURRENT_OBJECT_GUIDANCE.to_string());
+    }
+    lines.extend(batch_failure_lines(details));
+    lines
+}
+
+/// 一括適用の失敗が、どこで落ちてどこまで戻せたかを示す行。
+///
+/// 一括適用は 1 回の要求で最大 100 件の変更を起こすため、失敗したという事実
+/// だけでは要求元が何をすればよいか決められない。
+fn batch_failure_lines(details: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(index) = details.get("failed_index").and_then(Value::as_u64) {
+        lines.push(format!("operations[{index}] で失敗しました"));
+    }
+    match details.get("rolled_back").and_then(Value::as_bool) {
+        Some(true) => lines.push("それまでに適用した変更は全て巻き戻しました".to_string()),
+        Some(false) => lines.push(match details.get("rolled_back_count").and_then(Value::as_u64) {
+            // 1 件の巻き戻し失敗は後続の巻き戻しを連鎖的に失敗させ得るため、
+            // この値は実際に壊れている件数を過大に見積もり得る。
+            Some(count) => format!(
+                "巻き戻せたのは {count} 件です。この値は復旧の手掛かりであって、壊れている件数の計量ではありません"
+            ),
+            None => "巻き戻しに失敗した sub-operation があります".to_string(),
+        }),
+        None => {}
+    }
+    if details.get("failed_object").is_some() {
+        lines.push(FAILED_OBJECT_GUIDANCE.to_string());
+    }
+    if details.get("consistency_unknown").and_then(Value::as_bool) == Some(true) {
+        lines.push(CONSISTENCY_UNKNOWN_GUIDANCE.to_string());
     }
     lines
 }
@@ -586,6 +626,73 @@ mod tests {
         let text = text(&invalid_argument("limit が範囲外です"));
         assert!(!text.contains("aviutl2_set_layer_state"), "{text}");
         assert!(!text.contains("details.current_object"), "{text}");
+        assert!(!text.contains("operations["), "{text}");
+        assert!(!text.contains("巻き戻し"), "{text}");
+    }
+
+    #[test]
+    fn a_rolled_back_batch_says_where_it_stopped_and_that_nothing_is_left_behind() {
+        let error = ErrorObject::new(ErrorCode::PreconditionFailed, "宛先が埋まっています", true)
+            .with_details(serde_json::json!({
+                "reason": "destination_occupied",
+                "failed_index": 2,
+                "rolled_back": true,
+                "rolled_back_count": 2,
+            }));
+        let text = text(&error);
+        assert!(text.contains("operations[2]"), "{text}");
+        assert!(text.contains("全て巻き戻しました"), "{text}");
+        // 巻き戻せた以上、読み直しは必須ではない。
+        assert!(!text.contains("必ず対象を読み直して"), "{text}");
+    }
+
+    #[test]
+    fn a_batch_that_could_not_be_rolled_back_demands_a_refetch() {
+        // 最も重大な失敗であり、放置すると次の編集が壊れた前提の上に積み上がる。
+        let error = ErrorObject::new(ErrorCode::SdkError, "巻き戻しに失敗しました", false)
+            .with_details(serde_json::json!({
+                "failed_index": 5,
+                "rolled_back": false,
+                "rolled_back_count": 3,
+                "consistency_unknown": true,
+            }));
+        let text = text(&error);
+        assert!(text.contains("operations[5]"), "{text}");
+        assert!(text.contains("巻き戻せたのは 3 件"), "{text}");
+        // 数値を信じて「3 件だけ直せばよい」と判断させない。
+        assert!(text.contains("計量ではありません"), "{text}");
+        assert!(text.contains("必ず対象を読み直して"), "{text}");
+    }
+
+    #[test]
+    fn a_batch_object_mismatch_is_told_that_it_can_replace_a_single_operation() {
+        // 100 件を読み直させないための値であり、その存在は tool schema からは
+        // 知れない。
+        let error = ErrorObject::new(ErrorCode::PreconditionFailed, "対象が変化しました", true)
+            .with_details(serde_json::json!({
+                "mismatch": "fingerprint",
+                "failed_index": 7,
+                "failed_object": { "layer": 2 },
+                "retry_requires": "refetch",
+            }));
+        let text = text(&error);
+        assert!(text.contains("details.failed_object"), "{text}");
+        assert!(text.contains("1 件だけを差し替えて"), "{text}");
+    }
+
+    #[test]
+    fn a_batch_effect_mismatch_only_names_the_position() {
+        // effect 側の不一致では差し替えの材料が付かない。付くものとして案内すると、
+        // 要求元は存在しない値を探す。
+        let error = ErrorObject::new(ErrorCode::PreconditionFailed, "対象が変化しました", true)
+            .with_details(serde_json::json!({
+                "mismatch": "effect_fingerprint",
+                "failed_index": 7,
+                "rolled_back": true,
+            }));
+        let text = text(&error);
+        assert!(text.contains("operations[7]"), "{text}");
+        assert!(!text.contains("failed_object"), "{text}");
     }
 
     #[test]

@@ -28,11 +28,12 @@ use crate::mcp::input::{
     ensure_length,
 };
 use aviutl2_mcp_core::{
-    AddEffectParams, CreateObjectParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
-    Destination, EditInputError, EffectSelector, ErrorObject, FiniteF64, FocusChange, ItemValue,
-    LayerNameChange, MAX_ALIAS_BYTES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MoveObjectParams,
-    ObjectSource, Placement, RangeChange, SetEffectEnabledParams, SetLayerStateParams,
-    SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+    AddEffectParams, ApplyBatchParams, BatchInputError, BatchOperation, CreateObjectParams,
+    CursorPosition, DeleteEffectParams, DeleteObjectParams, Destination, EditInputError,
+    EffectSelector, ErrorObject, FiniteF64, FocusChange, ItemValue, LayerNameChange,
+    MAX_ALIAS_BYTES, MAX_BATCH_OPERATIONS, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS,
+    MoveObjectParams, ObjectSource, Placement, RangeChange, SetEffectEnabledParams,
+    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -658,6 +659,106 @@ impl SetSelectionInput {
     }
 }
 
+/// `operations` に指定できる sub-operation の最大件数。
+const MAX_BATCH_OPERATION_COUNT: u32 = MAX_BATCH_OPERATIONS as u32;
+
+/// 一括適用の 1 要素。
+///
+/// **variant は 2 つしか無く、それが除外した編集 operation の拒否を兼ねる。**
+/// 他の `type` は未知 variant として復号の段で落ちるため、「一括適用に
+/// 入れられない operation か」を実行時に判定する分岐を持たない。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BatchOperationInput {
+    /// オブジェクトのレイヤーと開始フレームを変更する。
+    MoveObject {
+        /// 対象オブジェクトのセレクター。
+        selector: ObjectSelectorInput,
+        /// 移動先。
+        destination: DestinationInput,
+    },
+    /// effect の設定項目またはトラックバーの値を変更する。
+    SetObjectItem {
+        /// 設定項目を持つ effect のセレクター。
+        selector: EffectSelectorInput,
+        /// 設定項目名。
+        #[schemars(length(max = MAX_NAME_CHARS))]
+        item: String,
+        /// 設定する値。
+        value: ItemValueInput,
+    },
+}
+
+impl BatchOperationInput {
+    /// core の sub-operation へ変換する。
+    fn to_operation(&self) -> Result<BatchOperation, ErrorObject> {
+        Ok(match self {
+            BatchOperationInput::MoveObject {
+                selector,
+                destination,
+            } => BatchOperation::MoveObject {
+                selector: selector.to_selector()?,
+                destination: destination.to_destination(),
+            },
+            BatchOperationInput::SetObjectItem {
+                selector,
+                item,
+                value,
+            } => BatchOperation::SetObjectItem {
+                selector: selector.to_selector()?,
+                item: item.clone(),
+                value: value.to_value()?,
+            },
+        })
+    }
+}
+
+/// `aviutl2_apply_batch` の入力。
+///
+/// 前提条件のフィールドを 1 つも持たない。全 sub-operation が selector を持つ
+/// ため、プロジェクト境界も現在シーンも対象の同一性も selector が運ぶ。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyBatchInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// 配列順に適用する sub-operation。
+    #[schemars(length(min = 1, max = MAX_BATCH_OPERATION_COUNT))]
+    pub operations: Vec<BatchOperationInput>,
+}
+
+impl ApplyBatchInput {
+    /// IPC の params へ変換する。
+    ///
+    /// 件数・シーンの一致・重複・各 sub-operation の内容は core の検証がまとめて
+    /// 判定する。一括適用のために別の規則を書かない。
+    pub fn to_params(&self) -> Result<ApplyBatchParams, ErrorObject> {
+        let operations = self
+            .operations
+            .iter()
+            .map(BatchOperationInput::to_operation)
+            .collect::<Result<Vec<_>, _>>()?;
+        let params = ApplyBatchParams { operations };
+        params.validate().map_err(from_batch_input_error)?;
+        Ok(params)
+    }
+}
+
+/// core の一括適用の検証の失敗を tool result のエラーへ写す。
+///
+/// **何番目の sub-operation で落ちたかを添える。** 100 件の要求に対して位置の
+/// 分からない `invalid_argument` は、訂正の手掛かりとして足りない。要求全体の
+/// 誤り（件数）は位置を持たないため添えない。
+fn from_batch_input_error(error: BatchInputError) -> ErrorObject {
+    let failed_index = error.failed_index();
+    let mapped = from_code(error.error_code(), error.to_string());
+    match failed_index {
+        Some(index) => mapped.with_details(serde_json::json!({ "failed_index": index })),
+        None => mapped,
+    }
+}
+
 /// 前提の epoch が schema で宣言した文字数の範囲に収まることを確かめる。
 fn expected_project_epoch(value: &str) -> Result<String, ErrorObject> {
     ensure_length("expected_project_epoch", value, 1, MAX_EPOCH_CHARS)?;
@@ -768,9 +869,19 @@ mod tests {
                 "cursor": { "layer": 1, "frame": 2 },
                 "expected_project_epoch": SAMPLE_EPOCH,
             }),
-            // 一括適用に対応する tool の入力型はまだ無い。型を足すときに
-            // ここへ現在の形を書き、下の表から自動的に検査される。
-            EditOperation::ApplyBatch => return None,
+            EditOperation::ApplyBatch => json!({
+                "instance_id": SAMPLE_ID,
+                "operations": [batch_move_json()],
+            }),
+        })
+    }
+
+    /// 一括適用の sub-operation 1 件分の入力。
+    fn batch_move_json() -> Value {
+        json!({
+            "type": "move_object",
+            "selector": object_selector_json(),
+            "destination": { "layer": 1, "frame": 0 },
         })
     }
 
@@ -797,9 +908,7 @@ mod tests {
             EditOperation::SetEffectEnabled => decoded!(SetEffectEnabledInput),
             EditOperation::SetLayerState => decoded!(SetLayerStateInput),
             EditOperation::SetSelection => decoded!(SetSelectionInput),
-            // 入力型を持たない operation は `current_input` が表から外すため、
-            // ここへは到達しない。到達したら表と復号の対応が食い違っている。
-            EditOperation::ApplyBatch => return Err(ErrorCode::UnsupportedOperation),
+            EditOperation::ApplyBatch => decoded!(ApplyBatchInput),
         })
     }
 
@@ -846,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    fn the_input_table_leaves_out_only_the_operations_without_an_input_type() {
+    fn every_edit_operation_has_an_input_type() {
         // 網羅 match は operation の追加を止めるが、既存の枝を除外へ書き換えても
         // 止まらない。表から外れているものを固定することで、除外を増やしても
         // 減らしてもここが落ちる。
@@ -856,22 +965,168 @@ mod tests {
             .map(EditOperation::as_str)
             .collect();
 
-        assert_eq!(excluded, vec![EditOperation::ApplyBatch.as_str()]);
+        assert_eq!(excluded, Vec::<&str>::new());
+    }
 
-        // 表から外れている operation は復号もできない。**片方だけ実装すると、
-        // 新しい入力が上の検査を素通りしたまま残る。** 入力型を足して復号の腕
-        // だけ書き換えると、この主張が先に落ちる。
-        for operation in EditOperation::ALL {
-            if current_input(operation).is_some() {
-                continue;
-            }
+    #[test]
+    fn batch_sub_operations_reject_unknown_fields() {
+        // 入れ子の未知フィールドは、上の表が配列の要素まで辿らないため個別に
+        // 固定する。sub-operation 自身と宛先は拒否し、往復型の selector は
+        // 拒否しない。
+        let mut unknown = batch_move_json();
+        unknown
+            .as_object_mut()
+            .unwrap()
+            .insert("unknown_field".to_string(), json!(1));
+        let mut destination = batch_move_json();
+        destination["destination"]
+            .as_object_mut()
+            .unwrap()
+            .insert("unknown_field".to_string(), json!(1));
+        for (label, operation) in [("sub-operation", unknown), ("destination", destination)] {
             assert_eq!(
-                decode_input(operation, &json!({})),
-                Err(ErrorCode::UnsupportedOperation),
-                "{} が表に無いまま復号できます",
-                operation.as_str()
+                decode_input(
+                    EditOperation::ApplyBatch,
+                    &json!({ "instance_id": SAMPLE_ID, "operations": [operation] }),
+                ),
+                Err(ErrorCode::InvalidArgument),
+                "{label} が未知フィールドを受理しました"
             );
         }
+
+        let mut selector = batch_move_json();
+        selector["selector"]
+            .as_object_mut()
+            .unwrap()
+            .insert("unknown_field".to_string(), json!(1));
+        assert!(
+            decode_input(
+                EditOperation::ApplyBatch,
+                &json!({ "instance_id": SAMPLE_ID, "operations": [selector] }),
+            )
+            .is_ok(),
+            "往復型の selector が未知フィールドで拒否されました"
+        );
+    }
+
+    #[test]
+    fn only_two_operation_types_can_be_sub_operations() {
+        // union に 2 つしか variant が無いこと自体が、除外した編集 operation の
+        // 拒否を兼ねる。実行時に「一括適用へ入れられるか」を判定しない。
+        for operation in EditOperation::ALL {
+            if matches!(
+                operation,
+                EditOperation::MoveObject | EditOperation::SetObjectItem
+            ) {
+                continue;
+            }
+            let name = operation.as_str();
+            let mut sub = batch_move_json();
+            sub["type"] = json!(name);
+            assert_eq!(
+                decode_input(
+                    EditOperation::ApplyBatch,
+                    &json!({ "instance_id": SAMPLE_ID, "operations": [sub] }),
+                ),
+                Err(ErrorCode::InvalidArgument),
+                "{name} が sub-operation として受理されました"
+            );
+        }
+
+        // 受け付ける 2 種はそれぞれの形で通る。
+        for sub in [
+            batch_move_json(),
+            json!({
+                "type": "set_object_item",
+                "selector": effect_selector_json(),
+                "item": "X",
+                "value": { "type": "integer", "value": 1 },
+            }),
+        ] {
+            assert!(
+                decode_input(
+                    EditOperation::ApplyBatch,
+                    &json!({ "instance_id": SAMPLE_ID, "operations": [sub] }),
+                )
+                .is_ok(),
+                "受け付けるはずの sub-operation が拒否されました"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_input_rejects_a_count_outside_the_declared_range() {
+        for count in [0, aviutl2_mcp_core::MAX_BATCH_OPERATIONS + 1] {
+            let operations: Vec<Value> = (0..count).map(|_| batch_move_json()).collect();
+            assert_eq!(
+                decode_input(
+                    EditOperation::ApplyBatch,
+                    &json!({ "instance_id": SAMPLE_ID, "operations": operations }),
+                ),
+                Err(ErrorCode::InvalidArgument),
+                "{count} 件が受理されました"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_validation_failures_name_the_operation_that_failed() {
+        // 100 件の要求に対して位置の分からない invalid_argument は、訂正の
+        // 手掛かりとして足りない。
+        let mut second = batch_move_json();
+        second["selector"]["scene_id"] = json!(99);
+        let input: ApplyBatchInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "operations": [batch_move_json(), second],
+        }))
+        .expect("入力型としては受理される");
+
+        let error = input.to_params().expect_err("シーンの不一致は拒否される");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.details["failed_index"], json!(1));
+
+        // 要求全体の誤りは位置を持たないため添えない。
+        let input: ApplyBatchInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "operations": [],
+        }))
+        .expect("入力型としては受理される");
+        let error = input.to_params().expect_err("空の要求は拒否される");
+        assert!(
+            error.details.get("failed_index").is_none(),
+            "位置を持たない失敗に位置が付きました: {:?}",
+            error.details
+        );
+    }
+
+    #[test]
+    fn batch_sub_operations_are_validated_like_the_standalone_edits() {
+        // 同じ set_object_item が単独と一括で違う入力を受理すると、要求元は
+        // 経路ごとに規則を持つことになる。
+        let value = json!({ "type": "text", "value": "字\u{0}幕" });
+        let standalone = decode_input(
+            EditOperation::SetObjectItem,
+            &json!({
+                "instance_id": SAMPLE_ID,
+                "selector": effect_selector_json(),
+                "item": "X",
+                "value": value,
+            }),
+        );
+        let batched = decode_input(
+            EditOperation::ApplyBatch,
+            &json!({
+                "instance_id": SAMPLE_ID,
+                "operations": [{
+                    "type": "set_object_item",
+                    "selector": effect_selector_json(),
+                    "item": "X",
+                    "value": value,
+                }],
+            }),
+        );
+        assert_eq!(standalone, Err(ErrorCode::InvalidArgument));
+        assert_eq!(batched, Err(ErrorCode::InvalidArgument));
     }
 
     /// 応答が返した値をそのまま送り返す往復型のフィールドか。

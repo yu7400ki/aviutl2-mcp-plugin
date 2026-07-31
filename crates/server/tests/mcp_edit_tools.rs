@@ -3,16 +3,17 @@
 mod support;
 
 use aviutl2_mcp_core::{
-    AuthSecret, Cursor, EditOutcome, EffectFingerprintInput, EffectInfo, EffectItem,
-    EffectItemType, ErrorCode, ErrorObject, FrameRange, InstanceId, InstanceState, ItemValue,
-    LayerInfo, LayerStateOutcome, ObjectFingerprintInput, ObjectSelector, ObjectSummary,
-    RequestEnvelope, SelectionField, SelectionState,
+    AuthSecret, BatchOutcome, BatchStepOutcome, Cursor, EditOutcome, EffectFingerprintInput,
+    EffectInfo, EffectItem, EffectItemType, ErrorCode, ErrorObject, FrameRange, InstanceId,
+    InstanceState, ItemValue, LayerInfo, LayerStateOutcome, ObjectFingerprintInput, ObjectSelector,
+    ObjectSummary, RequestEnvelope, SelectionField, SelectionState,
 };
 use aviutl2_mcp_server::mcp::edit_input::{
-    AddEffectInput, CreateObjectInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
-    DestinationInput, EffectSelectorInput, FocusChangeInput, ItemValueInput, LayerNameChangeInput,
-    MoveObjectInput, ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput,
-    SetLayerStateInput, SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
+    AddEffectInput, ApplyBatchInput, BatchOperationInput, CreateObjectInput, CursorPositionInput,
+    DeleteEffectInput, DeleteObjectInput, DestinationInput, EffectSelectorInput, FocusChangeInput,
+    ItemValueInput, LayerNameChangeInput, MoveObjectInput, ObjectSourceInput, PlacementInput,
+    RangeChangeInput, SetEffectEnabledInput, SetLayerStateInput, SetObjectItemInput,
+    SetObjectNameInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::ObjectSelectorInput;
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
@@ -653,6 +654,7 @@ async fn set_layer_state_tool_sends_the_three_axes_and_the_scene_guard() {
 /// read 側と桁で離し、取り違えたときに必ず落ちるようにする。
 const PROBE_READ_BUDGET: Duration = Duration::from_millis(300);
 const PROBE_EDIT_BUDGET: Duration = Duration::from_secs(9);
+const PROBE_BATCH_BUDGET: Duration = Duration::from_secs(19);
 
 /// 要求が運ぶ期限が、送信時刻からおよそ `budget` 先であることを確かめる。
 fn assert_deadline_from_budget(
@@ -1086,4 +1088,241 @@ async fn unknown_instance_id_never_reaches_an_edit_operation() {
     assert_eq!(result.is_error, Some(true));
     assert_eq!(structured(&result)["code"], json!("instance_not_found"));
     assert!(harness.requests().is_empty(), "削除要求が送られています");
+}
+
+/// 一括適用の結果を、移動 1 件と設定変更 1 件で組み立てる。
+fn batch_outcome(count: usize) -> Value {
+    let results: Vec<BatchStepOutcome> = (0..count)
+        .map(|index| BatchStepOutcome {
+            object: sample_summary(),
+            effect: (index % 2 == 1).then(sample_effect),
+        })
+        .collect();
+    serde_json::to_value(BatchOutcome {
+        project_epoch: EPOCH.to_string(),
+        project_revision: APPLIED_REVISION,
+        results,
+    })
+    .expect("直列化できる")
+}
+
+/// 移動 1 件の sub-operation。
+fn move_operation(layer: u32) -> BatchOperationInput {
+    BatchOperationInput::MoveObject {
+        selector: selector_input(),
+        destination: DestinationInput { layer, frame: 0 },
+    }
+}
+
+/// 互いに別の対象を指す移動の sub-operation。
+///
+/// 同じ状態を 2 回書き換える要求は検証で落ちるため、件数を並べるには対象を
+/// 変えなければならない。
+fn distinct_move_operation(index: u32) -> BatchOperationInput {
+    BatchOperationInput::MoveObject {
+        selector: ObjectSelectorInput {
+            layer: index,
+            ..selector_input()
+        },
+        destination: DestinationInput {
+            layer: index,
+            frame: 0,
+        },
+    }
+}
+
+#[tokio::test]
+async fn apply_batch_tool_sends_the_operations_in_order() {
+    let expected = batch_outcome(2);
+    let harness = Harness::start(responses("apply_batch", expected.clone()));
+
+    let result = harness
+        .server
+        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+            instance_id: harness.instance_id(),
+            operations: vec![
+                move_operation(5),
+                BatchOperationInput::SetObjectItem {
+                    selector: effect_selector_input(),
+                    item: "テキスト".to_string(),
+                    value: ItemValueInput::Text {
+                        value: SECRET_ITEM_VALUE.to_string(),
+                    },
+                },
+            ],
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+
+    let request = harness.only_request();
+    assert_eq!(request.operation, "apply_batch");
+    assert_eq!(
+        request.params,
+        json!({
+            "operations": [
+                {
+                    "type": "move_object",
+                    "selector": selector_json(),
+                    "destination": { "layer": 5, "frame": 0 },
+                },
+                {
+                    "type": "set_object_item",
+                    "selector": effect_selector_json(),
+                    "item": "テキスト",
+                    "value": { "type": "text", "value": SECRET_ITEM_VALUE },
+                },
+            ],
+        }),
+    );
+
+    let text = text_of(&result);
+    assert!(text.contains("2 件の操作"), "{text}");
+    assert!(text.contains("project_revision=43"), "{text}");
+}
+
+#[tokio::test]
+async fn a_hundred_step_batch_stays_within_the_text_limit() {
+    let harness = Harness::start(responses("apply_batch", batch_outcome(100)));
+
+    let result = harness
+        .server
+        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+            instance_id: harness.instance_id(),
+            operations: (0..100).map(distinct_move_operation).collect(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    let text = text_of(&result);
+    assert!(
+        text.chars().count() <= 25_000,
+        "text が上限を超えています: {}",
+        text.chars().count()
+    );
+    assert!(text.contains("- [9] "), "{text}");
+    assert!(!text.contains("- [10] "), "{text}");
+    assert!(text.contains("他 90 件"), "{text}");
+}
+
+#[tokio::test]
+async fn batch_text_never_echoes_aliases_values_or_paths() {
+    let harness = Harness::start(responses("apply_batch", batch_outcome(2)));
+
+    let result = harness
+        .server
+        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+            instance_id: harness.instance_id(),
+            operations: vec![
+                move_operation(5),
+                BatchOperationInput::SetObjectItem {
+                    selector: effect_selector_input(),
+                    item: "ファイル".to_string(),
+                    value: ItemValueInput::File {
+                        path: SECRET_PATH.to_string(),
+                    },
+                },
+            ],
+        }))
+        .await;
+
+    let text = text_of(&result);
+    for forbidden in [SECRET_ITEM_VALUE, SECRET_PATH, "[vo]", "_name="] {
+        assert!(
+            !text.contains(forbidden),
+            "{forbidden} が text にあります: {text}"
+        );
+    }
+    assert!(text.contains("layer=2"), "{text}");
+    assert!(text.contains("立ち絵"), "{text}");
+}
+
+#[tokio::test]
+async fn batch_requests_carry_a_deadline_derived_from_the_batch_budget() {
+    // 一括適用は単独編集より長くかかる。編集の予算で期限を作ると、応答して
+    // いるインスタンスを途中で打ち切ってしまう。
+    let harness = Harness::with_limits(
+        responses("apply_batch", batch_outcome(1)),
+        CallLimits {
+            edit_request: PROBE_EDIT_BUDGET,
+            batch_request: PROBE_BATCH_BUDGET,
+            ..CallLimits::default()
+        },
+    );
+
+    let before = Utc::now().timestamp_millis() as u64;
+    let result = harness
+        .server
+        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+            instance_id: harness.instance_id(),
+            operations: vec![move_operation(5)],
+        }))
+        .await;
+    let after = Utc::now().timestamp_millis() as u64;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_deadline_from_budget(&harness.only_request(), before, after, PROBE_BATCH_BUDGET);
+}
+
+#[tokio::test]
+async fn invalid_batch_input_is_rejected_before_any_ipc_and_names_the_operation() {
+    let harness = Harness::start(OperationResponses::new());
+
+    let result = harness
+        .server
+        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+            instance_id: harness.instance_id(),
+            // 同じオブジェクトを 2 回動かす要求は、2 つ目の逆操作が 1 つ目の
+            // 結果を指すため事前に組み立てられない。
+            operations: vec![move_operation(5), move_operation(6)],
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("invalid_argument"));
+    assert_eq!(structured["details"]["failed_index"], json!(1));
+    assert!(
+        harness.mock.received_requests().is_empty(),
+        "検証前に IPC を発生させない"
+    );
+}
+
+#[tokio::test]
+async fn a_batch_that_could_not_be_rolled_back_reaches_the_caller_intact() {
+    // 巻き戻しに失敗したことを隠さない。要求元が読み直さなければ、次の編集は
+    // 壊れた前提の上に積み上がる。
+    let error = ErrorObject::new(ErrorCode::SdkError, "巻き戻しに失敗しました", false)
+        .with_details(json!({
+            "failed_index": 1,
+            "rolled_back": false,
+            "rolled_back_count": 0,
+            "consistency_unknown": true,
+            "retry_requires": "refetch",
+        }));
+    let harness = Harness::start(OperationResponses::from([(
+        "apply_batch".to_string(),
+        err_result(error),
+    )]));
+
+    let result = harness
+        .server
+        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+            instance_id: harness.instance_id(),
+            operations: vec![move_operation(5)],
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("sdk_error"));
+    assert_eq!(structured["details"]["failed_index"], json!(1));
+    assert_eq!(structured["details"]["rolled_back"], json!(false));
+    assert_eq!(structured["details"]["rolled_back_count"], json!(0));
+    assert_eq!(structured["details"]["consistency_unknown"], json!(true));
+
+    let text = text_of(&result);
+    assert!(text.contains("operations[1]"), "{text}");
+    assert!(text.contains("必ず対象を読み直して"), "{text}");
 }
