@@ -1163,10 +1163,23 @@ fn edit_input_error(error: EditInputError) -> ErrorObject {
 
 /// 一括適用の要求内容だけで決まる検証の失敗を応答用のエラーへ変換する。
 ///
-/// 失敗の説明には、落ちた sub-operation の位置と、単独編集と同じ規則の破れが
-/// 現れる。設定値・alias・パスそのものは含まない。
+/// **何番目の sub-operation で落ちたかを機械可読な形で添える。** 100 件までを
+/// 1 要求で運ぶ operation に対し、位置の分からない `invalid_argument` は訂正の
+/// 手掛かりとして足りない。位置は説明の文面にも現れるが、要求元に文面の解析を
+/// 強いない。要求全体の誤り（件数）は位置を持たないため添えない。
+///
+/// **要求元がこの層へ届く前に同じ検証を通っているとは限らない。** 検証を備えた
+/// 口を経由しない要求でも、位置は同じ形で返る必要がある。
+///
+/// 添えるのは 0 始まりの整数だけである。失敗の説明に現れるのは対象フィールド名
+/// と規則の上限に限られ、設定値・alias・パスそのものは含まない。
 fn batch_input_error(error: BatchInputError) -> ErrorObject {
-    error_object(error.error_code(), error.to_string())
+    let failed_index = error.failed_index();
+    let mapped = error_object(error.error_code(), error.to_string());
+    match failed_index {
+        Some(index) => mapped.with_details(json!({ "failed_index": index })),
+        None => mapped,
+    }
 }
 
 /// レンダリングの要求内容だけで決まる検証の失敗を応答用のエラーへ変換する。
@@ -3338,6 +3351,184 @@ mod edit_tests {
                 assert!(
                     adapter.calls().is_empty(),
                     "{order} の {label} が実行口へ届きました"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn batch_validation_failures_name_the_operation_that_failed() {
+        // 100 件までを 1 要求で運ぶ operation に対し、位置の分からない
+        // invalid_argument は訂正の手掛かりとして足りない。**要求元がこの層へ
+        // 届く前に同じ検証を通っているとは限らない。** 検証を備えた口を
+        // 経由しない要求でも、位置は同じ形で返る。
+        let mut other_scene = fake_summary().selector;
+        other_scene.scene_id = SCENE_ID + 1;
+        let move_op = json!({
+            "type": "move_object",
+            "selector": fake_summary().selector,
+            "destination": { "layer": 1, "frame": 300 },
+        });
+        let located = [
+            (
+                "シーンの不揃い",
+                1,
+                json!({
+                    "operations": [
+                        move_op,
+                        {
+                            "type": "move_object",
+                            "selector": other_scene,
+                            "destination": { "layer": 1, "frame": 400 },
+                        },
+                    ],
+                }),
+            ),
+            (
+                "同じ状態の重複",
+                1,
+                json!({ "operations": [move_op, move_op] }),
+            ),
+            (
+                "sub-operation の内容",
+                2,
+                json!({
+                    "operations": [
+                        move_op,
+                        {
+                            "type": "move_object",
+                            "selector": fake_summary().selector,
+                            "destination": { "layer": 1, "frame": 500 },
+                        },
+                        {
+                            "type": "set_object_item",
+                            "selector": fake_effect_selector(),
+                            "item": "ファイル",
+                            "value": { "type": "file", "path": r"..\movie.mp4" },
+                        },
+                    ],
+                }),
+            ),
+        ];
+
+        for (label, index, params) in located {
+            let adapter = FakeEditAdapter::new();
+            let error = execute_edit(
+                &adapter,
+                &InstanceState::Ready,
+                EditOperation::ApplyBatch,
+                &params,
+                within(),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{label}");
+            assert_eq!(
+                error.details["failed_index"],
+                json!(index),
+                "{label} が落ちた sub-operation の位置を運びませんでした"
+            );
+            assert!(adapter.calls().is_empty(), "{label}");
+        }
+    }
+
+    #[test]
+    fn a_batch_failure_without_a_position_does_not_name_one() {
+        // 要求全体の誤りは特定の sub-operation に帰せられない。位置を添えると、
+        // 要求元は 0 件目を直せば通ると読んでしまう。
+        let too_many: Vec<Value> = (0..=aviutl2_mcp_core::MAX_BATCH_OPERATIONS)
+            .map(|frame| {
+                json!({
+                    "type": "move_object",
+                    "selector": fake_summary().selector,
+                    "destination": { "layer": 1, "frame": frame },
+                })
+            })
+            .collect();
+        for (label, params) in [
+            ("件数 0", json!({ "operations": [] })),
+            ("件数超過", json!({ "operations": too_many })),
+        ] {
+            let adapter = FakeEditAdapter::new();
+            let error = execute_edit(
+                &adapter,
+                &InstanceState::Ready,
+                EditOperation::ApplyBatch,
+                &params,
+                within(),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{label}");
+            assert_eq!(
+                error.details.get("failed_index"),
+                None,
+                "{label} が位置を持たない失敗に位置を添えました: {:?}",
+                error.details
+            );
+            assert!(adapter.calls().is_empty(), "{label}");
+        }
+    }
+
+    #[test]
+    fn batch_validation_failures_only_use_allowed_details_keys() {
+        // 検証の失敗が返す補助情報も、実行の失敗と同じ許可キー一覧に従う。
+        // 一覧に無いキーが出れば、要求元は解釈できない値を受け取る。
+        const ALLOWED: &[&str] = &["failed_index"];
+
+        let mut other_scene = fake_summary().selector;
+        other_scene.scene_id = SCENE_ID + 1;
+        let cases = [
+            json!({ "operations": [] }),
+            json!({
+                "operations": [
+                    {
+                        "type": "move_object",
+                        "selector": fake_summary().selector,
+                        "destination": { "layer": 1, "frame": 300 },
+                    },
+                    {
+                        "type": "move_object",
+                        "selector": other_scene,
+                        "destination": { "layer": 1, "frame": 400 },
+                    },
+                ],
+            }),
+            json!({
+                "operations": [{
+                    "type": "set_object_item",
+                    "selector": fake_effect_selector(),
+                    "item": "ファイル",
+                    "value": { "type": "file", "path": r"\\.\pipe\aviutl2" },
+                }],
+            }),
+        ];
+
+        for params in cases {
+            let adapter = FakeEditAdapter::new();
+            let error = execute_edit(
+                &adapter,
+                &InstanceState::Ready,
+                EditOperation::ApplyBatch,
+                &params,
+                within(),
+            )
+            .unwrap_err();
+
+            for key in error.details.as_object().expect("補助情報は object").keys() {
+                assert!(
+                    ALLOWED.contains(&key.as_str()),
+                    "検証の失敗の補助情報に未許可のキー {key} が含まれています"
+                );
+            }
+
+            // 位置は整数だけであり、対象の内容を運ばない。設定値・alias・
+            // パスそのものは説明にも補助情報にも現れない。
+            let document = format!("{} {}", error.message, error.details);
+            for forbidden in [r"\\.", "movie.mp4", "pipe", "[1:100]", "0x"] {
+                assert!(
+                    !document.contains(forbidden),
+                    "{forbidden} が応答に含まれます: {document}"
                 );
             }
         }
