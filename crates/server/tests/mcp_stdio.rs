@@ -9,6 +9,7 @@ use aviutl2_mcp_core::{
     AuthSecret, Cursor, DisplayRange, EditInfo, ErrorCode, ErrorObject, Extent, FiniteF64,
     FrameRange, InstanceId, InstanceState, SceneInfo,
 };
+use aviutl2_mcp_server::mcp::summary::MAX_TEXT_CHARS;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -1512,7 +1513,15 @@ fn verbose_logging_does_not_leak_full_identifiers_from_any_crate() {
 const HANDOFF_TOKEN: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
 
 /// 引き渡しファイルへ書く画像の中身。
-const IMAGE_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nfake-image-body";
+///
+/// **base64 が text content の上限を超える大きさにする。** 小さな画像では、
+/// blob へ上限を掛けても掛けなくても結果が変わらず、上限が適用されないことを
+/// 何も固定できない。
+fn image_bytes() -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.resize(24 * 1024, b'a');
+    bytes
+}
 
 /// `"sha256:"` と小文字十六進のダイジェスト。
 fn sha256_of(bytes: &[u8]) -> String {
@@ -1544,8 +1553,8 @@ fn start_rendering_mock_with_handoff(registry_dir: &Path, write_handoff: bool) -
             "width": 1920,
             "height": 1080,
             "media_type": "image/png",
-            "byte_length": IMAGE_BYTES.len(),
-            "sha256": sha256_of(IMAGE_BYTES),
+            "byte_length": image_bytes().len(),
+            "sha256": sha256_of(&image_bytes()),
             "handoff_token": HANDOFF_TOKEN,
         })),
     )]);
@@ -1564,7 +1573,7 @@ fn start_rendering_mock_with_handoff(registry_dir: &Path, write_handoff: bool) -
         let base = registry_dir.parent().expect("基底がある");
         let dir = base.join("render").join(mock.instance_id().to_string());
         std::fs::create_dir_all(&dir).expect("引き渡しディレクトリを作れる");
-        std::fs::write(dir.join(format!("{HANDOFF_TOKEN}.png")), IMAGE_BYTES)
+        std::fs::write(dir.join(format!("{HANDOFF_TOKEN}.png")), image_bytes())
             .expect("引き渡しファイルを書ける");
     }
 
@@ -1709,11 +1718,19 @@ fn a_rendered_artifact_is_listed_and_read_back_as_a_blob() {
         "画像を text で返しています: {contents}"
     );
     let blob = contents["blob"].as_str().expect("blob がある");
+    // text へ課してきた文字数の上限は blob へ適用しない。上限は「機械可読値は
+    // structuredContent に置き text は要約に留める」という規約に由来し、画像には
+    // その区別が無い。blob の大きさを縛るのは引き取り時の上限である。
+    assert!(
+        blob.chars().count() > MAX_TEXT_CHARS,
+        "上限を超える成果物で試していません: {}",
+        blob.chars().count()
+    );
     use base64::Engine as _;
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(blob)
         .expect("base64 として読める");
-    assert_eq!(decoded, IMAGE_BYTES);
+    assert_eq!(decoded, image_bytes());
 
     // 引き渡しの識別子は応答にもログにも現れない。
     assert!(

@@ -1939,16 +1939,68 @@ mod tests {
         (RENDER_FRAME, true, true),
     ];
 
-    /// 編集の説明規約が掛かる tool。
+    /// 登録済みの tool 名を、annotation の 3 表から引く。
+    ///
+    /// 表と router が一致することは [`all_tools_are_registered`] が固定する。
+    fn all_tool_names() -> impl Iterator<Item = &'static str> {
+        READ_TOOLS
+            .iter()
+            .copied()
+            .chain(EDIT_TOOL_ANNOTATIONS.iter().map(|(name, _, _)| *name))
+            .chain(PHASE4_TOOL_ANNOTATIONS.iter().map(|(name, _, _)| *name))
+    }
+
+    /// tool が編集 tool の説明規約に従うか。
     ///
     /// 一括適用は編集 tool の表には属さないが、運ぶ selector も取り消し単位も
-    /// 編集と同じ規約に従うため、説明の検査では同じ扱いにする。
+    /// 編集と同じであるため従う側に置く。読み取りと描画はプロジェクトを
+    /// 変更しないため従わない。
+    ///
+    /// **未知の tool 名で落とす。** 一覧を手書きの連結で持つと、そこから外した
+    /// tool が説明の共通検査から黙って外れる。
+    fn follows_the_edit_conventions(name: &str) -> bool {
+        match name {
+            "aviutl2_create_object"
+            | "aviutl2_move_object"
+            | "aviutl2_set_object_name"
+            | "aviutl2_set_object_item"
+            | "aviutl2_add_effect"
+            | "aviutl2_set_effect_enabled"
+            | "aviutl2_delete_effect"
+            | "aviutl2_delete_object"
+            | "aviutl2_set_layer_state"
+            | "aviutl2_set_selection"
+            | APPLY_BATCH => true,
+            "aviutl2_list_instances"
+            | "aviutl2_get_edit_info"
+            | "aviutl2_get_current_scene"
+            | "aviutl2_list_layers"
+            | "aviutl2_list_objects"
+            | "aviutl2_get_object"
+            | "aviutl2_list_available_effects"
+            | RENDER_FRAME => false,
+            other => panic!("{other} が編集の説明規約に従うかが定義されていません"),
+        }
+    }
+
+    /// 編集の説明規約が掛かる tool。
     fn edit_like_tools() -> Vec<&'static str> {
-        EDIT_TOOL_ANNOTATIONS
+        all_tool_names()
+            .filter(|name| follows_the_edit_conventions(name))
+            .collect()
+    }
+
+    #[test]
+    fn the_edit_conventions_cover_the_editing_tools_and_the_batch() {
+        // 集合そのものを固定する。判定を「従わない」側へ書き換えても、対象が
+        // 減ったことに気付けるようにする。
+        let covered: std::collections::BTreeSet<&str> = edit_like_tools().into_iter().collect();
+        let expected: std::collections::BTreeSet<&str> = EDIT_TOOL_ANNOTATIONS
             .iter()
             .map(|(name, _, _)| *name)
             .chain(std::iter::once(APPLY_BATCH))
-            .collect()
+            .collect();
+        assert_eq!(covered, expected);
     }
 
     fn server() -> AviUtl2McpServer {
@@ -1972,14 +2024,12 @@ mod tests {
         // すると annotation も説明も検査されないまま公開される。
         let names: std::collections::BTreeSet<String> =
             tools().iter().map(|tool| tool.name.to_string()).collect();
-        let expected: std::collections::BTreeSet<String> = READ_TOOLS
-            .iter()
-            .copied()
-            .chain(EDIT_TOOL_ANNOTATIONS.iter().map(|(name, _, _)| *name))
-            .chain(PHASE4_TOOL_ANNOTATIONS.iter().map(|(name, _, _)| *name))
-            .map(|name| name.to_string())
-            .collect();
+        let expected: std::collections::BTreeSet<String> =
+            all_tool_names().map(|name| name.to_string()).collect();
         assert_eq!(names, expected);
+        // 件数そのものも固定する。router と表の両方から同じ tool を落とすと、
+        // 集合の一致だけでは検出できない。
+        assert_eq!(names.len(), 19, "公開する tool の数が変わりました");
     }
 
     #[test]
