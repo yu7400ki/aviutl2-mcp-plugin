@@ -105,7 +105,10 @@ pub use operation::{
     ReadOperation, RenderOperation,
 };
 pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
-pub use render::{RenderFormat, RenderFrameParams, RenderFrameResult, RenderInputError};
+pub use render::{
+    ARTIFACT_MAX_BYTES, MAX_RENDER_FRAME_BYTES, RenderFormat, RenderFrameParams, RenderFrameResult,
+    RenderInputError,
+};
 pub use selector::{EffectSelector, ObjectSelector};
 pub use state::InstanceState;
 pub use validation::{

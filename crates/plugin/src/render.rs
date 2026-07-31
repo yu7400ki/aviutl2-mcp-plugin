@@ -49,7 +49,7 @@ use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::Duration;
 
 pub use adapter::HostRenderAdapter;
-pub use buffer::{BYTES_PER_PIXEL, ExtractedFrame, FrameLayout, MAX_RENDER_FRAME_BYTES};
+pub use buffer::{BYTES_PER_PIXEL, ExtractedFrame, FrameLayout};
 pub use error::{ArtifactStage, BufferRule, RenderError, RenderStage};
 pub use handoff::{ARTIFACT_MEDIA_TYPE, HANDOFF_TTL, HandoffArtifact, HandoffDir, HandoffToken};
 pub use slot::{

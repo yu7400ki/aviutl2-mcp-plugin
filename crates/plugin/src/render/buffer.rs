@@ -15,12 +15,7 @@
 //! の順に並んでおり、PNG の RGBA8 も同じ並びである。詰め物を除けば足りる。
 
 use crate::render::error::BufferRule;
-
-/// 1 フレーム分の非圧縮 RGBA8 が占めてよいバイト数の上限。
-///
-/// 詰め物を除いた大きさに掛ける。これを超える寸法は、確保そのものが
-/// ホストのメモリを圧迫するため受け取らない。
-pub const MAX_RENDER_FRAME_BYTES: usize = 256 * 1024 * 1024;
+use aviutl2_mcp_core::MAX_RENDER_FRAME_BYTES;
 
 /// 1 画素のバイト数。
 pub const BYTES_PER_PIXEL: u32 = 4;
@@ -153,7 +148,9 @@ pub fn validate_layout(
     let pixel_bytes = (row_bytes as usize)
         .checked_mul(height as usize)
         .ok_or(BufferRule::FrameTooLarge)?;
-    if pixel_bytes > MAX_RENDER_FRAME_BYTES {
+    // 上限は `u64` で持つ。比較を `u64` の側で行えば、`usize` の幅に依らず
+    // 同じ判定になる（`usize` から `u64` への変換は値を落とさない）。
+    if pixel_bytes as u64 > MAX_RENDER_FRAME_BYTES {
         return Err(BufferRule::FrameTooLarge);
     }
     Ok(FrameLayout {
@@ -300,9 +297,9 @@ mod tests {
         // 詰め物を除いた大きさが上限をちょうど 1 バイト超える組を作る。
         let width = 4 * 1024;
         let row_bytes = width * 4;
-        let height = MAX_RENDER_FRAME_BYTES as u32 / row_bytes + 1;
+        let height = (MAX_RENDER_FRAME_BYTES / row_bytes as u64) as u32 + 1;
         let buffer_len = row_bytes as usize * height as usize;
-        assert!(buffer_len > MAX_RENDER_FRAME_BYTES);
+        assert!(buffer_len as u64 > MAX_RENDER_FRAME_BYTES);
         assert_eq!(
             validate_layout(7, 7, width, height, row_bytes, buffer_len),
             Err(BufferRule::FrameTooLarge)
@@ -313,9 +310,9 @@ mod tests {
     fn rule_7_accepts_a_frame_exactly_at_the_cap() {
         let width = 4 * 1024;
         let row_bytes = width * 4;
-        let height = MAX_RENDER_FRAME_BYTES as u32 / row_bytes;
+        let height = (MAX_RENDER_FRAME_BYTES / row_bytes as u64) as u32;
         let buffer_len = row_bytes as usize * height as usize;
-        assert_eq!(buffer_len, MAX_RENDER_FRAME_BYTES);
+        assert_eq!(buffer_len as u64, MAX_RENDER_FRAME_BYTES);
         assert!(validate_layout(7, 7, width, height, row_bytes, buffer_len).is_ok());
     }
 

@@ -18,13 +18,15 @@
 use crate::project::ProjectState;
 use crate::read::host::HostEditInfo;
 use crate::read::{EditState, ReadError};
-use crate::render::buffer::{BYTES_PER_PIXEL, MAX_RENDER_FRAME_BYTES};
+use crate::render::buffer::BYTES_PER_PIXEL;
 use crate::render::error::RenderError;
 use crate::render::handoff::{ARTIFACT_MEDIA_TYPE, HandoffDir, HandoffToken};
 use crate::render::host::RenderHost;
 use crate::render::slot::{RenderInventory, RenderSlot, SlotWait, StopRequest};
 use crate::render::{RenderAdapter, RenderDrain};
-use aviutl2_mcp_core::{PLUGIN_RENDER_WAIT_TIMEOUT, RenderFrameParams, RenderFrameResult};
+use aviutl2_mcp_core::{
+    MAX_RENDER_FRAME_BYTES, PLUGIN_RENDER_WAIT_TIMEOUT, RenderFrameParams, RenderFrameResult,
+};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -273,9 +275,9 @@ fn ensure_renderable_frame(info: &HostEditInfo, frame: u32) -> Result<(), Render
             operation: "get_edit_info",
         });
     }
-    let frame_bytes = (info.width as usize)
-        .checked_mul(info.height as usize)
-        .and_then(|pixels| pixels.checked_mul(BYTES_PER_PIXEL as usize))
+    let frame_bytes = (info.width as u64)
+        .checked_mul(info.height as u64)
+        .and_then(|pixels| pixels.checked_mul(u64::from(BYTES_PER_PIXEL)))
         .ok_or(RenderError::FrameTooLarge)?;
     if frame_bytes > MAX_RENDER_FRAME_BYTES {
         return Err(RenderError::FrameTooLarge);

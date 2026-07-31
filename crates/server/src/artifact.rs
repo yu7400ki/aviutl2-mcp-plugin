@@ -15,7 +15,7 @@
 
 mod protected_dir;
 
-use aviutl2_mcp_core::InstanceId;
+use aviutl2_mcp_core::{ARTIFACT_MAX_BYTES, InstanceId};
 use chrono::{DateTime, TimeDelta, Utc};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -26,11 +26,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tracing::{debug, warn};
 use uuid::Uuid;
-
-/// 引き取る成果物の大きさの上限。
-///
-/// 符号化後の値であり、非圧縮 buffer の上限とは別である。
-pub const ARTIFACT_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 /// artifact の有効期限。
 pub const ARTIFACT_TTL: Duration = Duration::from_secs(10 * 60);
@@ -455,6 +450,11 @@ impl ArtifactStore {
             .len();
         // 申告値ではなく実体の大きさで判定し、読み込む前に打ち切る。
         // 申告を信じて確保すると、申告と実体が食い違ったときに過大な確保が起きる。
+        //
+        // 上限は書き出す側と同じ [`ARTIFACT_MAX_BYTES`] である。書き出す側も
+        // 同じ値で落とすため、ここへ届く超過は書き出した相手が別の規則で
+        // 動いている場合に限られる。それでも判定を残すのは、引き取りの確保を
+        // 相手の振る舞いに委ねないためである。
         if length > ARTIFACT_MAX_BYTES {
             warn!(byte_length = length, "handoff ファイルが上限を超えています");
             return Err(IngestError::TooLarge);
