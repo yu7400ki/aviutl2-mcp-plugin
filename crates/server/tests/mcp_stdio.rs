@@ -1526,6 +1526,14 @@ fn sha256_of(bytes: &[u8]) -> String {
 
 /// 描画に応じる mock を起こし、引き渡しファイルを置く。
 fn start_rendering_mock(registry_dir: &Path) -> MockPipeServer {
+    start_rendering_mock_with_handoff(registry_dir, true)
+}
+
+/// 描画に応じる mock を起こす。
+///
+/// `write_handoff` が偽なら引き渡しファイルを置かず、server 側の引き取りを
+/// 失敗させる。
+fn start_rendering_mock_with_handoff(registry_dir: &Path, write_handoff: bool) -> MockPipeServer {
     let responses = OperationResponses::from([(
         "render_frame".to_string(),
         ok_result(json!({
@@ -1551,15 +1559,71 @@ fn start_rendering_mock(registry_dir: &Path) -> MockPipeServer {
     );
     mock.write_descriptor(registry_dir);
 
-    // server は自分の基底から引き渡し先を組み立てる。試験側も同じ規則で置く。
-    let base = registry_dir.parent().expect("基底がある");
-    let dir = base.join("render").join(mock.instance_id().to_string());
-    std::fs::create_dir_all(&dir).expect("引き渡しディレクトリを作れる");
-    std::fs::write(dir.join(format!("{HANDOFF_TOKEN}.png")), IMAGE_BYTES)
-        .expect("引き渡しファイルを書ける");
+    if write_handoff {
+        // server は自分の基底から引き渡し先を組み立てる。試験側も同じ規則で置く。
+        let base = registry_dir.parent().expect("基底がある");
+        let dir = base.join("render").join(mock.instance_id().to_string());
+        std::fs::create_dir_all(&dir).expect("引き渡しディレクトリを作れる");
+        std::fs::write(dir.join(format!("{HANDOFF_TOKEN}.png")), IMAGE_BYTES)
+            .expect("引き渡しファイルを書ける");
+    }
 
     std::thread::sleep(MOCK_STARTUP_GRACE);
     mock
+}
+
+/// 描画を 1 回要求する tools/call。
+fn render_request(id: u64, instance_id: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_render_frame",
+            "arguments": {
+                "instance_id": instance_id,
+                "expected_scene_id": 3,
+                "frame": 120,
+            },
+        },
+    })
+}
+
+#[test]
+fn a_failed_takeover_keeps_the_handoff_token_out_of_the_log() {
+    // 引き取りに失敗した経路は、成功した経路と違って診断のためのログを出す。
+    // そこへ識別子を書くと、要求元が引き渡しファイルの名前を知る経路が
+    // ログ経由で生まれる。
+    let registry_dir = temp_registry_dir();
+    let mock = start_rendering_mock_with_handoff(&registry_dir, false);
+
+    let mut requests = initialize_requests();
+    requests.push(render_request(2, &mock.instance_id().to_string()));
+
+    let session = run_session(&registry_dir, &requests);
+    let response = session.response(2);
+    assert_eq!(
+        response["result"]["isError"],
+        json!(true),
+        "引き取りが成功しています: {response}"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["code"],
+        json!("internal_error"),
+        "{response}"
+    );
+    assert!(
+        !session.stdout.contains(HANDOFF_TOKEN),
+        "引き渡しの識別子が応答に出ています"
+    );
+    assert!(
+        !session.stderr.contains(HANDOFF_TOKEN),
+        "引き渡しの識別子がログに出ています: {}",
+        session.stderr
+    );
+
+    drop(mock);
+    remove_test_registry(&registry_dir);
 }
 
 #[test]
