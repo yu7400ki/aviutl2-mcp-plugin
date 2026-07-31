@@ -3772,6 +3772,36 @@ mod render_tests {
         let mut expected = VARIANTS.to_vec();
         expected.sort_unstable();
         assert_eq!(covered, expected, "代表値が全 variant を覆っていません");
+
+        // variant の網羅だけでは足りない。`Read` のように内側の値で振る舞いが
+        // 変わる variant は代表値を複数持つため、そのうち 1 件を落としても
+        // 上の主張は通ってしまう。**観測結果の集合そのものを固定する。**
+        let observed: Vec<(String, String, String)> = RenderFailure::ALL
+            .iter()
+            .map(|failure| {
+                let error = failure.error();
+                (
+                    error.error_code().to_string(),
+                    error.to_string(),
+                    error.details().to_string(),
+                )
+            })
+            .collect();
+
+        let mut unique = observed.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            observed.len(),
+            "同じ観測結果を返す代表値が重複しています。増やしても網羅は増えません"
+        );
+        assert_eq!(
+            observed.len(),
+            13,
+            "代表値の件数が変わりました。減らすなら、失われた観測結果が \
+             他の代表値で覆われていることを確かめてください"
+        );
     }
 
     #[test]
