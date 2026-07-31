@@ -101,20 +101,60 @@ impl Default for CallLimits {
 }
 
 impl CallLimits {
-    /// operation 名に応じた要求フェーズの期限を返す。
+    /// operation 名に応じた要求フェーズ全体の期限を返す。
     ///
     /// 区分の判定は core の選択規則（[`request_budget_kind`]）に委ねる。判定
     /// 基準を server が独自に持たないことで、片方だけ取り違えたときに検出
     /// できない状態を避ける。
     ///
-    /// **区分ごとの `match` に `_` を使わない。** 既定の腕を置くと、区分が
-    /// 増えたときに新しい operation が黙って別の予算で走る。
-    pub fn request_budget(&self, operation: &str) -> Duration {
-        match request_budget_kind(operation) {
+    /// **これは IPC の要求へ載せる値ではない。** 応答を受け取ったあとに走る段を
+    /// 持つ operation では、その取り分だけ短い
+    /// [`ipc_request_budget`](Self::ipc_request_budget) を渡す。
+    pub fn request_phase_budget(&self, operation: &str) -> Duration {
+        self.phase_budget(request_budget_kind(operation))
+    }
+
+    /// IPC の要求 1 件へ載せる期限の長さを返す。
+    ///
+    /// 要求フェーズ全体の予算から、応答を受け取ったあとに同じフェーズの内側で
+    /// 走る段の取り分を差し引く。**差し引きを呼び出し側の責務にしない。**
+    /// 期限を組み立てる経路をこの 1 つに絞ることで、応答後の段を持つ operation
+    /// が要求フェーズの予算をそのまま渡す形を作れないようにする。差し引きを
+    /// 忘れると、接続先が期限いっぱいまで使った直後に応答後の段が始まり、
+    /// どの層の期限にも捕まらないまま予算を超える。
+    pub fn ipc_request_budget(&self, operation: &str) -> Duration {
+        let kind = request_budget_kind(operation);
+        self.phase_budget(kind)
+            .saturating_sub(self.post_response_reserve(kind))
+    }
+
+    /// 区分ごとの要求フェーズ全体の期限。
+    ///
+    /// **`match` に `_` を使わない。** 既定の腕を置くと、区分が増えたときに
+    /// 新しい operation が黙って別の予算で走る。
+    fn phase_budget(&self, kind: RequestBudgetKind) -> Duration {
+        match kind {
             RequestBudgetKind::Read => self.request,
             RequestBudgetKind::Edit => self.edit_request,
             RequestBudgetKind::Batch => self.batch_request,
             RequestBudgetKind::Render => self.render_request,
+        }
+    }
+
+    /// 応答を受け取ったあと、同じ要求フェーズの内側で走る段の取り分。
+    ///
+    /// 描画だけがこの段を持つ。応答が運ぶ識別子で成果物を引き取り、読み込み・
+    /// ダイジェストの算出・保存・引き渡し元の削除までを行う。他の operation は
+    /// 応答を変換して返すだけであり、取り分を持たない。
+    ///
+    /// ここも `_` を使わない。区分が増えたときに、取り分の要否を判断しないまま
+    /// 「無し」へ落ちることを防ぐ。
+    fn post_response_reserve(&self, kind: RequestBudgetKind) -> Duration {
+        match kind {
+            RequestBudgetKind::Read | RequestBudgetKind::Edit | RequestBudgetKind::Batch => {
+                Duration::ZERO
+            }
+            RequestBudgetKind::Render => self.artifact_ingest,
         }
     }
 }
@@ -1329,7 +1369,7 @@ fn list_instances(
 /// 接続は本関数の中で確立し、応答を受け取ったところで破棄する。フレーム境界を
 /// 見失った接続を持ち越さないため、接続の再利用は行わない。
 ///
-/// 要求フェーズの期限は operation 名から選ぶ（[`CallLimits::request_budget`]）。
+/// 要求へ載せる期限は operation 名から選ぶ（[`CallLimits::ipc_request_budget`]）。
 /// 編集は read より長くかかるため、選び違えると応答しているインスタンスを
 /// 打ち切ってしまう。
 fn request_operation<P, R>(
@@ -1349,7 +1389,7 @@ where
     let resolved = resolve_instance(registry_dir, instance_id, config)
         .map_err(|e| failure::from_resolve_error(&e))?;
 
-    let deadline = Instant::now() + limits.request_budget(operation);
+    let deadline = Instant::now() + limits.ipc_request_budget(operation);
     tracing::debug!(
         instance = %redact::instance_id(&instance_id),
         operation,
@@ -2439,16 +2479,21 @@ mod tests {
         assert_eq!(server.limits.artifact_ingest, Duration::from_millis(130));
     }
 
-    #[test]
-    fn request_budget_selects_the_limit_matching_the_operation_kind() {
-        let limits = CallLimits {
+    /// 区分ごとの取り違えが必ず落ちるよう、桁で離した予算。
+    fn probe_limits() -> CallLimits {
+        CallLimits {
             resolve: Duration::from_millis(1),
             request: Duration::from_millis(2),
             edit_request: Duration::from_millis(3),
             batch_request: Duration::from_millis(4),
-            render_request: Duration::from_millis(5),
+            render_request: Duration::from_millis(50),
             artifact_ingest: Duration::from_millis(6),
-        };
+        }
+    }
+
+    #[test]
+    fn request_budget_selects_the_limit_matching_the_operation_kind() {
+        let limits = probe_limits();
 
         for name in aviutl2_mcp_core::ReadOperation::ALL
             .into_iter()
@@ -2456,7 +2501,7 @@ mod tests {
             .chain(["ping", "future_operation"])
         {
             assert_eq!(
-                limits.request_budget(name),
+                limits.request_phase_budget(name),
                 limits.request,
                 "{name} が read 予算を使っていません"
             );
@@ -2469,7 +2514,7 @@ mod tests {
                 _ => limits.edit_request,
             };
             assert_eq!(
-                limits.request_budget(op.as_str()),
+                limits.request_phase_budget(op.as_str()),
                 expected,
                 "{op:?} の予算が想定と異なります"
             );
@@ -2477,9 +2522,51 @@ mod tests {
 
         for op in aviutl2_mcp_core::RenderOperation::ALL {
             assert_eq!(
-                limits.request_budget(op.as_str()),
+                limits.request_phase_budget(op.as_str()),
                 limits.render_request,
                 "{op:?} が render 予算を使っていません"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_render_request_reserves_time_for_what_happens_after_the_response() {
+        // 描画だけが応答を受けたあとに成果物の引き取りを行う。要求フェーズの
+        // 予算をそのまま IPC へ渡すと、接続先が期限いっぱいまで使った直後に
+        // 引き取りが始まり、どの層の期限にも捕まらないまま予算を超える。
+        let limits = probe_limits();
+
+        for op in aviutl2_mcp_core::RenderOperation::ALL {
+            let name = op.as_str();
+            assert_eq!(
+                limits.ipc_request_budget(name),
+                limits.render_request - limits.artifact_ingest,
+                "{name} の期限が引き取りの取り分を残していません"
+            );
+            assert_ne!(
+                limits.ipc_request_budget(name),
+                limits.render_request,
+                "{name} が要求フェーズの予算をそのまま渡しています"
+            );
+        }
+
+        // 他の operation は応答後の段を持たないため、要求フェーズの予算がその
+        // まま期限になる。
+        for name in aviutl2_mcp_core::ReadOperation::ALL
+            .into_iter()
+            .map(aviutl2_mcp_core::ReadOperation::as_str)
+            .map(str::to_string)
+            .chain(
+                aviutl2_mcp_core::EditOperation::ALL
+                    .into_iter()
+                    .map(|op| op.as_str().to_string()),
+            )
+            .chain(["ping".to_string(), "future_operation".to_string()])
+        {
+            assert_eq!(
+                limits.ipc_request_budget(&name),
+                limits.request_phase_budget(&name),
+                "{name} が予算から時間を差し引いています"
             );
         }
     }
