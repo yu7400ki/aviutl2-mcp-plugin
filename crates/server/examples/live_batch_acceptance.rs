@@ -36,8 +36,12 @@
 //!    別インスタンスのセレクターを拒否する確認が fingerprint の確認にすり替わる。
 //! 3. AviUtl2 を **2 プロセス**起動し、それぞれで別の複製を開く。
 //! 4. サンプルプロジェクトは次を満たすこと。
+//!    - オブジェクトを持つレイヤーが 3 つ以上あり、各レイヤーに 2 つ以上の
+//!      オブジェクトがある。多数の sub-operation を多レイヤーへ散らす確認が、
+//!      これだけの広がりを要する。
 //!    - 現在シーンに、ロックされていないレイヤー上のオブジェクトが 2 つ以上ある。
-//!    - そのうち少なくとも 1 つが、値を書き換えられる設定項目を持つ。
+//!    - そのうち少なくとも 1 つが、値を書き換えられる設定項目を持つ effect を
+//!      含む。
 //!    - オブジェクトを 1 つも置いていない空きレイヤーが 3 つ以上ある。
 //!
 //! # 実行方法
@@ -2197,13 +2201,28 @@ fn section_undo(
         harness.apply_batch(&instance.id, steps.operations.clone()),
         "3 件の一括適用に失敗しました",
     )?;
-    let outcome = judge_three_steps_applied(harness, instance, context, &steps, &applied, &before);
+    // 読み直しと UI の両方で見る。読み直しだけでは、読み取りと UI が同じものを
+    // 映していない場合に気付けない。
+    let outcome = judge_three_steps_applied(harness, instance, context, &steps, &applied, &before)
+        .and_then(|mut notes| {
+            notes.extend(operator_verdict(&format!(
+                "いま行ったこと: MCP から 3 件の変更を 1 回の呼び出しで適用しました。\n\
+                 オブジェクトを {} と {} へ動かし、設定項目「{}」の値を変えています。\n\
+                 お願いすること: AviUtl2 の画面で 3 件すべてが反映されているかを見てください。\n\
+                 確認する場所: タイムライン上のオブジェクトの位置と、動かした側の設定パネル。\n\
+                 回答: 3 件とも反映されていれば y、1 件でも反映されていなければ n を入力してください。",
+                placement_label(steps.first_to),
+                placement_label(steps.second_to),
+                steps.item.item
+            ))?);
+            Ok(notes)
+        });
     let applied_ok = outcome.is_ok();
     report.record(
         "取り消しの単位",
         "3 件の一括適用",
-        "移動 2 件と設定値 1 件が 1 回の呼び出しで適用され、読み直しに 3 件すべてが現れる",
-        Mode::Auto,
+        "移動 2 件と設定値 1 件が 1 回の呼び出しで適用され、読み直しと UI の双方に 3 件すべてが現れる",
+        Mode::Operator,
         outcome,
     );
     if !applied_ok {
@@ -2228,15 +2247,24 @@ fn section_undo(
     ));
     let after_undo = snapshot(harness, instance, context.scene_id)?;
     let outcome = expect_unchanged(&before, &after_undo)
-        .map(|()| {
-            vec!["3 件すべてが 1 回の取り消しで戻り、2 回目を要する状態が残らなかった".to_string()]
-        })
-        .map_err(|reason| format!("1 回の取り消しでは元へ戻りませんでした: {reason}"));
+        .map_err(|reason| format!("1 回の取り消しでは元へ戻りませんでした: {reason}"))
+        .and_then(|()| {
+            let mut notes = vec![
+                "読み直しでは 3 件すべてが戻り、2 回目を要する状態が残らなかった".to_string(),
+            ];
+            notes.extend(operator_verdict(
+                "いま行ったこと: 取り消しの後のオブジェクトを読み直し、実行前と同じであることを確かめました。\n\
+                 お願いすること: AviUtl2 の画面でも 3 件すべてが元へ戻っているかを見てください。\n\
+                 確認する場所: タイムライン上のオブジェクトの位置と、動かした側の設定パネル。\n\
+                 回答: 3 件とも元へ戻っていれば y、1 件でも戻っていなければ n を入力してください。",
+            )?);
+            Ok(notes)
+        });
     let undone = outcome.is_ok();
     report.record(
         "取り消しの単位",
         "1 回の取り消しで戻ること",
-        "1 回の取り消し操作で 3 件すべてが元へ戻り、2 回目の取り消しを要する状態が残らない",
+        "1 回の取り消し操作で 3 件すべてが読み直しと UI の双方で元へ戻り、2 回目の取り消しを要する状態が残らない",
         Mode::Operator,
         outcome,
     );
@@ -2399,13 +2427,26 @@ fn section_rollback(
 
     let now = snapshot(harness, instance, context.scene_id)?;
     let outcome = expect_unchanged(&blocked, &now)
-        .map(|()| vec!["1 件目・2 件目が適用されたまま残っていない".to_string()])
-        .map_err(|reason| format!("巻き戻したはずのプロジェクトが変化しています: {reason}"));
+        .map_err(|reason| format!("巻き戻したはずのプロジェクトが変化しています: {reason}"))
+        .and_then(|()| {
+            let mut notes =
+                vec!["読み直しでは 1 件目・2 件目が適用されたまま残っていない".to_string()];
+            notes.extend(operator_verdict(&format!(
+                "いま行ったこと: 3 件目が失敗する一括適用を流しました。1 件目と 2 件目は一度適用され、\n\
+                 その後に取り消されているはずです。\n\
+                 お願いすること: AviUtl2 の画面で、オブジェクトが動いたまま残っていないかを見てください。\n\
+                 確認する場所: {} と {}、および元の位置。\n\
+                 回答: 一括適用の前と同じままなら y、1 つでも動いたままなら n を入力してください。",
+                placement_label(steps.first_to),
+                placement_label(context.first)
+            ))?);
+            Ok(notes)
+        });
     report.record(
         "巻き戻し",
         "巻き戻し後のプロジェクト",
-        "失敗した一括適用の直前と、プロジェクトが完全に一致する",
-        Mode::Auto,
+        "失敗した一括適用の直前と、プロジェクトが読み直しと UI の双方で一致する",
+        Mode::Operator,
         outcome,
     );
 
