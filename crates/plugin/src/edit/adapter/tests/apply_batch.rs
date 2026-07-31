@@ -458,8 +458,12 @@ fn sub_operations_in_different_layers_scan_each_layer() {
 #[test]
 fn a_destination_freed_by_an_earlier_sub_operation_can_be_moved_into() {
     // 事前解決相で宛先を一括判定すると、先行 sub-operation が空けた宛先へ移動
-    // する要求が必ず失敗する。入れ替えは一括適用の最も自然な用途の 1 つで
-    // あり、これを構造的に不可能にする設計は採れない。
+    // する要求が必ず失敗する。**適用時点で判定することの価値はこの連鎖にある。**
+    // ここでは 1 件目が (0,0) を空け、2 件目がそこへ入る。
+    //
+    // 2 つの対象が互いの位置を交換する形は、判定時点をどれだけ遅らせても
+    // 成立しない。1 件目を発行する時点で相手はまだ宛先に居るためである。
+    // 交換には空き位置を経由する 3 件目が要る。
     let harness = Harness::new();
     let params = batch(vec![
         move_op(harness.selector(0, 0), 1, 500),
@@ -468,7 +472,7 @@ fn a_destination_freed_by_an_earlier_sub_operation_can_be_moved_into() {
     let outcome = harness
         .edit
         .apply_batch(&params)
-        .expect("入れ替えの一括適用が拒否されました");
+        .expect("先行が空けた宛先への移動が拒否されました");
 
     assert_eq!(placement_of(&harness, 1), (1, 500));
     assert_eq!(placement_of(&harness, 2), (0, 0));

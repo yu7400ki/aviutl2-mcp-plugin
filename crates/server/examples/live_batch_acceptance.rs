@@ -257,6 +257,17 @@ struct Observation {
 /// 確認の成否。`Ok` の要素は記録に残す観測値。
 type CheckResult = Result<Vec<String>, String>;
 
+/// 実施できたかどうかを含む確認の結果。
+///
+/// 前提が揃わなかった確認を合格として数えないために、実施しなかったことを
+/// 結果の一部として運ぶ。
+enum Attempt {
+    /// 実施し、合否が決まった。
+    Ran(CheckResult),
+    /// 前提が揃わず実施できなかった。
+    Unmet(String),
+}
+
 /// 観測値を 1 つ伴う合格。
 fn passed_with(note: impl Into<String>) -> CheckResult {
     Ok(vec![note.into()])
@@ -316,6 +327,21 @@ impl Report {
             verdict: Verdict::Skipped(reason.into()),
             notes: Vec::new(),
         });
+    }
+
+    /// 実施できたかどうかを含む結果を記録する。
+    fn record_attempt(
+        &mut self,
+        section: &'static str,
+        title: impl Into<String>,
+        verified: impl Into<String>,
+        mode: Mode,
+        attempt: Attempt,
+    ) {
+        match attempt {
+            Attempt::Ran(outcome) => self.record(section, title, verified, mode, outcome),
+            Attempt::Unmet(reason) => self.skip(section, title, verified, mode, reason),
+        }
     }
 
     /// 実機でのみ決着する事項の観測を記録する。
@@ -1027,7 +1053,7 @@ struct Context {
     scene_id: i32,
     /// 主たる対象の位置。値を書き換えられる設定項目を持つ。
     first: Placement,
-    /// 入れ替えの相手の位置。
+    /// もう 1 つの対象の位置。先行が空けた宛先へ入る側に使う。
     second: Placement,
     /// 空きレイヤーの先頭フレーム。
     free_slots: Vec<Placement>,
@@ -1088,11 +1114,11 @@ impl Context {
             .iter()
             .map(placement_of)
             .find(|at| *at != first)
-            .ok_or_else(|| "入れ替えの相手にできるオブジェクトがありません。".to_string())?;
+            .ok_or_else(|| "2 つ目の対象にできるオブジェクトがありません。".to_string())?;
 
         println!();
         println!("主に使うオブジェクト: {}", placement_label(first));
-        println!("入れ替えの相手: {}", placement_label(second));
+        println!("2 つ目の対象: {}", placement_label(second));
         println!(
             "オブジェクトが 1 つも無いレイヤー: {}",
             free_slots
@@ -1691,7 +1717,7 @@ fn section_basic(
 ) -> Result<(), String> {
     print_section(
         "基本",
-        "移動だけ・設定値だけ・両方を混ぜた一括適用と、2 つのオブジェクトの入れ替えを試します。実行者の操作はありません。",
+        "移動だけ・設定値だけ・両方を混ぜた一括適用と、先行が空けた宛先への移動を試します。実行者の操作はありません。",
     );
 
     let outcome = check_moves_only(harness, instance, context);
@@ -1716,7 +1742,7 @@ fn section_basic(
     report.record(
         "基本",
         "同じ読み取り時点のセレクターを並べた一括適用",
-        "1 回の読み取りで得た同じセレクターを移動と設定値の変更で並べても、両方が成功する",
+        "1 回の読み取りで得た同じセレクターを設定値の変更と移動で並べても、両方が成功する",
         Mode::Auto,
         outcome,
     );
@@ -1725,18 +1751,18 @@ fn section_basic(
     report.record(
         "基本",
         "単独 tool を続けて呼んだ場合",
-        "同じ読み取り時点のセレクターで単独 tool を続けて呼ぶと、2 回目が precondition_failed（mismatch=fingerprint）で拒まれる",
+        "同じ 2 件を同じ順で単独 tool として続けて呼ぶと、2 回目が precondition_failed（mismatch=fingerprint）で拒まれる",
         Mode::Auto,
         outcome,
     );
 
-    let outcome = check_swap(harness, instance, context);
-    report.record(
+    let attempt = check_chained_destination(harness, instance, context);
+    report.record_attempt(
         "基本",
-        "2 つのオブジェクトの入れ替え",
-        "互いの位置を交換する 2 件の移動が、1 回の一括適用で成功する",
+        "先行が空けた宛先への移動",
+        "先行する移動が空けた場所を宛先とする移動が、1 回の一括適用で成功する",
         Mode::Auto,
-        outcome,
+        attempt,
     );
 
     let outcome = check_selector_chain(harness, instance, context);
@@ -1885,11 +1911,13 @@ fn check_mixed(harness: &Harness, instance: &Instance, context: &Context) -> Che
     let target = alterable(harness, instance, context.scene_id, context.first)?;
     let object = target.selector.object.clone();
 
+    // 並びは単独 tool で続けて呼ぶ場合と揃える。同じ 2 件を同じ順で出したとき、
+    // 一括適用では両方通り、単独では 2 件目が拒まれることを対比する。
     let applied = harness.apply_batch(
         &instance.id,
         vec![
-            move_op(&object, destination),
             item_op(&target.selector, &target.item, &target.altered),
+            move_op(&object, destination),
         ],
     );
 
@@ -1941,11 +1969,11 @@ fn judge_mixed(
             placement_label(landed)
         ));
     }
-    if outcome.results[0].effect.is_some() {
-        return Err("移動の結果に effect が載っています".to_string());
-    }
-    if outcome.results[1].effect.is_none() {
+    if outcome.results[0].effect.is_none() {
         return Err("設定値の変更の結果に effect が載っていません".to_string());
+    }
+    if outcome.results[1].effect.is_some() {
+        return Err("移動の結果に effect が載っています".to_string());
     }
     Ok(vec![format!(
         "移動と設定項目 {} の変更が 1 回で通った",
@@ -1956,7 +1984,14 @@ fn judge_mixed(
 /// 同じ読み取り時点のセレクターで単独 tool を続けて呼ぶと拒まれることを確かめる。
 ///
 /// 一括適用が同じ並びを受け付けることと対にして見る。片方だけを確かめると、
-/// 一括適用の約束が単独 tool と何が違うのかを示せない。
+/// 一括適用の約束が単独 tool と何が違うのかを示せない。**送る 2 件も順序も
+/// 一括適用の側と同じにする。** 違えると、通った理由と拒まれた理由の差が
+/// 「一括で出したかどうか」以外にも生じてしまう。
+///
+/// 1 件目は設定値の変更である。**対象の位置を変えないことが要る。** 位置を
+/// 変える編集を先に置くと、2 件目は古いセレクターが指す位置に対象が居ないため
+/// 見つからないことで落ち、fingerprint の照合まで届かない。設定値の変更なら
+/// 位置はそのままで fingerprint だけが変わり、その照合が拒否の理由になる。
 fn check_single_tools_reject_the_second_call(
     harness: &Harness,
     instance: &Instance,
@@ -1966,78 +2001,94 @@ fn check_single_tools_reject_the_second_call(
     let target = alterable(harness, instance, context.scene_id, context.first)?;
     let object = target.selector.object.clone();
 
-    let moved = require(
-        harness.move_object(&instance.id, &object, destination),
-        "単独 tool での移動に失敗しました",
+    require(
+        harness.set_object_item(
+            &instance.id,
+            &target.selector,
+            &target.item,
+            &target.altered,
+        ),
+        "単独 tool での設定値の変更に失敗しました",
     )?;
-    let landed = moved
-        .object
-        .as_ref()
-        .map(placement_of)
-        .ok_or_else(|| "移動の応答が対象を返しませんでした".to_string())?;
 
-    // 移動より前に読んだ effect セレクターのまま設定値を変えにいく。
-    let attempt = harness.set_object_item(
-        &instance.id,
-        &target.selector,
-        &target.item,
-        &target.altered,
-    );
+    // 設定値を変える前に読んだセレクターのまま移動を試みる。対象は同じ位置に
+    // 居るため解決はできるが、内容が変わっているため照合が拒む。
+    let attempt = harness.move_object(&instance.id, &object, destination);
     let probed = expect_rejection(attempt, ErrorCode::PreconditionFailed, "fingerprint");
 
-    // 後始末: 設定値は変わっていないはずだが、念のため確かめてから位置を戻す。
+    // 後始末: 拒まれた移動は起きていないため、設定値だけを元へ戻す。
     let cleaned = restore_item(
         harness,
         instance,
         context.scene_id,
-        landed,
+        context.first,
         &target.effect_name,
         &target.item,
         &target.original,
     )
-    .and_then(|()| restore_placement(harness, instance, context.scene_id, landed, context.first));
+    .and_then(|()| {
+        // 万一移動が通っていた場合に備え、元の位置に居ることまで確かめる。
+        restore_placement(
+            harness,
+            instance,
+            context.scene_id,
+            destination,
+            context.first,
+        )
+    });
     finish(probed, cleaned)
 }
 
-/// 2 つのオブジェクトの入れ替えを確かめる。
+/// 先行する移動が空けた宛先へ、後続の移動が入れることを確かめる。
 ///
-/// **宛先の空きを事前解決の時点で判定する実装では必ず失敗する。** 入れ替えは
-/// 互いの現在位置を宛先にするため、適用時点まで宛先の判定を遅らせて初めて通る。
-fn check_swap(harness: &Harness, instance: &Instance, context: &Context) -> CheckResult {
+/// **宛先の空きを事前解決の時点で一括判定する実装では必ず失敗する。** 2 件目の
+/// 宛先は要求を組み立てた時点では塞がっており、1 件目を適用して初めて空く。
+/// 適用時点まで宛先の判定を遅らせることの価値はここにある。
+///
+/// **2 つの対象が互いの位置を交換する形はこれに当たらない。** 判定時点をどれだけ
+/// 遅らせても、1 件目を発行する時点で相手はまだ宛先に居るため通らない。交換には
+/// 空き位置を経由する 3 件目が要る。
+fn check_chained_destination(harness: &Harness, instance: &Instance, context: &Context) -> Attempt {
+    let Some(&vacant) = context.free_slots.first() else {
+        return Attempt::Unmet("先行が空ける宛先を作るための空きレイヤーがありません".to_string());
+    };
+    Attempt::Ran(probe_chained_destination(
+        harness, instance, context, vacant,
+    ))
+}
+
+/// 空き位置を経由する 2 件の移動を 1 回で流す。
+fn probe_chained_destination(
+    harness: &Harness,
+    instance: &Instance,
+    context: &Context,
+    vacant: Placement,
+) -> CheckResult {
     let first = read_object(harness, instance, context.scene_id, context.first)?;
     let second = read_object(harness, instance, context.scene_id, context.second)?;
 
     let applied = harness.apply_batch(
         &instance.id,
         vec![
-            move_op(&first.selector, context.second),
+            // 1 件目は空きレイヤーへ抜け、元居た場所を空ける。
+            move_op(&first.selector, vacant),
+            // 2 件目の宛先は、1 件目を適用するまで塞がっている。
             move_op(&second.selector, context.first),
         ],
     );
-    let probed = judge_moves(applied, &[context.second, context.first]);
+    let probed = judge_moves(applied, &[vacant, context.first]);
 
-    // 後始末: もう一度入れ替えて元へ戻す。戻せたことは位置の読み直しで確かめる。
-    let cleaned = swap_back(harness, instance, context);
+    // 後始末: 2 件目を元へ戻してから、1 件目を空けた場所へ戻す。順序が逆だと
+    // 戻り先が塞がったままになる。
+    let cleaned = move_home(
+        harness,
+        instance,
+        context.scene_id,
+        context.first,
+        context.second,
+    )
+    .and_then(|()| move_home(harness, instance, context.scene_id, vacant, context.first));
     finish(probed, cleaned)
-}
-
-/// 入れ替えた 2 つを、もう一度の入れ替えで元へ戻す。
-fn swap_back(harness: &Harness, instance: &Instance, context: &Context) -> Result<(), String> {
-    let at_second = read_object(harness, instance, context.scene_id, context.second)?;
-    let at_first = read_object(harness, instance, context.scene_id, context.first)?;
-    require(
-        harness.apply_batch(
-            &instance.id,
-            vec![
-                move_op(&at_second.selector, context.first),
-                move_op(&at_first.selector, context.second),
-            ],
-        ),
-        "入れ替えを元へ戻せません",
-    )?;
-    read_object(harness, instance, context.scene_id, context.first)?;
-    read_object(harness, instance, context.scene_id, context.second)?;
-    Ok(())
 }
 
 /// 応答が返したセレクターで次の一括適用を組み立てられることを確かめる。
