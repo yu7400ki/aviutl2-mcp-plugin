@@ -37,6 +37,13 @@ path = "examples/live_edit_acceptance.rs"
 name = "live_batch_acceptance"
 path = "examples/live_batch_acceptance.rs"
 
+# 描画の実機受け入れ確認。プロジェクトは書き換えないが、成果物をディスクへ書く。
+# 分離方式は上と同じ。
+# 実行は `cargo run -p aviutl2-mcp-server --example live_render_acceptance`。
+[[example]]
+name = "live_render_acceptance"
+path = "examples/live_render_acceptance.rs"
+
 [dependencies]
 aviutl2-mcp-core = { workspace = true }
 base64 = { workspace = true }
