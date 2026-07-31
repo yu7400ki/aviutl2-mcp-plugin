@@ -6,6 +6,7 @@
 //! 非同期タスク間で接続が移動しないようにする。
 
 use crate::api::{ListInstancesResponse, aviutl2_list_instances};
+use crate::artifact::{ArtifactStore, ArtifactStoreError, base_dir_for_registry};
 use crate::discovery::{DiscoveryConfig, list_registered_instances, resolve_instance};
 use crate::mcp::edit_input::{
     AddEffectInput, ApplyBatchInput, CreateObjectInput, DeleteEffectInput, DeleteObjectInput,
@@ -16,6 +17,7 @@ use crate::mcp::input::{
     GetObjectInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput, ListLayersInput,
     ListObjectsInput, parse_instance_id,
 };
+use crate::mcp::render::{RenderFrameInput, RenderFrameOutput};
 use crate::mcp::summary::{MAX_TEXT_CHARS, clamp_chars};
 use crate::mcp::{describe, failure};
 use crate::redact;
@@ -26,11 +28,12 @@ use aviutl2_mcp_core::{
     OPERATION_ADD_EFFECT, OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT, OPERATION_DELETE_EFFECT,
     OPERATION_DELETE_OBJECT, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
     OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
-    OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT, OPERATION_SET_EFFECT_ENABLED,
-    OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME,
-    OPERATION_SET_SELECTION, ObjectDetail, RequestBudgetKind, SERVER_ARTIFACT_INGEST_BUDGET,
-    SERVER_BATCH_REQUEST_BUDGET, SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET,
-    SERVER_RENDER_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, SelectionState, request_budget_kind,
+    OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT, OPERATION_RENDER_FRAME,
+    OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
+    OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail, RenderFrameResult,
+    RequestBudgetKind, SERVER_ARTIFACT_INGEST_BUDGET, SERVER_BATCH_REQUEST_BUDGET,
+    SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET, SERVER_RENDER_REQUEST_BUDGET,
+    SERVER_RESOLVE_BUDGET, SelectionState, request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -54,6 +57,9 @@ pub const REGISTRY_DIR_ENV: &str = "AVIUTL2_MCP_REGISTRY_DIR";
 
 /// インスタンス一覧の resource URI。
 pub const INSTANCES_RESOURCE_URI: &str = "aviutl2://instances";
+
+/// 描画成果物の resource URI の接頭辞。
+pub const ARTIFACTS_RESOURCE_URI_PREFIX: &str = "aviutl2://artifacts/";
 
 /// resource の内容に用いる MIME type。
 const RESOURCE_MIME_TYPE: &str = "application/json";
@@ -160,11 +166,27 @@ impl CallLimits {
 }
 
 /// AviUtl2 の読み取りと編集を提供する MCP サーバー。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AviUtl2McpServer {
     registry_dir: Arc<PathBuf>,
+    /// 描画成果物の保管庫。
+    ///
+    /// 開いていない場合、描画と成果物 resource は使えない。保管庫は
+    /// registry から導いた基底の下へディレクトリを作り、そこへ保護された DACL を
+    /// 設定するため、**開くかどうかを利用側が決められる形にしてある。**
+    artifacts: Option<Arc<ArtifactStore>>,
     limits: CallLimits,
     tool_router: ToolRouter<Self>,
+}
+
+impl std::fmt::Debug for AviUtl2McpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AviUtl2McpServer")
+            .field("registry_dir", &self.registry_dir)
+            .field("limits", &self.limits)
+            .field("artifacts", &self.artifacts.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// 成功した tool call の応答内容。
@@ -175,16 +197,53 @@ struct ToolSuccess {
 
 impl AviUtl2McpServer {
     /// registry ディレクトリを指定してサーバーを作る。
+    ///
+    /// 描画成果物の保管庫は開かない。描画を提供するには [`Self::open`] を使う。
     pub fn new(registry_dir: PathBuf) -> Self {
         Self::with_limits(registry_dir, CallLimits::default())
     }
 
-    /// 実行予算を指定してサーバーを作る。
+    /// 実行予算を指定してサーバーを作る。保管庫は開かない。
     pub fn with_limits(registry_dir: PathBuf, limits: CallLimits) -> Self {
         Self {
             registry_dir: Arc::new(registry_dir),
+            artifacts: None,
             limits,
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// 描画成果物の保管庫を開いてサーバーを作る。
+    ///
+    /// 保管庫は registry と同じ基底の下に作られ、**このサーバーが破棄される
+    /// ときにディレクトリごと消える**。成果物はこのプロセスだけが読むもので
+    /// あり、プロセスの終了後に残す理由が無い。
+    pub fn open(registry_dir: PathBuf) -> Result<Self, ArtifactStoreError> {
+        Self::open_with_limits(registry_dir, CallLimits::default())
+    }
+
+    /// 実行予算を指定し、保管庫を開いてサーバーを作る。
+    pub fn open_with_limits(
+        registry_dir: PathBuf,
+        limits: CallLimits,
+    ) -> Result<Self, ArtifactStoreError> {
+        let store = ArtifactStore::open(base_dir_for_registry(&registry_dir))?;
+        Ok(Self::with_artifact_store(
+            registry_dir,
+            limits,
+            Arc::new(store),
+        ))
+    }
+
+    /// 開いてある保管庫を渡してサーバーを作る。
+    pub fn with_artifact_store(
+        registry_dir: PathBuf,
+        limits: CallLimits,
+        artifacts: Arc<ArtifactStore>,
+    ) -> Self {
+        Self {
+            artifacts: Some(artifacts),
+            ..Self::with_limits(registry_dir, limits)
         }
     }
 
@@ -1185,6 +1244,80 @@ impl AviUtl2McpServer {
         })
         .await
     }
+
+    /// 現在シーンの 1 フレームを描画し、成果物を resource として返す。
+    /// frame 番号は 0 始まりであり UI の表示とは異なる。
+    /// 描画できるのは現在シーンだけである。expected_scene_id には
+    /// aviutl2_get_edit_info などが返した scene_id をそのまま指定する。
+    /// 結果は画像そのものではなく resource URI で返る。内容は resources/read で
+    /// 取得する。
+    /// 成果物は既定で 10 分後に失効し、失効後の resources/read は not_found となる。
+    /// 呼ぶたびに新しい成果物が生まれ、古いものは件数と総量の上限で押し出され得る。
+    /// 出力形式は PNG のみである。
+    /// プロジェクトは変更しないが、一時ファイルを作りホストの計算資源を使う。
+    /// 出力（ファイル書き出し）中は edit_blocked となる。プレビュー再生中は成功し得る。
+    /// 描画の途中でシーンを切り替えると precondition_failed となる。ただし
+    /// 切り替えて戻した場合は検出できない。
+    /// シーンの解像度が大きすぎる場合は unsupported_operation となる。要求を
+    /// 直しても通らない。
+    /// timeout は描画されなかったことを意味する。プロジェクトは変更されていない
+    /// ため、そのまま再送してよい。
+    #[tool(
+        name = "aviutl2_render_frame",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::render_frame()
+        )
+    )]
+    pub async fn aviutl2_render_frame(
+        &self,
+        Parameters(input): Parameters<RenderFrameInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits;
+        let artifacts = self.artifacts.clone();
+        self.run("aviutl2_render_frame", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let artifacts = artifacts
+                .ok_or_else(|| failure::internal_error("描画成果物の保管庫が利用できません"))?;
+
+            // 応答を受けたあと、同じブロッキングタスクの中で成果物を引き取る。
+            // 引き渡しの識別子はここで消費して終わり、以降のどの経路にも
+            // 現れない。
+            let result: RenderFrameResult = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_RENDER_FRAME,
+                &params,
+            )?;
+            let artifact = artifacts
+                .ingest(
+                    &instance_id,
+                    &result.handoff_token,
+                    result.byte_length,
+                    &result.sha256,
+                )
+                .map_err(|error| {
+                    // 理由は分類名だけを残す。引き渡しの識別子もパスも記録しない。
+                    tracing::warn!(reason = error.as_code(), "描画成果物を引き取れませんでした",);
+                    failure::internal_error("描画成果物を引き取れませんでした")
+                })?;
+
+            let output = RenderFrameOutput::new(&result, &artifact);
+            Ok(ToolSuccess {
+                text: describe::render_frame(&output),
+                structured: to_structured(&output)?,
+            })
+        })
+        .await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -1403,6 +1536,14 @@ enum ResourceTarget {
 /// インスタンスの編集情報 resource の URI。
 pub fn edit_info_resource_uri(instance_id: &InstanceId) -> String {
     format!("{INSTANCES_RESOURCE_URI}/{instance_id}/edit-info")
+}
+
+/// 描画成果物 resource の URI。
+///
+/// 識別子は保管庫が採番した値であり、接続先が書いた引き渡しファイルの名前とは
+/// 別物である。URI を見ても他プロセスのファイル名は導けない。
+pub fn artifact_resource_uri(artifact_id: &str) -> String {
+    format!("{ARTIFACTS_RESOURCE_URI_PREFIX}{artifact_id}")
 }
 
 /// resource URI を解釈する。未知の URI は `None`。
@@ -1648,6 +1789,7 @@ mod tests {
         "aviutl2_set_layer_state",
         "aviutl2_set_selection",
         "aviutl2_apply_batch",
+        "aviutl2_render_frame",
     ];
 
     /// 読み取り専用の tool。
@@ -1687,6 +1829,9 @@ mod tests {
     /// 一括適用の tool 名。
     const APPLY_BATCH: &str = "aviutl2_apply_batch";
 
+    /// 描画の tool 名。
+    const RENDER_FRAME: &str = "aviutl2_render_frame";
+
     /// 一括適用と描画の tool、および宣言する annotation。
     ///
     /// 値は `read_only_hint` / `destructive_hint` / `idempotent_hint` の組である。
@@ -1695,7 +1840,11 @@ mod tests {
     /// 一括適用を冪等と名乗らないのは、冪等かどうかが中身に依存する一方、
     /// annotation は tool 単位でしか付けられないためである。作成系と同じく、
     /// 「再送が安全である」と主張しない側へ倒す。
-    const PHASE4_TOOL_ANNOTATIONS: &[(&str, bool, bool)] = &[(APPLY_BATCH, false, false)];
+    const PHASE4_TOOL_ANNOTATIONS: &[(&str, bool, bool)] = &[
+        (APPLY_BATCH, false, false),
+        // 描画はプロジェクトを変更せず、同じ要求は同じ絵を返す。
+        (RENDER_FRAME, true, true),
+    ];
 
     /// 編集の説明規約が掛かる tool。
     ///
@@ -1830,6 +1979,7 @@ mod tests {
             "aviutl2_set_layer_state" => schema::set_layer_state(),
             "aviutl2_set_selection" => schema::set_selection(),
             "aviutl2_apply_batch" => schema::apply_batch(),
+            "aviutl2_render_frame" => schema::render_frame(),
             other => panic!("{other} の outputSchema が定義されていません"),
         }
     }

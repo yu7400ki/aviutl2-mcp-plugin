@@ -24,7 +24,17 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let service = match AviUtl2McpServer::new(registry_dir).serve(stdio()).await {
+    // 描画成果物の保管庫は起動時に開く。保管庫はこのサービスが破棄されるときに
+    // ディレクトリごと消えるため、寿命はプロセスの寿命と一致する。
+    let server = match AviUtl2McpServer::open(registry_dir) {
+        Ok(server) => server,
+        Err(e) => {
+            tracing::error!(error = %e, "描画成果物の保管庫を開けませんでした");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let service = match server.serve(stdio()).await {
         Ok(service) => service,
         Err(e) => {
             tracing::error!(error = %e, "MCP サーバーを開始できませんでした");

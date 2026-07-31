@@ -551,13 +551,29 @@ pub fn write_frame(
     win_io::write_all(handle, &frame, deadline)
 }
 
+/// 試験ごとに独立した registry ディレクトリ。
+///
+/// **基底の直下へ置く。** 描画成果物の保管庫と引き渡しディレクトリは registry の
+/// 親を基底として導かれるため、registry を一時ディレクトリの直下に置くと、
+/// 一時ディレクトリそのものが基底として扱われ、その DACL まで書き換えられる。
 pub fn temp_registry_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
+    let base = test_base_dir();
+    let _ = std::fs::remove_dir_all(&base);
+    base.join("instances")
+}
+
+/// [`temp_registry_dir`] が使う基底を新しく 1 つ作る。
+fn test_base_dir() -> PathBuf {
+    std::env::temp_dir().join(format!(
         "aviutl2-mcp-integration-test-{}",
         InstanceId::new_v4()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
+    ))
+}
+
+/// registry と、そこから導かれる基底ごと後始末する。
+pub fn remove_test_registry(registry_dir: &std::path::Path) {
+    let target = registry_dir.parent().unwrap_or(registry_dir);
+    let _ = std::fs::remove_dir_all(target);
 }
 
 pub fn current_process_created_at() -> String {

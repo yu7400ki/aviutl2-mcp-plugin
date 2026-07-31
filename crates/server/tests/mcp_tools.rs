@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use support::{
     MOCK_STARTUP_GRACE, MockPipeServer, OperationResponses, current_process_created_at, err_result,
-    ok_result, temp_registry_dir,
+    ok_result, remove_test_registry, temp_registry_dir,
 };
 
 /// 生存する mock インスタンスと、それを見る MCP サーバー。
@@ -83,7 +83,7 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.registry_dir);
+        remove_test_registry(&self.registry_dir);
     }
 }
 
@@ -474,7 +474,7 @@ async fn dead_instance_becomes_instance_stale() {
     assert_eq!(structured["retryable"], json!(true));
 
     drop(mock);
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 #[tokio::test]

@@ -161,6 +161,33 @@ fn batch_step_outcome() -> Value {
     ])
 }
 
+/// `aviutl2_render_frame` の出力。
+///
+/// 接続先の result とは別の形である。引き渡しの識別子はここに現れない。
+pub fn render_frame() -> Value {
+    object(&[
+        ("project_epoch", string()),
+        ("project_revision", unsigned()),
+        ("scene_id", integer()),
+        ("frame", unsigned()),
+        ("width", unsigned()),
+        ("height", unsigned()),
+        ("artifact", artifact_ref()),
+    ])
+}
+
+/// 要求元へ渡す成果物の参照。
+fn artifact_ref() -> Value {
+    object(&[
+        ("artifact_id", string()),
+        ("uri", string()),
+        ("media_type", string()),
+        ("byte_length", unsigned()),
+        ("sha256", string()),
+        ("expires_at", string()),
+    ])
+}
+
 /// `aviutl2_set_selection` の出力。
 pub fn set_selection() -> Value {
     object(&[
@@ -1160,6 +1187,61 @@ mod tests {
             assert!(
                 check(&apply_batch(), &value, "$").is_err(),
                 "{key} の混入を検出できていません"
+            );
+        }
+    }
+
+    /// 描画の応答。
+    fn sample_render_output() -> crate::mcp::render::RenderFrameOutput {
+        use crate::mcp::render::{ArtifactRef, RenderFrameOutput};
+        RenderFrameOutput {
+            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            project_revision: 42,
+            scene_id: 3,
+            frame: 120,
+            width: 1920,
+            height: 1080,
+            artifact: ArtifactRef {
+                artifact_id: "5d0b6f7a-1f2e-4a3b-9c8d-7e6f5a4b3c2d".to_string(),
+                uri: "aviutl2://artifacts/5d0b6f7a-1f2e-4a3b-9c8d-7e6f5a4b3c2d".to_string(),
+                media_type: "image/png".to_string(),
+                byte_length: 4096,
+                sha256: format!("sha256:{}", "0".repeat(64)),
+                expires_at: "2026-01-01T00:10:00+00:00".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn render_frame_schema_matches_dto() {
+        assert_conforms(render_frame(), &to_value(&sample_render_output()));
+    }
+
+    #[test]
+    fn render_frame_schema_refuses_a_handoff_token() {
+        // 接続先の result をそのまま流すと引き渡しの識別子が漏れる。型を分けた
+        // うえで、schema の側からも混入を検出できるようにしておく。
+        assert!(
+            !serde_json::to_string(&render_frame())
+                .expect("直列化できる")
+                .contains("handoff_token"),
+            "schema が引き渡しの識別子を宣言しています"
+        );
+
+        for path in ["$", "artifact"] {
+            let mut value = to_value(&sample_render_output());
+            let target = if path == "$" {
+                &mut value
+            } else {
+                &mut value[path]
+            };
+            target
+                .as_object_mut()
+                .expect("object")
+                .insert("handoff_token".to_string(), json!("0123456789abcdef"));
+            assert!(
+                check(&render_frame(), &value, "$").is_err(),
+                "{path} への混入を検出できていません"
             );
         }
     }

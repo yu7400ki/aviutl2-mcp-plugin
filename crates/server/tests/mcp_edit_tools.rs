@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use support::{
     MOCK_STARTUP_GRACE, MockPipeServer, OperationResponses, current_process_created_at, err_result,
-    ok_result, temp_registry_dir,
+    ok_result, remove_test_registry, temp_registry_dir,
 };
 
 const EPOCH: &str = "78be92d1-c8c9-44c6-ae52-387548971468";
@@ -122,7 +122,7 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.registry_dir);
+        remove_test_registry(&self.registry_dir);
     }
 }
 

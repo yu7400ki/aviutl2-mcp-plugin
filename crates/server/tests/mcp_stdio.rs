@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use support::{
     MOCK_STARTUP_GRACE, MockPipeServer, OperationResponses, current_process_created_at, err_result,
-    ok_result, temp_registry_dir, write_bare_descriptor,
+    ok_result, remove_test_registry, temp_registry_dir, write_bare_descriptor,
 };
 
 /// stdio セッションの結果。
@@ -262,7 +262,9 @@ fn expected_annotations(name: &str) -> (bool, bool, bool) {
         | "aviutl2_list_layers"
         | "aviutl2_list_objects"
         | "aviutl2_get_object"
-        | "aviutl2_list_available_effects" => (true, false, true),
+        | "aviutl2_list_available_effects"
+        // 描画はプロジェクトを変更せず、同じ要求は同じ絵を返す。
+        | "aviutl2_render_frame" => (true, false, true),
         // 作成系は再送で重複し得るため冪等と名乗らない。一括適用も、冪等かどうかが
         // 中身に依存する以上、安全である側を主張しない。
         "aviutl2_create_object" | "aviutl2_add_effect" | "aviutl2_apply_batch" => {
@@ -342,7 +344,7 @@ fn stdout_carries_only_mcp_messages() {
     let call = session.response(3);
     assert_eq!(call["result"]["isError"], json!(false));
 
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 #[test]
@@ -376,7 +378,7 @@ fn tool_call_outcome_is_logged_without_rust_log() {
         assert!(logged.contains(field), "{field} がありません: {logged}");
     }
 
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 /// `tools/list` の応答から指定 tool の定義を取り出す。
@@ -448,7 +450,7 @@ fn effect_catalog_paging_is_not_declared_as_revision_checked() {
         );
     }
 
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 #[test]
@@ -577,7 +579,7 @@ fn rejected_tool_calls_do_not_pollute_stdout() {
         );
     }
 
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 #[test]
@@ -674,7 +676,7 @@ fn rejected_edit_tool_calls_take_the_same_path() {
         "受け取った値が応答に含まれています: {echoed}"
     );
 
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 /// 型を取り違えて送られた、応答へ反響してはならない値。
@@ -770,7 +772,7 @@ fn resources_round_trip_over_stdio() {
     );
 
     drop(mock);
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 /// `resources/list` の応答から resource の URI を取り出す。
@@ -804,7 +806,7 @@ fn resources_list_does_not_probe_instances() {
     }
     assert!(session.response(2)["result"]["nextCursor"].is_null());
 
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 #[test]
@@ -852,7 +854,7 @@ fn resources_list_pages_with_a_cursor() {
     all.dedup();
     assert_eq!(all.len(), total + 1);
 
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 #[test]
@@ -871,7 +873,7 @@ fn invalid_resources_list_cursor_is_rejected() {
     let session = run_session(&registry_dir, &requests);
     assert!(session.response(2)["error"].is_object());
 
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 #[test]
@@ -895,7 +897,7 @@ fn unreachable_instance_resource_reports_not_found_with_details() {
     assert_eq!(error["data"]["retryable"], json!(true));
     assert!(error["data"]["correlation_id"].is_string());
 
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 /// resource が返す protocol error の JSON-RPC コード。
@@ -947,7 +949,7 @@ fn busy_instance_resource_reports_not_found_with_retry_after() {
     assert!(error["data"]["correlation_id"].is_string(), "{response}");
 
     drop(mock);
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 /// インスタンス一覧の resource を上限超えにするための表示名の長さ。
@@ -1038,7 +1040,7 @@ fn crowded_instances_resource_stays_within_the_text_limit() {
     assert!(decoded["next_offset"].is_number(), "{decoded}");
 
     drop(mocks);
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 /// 編集情報の resource を上限超えにするための grid_bpm の要素数。
@@ -1094,7 +1096,7 @@ fn oversized_edit_info_resource_reports_truncation_as_readable_json() {
     );
 
     drop(mock);
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 /// インスタンスが read operation を処理している時間。
@@ -1226,7 +1228,7 @@ fn instance_listing_and_tool_call_survive_overlapping() {
     );
 
     drop(mock);
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 /// 編集が pipe を占有する時間。
@@ -1351,7 +1353,7 @@ fn edit_tool_call_and_resource_read_survive_overlapping() {
     );
 
     drop(mock);
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 #[test]
@@ -1403,7 +1405,7 @@ fn tool_call_over_stdio_reaches_the_instance() {
     );
 
     drop(mock);
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 #[test]
@@ -1455,7 +1457,7 @@ fn logs_expose_neither_full_identifiers_nor_absolute_paths() {
     );
 
     drop(mock);
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }
 
 #[test]
@@ -1503,5 +1505,5 @@ fn verbose_logging_does_not_leak_full_identifiers_from_any_crate() {
     );
 
     drop(mock);
-    let _ = std::fs::remove_dir_all(&registry_dir);
+    remove_test_registry(&registry_dir);
 }

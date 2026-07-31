@@ -8,6 +8,7 @@
 //! 番号は対象を見分けるのに要るため載せる。
 
 use crate::api::ListInstancesResponse;
+use crate::mcp::render::RenderFrameOutput;
 use crate::mcp::summary::{TextBuilder, clamp_chars};
 use aviutl2_mcp_core::{
     BatchOutcome, BatchStepOutcome, EditInfo, EditOutcome, GetCurrentSceneResult, InstanceInfo,
@@ -316,6 +317,26 @@ fn batch_step_line(index: usize, step: &BatchStepOutcome) -> String {
         None => "移動".to_string(),
     };
     format!("- [{index}] {action} {}", object_line(&step.object))
+}
+
+/// `aviutl2_render_frame` の text content。
+///
+/// **URI は載せる。** 識別子であり、画像の内容を漏らさない。引き渡しの識別子・
+/// 保存先のパス・画像そのものは載せない。
+pub fn render_frame(output: &RenderFrameOutput) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(format!(
+        "scene_id={} frame={} を {}x{} で描画しました（frame は 0 始まり）",
+        output.scene_id, output.frame, output.width, output.height,
+    ));
+    text.push_line(format!(
+        "成果物 {} media_type={} expires_at={}",
+        output.artifact.uri, output.artifact.media_type, output.artifact.expires_at,
+    ));
+    text.push_line(
+        "画像は応答に含まれません。内容は resources/read にこの URI を渡して取得します。失効後は not_found になります",
+    );
+    text.finish()
 }
 
 /// `aviutl2_set_layer_state` の text content。
@@ -912,6 +933,36 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn render_text_points_at_the_resource_without_leaking_the_image_or_its_source() {
+        use crate::mcp::render::{ArtifactRef, RenderFrameOutput};
+        let output = RenderFrameOutput {
+            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            project_revision: 42,
+            scene_id: 3,
+            frame: 120,
+            width: 1920,
+            height: 1080,
+            artifact: ArtifactRef {
+                artifact_id: "5d0b6f7a-1f2e-4a3b-9c8d-7e6f5a4b3c2d".to_string(),
+                uri: "aviutl2://artifacts/5d0b6f7a-1f2e-4a3b-9c8d-7e6f5a4b3c2d".to_string(),
+                media_type: "image/png".to_string(),
+                byte_length: 4096,
+                sha256: format!("sha256:{}", "0".repeat(64)),
+                expires_at: "2026-01-01T00:10:00+00:00".to_string(),
+            },
+        };
+
+        let text = render_frame(&output);
+        assert!(text.contains("scene_id=3"), "{text}");
+        assert!(text.contains("frame=120"), "{text}");
+        assert!(text.contains("1920x1080"), "{text}");
+        assert!(text.contains(&output.artifact.uri), "{text}");
+        assert!(text.contains("2026-01-01T00:10:00+00:00"), "{text}");
+        assert!(text.contains("resources/read"), "{text}");
+        assert!(text.contains("0 始まり"), "{text}");
     }
 
     #[test]

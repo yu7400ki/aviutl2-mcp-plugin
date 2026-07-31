@@ -13,7 +13,11 @@ pub mod edit_input;
 pub mod failure;
 pub mod input;
 pub mod output_schema;
+pub mod render;
 pub mod server;
 pub mod summary;
 
-pub use server::{AviUtl2McpServer, CallLimits, INSTANCES_RESOURCE_URI, REGISTRY_DIR_ENV};
+pub use server::{
+    ARTIFACTS_RESOURCE_URI_PREFIX, AviUtl2McpServer, CallLimits, INSTANCES_RESOURCE_URI,
+    REGISTRY_DIR_ENV,
+};
