@@ -2450,6 +2450,81 @@ mod tests {
     }
 
     #[test]
+    fn the_batch_description_states_what_costs_the_caller_if_assumed_wrong() {
+        // 一括適用は 1 回で最大 100 件の変更を起こす。誤った期待で要求を組み
+        // 立てさせると、失敗からの復帰が最も高くつく。
+        let description = description_of(APPLY_BATCH);
+        for keyword in [
+            // 入れられる operation を取り違えさせない。
+            "move_object と set_object_item",
+            "単独 tool",
+            "1 件以上 100 件以下",
+            // 一括適用を使う 2 つの理由。
+            "1 つの取り消し単位",
+            "同じ読み取り時点の selector",
+            "配列順",
+            "入れ替え",
+            // 拒否と失敗の読み方。
+            "2 回変更する要求は受け付けない",
+            "自動で巻き戻す",
+            "details.failed_index",
+            "details.failed_object",
+            "details.consistency_unknown",
+            "必ず読み直すこと",
+            "details.rolled_back_count",
+            "計量ではない",
+            // ロックの範囲と解き方。
+            "layer_locked",
+            "設定値の変更はロックされた",
+            // 費用。
+            "UI が数秒止まり得る",
+        ] {
+            assert!(
+                description.contains(keyword),
+                "{APPLY_BATCH} の説明に {keyword} がありません"
+            );
+        }
+    }
+
+    #[test]
+    fn the_render_description_states_what_costs_the_caller_if_assumed_wrong() {
+        let description = description_of(RENDER_FRAME);
+        for keyword in [
+            "0 始まり",
+            // 描けるのは現在シーンだけである。
+            "現在シーンだけ",
+            "expected_scene_id",
+            "aviutl2_get_edit_info",
+            // 画像は応答に埋めない。
+            "resource URI で返る",
+            "resources/read",
+            // 後から読もうとして失敗する場面を減らす。
+            "10 分後に失効",
+            "not_found",
+            "押し出され得る",
+            "PNG のみ",
+            // readOnlyHint の意味を狭く伝える。
+            "プロジェクトは変更しない",
+            "一時ファイル",
+            "計算資源",
+            // 失敗の理由と再試行の判断。
+            "edit_blocked",
+            "プレビュー再生中は成功し得る",
+            "precondition_failed",
+            "切り替えて戻した場合は検出できない",
+            "unsupported_operation",
+            "直しても通らない",
+            "timeout は描画されなかったことを意味する",
+            "そのまま再送してよい",
+        ] {
+            assert!(
+                description.contains(keyword),
+                "{RENDER_FRAME} の説明に {keyword} がありません"
+            );
+        }
+    }
+
+    #[test]
     fn paginated_tool_descriptions_explain_page_arguments() {
         let mut checked = 0;
         for tool in tools() {
