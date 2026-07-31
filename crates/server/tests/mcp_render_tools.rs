@@ -33,9 +33,14 @@ const HANDOFF_TOKEN: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
 const IMAGE_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nfake-image-body";
 
 /// 生存する mock インスタンスと、成果物の保管庫を持つ MCP サーバー。
+///
+/// **保管庫を掴んでいるものは、後始末で基底を消す前に全て閉じる必要がある。**
+/// 保管庫は自分の session ディレクトリのロックファイルを共有なしで開いたまま
+/// 保持するため、閉じないまま基底を消しにいくと走査がそのファイルで打ち切られ、
+/// 一時ディレクトリが残る。サーバーも保管庫の参照を持つため、取り出せる形で持つ。
 struct Harness {
-    server: AviUtl2McpServer,
-    store: Arc<ArtifactStore>,
+    server: Option<AviUtl2McpServer>,
+    store: Option<Arc<ArtifactStore>>,
     mock: MockPipeServer,
     registry_dir: PathBuf,
 }
@@ -61,15 +66,27 @@ impl Harness {
             ArtifactStore::open(base_dir_for_registry(&registry_dir)).expect("保管庫を開ける"),
         );
         Self {
-            server: AviUtl2McpServer::with_artifact_store(
+            server: Some(AviUtl2McpServer::with_artifact_store(
                 registry_dir.clone(),
                 limits,
                 Arc::clone(&store),
-            ),
-            store,
+            )),
+            store: Some(store),
             mock,
             registry_dir,
         }
+    }
+
+    /// 試験対象のサーバー。
+    fn server(&self) -> &AviUtl2McpServer {
+        self.server
+            .as_ref()
+            .expect("サーバーは後始末まで生きています")
+    }
+
+    /// 試験対象の保管庫。
+    fn store(&self) -> &ArtifactStore {
+        self.store.as_ref().expect("保管庫は後始末まで生きています")
     }
 
     fn instance_id(&self) -> String {
@@ -112,7 +129,7 @@ impl Harness {
     }
 
     async fn render(&self) -> CallToolResult {
-        self.server
+        self.server()
             .aviutl2_render_frame(Parameters(RenderFrameInput {
                 instance_id: self.instance_id(),
                 expected_scene_id: SCENE_ID,
@@ -125,6 +142,10 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
+        // 保管庫を掴んでいるものを全て閉じてから基底を消す。サーバーも参照を
+        // 持つため、片方だけ落としても保管庫は生き残る。
+        drop(self.server.take());
+        drop(self.store.take());
         remove_test_registry(&self.registry_dir);
     }
 }
@@ -229,7 +250,7 @@ async fn render_tool_sends_the_scene_guard_and_takes_over_the_artifact() {
     // 失効時刻は保管庫が定めた値である。作成時刻を返すと、要求元は読める間に
     // 読まず、あるいは読めない成果物を読もうとする。
     let stored = harness
-        .store
+        .store()
         .list()
         .into_iter()
         .find(|artifact| artifact.artifact_id == artifact_id)
@@ -242,9 +263,9 @@ async fn render_tool_sends_the_scene_guard_and_takes_over_the_artifact() {
 
     // 所有権は 1 か所ずつ移る。引き渡し元は残らない。
     assert!(!handoff.exists(), "引き渡しファイルが残っています");
-    assert_eq!(harness.store.len(), 1);
+    assert_eq!(harness.store().len(), 1);
     let content = harness
-        .store
+        .store()
         .read(&artifact_id)
         .expect("成果物を読み出せます");
     assert_eq!(content.bytes, IMAGE_BYTES);
@@ -292,7 +313,7 @@ async fn a_declared_length_that_does_not_match_leaves_no_artifact_behind() {
 
     assert_eq!(result.is_error, Some(true));
     assert_eq!(structured(&result)["code"], json!("internal_error"));
-    assert!(harness.store.is_empty(), "成果物が作られています");
+    assert!(harness.store().is_empty(), "成果物が作られています");
     assert!(!handoff.exists(), "引き渡しファイルが残っています");
 }
 
@@ -311,7 +332,7 @@ async fn a_declared_digest_that_does_not_match_leaves_no_artifact_behind() {
 
     assert_eq!(result.is_error, Some(true));
     assert_eq!(structured(&result)["code"], json!("internal_error"));
-    assert!(harness.store.is_empty(), "成果物が作られています");
+    assert!(harness.store().is_empty(), "成果物が作られています");
     assert!(!handoff.exists(), "引き渡しファイルが残っています");
 }
 
@@ -333,7 +354,7 @@ async fn a_malformed_handoff_token_is_rejected_without_touching_any_file() {
 
     assert_eq!(result.is_error, Some(true));
     assert_eq!(structured(&result)["code"], json!("internal_error"));
-    assert!(harness.store.is_empty(), "成果物が作られています");
+    assert!(harness.store().is_empty(), "成果物が作られています");
     assert!(untouched.exists(), "無関係のファイルが消えています");
 }
 
@@ -345,7 +366,7 @@ async fn a_missing_handoff_file_fails_without_producing_an_artifact() {
 
     assert_eq!(result.is_error, Some(true));
     assert_eq!(structured(&result)["code"], json!("internal_error"));
-    assert!(harness.store.is_empty(), "成果物が作られています");
+    assert!(harness.store().is_empty(), "成果物が作られています");
 }
 
 #[tokio::test]
@@ -369,7 +390,7 @@ async fn a_render_failure_from_the_instance_reaches_the_caller() {
         structured["details"].get("change_applied").is_none(),
         "{structured}"
     );
-    assert!(harness.store.is_empty(), "成果物が作られています");
+    assert!(harness.store().is_empty(), "成果物が作られています");
 }
 
 #[tokio::test]
@@ -377,7 +398,7 @@ async fn invalid_render_input_is_rejected_before_any_ipc() {
     let harness = Harness::start(honest_render_result());
 
     let result = harness
-        .server
+        .server()
         .aviutl2_render_frame(Parameters(RenderFrameInput {
             instance_id: harness.instance_id(),
             expected_scene_id: SCENE_ID,

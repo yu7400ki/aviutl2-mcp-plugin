@@ -13,7 +13,7 @@ use aviutl2_mcp_server::pipe_client::PipeClientError;
 use std::time::{Duration, Instant};
 use support::{
     IO_TIMEOUT, MOCK_STARTUP_GRACE, MockPipeServer, OperationResponses, current_process_created_at,
-    err_result, ok_result, request_deadline, temp_registry_dir,
+    err_result, ok_result, remove_test_registry, request_deadline, temp_registry_dir,
 };
 
 #[test]
@@ -86,7 +86,7 @@ fn resolved_client_serves_multiple_requests() {
 
     drop(resolved);
     drop(server);
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn resolve_instance_reports_authentication_failed_for_wrong_secret() {
     );
     assert_eq!(error.error_code(), ErrorCode::AuthenticationFailed);
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn mock_server_stops_while_client_is_connected() {
         started.elapsed().as_millis()
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 /// ping が指定のエラーを返す mock を起こし、descriptor を書く。
@@ -191,7 +191,7 @@ fn resolve_instance_surfaces_host_busy_from_ping() {
         "retry_after_ms を含むエラー応答がそのまま届く"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 #[test]
@@ -219,7 +219,7 @@ fn resolve_instance_hides_other_ping_errors() {
     assert_eq!(failure.error_code(), ErrorCode::InstanceStale);
     assert_eq!(failure.remote_error(), None);
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 #[test]
@@ -244,7 +244,7 @@ fn discovery_excludes_instance_whose_ping_is_rejected() {
         "生存中の descriptor は削除されない"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 #[test]
@@ -267,7 +267,7 @@ fn resolve_instance_excludes_draining_instance() {
         .expect("draining のインスタンスは解決できない");
     assert_eq!(error.error_code(), ErrorCode::InstanceStale);
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 #[test]
@@ -306,7 +306,7 @@ fn discovery_finds_live_mock_instance() {
     assert_eq!(project.revision, Some(support::MOCK_PROJECT_REVISION));
     assert_eq!(project.modified, Some(support::MOCK_PROJECT_MODIFIED));
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 #[test]
@@ -340,7 +340,7 @@ fn discovery_keeps_the_ping_project_state_without_a_descriptor_project() {
     assert_eq!(project.display_name, None);
     assert_eq!(project.path, None);
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 #[test]
@@ -364,7 +364,7 @@ fn discovery_excludes_draining_instance() {
         .expect("registry ディレクトリを列挙できる");
     assert!(instances.is_empty(), "draining instance は一覧に含まれない");
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 #[test]
@@ -395,7 +395,7 @@ fn discovery_excludes_authentication_failed_instance() {
     assert!(instances.is_empty(), "auth_secret 不一致は除外される");
     assert!(path.exists(), "生存中の descriptor は削除されない");
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 #[test]
@@ -428,7 +428,7 @@ fn cleanup_preserves_live_but_unreachable_instance() {
     );
     assert!(path.exists(), "生存中の descriptor は削除されない");
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 #[test]
@@ -474,7 +474,7 @@ fn discovery_isolates_broken_candidate() {
     assert_eq!(instances[0].instance_id, id1);
     assert!(path2.exists(), "生存中の descriptor は削除されない");
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 #[test]
@@ -517,7 +517,7 @@ fn discovery_lists_three_distinct_instances() {
     let ids: std::collections::HashSet<_> = instances.iter().map(|info| info.instance_id).collect();
     assert_eq!(ids.len(), 3, "各 instance_id は互いに異なる");
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
 
 #[test]
@@ -560,5 +560,5 @@ fn discovery_excludes_stopped_instance_even_if_descriptor_remains() {
         "生存中の descriptor は削除されない"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_test_registry(&dir);
 }
