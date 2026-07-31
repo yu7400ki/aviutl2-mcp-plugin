@@ -198,6 +198,9 @@ async fn render_tool_sends_the_scene_guard_and_takes_over_the_artifact() {
     );
 
     let structured = structured(&result);
+    // 描画時点のプロジェクトの世代は、そのまま次の要求の前提として使われる。
+    assert_eq!(structured["project_epoch"], json!(EPOCH));
+    assert_eq!(structured["project_revision"], json!(42));
     assert_eq!(structured["scene_id"], json!(SCENE_ID));
     assert_eq!(structured["frame"], json!(FRAME));
     assert_eq!(structured["width"], json!(1920));
