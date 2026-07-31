@@ -3011,7 +3011,13 @@ fn check_no_secret_in_response(
     )?;
 
     // 設定値と元値の双方を、応答へ現れたら分かる文字列にしてから確かめる。
-    let checked_value = match text_item(harness, instance, context.scene_id, context.first, "") {
+    let checked_value = match text_item(
+        harness,
+        instance,
+        context.scene_id,
+        context.first,
+        SECRET_TEXT_FIRST,
+    ) {
         Ok(target) => {
             let probed =
                 probe_secret_values(harness, instance, context, &target, &alias, &mut leaks);
@@ -3052,13 +3058,10 @@ fn probe_secret_values(
     alias: &str,
     leaks: &mut Vec<String>,
 ) -> CheckResult {
-    let first_value = ItemValue::Text {
-        value: SECRET_TEXT_FIRST.to_string(),
-    };
     require(
         harness.apply_batch(
             &instance.id,
-            vec![item_op(&target.selector, &target.item, &first_value)],
+            vec![item_op(&target.selector, &target.item, &target.altered)],
         ),
         "確認用の設定値を書き込めません",
     )?;
