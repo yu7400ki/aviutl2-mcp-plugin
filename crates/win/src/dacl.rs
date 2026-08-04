@@ -50,8 +50,9 @@ impl ProtectedSecurityAttributes {
 
     /// 与えた SID だけを許可するセキュリティ属性を組み立てる。
     pub(crate) fn for_sids(sids: Vec<Vec<u8>>) -> Result<Self, ProtectedDirError> {
-        // SAFETY: 各 API へ渡すバッファはこの関数内で確保し、必要な長さを
-        // 事前問い合わせで求めている。SID は本構造体が保持し続ける。
+        // SAFETY: ACL と記述子のバッファはこの関数内で確保し、長さは ACE の
+        // 大きさと SID の長さから求めている。`sids` は移動して本構造体が
+        // 保持し続けるため、`sid_ptrs` の指す先は構造体より長く生きる。
         unsafe {
             let sid_ptrs: Vec<PSID> = sids
                 .iter()
@@ -130,7 +131,9 @@ impl ProtectedSecurityAttributes {
 /// 並びは DACL の中でも検証でも同じ意味を持つ。現在のユーザー・SYSTEM・
 /// Administrators の順である。
 pub(crate) fn protected_sids() -> Result<Vec<Vec<u8>>, ProtectedDirError> {
-    // SAFETY: 生成した SID は返り値として呼び出し元が保持する。
+    // SAFETY: 返り値のバッファはそのまま呼び出し元へ渡り、`PSID` を作るのは
+    // 同じ `Vec` を保持したままの [`ProtectedSecurityAttributes::for_sids`] と
+    // 検証だけである。バッファを縮めたり作り直したりする経路は無い。
     unsafe {
         Ok(vec![
             current_user_sid()?,
@@ -144,7 +147,9 @@ pub(crate) fn protected_sids() -> Result<Vec<Vec<u8>>, ProtectedDirError> {
 ///
 /// # Safety
 ///
-/// Win32 API を直接呼ぶ。呼び出し側は返り値のバッファを SID として扱うこと。
+/// 返り値は Win32 が SID として解釈する生のバイト列である。呼び出し側は
+/// バッファの内容を変えずに保持し、そこから作った `PSID` の寿命をバッファの
+/// 寿命の内側へ収めること。
 pub(crate) unsafe fn current_user_sid() -> Result<Vec<u8>, ProtectedDirError> {
     let mut token = HANDLE::default();
     // SAFETY: `token` はスタック上の有効な書き込み先であり、取得したハンドルは
@@ -190,7 +195,7 @@ pub(crate) unsafe fn current_user_sid() -> Result<Vec<u8>, ProtectedDirError> {
 ///
 /// # Safety
 ///
-/// Win32 API を直接呼ぶ。呼び出し側は返り値のバッファを SID として扱うこと。
+/// 返り値の扱いに課される約束は [`current_user_sid`] と同じである。
 pub(crate) unsafe fn well_known_sid(
     kind: WELL_KNOWN_SID_TYPE,
 ) -> Result<Vec<u8>, ProtectedDirError> {
@@ -220,8 +225,17 @@ pub(crate) fn to_wide(path: &Path) -> Vec<u16> {
 
 /// Win32 の失敗を `io::Error` へ包む。
 ///
-/// 呼び出し側が種別ごとの分岐を持たないため、生の Win32 コードへは還元せず、
-/// 表示可能な形のまま包む。
+/// `windows::core::Error` は Win32 のエラーを `HRESULT`（`0x8007_XXXX`）として
+/// 保持するため、そのまま `from_raw_os_error` へ渡すと `raw_os_error` が生の
+/// Win32 コードと一致しない。FACILITY_WIN32 の場合は元のコードへ戻す。
+///
+/// 戻すことで `ErrorKind` が意味を持つ。「作れなかった」理由（権限が無い・
+/// 親が無い・使用中）は呼び出し元の対処が違うため、`Other` へ畳まない。
 pub(crate) fn to_io_error(err: windows::core::Error) -> io::Error {
-    io::Error::other(err)
+    let hresult = err.code().0 as u32;
+    if hresult & 0xFFFF_0000 == 0x8007_0000 {
+        io::Error::from_raw_os_error((hresult & 0xFFFF) as i32)
+    } else {
+        io::Error::other(err)
+    }
 }

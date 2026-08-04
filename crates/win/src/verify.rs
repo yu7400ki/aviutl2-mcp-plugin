@@ -10,10 +10,12 @@ use std::ffi::c_void;
 use std::mem::MaybeUninit;
 use std::path::Path;
 use std::ptr;
+use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 use windows::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION,
-    EqualSid, GetAce, GetAclInformation, GetFileSecurityW, GetSecurityDescriptorControl,
-    GetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
+    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetFileSecurityW,
+    GetSecurityDescriptorControl, GetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR, PSID,
+    SE_DACL_PROTECTED,
 };
 use windows::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 use windows::core::{BOOL, PCWSTR};
@@ -46,7 +48,7 @@ impl SecurityDescriptor {
     ///
     /// 末尾の詰め物まで含むが、確保時に 0 で埋めているため内容は記述子だけで
     /// 決まる。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn bytes(&self) -> &[u8] {
         // SAFETY: `words` は 0 で初期化済みであり、長さは確保した大きさに等しい。
         unsafe {
@@ -78,16 +80,23 @@ pub(crate) fn read_security_descriptor(
 ) -> Result<SecurityDescriptor, ProtectedDirError> {
     let wide = to_wide(path);
     let mut needed = 0u32;
-    // SAFETY: `wide` は NUL 終端したパスである。長さの問い合わせは必ず失敗を
-    // 返すため、結果ではなく書き込まれた長さだけを使う。
-    unsafe {
-        let _ = GetFileSecurityW(
+    // SAFETY: `wide` は NUL 終端したパスである。長さの問い合わせであり、
+    // 記述子の書き込み先は渡さない。
+    let queried = unsafe {
+        GetFileSecurityW(
             PCWSTR(wide.as_ptr()),
             DACL_SECURITY_INFORMATION.0,
             None,
             0,
             &mut needed,
-        );
+        )
+    };
+    // 長さの問い合わせはバッファ不足で失敗する。それ以外の失敗は対象へ
+    // 届いていないことを意味するため、長さを持たないまま先へ進まない。
+    if let Err(e) = queried.ok()
+        && e.code() != ERROR_INSUFFICIENT_BUFFER.into()
+    {
+        return Err(to_io_error(e).into());
     }
 
     let length = needed;
@@ -163,10 +172,14 @@ pub(crate) fn allowed_subjects(
         for index in 0..info.AceCount {
             let mut ace = ptr::null_mut();
             GetAce(acl, index, &mut ace).map_err(to_io_error)?;
-            let ace = &*(ace as *const ACCESS_ALLOWED_ACE);
-            if ace.Header.AceType as u32 != ACCESS_ALLOWED_ACE_TYPE {
+            // 型を見てから許可型の形へ読み替える。ACE の大きさは型ごとに
+            // 異なるため、先に読み替えると許可型でない ACE を許可型の大きさで
+            // 読むことになる。
+            let header = &*(ace as *const ACE_HEADER);
+            if header.AceType as u32 != ACCESS_ALLOWED_ACE_TYPE {
                 continue;
             }
+            let ace = &*(ace as *const ACCESS_ALLOWED_ACE);
             let subject = PSID(ptr::addr_of!(ace.SidStart) as *mut c_void);
             let matched = expected.iter().position(|sid| {
                 EqualSid(subject, PSID(sid.as_ptr().cast::<c_void>() as *mut c_void)).is_ok()

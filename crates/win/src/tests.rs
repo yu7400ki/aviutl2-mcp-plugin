@@ -149,7 +149,12 @@ fn a_directory_that_cannot_be_created_is_not_reported_as_unprotected() {
     let nested = dir.path().join("missing").join("child");
 
     let error = create_protected_directory(&nested).expect_err("親の無いディレクトリを作れました");
-    assert!(matches!(error, ProtectedDirError::Io(_)), "{error:?}");
+    // 理由は種別として残す。権限が無いのか、親が無いのかで呼び出し元の対処が
+    // 違うため、まとめて「その他」へ畳まない。
+    let ProtectedDirError::Io(error) = error else {
+        panic!("作れなかった失敗が入出力の失敗として返りません: {error:?}");
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error:?}");
 }
 
 #[test]
@@ -172,5 +177,8 @@ fn a_protected_file_is_never_created_over_an_existing_one() {
     assert_eq!(seen, [true; 3], "許可する ACE を持たない主体があります");
 
     let error = create_protected_file(&path).expect_err("既存のファイルを作り直せました");
-    assert!(matches!(error, ProtectedDirError::Io(_)), "{error:?}");
+    let ProtectedDirError::Io(error) = error else {
+        panic!("既存のファイルが検証の失敗として返りました: {error:?}");
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists, "{error:?}");
 }

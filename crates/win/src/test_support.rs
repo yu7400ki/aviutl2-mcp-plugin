@@ -21,3 +21,14 @@ pub fn assert_protected_dacl(path: &Path) {
         "許可する ACE を持たない主体があります"
     );
 }
+
+/// 対象のセキュリティ記述子をバイト列として読み出す。
+///
+/// 呼び出しの前後で読み比べると、DACL が書き換えられていないことを確かめ
+/// られる。**成否だけを見ても「壊さないこと」は確かめられない。**
+pub fn security_descriptor_bytes(path: &Path) -> Vec<u8> {
+    read_security_descriptor(path)
+        .expect("DACL を読み出せません")
+        .bytes()
+        .to_vec()
+}
