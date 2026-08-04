@@ -37,7 +37,6 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
@@ -128,12 +127,6 @@ pub struct SettingsSource {
     /// 値の保持と通知を 1 つにすることで、「差し替えたが知らせ忘れた」形が
     /// 作れなくなる。
     changed: watch::Sender<Arc<Settings>>,
-    /// 値が変わった回数。
-    ///
-    /// **待ち受けるなら [`SettingsSource::subscribe`] を使う。** こちらは
-    /// 「前に見たときから変わったか」を非同期の文脈を持たずに数えたい呼び出し側
-    /// のための口であり、差し替えと同じ区間で進む。
-    applied: AtomicU64,
 }
 
 impl SettingsSource {
@@ -147,7 +140,6 @@ impl SettingsSource {
     fn new(settings: Arc<Settings>) -> Self {
         Self {
             changed: watch::Sender::new(settings),
-            applied: AtomicU64::new(0),
         }
     }
 
@@ -166,26 +158,20 @@ impl SettingsSource {
         self.changed.subscribe()
     }
 
-    /// 値が変わった回数。
-    pub fn applied(&self) -> u64 {
-        self.applied.load(Ordering::Acquire)
-    }
-
     /// 値が変わっていれば差し替え、購読者へ知らせる。変わったかどうかを返す。
     ///
     /// **同じ内容を読み直しても知らせない。** 原子的置換は一時ファイルの作成と
     /// rename で複数の記録を生むため、記録の数だけ知らせると変化していない
     /// 通知が並ぶ。
     ///
-    /// 回数を進めるのは差し替えと同じ区間の内側である。**「差し替えたが数え
-    /// 忘れた」も「数えたが知らせ忘れた」も書けない。**
+    /// 差し替えたかどうかは戻り値がそのまま運ぶ。**保持と通知が 1 つであるため、
+    /// 「差し替えたが知らせ忘れた」形が書けない。**
     fn replace_if_changed(&self, settings: Arc<Settings>) -> bool {
         self.changed.send_if_modified(|current| {
             if **current == *settings {
                 return false;
             }
             *current = settings;
-            self.applied.fetch_add(1, Ordering::AcqRel);
             true
         })
     }

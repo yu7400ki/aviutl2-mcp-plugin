@@ -172,14 +172,20 @@ fn consecutive_writes_settle_on_the_last_state() {
 #[test]
 fn a_corrupt_file_keeps_the_last_known_good_snapshot() {
     // **「何も起きないこと」を待って確かめない。** 破損の後に検出できる変更を
-    // 続けて置き、それが届いた時点で差し替えの回数を数える。破損が差し替えを
-    // 起こしていれば回数が 1 つ多くなる。
+    // 続けて置き、それが届くことを確かめる。
+    //
+    // **破損そのものが差し替えを起こさないことは
+    // [`a_corrupt_file_is_reported_instead_of_being_swallowed_by_a_retry`] が
+    // 固定する**——
+    // 読み直しを直接呼ぶため、差し替えの有無を待たずに観測できる。ここで見て
+    // いるのは監視の側であり、破損を挟んでも次の変更が届くことである。
     let dir = TempDir::new();
     dir.replace_settings(r#"{"artifact":{"ttl_seconds":120}}"#);
     let watcher = SettingsWatcher::start(reader_for(&dir), ParentPolicy::Require)
         .expect("監視を開始できます");
     let source = watcher.source();
     assert_eq!(source.settings().artifact_ttl(), Duration::from_secs(120));
+    let mut changes = source.subscribe();
 
     dir.replace_settings("{ broken");
     dir.replace_settings(r#"{"artifact":{"ttl_seconds":900}}"#);
@@ -188,9 +194,11 @@ fn a_corrupt_file_keeps_the_last_known_good_snapshot() {
         wait_until(|| source.settings().artifact_ttl() == Duration::from_secs(900)),
         "破損の後の変更が届きませんでした"
     );
+    // 届いた値が最後の状態である。破損が既定値へ落としていれば、購読者が最初に
+    // 見る値がそれになる。
     assert_eq!(
-        source.applied(),
-        1,
+        changes.borrow_and_update().artifact_ttl(),
+        Duration::from_secs(900),
         "破損が snapshot の差し替えを起こしました"
     );
 }
@@ -287,6 +295,7 @@ fn a_corrupt_file_is_reported_instead_of_being_swallowed_by_a_retry() {
     dir.replace_settings(r#"{"artifact":{"ttl_seconds":120}}"#);
     let mut reader = reader_for(&dir);
     let source = SettingsSource::fixed((*reader.settings()).clone());
+    let changes = source.subscribe();
 
     dir.replace_settings("{ broken");
     let (outcome, logs) = capture_logs(|| reload(&mut reader, &source));
@@ -300,9 +309,13 @@ fn a_corrupt_file_is_reported_instead_of_being_swallowed_by_a_retry() {
         logs.contains("WARN") && logs.contains("設定を解析できませんでした"),
         "破損を告げる WARN が記録されていません: {logs}"
     );
-    // last-known-good は維持される。
+    // last-known-good は維持される。読み直しは同期に呼んであるため、購読者が
+    // 起こされていないことをそのまま観測できる。
     assert_eq!(source.settings().artifact_ttl(), Duration::from_secs(120));
-    assert_eq!(source.applied(), 0);
+    assert!(
+        !changes.has_changed().expect("供給元は生きています"),
+        "破損が snapshot の差し替えを起こしました"
+    );
 }
 
 #[test]
@@ -446,6 +459,7 @@ fn the_snapshot_is_replaced_only_when_the_value_changes() {
     dir.replace_settings(r#"{"log_level":"debug"}"#);
     let mut reader = reader_for(&dir);
     let source = SettingsSource::fixed((*reader.settings()).clone());
+    let changes = source.subscribe();
 
     dir.replace_settings(r#"{"log_level":"debug"}"#);
     assert_eq!(
@@ -453,7 +467,10 @@ fn the_snapshot_is_replaced_only_when_the_value_changes() {
         ReloadOutcome::Same,
         "同じ内容で差し替えました"
     );
-    assert_eq!(source.applied(), 0);
+    assert!(
+        !changes.has_changed().expect("供給元は生きています"),
+        "同じ内容で購読者を起こしました"
+    );
 
     dir.replace_settings(r#"{"log_level":"trace"}"#);
     assert_eq!(
@@ -461,7 +478,10 @@ fn the_snapshot_is_replaced_only_when_the_value_changes() {
         ReloadOutcome::Applied,
         "変更が反映されませんでした"
     );
-    assert_eq!(source.applied(), 1);
+    assert!(
+        changes.has_changed().expect("供給元は生きています"),
+        "変更が購読者へ届いていません"
+    );
     assert_eq!(source.settings().log_level(), Some("trace"));
 }
 
