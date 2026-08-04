@@ -41,13 +41,13 @@ use win32_ui::{Dialog, DialogHandle, MessageBox};
 use windows::Win32::Foundation::HWND;
 
 /// ホストの設定メニューに出す名前。
-pub const MENU_NAME: &str = "AviUtl2 MCP の設定";
+pub const MENU_NAME: &str = "AviUtl2 MCP";
 
 /// ダイアログとメッセージボックスの見出し。
 ///
-/// **メニューの名前と同じものを指す。** 利用者が選んだ項目と開いた窓が同じ名前
-/// を名乗らなければ、どれを開いたのかが分からない。
-const DIALOG_TITLE: &str = MENU_NAME;
+/// **メニューの名前より 1 語長い。** 窓は親の見出しを伴わずに開くため、
+/// 名前だけでは何を映しているのかが分からない。
+const DIALOG_TITLE: &str = "AviUtl2 MCP の設定";
 
 /// tool の一覧を並べる列数。
 const TOOL_COLUMNS: usize = 3;
