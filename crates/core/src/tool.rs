@@ -214,4 +214,19 @@ mod tests {
             .collect();
         assert_eq!(listed, known);
     }
+
+    /// tool 名の集合に、接頭辞を持つ名前が 1 つも含まれないこと。
+    ///
+    /// 導出の結果だけを見る。写像が恒等であることは
+    /// `tool_names_equal_the_operation_names` が別に固定しているため、
+    /// この結果は導出を経由するすべての呼び出し側に自動で及ぶ。
+    #[test]
+    fn no_tool_name_carries_the_old_prefix() {
+        for name in all_tool_names() {
+            assert!(
+                !name.starts_with("aviutl2_"),
+                "{name} が古い接頭辞を持っています"
+            );
+        }
+    }
 }
