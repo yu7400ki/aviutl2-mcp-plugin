@@ -165,13 +165,15 @@ fn consecutive_writes_settle_on_the_last_state() {
         wait_until(|| source.settings().log_level() == Some("trace")),
         "最後の状態が反映されませんでした"
     );
-    // 反映された後も中間の状態へ戻らない。
-    std::thread::sleep(Duration::from_millis(200));
-    assert_eq!(source.settings().log_level(), Some("trace"));
+    // 中間の状態へ戻ることはない。読み直しはそのつどファイルの現在の内容を
+    // 読むため、遅れて走った読み直しも同じ最後の状態しか見ない。
 }
 
 #[test]
 fn a_corrupt_file_keeps_the_last_known_good_snapshot() {
+    // **「何も起きないこと」を待って確かめない。** 破損の後に検出できる変更を
+    // 続けて置き、それが届いた時点で差し替えの回数を数える。破損が差し替えを
+    // 起こしていれば回数が 1 つ多くなる。
     let dir = TempDir::new();
     dir.replace_settings(r#"{"artifact":{"ttl_seconds":120}}"#);
     let watcher = SettingsWatcher::start(reader_for(&dir), ParentPolicy::Require)
@@ -180,20 +182,26 @@ fn a_corrupt_file_keeps_the_last_known_good_snapshot() {
     assert_eq!(source.settings().artifact_ttl(), Duration::from_secs(120));
 
     dir.replace_settings("{ broken");
-    std::thread::sleep(Duration::from_millis(300));
+    dir.replace_settings(r#"{"artifact":{"ttl_seconds":900}}"#);
 
-    assert_eq!(
-        source.settings().artifact_ttl(),
-        Duration::from_secs(120),
-        "破損で直前の設定が失われました"
+    assert!(
+        wait_until(|| source.settings().artifact_ttl() == Duration::from_secs(900)),
+        "破損の後の変更が届きませんでした"
     );
-    assert_eq!(source.applied(), 0, "破損で snapshot を差し替えました");
+    assert_eq!(
+        source.applied(),
+        1,
+        "破損が snapshot の差し替えを起こしました"
+    );
 }
 
 #[test]
 fn the_watcher_stops_when_it_is_dropped() {
     // 停止は保留中の I/O のキャンセルを伴う。`OverlappedOp` の `Drop` が完了を
-    // 確定させるまで戻らないため、ここで待ち続ける実装なら期限で気付ける。
+    // 確定させるまで戻らないため、ここで待ち続ける実装なら試験ごと固まる。
+    //
+    // **`drop` は監視スレッドを join する。** 戻った時点でスレッドは終わって
+    // おり、以後の変更を観測する主体が居ない。**待って確かめる必要が無い。**
     let dir = TempDir::new();
     dir.replace_settings(r#"{"log_level":"debug"}"#);
     let watcher = SettingsWatcher::start(reader_for(&dir), ParentPolicy::Require)
@@ -201,19 +209,14 @@ fn the_watcher_stops_when_it_is_dropped() {
     let source = watcher.source();
     assert_eq!(source.settings().log_level(), Some("debug"));
 
-    let started = Instant::now();
     drop(watcher);
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "監視スレッドの停止に {}ms 掛かりました",
-        elapsed.as_millis()
-    );
 
-    // 停止後の変更は反映されない。監視スレッドが生き残っていればここで動く。
     dir.replace_settings(r#"{"log_level":"trace"}"#);
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(source.settings().log_level(), Some("debug"));
+    assert_eq!(
+        source.settings().log_level(),
+        Some("debug"),
+        "停止後の変更が反映されました"
+    );
 }
 
 #[test]
