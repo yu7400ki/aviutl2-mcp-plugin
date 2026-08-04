@@ -192,9 +192,10 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
         init_tracing();
         EDIT_HANDLE.init(registry.create_edit_handle());
 
-        // 設定画面はこの後の初期化に依存しない。**先に登録するのは、初期化が
-        // 失敗した状態でも設定を直せるようにするためである**——設定が原因で
-        // 失敗している場合、画面が唯一の修復手段になる。
+        // 設定画面はこの後の初期化に何も依存しない。**先に登録するのは、以降の
+        // いずれかの段が失敗して戻った場合にも画面を開けるようにするためで
+        // ある**——コールバックが触れるのは設定の読み書き口だけであり、
+        // ここで用意する状態を 1 つも参照しない。
         //
         // ラッパーの設定メニュー用のマクロを使わない。マクロが生成するブリッジは
         // plugin の singleton のロックを保持したままハンドラを実行するが、
@@ -558,7 +559,7 @@ pub fn placeholder() {}
 #[cfg(all(windows, test))]
 mod tests {
     use super::*;
-    use crate::test_support::with_silent_panic_hook;
+    use crate::test_support::{capture_logs, with_silent_panic_hook};
 
     #[test]
     fn shutdown_sequence_removes_descriptor_even_if_earlier_steps_panic() {
@@ -865,54 +866,6 @@ mod tests {
         assert!(!project_state.modified());
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// tracing イベントの出力先として使う共有バッファ。
-    #[derive(Clone, Default)]
-    struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl LogCapture {
-        fn contents(&self) -> String {
-            let buffer = self.0.lock().unwrap_or_else(|e| e.into_inner());
-            String::from_utf8_lossy(&buffer).into_owned()
-        }
-    }
-
-    impl std::io::Write for LogCapture {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> aviutl2::tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
-        type Writer = LogCapture;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    /// `f` の実行中に発行された tracing イベントを集めて返す。
-    ///
-    /// 出力先はこのスレッドの subscriber に限られるため、ホストのログ設定にも
-    /// 他のテストにも影響しない。
-    fn capture_logs(f: impl FnOnce()) -> String {
-        let capture = LogCapture::default();
-        let subscriber = aviutl2::tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .with_writer(capture.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, f);
-        capture.contents()
     }
 
     /// ログに完全な識別子も絶対パスも現れないことを確かめる。

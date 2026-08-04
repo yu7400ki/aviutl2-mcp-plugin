@@ -6,9 +6,16 @@
 //! # 触れるのはモジュールの `static` だけである
 //!
 //! 設定メニューのコールバックは `extern "C" fn` でありキャプチャを持てない。
-//! 触れるのは [`crate::settings`] が持つモジュールの `static`（設定ファイルの
-//! 場所の解決結果と現在の snapshot）だけであり、**plugin の singleton にも編集
+//! 触れるのは次の 2 つの `static` だけであり、**plugin の singleton にも編集
 //! ハンドルにも触れない。** どのスレッドから呼ばれても成り立つ形である。
+//!
+//! | 触れるもの | 経路 |
+//! |---|---|
+//! | [`crate::settings`] の読み書き口（設定ファイルの場所と現在の snapshot） | `refresh` / `current` / `save` |
+//! | 稼働中の記録の水準を差し替える口 | `refresh` / `save` が設定の変化を記録の層へ届ける |
+//!
+//! **いずれもロックを保持したままダイアログへ入らない。** 保持するのは呼び出し
+//! 1 つ分の区間だけである。
 //!
 //! ラッパーの設定メニュー用のマクロを使わないのも同じ理由による。マクロが生成
 //! するブリッジは plugin の singleton のロックを保持したままハンドラを実行する
@@ -23,6 +30,7 @@
 pub mod form;
 
 use crate::settings;
+use aviutl2_mcp_core::settings::SettingsChange;
 use aviutl2_mcp_core::tool::ToolFamily;
 use form::{BehaviorGroup, SettingsForm};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -36,7 +44,10 @@ use windows::Win32::Foundation::HWND;
 pub const MENU_NAME: &str = "AviUtl2 MCP の設定";
 
 /// ダイアログとメッセージボックスの見出し。
-const DIALOG_TITLE: &str = "AviUtl2 MCP の設定";
+///
+/// **メニューの名前と同じものを指す。** 利用者が選んだ項目と開いた窓が同じ名前
+/// を名乗らなければ、どれを開いたのかが分からない。
+const DIALOG_TITLE: &str = MENU_NAME;
 
 /// tool の一覧を並べる列数。
 const TOOL_COLUMNS: usize = 3;
@@ -206,39 +217,57 @@ fn button_row(form: &Rc<SettingsForm>, handle: &DialogHandle) -> FlexLayout {
 }
 
 /// OK を押したときの処理。
-///
-/// **全項目を読んで検証し、範囲外なら閉じない。** 保存に失敗した場合も閉じない
-/// ——黙って閉じると、利用者は変更が失われたことを知らないまま去る。
-///
-/// ウィンドウプロシージャの内側にも捕捉層があるが、ここでも捕捉する。**層が
-/// 1 つだと、その実装が古い版に差し替わったときに穴が開く。**
 fn on_accept(form: &SettingsForm, handle: &DialogHandle) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        let parent = handle.hwnd();
-        let change = match form.collect() {
-            Ok(change) => change,
-            Err(messages) => {
-                MessageBox::error(
-                    parent,
-                    &format!("入力できない値があります。\n\n{}", messages.join("\n")),
-                    DIALOG_TITLE,
-                );
-                return;
-            }
-        };
-        if !change.is_empty()
-            && let Err(e) = settings::save(&change)
-        {
-            tracing::error!("設定を保存できませんでした: {e:#}");
-            MessageBox::error(
-                parent,
-                &format!("設定を保存できませんでした。\n{e:#}"),
-                DIALOG_TITLE,
-            );
-            return;
+    guarded_accept(form, handle, settings::save);
+}
+
+/// 保存の口を差し替えられる形の OK。
+///
+/// **捕捉と記録はここ 1 か所に置く。** ウィンドウプロシージャの内側にも捕捉層が
+/// あるが、ここでも捕捉する——層が 1 つだと、その実装が古い版に差し替わった
+/// ときに穴が開く。**捕捉したら必ず記録する。** 内側で捕まえる以上、外側の層は
+/// 数を進めず、繰り返しに対する復旧も発動しない。**記録が無ければ、OK が
+/// 無反応なダイアログが痕跡を残さずに残る。**
+///
+/// 捕捉を二重にしてあるのは、記録そのものが panic しても境界を越えさせない
+/// ためである。
+fn guarded_accept<S>(form: &SettingsForm, handle: &DialogHandle, save: S)
+where
+    S: FnOnce(&SettingsChange) -> anyhow::Result<()>,
+{
+    let _ = catch_unwind(AssertUnwindSafe(move || {
+        match catch_unwind(AssertUnwindSafe(move || accept_outcome(form, save))) {
+            Ok(Ok(())) => handle.accept(),
+            Ok(Err(message)) => MessageBox::error(handle.hwnd(), &message, DIALOG_TITLE),
+            Err(_) => tracing::error!("設定の確定で panic を捕捉しました"),
         }
-        handle.accept();
     }));
+}
+
+/// OK の判定。
+///
+/// **全項目を読んで検証し、範囲外なら画面を閉じない。** 保存に失敗した場合も
+/// 閉じない——黙って閉じると、利用者は変更が失われたことを知らないまま去る。
+/// 開いたままであれば、もう一度 OK を押すだけで済む。
+///
+/// 戻り値の `Err` は利用者へ示す文言である。**閉じてよいかだけを返し、画面の
+/// 操作を行わない**ため、ウィンドウを作らずに判定を確かめられる。
+fn accept_outcome<S>(form: &SettingsForm, save: S) -> Result<(), String>
+where
+    S: FnOnce(&SettingsChange) -> anyhow::Result<()>,
+{
+    let change = form
+        .collect()
+        .map_err(|messages| format!("入力できない値があります。\n\n{}", messages.join("\n")))?;
+    // 変更が無ければ書かない。書けば更新時刻が動き、他のプロセスに読み直しを
+    // 強いるだけである。
+    if change.is_empty() {
+        return Ok(());
+    }
+    save(&change).map_err(|e| {
+        tracing::error!("設定を保存できませんでした: {e:#}");
+        format!("設定を保存できませんでした。\n{e:#}")
+    })
 }
 
 /// 族の見出し。
@@ -288,5 +317,121 @@ mod tests {
             let count = form.numbers_in(group).count() + usize::from(group == BehaviorGroup::Log);
             assert!(count > 0, "{group:?} に入力欄がありません");
         }
+    }
+
+    /// 保存の呼び出しを記録する差し替え口。
+    #[derive(Default)]
+    struct RecordingSave {
+        saved: std::cell::RefCell<Vec<SettingsChange>>,
+    }
+
+    impl RecordingSave {
+        fn save(&self) -> impl FnOnce(&SettingsChange) -> anyhow::Result<()> {
+            move |change| {
+                self.saved.borrow_mut().push(change.clone());
+                Ok(())
+            }
+        }
+
+        fn count(&self) -> usize {
+            self.saved.borrow().len()
+        }
+    }
+
+    /// 何も変えていなければ保存しないこと。
+    ///
+    /// 書けば更新時刻が動き、他のプロセスに読み直しを強いるだけである。
+    #[test]
+    fn an_untouched_form_is_accepted_without_saving() {
+        let form = SettingsForm::new(&Settings::default());
+        let saver = RecordingSave::default();
+
+        assert_eq!(accept_outcome(&form, saver.save()), Ok(()));
+        assert_eq!(saver.count(), 0, "変更が無いのに保存しました");
+    }
+
+    /// 変更があれば、その変更点だけを保存すること。
+    #[test]
+    fn a_touched_form_saves_only_the_change() {
+        let form = SettingsForm::new(&Settings::default());
+        form.numbers_in(BehaviorGroup::Timing)
+            .next()
+            .unwrap()
+            .control()
+            .set_value(150);
+        let saver = RecordingSave::default();
+
+        assert_eq!(accept_outcome(&form, saver.save()), Ok(()));
+
+        let saved = saver.saved.borrow();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].budget_scale_percent, Some(150));
+        assert!(saved[0].tools.is_empty());
+    }
+
+    /// 検証を通らない入力は保存へ進まず、閉じてよいとも言わないこと。
+    #[test]
+    fn invalid_input_neither_saves_nor_accepts() {
+        let form = SettingsForm::new(&Settings::default());
+        form.numbers_in(BehaviorGroup::Timing)
+            .next()
+            .unwrap()
+            .control()
+            .set_text("いち");
+        let saver = RecordingSave::default();
+
+        let message = accept_outcome(&form, saver.save()).unwrap_err();
+
+        assert!(message.contains("入力できない値があります"), "{message}");
+        assert_eq!(saver.count(), 0, "検証を通らない入力を保存しました");
+    }
+
+    /// 保存に失敗したら閉じてよいと言わず、理由を伝えること。
+    #[test]
+    fn a_failed_save_is_reported_and_does_not_accept() {
+        let form = SettingsForm::new(&Settings::default());
+        form.numbers_in(BehaviorGroup::Timing)
+            .next()
+            .unwrap()
+            .control()
+            .set_value(150);
+
+        let message = accept_outcome(&form, |_| {
+            Err(anyhow::anyhow!(
+                "設定の名前付き mutex を獲得できませんでした"
+            ))
+        })
+        .unwrap_err();
+
+        assert!(message.contains("設定を保存できませんでした"), "{message}");
+        assert!(message.contains("mutex"), "理由が伝わりません: {message}");
+    }
+
+    /// 確定の途中で panic しても、境界を越えず、記録が残ること。
+    ///
+    /// **内側で捕まえる以上、ウィンドウプロシージャの捕捉層は数を進めない。**
+    /// 繰り返しに対する復旧も発動しないため、記録が無ければ「OK が無反応な
+    /// ダイアログ」が痕跡を残さずに残る。
+    #[test]
+    fn a_panic_while_confirming_is_caught_and_logged() {
+        let form = SettingsForm::new(&Settings::default());
+        form.numbers_in(BehaviorGroup::Timing)
+            .next()
+            .unwrap()
+            .control()
+            .set_value(150);
+        let dialog = Dialog::new(DIALOG_TITLE);
+        let handle = dialog.handle();
+
+        let logs = crate::test_support::with_silent_panic_hook(|| {
+            crate::test_support::capture_logs(|| {
+                guarded_accept(&form, &handle, |_| panic!("保存の途中で panic させます"));
+            })
+        });
+
+        assert!(
+            logs.contains("ERROR") && logs.contains("panic を捕捉しました"),
+            "捕捉した panic が記録されていません: {logs}"
+        );
     }
 }

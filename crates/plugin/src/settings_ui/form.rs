@@ -16,7 +16,7 @@
 //! 数値の範囲は `aviutl2_mcp_core::settings` の下限・上限の定数から導く。
 //! **書き写さないため、tool や範囲が変わったときに画面だけが古くなる経路が無い。**
 
-use aviutl2_mcp_core::budget::RequestBudgetKind;
+use aviutl2_mcp_core::budget::{RequestBudgetKind, ScaledBudgets};
 use aviutl2_mcp_core::settings::{
     MAX_ARTIFACT_MAX_COUNT, MAX_ARTIFACT_MAX_TOTAL_BYTES, MAX_ARTIFACT_TTL_SECONDS,
     MAX_BUDGET_SCALE_PERCENT, MAX_HANDOFF_TTL_SECONDS, MAX_RENDER_DRAIN_TIMEOUT_MS,
@@ -144,8 +144,10 @@ impl NumericSetting {
     /// 入力できる下限と上限。
     ///
     /// **`aviutl2_mcp_core` の下限・上限から導く。** 引き渡しの保持時間だけは
-    /// 下限が倍率後の描画の要求フェーズ予算と連動するため、`settings` を見る。
-    pub fn range(self, settings: &Settings) -> (i32, i32) {
+    /// 下限が倍率後の描画の要求フェーズ予算と連動するため、予算一式を見る。
+    /// **倍率は同じ画面で変えられるため、確定時には入力済みの倍率から組み直した
+    /// 一式を渡す**（[`SettingsForm::collect`]）。
+    pub fn range(self, budgets: ScaledBudgets) -> (i32, i32) {
         let (min, max) = match self {
             NumericSetting::BudgetScalePercent => (
                 u64::from(MIN_BUDGET_SCALE_PERCENT),
@@ -165,7 +167,7 @@ impl NumericSetting {
                 MAX_ARTIFACT_MAX_TOTAL_BYTES / BYTES_PER_MIB,
             ),
             NumericSetting::HandoffTtlSeconds => {
-                let floor = handoff_ttl_floor(settings);
+                let floor = handoff_ttl_floor(budgets);
                 (floor, MAX_HANDOFF_TTL_SECONDS.max(floor))
             }
             NumericSetting::SessionStaleAfterSeconds => (
@@ -219,10 +221,9 @@ impl NumericSetting {
 ///
 /// 固定の下限と、倍率を適用した描画の要求フェーズ予算の長い方である。解決側と
 /// 同じ規則であり、画面が解決側より緩い範囲を提示しないようにする。
-fn handoff_ttl_floor(settings: &Settings) -> u64 {
+fn handoff_ttl_floor(budgets: ScaledBudgets) -> u64 {
     MIN_HANDOFF_TTL_SECONDS.max(
-        settings
-            .budgets()
+        budgets
             .server_request_phase(RequestBudgetKind::Render)
             .as_secs(),
     )
@@ -247,11 +248,6 @@ impl ToolToggle {
         &self.name
     }
 
-    /// 属する族。
-    pub fn family(&self) -> ToolFamily {
-        self.family
-    }
-
     /// 画面に置くチェックボックス。
     pub fn control(&self) -> CheckBox {
         self.control.clone()
@@ -271,12 +267,21 @@ impl NumericInput {
         self.setting
     }
 
-    /// 単位と範囲を添えた見出し。
+    /// 単位と、入力欄が持つ範囲を添えた見出し。
     pub fn label(&self) -> String {
         let (min, max) = self
             .control
             .range_bounds()
             .expect("数値の入力欄は必ず範囲を持つ");
+        self.label_for(min, max)
+    }
+
+    /// 単位と、与えられた範囲を添えた見出し。
+    ///
+    /// **確定時の判定は入力済みの倍率から範囲を引き直す**ため、そのとき伝える
+    /// 見出しは入力欄が持つ範囲と食い違い得る。伝えるのは判定に使った範囲で
+    /// なければならない。
+    fn label_for(&self, min: i32, max: i32) -> String {
         format!(
             "{} ({}, {min}〜{max})",
             self.setting.name(),
@@ -294,7 +299,7 @@ impl NumericInput {
 pub struct LogLevelChoice {
     control: ComboBox,
     items: Vec<String>,
-    initial_index: i32,
+    initial_index: usize,
 }
 
 impl LogLevelChoice {
@@ -313,22 +318,28 @@ impl LogLevelChoice {
         &self.items
     }
 
-    /// 現在選ばれている値。範囲外の選択は既定の位置として扱う。
+    /// 開いた時点の値。
+    fn initial(&self) -> &str {
+        self.items[self.initial_index].as_str()
+    }
+
+    /// 現在選ばれている値。
+    ///
+    /// **選択を読めない場合は開いた時点の値へ倒す。** 何も選ばれていないときの
+    /// 通知は負の値であり、先頭の要素へ倒すと「手で書かれた指定が先頭に居る」
+    /// 場合に別の値を選んだことになる。**退避先を 1 つにする。**
     fn selected(&self) -> &str {
-        let index = self.control.selected_index();
-        self.items
-            .get(usize::try_from(index).unwrap_or(0))
+        usize::try_from(self.control.selected_index())
+            .ok()
+            .and_then(|index| self.items.get(index))
             .map(String::as_str)
-            .unwrap_or_else(|| {
-                self.items[usize::try_from(self.initial_index).unwrap_or(0)].as_str()
-            })
+            .unwrap_or_else(|| self.initial())
     }
 
     /// 開いた時点の値から変わっていれば、その値。
     fn change(&self) -> Option<String> {
         let selected = self.selected();
-        let initial = self.items[usize::try_from(self.initial_index).unwrap_or(0)].as_str();
-        (selected != initial).then(|| selected.to_string())
+        (selected != self.initial()).then(|| selected.to_string())
     }
 }
 
@@ -340,6 +351,8 @@ pub struct SettingsForm {
     tools: Vec<ToolToggle>,
     log_level: LogLevelChoice,
     numbers: Vec<NumericInput>,
+    /// 開いた時点の予算一式。倍率の入力が使えないときの退避先である。
+    budgets: ScaledBudgets,
 }
 
 impl SettingsForm {
@@ -358,10 +371,11 @@ impl SettingsForm {
             })
             .collect();
 
+        let budgets = settings.budgets();
         let numbers = NumericSetting::ALL
             .into_iter()
             .map(|setting| {
-                let (min, max) = setting.range(settings);
+                let (min, max) = setting.range(budgets);
                 let initial = setting.current(settings).clamp(min, max);
                 NumericInput {
                     setting,
@@ -375,6 +389,7 @@ impl SettingsForm {
             tools,
             log_level: log_level_choice(settings),
             numbers,
+            budgets,
         }
     }
 
@@ -406,19 +421,52 @@ impl SettingsForm {
     /// 入力欄の範囲指定はスピンボタンとカーソルキーしか縛らないため、直接
     /// 入力された値はここで初めて弾かれる。**これは読み込み時の丸めの代わりでは
     /// ない**——ファイルを手で編集する経路が残るため、保証は読み手側が与える。
+    ///
+    /// 検証は 2 段である。**まず全項目を読んで整数として解釈できることを確かめ、
+    /// 次に入力済みの倍率から範囲を引き直して判定する。** 引き渡しの保持時間の
+    /// 下限は倍率後の描画の要求フェーズ予算と連動しており、**倍率は同じ画面で
+    /// 変えられる**——入力欄が持つ範囲は開いた時点のものであり、確定の判定を
+    /// そちらに委ねると、倍率を上げた場合は解決側が丸める値を通してしまい、
+    /// 下げた場合は解決側が受け取る値を拒んでしまう。
     pub fn collect(&self) -> Result<SettingsChange, Vec<String>> {
         let mut change = SettingsChange::default();
         let mut errors = Vec::new();
+        let mut entered = Vec::new();
 
         for input in &self.numbers {
             match input.control.validate() {
-                Ok(value) if value != input.initial => input.setting.apply(value, &mut change),
-                Ok(_) => {}
+                Ok(value) => entered.push((input, value)),
+                // 範囲の判定は引き直した後に行う。ここで拾うのは値そのものである。
+                Err(NumberRangeError::OutOfRange { value, .. }) => entered.push((input, value)),
                 Err(e) => errors.push(describe_range_error(&input.label(), &e)),
             }
         }
         if !errors.is_empty() {
             return Err(errors);
+        }
+
+        let budgets = self.entered_budgets(&entered);
+        for (input, value) in &entered {
+            let (min, max) = input.setting.range(budgets);
+            if *value < min || *value > max {
+                errors.push(describe_range_error(
+                    &input.label_for(min, max),
+                    &NumberRangeError::OutOfRange {
+                        value: *value,
+                        min,
+                        max,
+                    },
+                ));
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+
+        for (input, value) in entered {
+            if value != input.initial {
+                input.setting.apply(value, &mut change);
+            }
         }
 
         for tool in &self.tools {
@@ -430,6 +478,19 @@ impl SettingsForm {
         change.log_level = self.log_level.change();
 
         Ok(change)
+    }
+
+    /// 入力済みの倍率から組み直した予算一式。
+    ///
+    /// 倍率が不等式を破る場合は開いた時点の一式を使う。**解決側が同じ判断を
+    /// する**——破る倍率は採用されず、直前の値が維持される。
+    fn entered_budgets(&self, entered: &[(&NumericInput, i32)]) -> ScaledBudgets {
+        entered
+            .iter()
+            .find(|(input, _)| input.setting == NumericSetting::BudgetScalePercent)
+            .and_then(|(_, value)| u32::try_from(*value).ok())
+            .and_then(|percent| ScaledBudgets::checked(percent).ok())
+            .unwrap_or(self.budgets)
     }
 }
 
@@ -453,9 +514,10 @@ fn log_level_choice(settings: &Settings) -> LogLevelChoice {
     let index = items
         .iter()
         .position(|item| item == current)
-        .expect("現在の値は必ず選択肢に含まれる") as i32;
+        .expect("現在の値は必ず選択肢に含まれる");
     LogLevelChoice {
-        control: ComboBox::new(items.iter().map(String::as_str).collect()).selected(index),
+        control: ComboBox::new(items.iter().map(String::as_str).collect())
+            .selected(clamp_to_i32(index as u64)),
         items,
         initial_index: index,
     }

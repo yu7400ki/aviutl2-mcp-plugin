@@ -88,8 +88,16 @@ fn the_tools_are_ordered_by_family() {
 
 /// 数値の範囲が共有の定数と一致すること。
 ///
-/// 期待値を定数から導くのは、**画面が定数を引いていることを確かめたい**ためで
-/// ある。範囲を書き写した実装は、定数を動かした時点でここが落ちる。
+/// **期待値の書き方を 2 つに分けてある。**
+///
+/// - 予算倍率だけはリテラルで書く。**定数の側だけを動かせばここが落ちる**ため、
+///   画面の範囲が黙って変わらない。期待も実装も同じ定数から導くと、定数を
+///   動かしたときに期待も一緒に動いて何も落ちない。
+/// - 残りは定数から導く。**画面が定数を引いていること**を確かめたいためであり、
+///   範囲を書き写した実装は定数を動かした時点でここが落ちる。
+///
+/// **同じ値のまま書き写した実装は、どちらの書き方でも捕まえられない**——値が
+/// 一致している限り観測できる差が無い。捕まるのは定数が動いたときである。
 #[test]
 fn the_numeric_ranges_come_from_the_shared_constants() {
     let settings = Settings::default();
@@ -99,12 +107,17 @@ fn the_numeric_ranges_come_from_the_shared_constants() {
         let input = find(&form, setting);
         assert_eq!(
             input.control().range_bounds(),
-            Some(setting.range(&settings)),
+            Some(setting.range(settings.budgets())),
             "{setting:?} の範囲が指定されていません"
         );
     }
 
-    let bounds = |setting: NumericSetting| setting.range(&settings);
+    let bounds = |setting: NumericSetting| setting.range(settings.budgets());
+    assert_eq!(
+        bounds(NumericSetting::BudgetScalePercent),
+        (10, 400),
+        "予算倍率の範囲が変わりました"
+    );
     assert_eq!(
         bounds(NumericSetting::BudgetScalePercent),
         (
@@ -146,20 +159,78 @@ fn the_numeric_ranges_come_from_the_shared_constants() {
     );
 }
 
-/// 引き渡しの保持時間の下限が、倍率を適用した描画の予算と連動すること。
+/// 引き渡しの保持時間の下限が、倍率を適用した**描画**の予算と連動すること。
 ///
 /// 解決側と同じ規則であり、画面が解決側より緩い範囲を提示しない。
+///
+/// **期待値をリテラルで書く。** 同じ関数へ問い合わせて突き合わせると、どの予算
+/// に結ばれているかを見ていないことになる——別の区分（一括適用など）へ差し
+/// 替えても、それが 30 秒を超える限り通ってしまう。描画の要求フェーズ予算は
+/// 30 秒であり、倍率 400% では 120 秒である。
 #[test]
 fn the_handoff_floor_follows_the_scaled_render_budget() {
     let scaled = settings_from(r#"{"budget_scale_percent":400}"#);
-    let (min, max) = NumericSetting::HandoffTtlSeconds.range(&scaled);
 
-    assert_eq!(min as u64, handoff_ttl_floor(&scaled));
-    assert!(
-        min as u64 > MIN_HANDOFF_TTL_SECONDS,
-        "倍率を上げても固定の下限のままです"
+    let (min, max) = NumericSetting::HandoffTtlSeconds.range(scaled.budgets());
+
+    assert_eq!(min, 120, "描画の予算（倍率 400%）と一致しません");
+    assert_eq!(max, MAX_HANDOFF_TTL_SECONDS as i32);
+    // 倍率が既定なら固定の下限のままである。
+    assert_eq!(
+        NumericSetting::HandoffTtlSeconds
+            .range(Settings::default().budgets())
+            .0,
+        MIN_HANDOFF_TTL_SECONDS as i32
     );
-    assert!(max >= min);
+}
+
+/// 確定時の下限が、**入力済みの**倍率から引き直されること。
+///
+/// 倍率は同じ画面で変えられる。開いた時点の下限のまま通すと、解決側が丸める値
+/// を「入力できた」ことにしてしまう——保存の後に WARN だけが残る。
+#[test]
+fn confirming_re_derives_the_handoff_floor_from_the_entered_scale() {
+    let form = SettingsForm::new(&Settings::default());
+    // 既定（100%）での下限は 30 秒であり、この入力は開いた時点では通る。
+    find(&form, NumericSetting::HandoffTtlSeconds)
+        .control()
+        .set_value(MIN_HANDOFF_TTL_SECONDS);
+    find(&form, NumericSetting::BudgetScalePercent)
+        .control()
+        .set_value(400);
+
+    let errors = form.collect().unwrap_err();
+
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains(NumericSetting::HandoffTtlSeconds.name()) && errors[0].contains("120"),
+        "引き直した下限が伝わりません: {}",
+        errors[0]
+    );
+
+    // 下限を満たす値なら通り、倍率と一緒に保存される。
+    find(&form, NumericSetting::HandoffTtlSeconds)
+        .control()
+        .set_value(200);
+    let change = form.collect().unwrap();
+    assert_eq!(change.handoff_ttl_seconds, Some(200));
+    assert_eq!(change.budget_scale_percent, Some(400));
+}
+
+/// 倍率を下げた場合は固定の下限が効くこと。
+#[test]
+fn lowering_the_scale_keeps_the_fixed_handoff_floor() {
+    let form = SettingsForm::new(&settings_from(r#"{"budget_scale_percent":400}"#));
+    find(&form, NumericSetting::BudgetScalePercent)
+        .control()
+        .set_value(MIN_BUDGET_SCALE_PERCENT);
+    find(&form, NumericSetting::HandoffTtlSeconds)
+        .control()
+        .set_value(MIN_HANDOFF_TTL_SECONDS);
+
+    let change = form.collect().unwrap();
+
+    assert_eq!(change.handoff_ttl_seconds, Some(MIN_HANDOFF_TTL_SECONDS));
 }
 
 /// 画面が現在の設定を初期値として映すこと。
@@ -411,7 +482,7 @@ fn the_labels_carry_the_unit_and_the_range() {
     let form = SettingsForm::new(&settings);
 
     for setting in NumericSetting::ALL {
-        let (min, max) = setting.range(&settings);
+        let (min, max) = setting.range(settings.budgets());
         let label = find(&form, setting).label();
         assert!(label.contains(setting.name()), "{label}");
         assert!(label.contains(setting.unit()), "{label}");

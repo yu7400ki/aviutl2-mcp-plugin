@@ -52,6 +52,54 @@ pub(crate) fn alias_with_effects(base: &str, effects: &[HostEffect]) -> String {
     alias
 }
 
+/// tracing イベントの出力先として使う共有バッファ。
+#[derive(Clone, Default)]
+pub(crate) struct LogCapture(std::sync::Arc<Mutex<Vec<u8>>>);
+
+impl LogCapture {
+    fn contents(&self) -> String {
+        let buffer = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        String::from_utf8_lossy(&buffer).into_owned()
+    }
+}
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> aviutl2::tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = LogCapture;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// `f` の実行中に発行された tracing イベントを集めて返す。
+///
+/// 出力先はこのスレッドの subscriber に限られるため、ホストのログ設定にも
+/// 他のテストにも影響しない。
+pub(crate) fn capture_logs(f: impl FnOnce()) -> String {
+    let capture = LogCapture::default();
+    let subscriber = aviutl2::tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(capture.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    capture.contents()
+}
+
 /// panic フックの差し替えを直列化する。
 ///
 /// フックはプロセス全体で 1 つしかなく、テストは並列に走る。複数のテストが
