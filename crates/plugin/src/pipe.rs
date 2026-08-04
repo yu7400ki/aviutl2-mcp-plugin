@@ -2134,6 +2134,13 @@ mod tests {
             Err(Self::unavailable())
         }
 
+        fn set_grid_bpm(
+            &self,
+            _: &aviutl2_mcp_core::SetGridBpmParams,
+        ) -> Result<aviutl2_mcp_core::GridBpmOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
         fn set_object_item(
             &self,
             _: &aviutl2_mcp_core::SetObjectItemParams,

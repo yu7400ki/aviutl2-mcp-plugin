@@ -73,6 +73,9 @@ pub const OPERATION_DELETE_OBJECT_SECTION: &str = "delete_object_section";
 /// オブジェクトの中間点を移動する operation 名。
 pub const OPERATION_MOVE_OBJECT_SECTION: &str = "move_object_section";
 
+/// BPM グリッドの一覧を置き換える operation 名。
+pub const OPERATION_SET_GRID_BPM: &str = "set_grid_bpm";
+
 /// 複数の変更を 1 つの取り消し単位で適用する operation 名。
 pub const OPERATION_APPLY_BATCH: &str = "apply_batch";
 
@@ -178,6 +181,8 @@ pub enum EditOperation {
     DeleteObjectSection,
     /// [`OPERATION_MOVE_OBJECT_SECTION`]。
     MoveObjectSection,
+    /// [`OPERATION_SET_GRID_BPM`]。
+    SetGridBpm,
     /// [`OPERATION_APPLY_BATCH`]。
     ///
     /// 複数の変更をまとめて発行するが、区間の入り方も失敗の写し方も他の編集
@@ -190,7 +195,7 @@ impl EditOperation {
     /// 全 variant。
     ///
     /// 要素数と内容は `edit_operation_all_is_exhaustive` テストで固定する。
-    pub const ALL: [EditOperation; 14] = [
+    pub const ALL: [EditOperation; 15] = [
         EditOperation::CreateObject,
         EditOperation::MoveObject,
         EditOperation::DeleteObject,
@@ -204,6 +209,7 @@ impl EditOperation {
         EditOperation::CreateObjectSection,
         EditOperation::DeleteObjectSection,
         EditOperation::MoveObjectSection,
+        EditOperation::SetGridBpm,
         EditOperation::ApplyBatch,
     ];
 
@@ -223,6 +229,7 @@ impl EditOperation {
             EditOperation::CreateObjectSection => OPERATION_CREATE_OBJECT_SECTION,
             EditOperation::DeleteObjectSection => OPERATION_DELETE_OBJECT_SECTION,
             EditOperation::MoveObjectSection => OPERATION_MOVE_OBJECT_SECTION,
+            EditOperation::SetGridBpm => OPERATION_SET_GRID_BPM,
             EditOperation::ApplyBatch => OPERATION_APPLY_BATCH,
         }
     }
@@ -344,7 +351,8 @@ impl KnownOperation {
                 | EditOperation::SetSelection
                 | EditOperation::CreateObjectSection
                 | EditOperation::DeleteObjectSection
-                | EditOperation::MoveObjectSection => RequestBudgetKind::Edit,
+                | EditOperation::MoveObjectSection
+                | EditOperation::SetGridBpm => RequestBudgetKind::Edit,
                 EditOperation::ApplyBatch => RequestBudgetKind::Batch,
             },
             KnownOperation::Render(operation) => match operation {
@@ -821,6 +829,7 @@ mod tests {
                 | EditOperation::CreateObjectSection
                 | EditOperation::DeleteObjectSection
                 | EditOperation::MoveObjectSection
+                | EditOperation::SetGridBpm
                 | EditOperation::ApplyBatch => {}
             }
             assert!(
@@ -842,8 +851,9 @@ mod tests {
         assert_listed(EditOperation::CreateObjectSection);
         assert_listed(EditOperation::DeleteObjectSection);
         assert_listed(EditOperation::MoveObjectSection);
+        assert_listed(EditOperation::SetGridBpm);
         assert_listed(EditOperation::ApplyBatch);
-        assert_eq!(EditOperation::ALL.len(), 14);
+        assert_eq!(EditOperation::ALL.len(), 15);
     }
 
     /// [`ReadOperation::ALL`] が全 variant を含むことを固定する。
@@ -965,7 +975,8 @@ mod tests {
                 | EditOperation::SetSelection
                 | EditOperation::CreateObjectSection
                 | EditOperation::DeleteObjectSection
-                | EditOperation::MoveObjectSection => RequestBudgetKind::Edit,
+                | EditOperation::MoveObjectSection
+                | EditOperation::SetGridBpm => RequestBudgetKind::Edit,
             };
             assert_eq!(
                 KnownOperation::Edit(op).budget_kind(),

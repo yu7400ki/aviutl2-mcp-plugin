@@ -82,6 +82,13 @@ pub(crate) enum Fault {
     /// 事前確認の読みには掛けない。掛けると変更を発行する前に落ち、read-back の
     /// 検証にならない。
     SectionsUnreadable,
+    /// BPM グリッドの置き換えを無言で無視する。
+    IgnoreGridBpm,
+    /// BPM グリッドを置き換えるが、値をホストが書き換える。
+    ///
+    /// 件数は要求どおりであり、値だけが要求と違う。単精度への丸めと並べ替えを
+    /// 失敗と誤診断しないことを確かめるために用いる。
+    RewriteGridBpmValues,
 }
 
 /// panic させる位置。
@@ -481,6 +488,7 @@ pub(crate) const MUTATIONS: &[&str] = &[
     "set_display_layer_frame",
     "set_select_range",
     "set_focus_object",
+    "set_grid_bpm_list",
 ];
 
 impl EditHost for FakeEditHost {
@@ -1397,6 +1405,36 @@ impl SceneEditor for FakeSceneEditor<'_> {
     ) -> Result<(), EditError> {
         self.mutation("set_layer_lock")?;
         self.with_layer(layer, "set_layer_lock", |fake| fake.locked = locked)
+    }
+
+    fn set_grid_bpm_list(
+        &self,
+        _ticket: MutationTicket<'_>,
+        entries: &[GridBpm],
+    ) -> Result<(), EditError> {
+        self.mutation("set_grid_bpm_list")?;
+        match self.host.knobs().fault {
+            // ホストが要求を黙って捨てる。件数の照合だけが気付ける。
+            Some(Fault::IgnoreGridBpm) => return Ok(()),
+            // ホストは単精度で受け取り、並べ替えもする。件数は変わらない。
+            Some(Fault::RewriteGridBpmValues) => {
+                let mut rewritten: Vec<GridBpm> = entries
+                    .iter()
+                    .map(|entry| GridBpm {
+                        tempo: FiniteF64::try_new(entry.tempo.get() + 1.0).unwrap(),
+                        beat: entry.beat + 1,
+                        start: entry.start,
+                        offset: FiniteF64::try_new(entry.offset.get() + 1.0).unwrap(),
+                    })
+                    .collect();
+                rewritten.reverse();
+                self.host.scene.lock().unwrap().grid_bpm = rewritten;
+                return Ok(());
+            }
+            _ => {}
+        }
+        self.host.scene.lock().unwrap().grid_bpm = entries.to_vec();
+        Ok(())
     }
 
     fn set_cursor(

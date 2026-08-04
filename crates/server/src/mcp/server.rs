@@ -11,8 +11,8 @@ use crate::discovery::{DiscoveryConfig, list_registered_instances, resolve_insta
 use crate::mcp::edit_input::{
     AddEffectInput, ApplyBatchInput, CreateObjectInput, CreateObjectSectionInput,
     DeleteEffectInput, DeleteObjectInput, DeleteObjectSectionInput, MoveObjectInput,
-    MoveObjectSectionInput, SetEffectEnabledInput, SetLayerStateInput, SetObjectItemInput,
-    SetObjectNameInput, SetSelectionInput,
+    MoveObjectSectionInput, SetEffectEnabledInput, SetGridBpmInput, SetLayerStateInput,
+    SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
 };
 use crate::mcp::input::{
     GetEffectItemValuesInput, GetObjectInput, InstanceInput, ListAvailableEffectsInput,
@@ -26,17 +26,17 @@ use crate::redact;
 use crate::settings::SettingsSource;
 use aviutl2_mcp_core::{
     BatchOutcome, EditInfo, EditOutcome, EffectItemValues, ErrorCode, ErrorObject,
-    GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, InstanceId, LayerStateOutcome,
-    ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, MAX_PAGE_LIMIT,
-    OPERATION_ADD_EFFECT, OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT,
+    GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GridBpmOutcome, InstanceId,
+    LayerStateOutcome, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
+    MAX_PAGE_LIMIT, OPERATION_ADD_EFFECT, OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT,
     OPERATION_CREATE_OBJECT_SECTION, OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT,
     OPERATION_DELETE_OBJECT_SECTION, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
     OPERATION_GET_EFFECT_ITEM_VALUES, OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS,
     OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT,
     OPERATION_MOVE_OBJECT_SECTION, OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED,
-    OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME,
-    OPERATION_SET_SELECTION, ObjectDetail, ObjectSectionsOutcome, RenderFrameResult,
-    RequestBudgetKind, ScaledBudgets, SelectionState, request_budget_kind,
+    OPERATION_SET_GRID_BPM, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
+    OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail, ObjectSectionsOutcome,
+    RenderFrameResult, RequestBudgetKind, ScaledBudgets, SelectionState, request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -1498,6 +1498,64 @@ impl AviUtl2McpServer {
         .await
     }
 
+    /// BPM グリッドの一覧を置き換える。部分更新ではない。entries に指定した一覧が
+    /// そのまま現在の一覧になり、指定しなかった要素は消える。変えたい要素だけを
+    /// 差し替えるには、get_edit_info が返した grid_bpm を受け取り、その要素を書き換えて
+    /// 全件を送る。一覧全体が置き換わるため、置き換え前の一覧を保持していなければ
+    /// 同じ状態へは戻せない。
+    /// entries を空配列にするとグリッドが消える。指定できるのは 256 件までである。
+    /// tempo は 0 より大きい値、beat は 1 以上の整数を指定する。
+    /// start と offset は秒であり、フレーム番号ではない。start は 0 以上を指定する。
+    /// start が一覧の中で重複する要求は invalid_argument（duplicate_target）となる。
+    /// 値が範囲外の要求は invalid_argument（grid_bpm_out_of_range）となる。
+    /// start の昇順は求めない。並べ替えはホストが行う。
+    /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
+    /// project_epoch をそのまま指定する。省略はできない。BPM グリッドは selector も
+    /// fingerprint も持たないため、これがプロジェクト境界を照合する唯一の材料である。
+    /// 要求は project_revision を運ばない。読み取りから変更までに revision が進んで
+    /// いても拒否されない。
+    /// 応答の entries には置き換え後に読み直した一覧が入る。ホストは tempo と offset を
+    /// 単精度で受け取り並べ替えもするため、要求した値や順序と一致するとは限らない。
+    /// 確かめるのは件数だけであり、件数が食い違うと unsupported_operation
+    /// （change_not_applied）となる。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    #[tool(
+        name = "set_grid_bpm",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::set_grid_bpm()
+        )
+    )]
+    pub async fn set_grid_bpm(
+        &self,
+        Parameters(input): Parameters<SetGridBpmInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits();
+        self.run("set_grid_bpm", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: GridBpmOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_SET_GRID_BPM,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::grid_bpm(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
     /// どこを見て何を選んでいるかを変更する。cursor はカーソル位置、selected_range は
     /// フレーム範囲選択、focus はフォーカス対象、display はレイヤー編集の表示開始位置である。
     /// cursor と selected_range と focus と display の 4 つ全てを省略した要求は受け付けない。
@@ -2329,34 +2387,42 @@ mod tests {
 
     use rmcp::model::Tool;
 
-    /// frame / layer を入出力に持ち、0 始まりであることの明記が要る tool。
+    /// tool が frame / layer を入出力に持ち、0 始まりであることの明記が要るか。
     ///
-    /// `list_available_effects` は effect カタログだけを扱い frame も
-    /// layer も現れないため、ここには含めない。
-    const ZERO_BASED_TOOLS: &[&str] = &[
-        "list_instances",
-        "get_edit_info",
-        "get_current_scene",
-        "list_layers",
-        "list_objects",
-        "get_object",
-        "get_effect_item_values",
-        "create_object",
-        "move_object",
-        "set_object_name",
-        "set_object_item",
-        "add_effect",
-        "set_effect_enabled",
-        "delete_effect",
-        "delete_object",
-        "create_object_section",
-        "delete_object_section",
-        "move_object_section",
-        "set_layer_state",
-        "set_selection",
-        "apply_batch",
-        "render_frame",
-    ];
+    /// **未知の tool 名で落とす。** 一覧を const で持つと、どちらにも書かれて
+    /// いない新しい tool が「明記が要らない」側の既定へ黙って落ちる。
+    fn takes_zero_based_numbers(name: &str) -> bool {
+        match name {
+            "list_instances"
+            | "get_edit_info"
+            | "get_current_scene"
+            | "list_layers"
+            | "list_objects"
+            | "get_object"
+            | "get_effect_item_values"
+            | "create_object"
+            | "move_object"
+            | "set_object_name"
+            | "set_object_item"
+            | "add_effect"
+            | "set_effect_enabled"
+            | "delete_effect"
+            | "delete_object"
+            | "create_object_section"
+            | "delete_object_section"
+            | "move_object_section"
+            | "set_layer_state"
+            | "set_selection"
+            | "apply_batch"
+            | "render_frame" => true,
+            // effect カタログだけを扱い、frame も layer も現れない。
+            "list_available_effects" => false,
+            // BPM グリッドはシーンに属し、位置は秒で表す。フレーム番号も
+            // レイヤー番号も現れない。
+            "set_grid_bpm" => false,
+            other => panic!("{other} が 0 始まりの番号を扱うかが定義されていません"),
+        }
+    }
 
     /// 読み取り専用の tool。
     const READ_TOOLS: &[&str] = &[
@@ -2397,6 +2463,9 @@ mod tests {
         // 同じ状態を 2 度設定しても追加の変更を起こさない。
         ("set_layer_state", false, true),
         ("set_selection", false, true),
+        // 一覧全体が置き換わるが、同じ tool で別の一覧を書ける。同じ一覧を 2 度
+        // 送っても追加の変更を起こさない。
+        ("set_grid_bpm", false, true),
     ];
 
     /// 一括適用の tool 名。
@@ -2457,6 +2526,7 @@ mod tests {
             | "move_object_section"
             | "set_layer_state"
             | "set_selection"
+            | "set_grid_bpm"
             | APPLY_BATCH => true,
             "list_instances"
             | "get_edit_info"
@@ -2526,7 +2596,7 @@ mod tests {
         assert_eq!(names, expected);
         // 件数そのものも固定する。router と表の両方から同じ tool を落とすと、
         // 集合の一致だけでは検出できない。
-        assert_eq!(names.len(), 23, "公開する tool の数が変わりました");
+        assert_eq!(names.len(), 24, "公開する tool の数が変わりました");
     }
 
     /// 共有設定を与えたサーバー。
@@ -2725,6 +2795,7 @@ mod tests {
             "move_object_section" => schema::move_object_section(),
             "set_layer_state" => schema::set_layer_state(),
             "set_selection" => schema::set_selection(),
+            "set_grid_bpm" => schema::set_grid_bpm(),
             "apply_batch" => schema::apply_batch(),
             "render_frame" => schema::render_frame(),
             other => panic!("{other} の outputSchema が定義されていません"),
@@ -2756,7 +2827,7 @@ mod tests {
                 .description
                 .as_ref()
                 .unwrap_or_else(|| panic!("{} に説明がありません", tool.name));
-            if !ZERO_BASED_TOOLS.contains(&tool.name.as_ref()) {
+            if !takes_zero_based_numbers(&tool.name) {
                 continue;
             }
             assert!(
@@ -2780,8 +2851,12 @@ mod tests {
     ///
     /// 対象を指す selector を持たないため、これがプロジェクト境界を照合する
     /// 材料になる。
-    const TOOLS_CARRYING_AN_EXPECTED_EPOCH: &[&str] =
-        &["create_object", "set_layer_state", "set_selection"];
+    const TOOLS_CARRYING_AN_EXPECTED_EPOCH: &[&str] = &[
+        "create_object",
+        "set_layer_state",
+        "set_selection",
+        "set_grid_bpm",
+    ];
 
     #[test]
     fn edit_tool_descriptions_state_what_costs_the_caller_if_assumed_wrong() {
@@ -2789,14 +2864,18 @@ mod tests {
         // 落とせない。
         for name in edit_like_tools() {
             let description = description_of(name);
-            for keyword in [
-                "0 始まり",
-                "UI の表示とは異なる",
-                "project_epoch",
-                "selector",
-                "change_applied",
-                "unknown",
-            ] {
+            for keyword in ["project_epoch", "selector", "change_applied", "unknown"] {
+                assert!(
+                    description.contains(keyword),
+                    "{name} の説明に {keyword} がありません"
+                );
+            }
+            // 番号の起点は、番号を扱う tool にだけ意味がある。扱わない tool へ
+            // 求めると、説明が持たない性質を述べることになる。
+            if !takes_zero_based_numbers(name) {
+                continue;
+            }
+            for keyword in ["0 始まり", "UI の表示とは異なる"] {
                 assert!(
                     description.contains(keyword),
                     "{name} の説明に {keyword} がありません"
@@ -2921,11 +3000,12 @@ mod tests {
             | "add_effect" | "set_effect_enabled" | "delete_effect" | "delete_object"
             | "set_layer_state" | "apply_batch" => UndoStatement::OneUnit,
             "set_selection" => UndoStatement::NoUnitAndJumpsBack,
-            // 中間点の 3 つは 1 回の編集区間で実行するが、SDK が取り消し単位を
-            // 作るかを確かめていない。
-            "create_object_section" | "delete_object_section" | "move_object_section" => {
-                UndoStatement::Silent
-            }
+            // 中間点の 3 つと BPM グリッドの置き換えは 1 回の編集区間で実行するが、
+            // SDK が取り消し単位を作るかを確かめていない。
+            "create_object_section"
+            | "delete_object_section"
+            | "move_object_section"
+            | "set_grid_bpm" => UndoStatement::Silent,
             other => panic!("{other} の取り消しの説明が定義されていません"),
         }
     }
@@ -3057,7 +3137,9 @@ mod tests {
             | "add_effect"
             | "set_effect_enabled"
             | "delete_effect"
-            | "set_selection" => LayerLockStatement::Silent,
+            | "set_selection"
+            // BPM グリッドはシーンに属し、どのレイヤーの対象にも触れない。
+            | "set_grid_bpm" => LayerLockStatement::Silent,
             other => panic!("{other} のレイヤーロックの説明が定義されていません"),
         }
     }
@@ -3124,7 +3206,7 @@ mod tests {
             | "move_object_section" => true,
             // 一括適用は 100 件のうちどれが落ちたかを併せて示す必要があるため、
             // 別のキー（failed_object）で返す。
-            "create_object" | "set_layer_state" | "apply_batch" => false,
+            "create_object" | "set_layer_state" | "set_grid_bpm" | "apply_batch" => false,
             other => panic!("{other} が現在の姿を返すかが定義されていません"),
         }
     }
@@ -3825,7 +3907,8 @@ mod tests {
                 | Edit::SetSelection
                 | Edit::CreateObjectSection
                 | Edit::DeleteObjectSection
-                | Edit::MoveObjectSection => limits.edit_request,
+                | Edit::MoveObjectSection
+                | Edit::SetGridBpm => limits.edit_request,
             };
             assert_eq!(
                 limits.request_phase_budget(op.as_str()),

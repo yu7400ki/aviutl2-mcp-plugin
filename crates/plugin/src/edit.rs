@@ -19,10 +19,10 @@ pub mod sdk;
 use crate::project::ProjectState;
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchOutcome, CreateObjectParams, CreateObjectSectionParams,
-    DeleteEffectParams, DeleteObjectParams, DeleteObjectSectionParams, EditOutcome,
+    DeleteEffectParams, DeleteObjectParams, DeleteObjectSectionParams, EditOutcome, GridBpmOutcome,
     LayerStateOutcome, MoveObjectParams, MoveObjectSectionParams, ObjectSectionsOutcome,
-    SelectionState, SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams,
-    SetObjectNameParams, SetSelectionParams,
+    SelectionState, SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams,
+    SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
 };
 use std::sync::Arc;
 
@@ -91,6 +91,14 @@ pub trait EditAdapter: Send + Sync {
     /// 行き止まりが解けなくなる。
     fn set_layer_state(&self, params: &SetLayerStateParams)
     -> Result<LayerStateOutcome, EditError>;
+
+    /// BPM グリッドの一覧を置き換える。
+    ///
+    /// 部分更新ではない。要求した一覧がそのまま現在の一覧になる。
+    ///
+    /// 置き換えの API は戻り値を持たないため、同一区間内で読み直して件数を
+    /// 照合する。値は照合しない——ホストは単精度で受け取り、並べ替えもする。
+    fn set_grid_bpm(&self, params: &SetGridBpmParams) -> Result<GridBpmOutcome, EditError>;
 
     /// カーソル・選択範囲・フォーカスを変更する。
     ///

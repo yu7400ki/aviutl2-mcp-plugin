@@ -18,7 +18,7 @@ use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
 use crate::read::host::{EditState, HostEditInfo, HostObject, SceneReader};
 use aviutl2_mcp_core::{
-    AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, FrameRange, SectionRange,
+    AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, FrameRange, GridBpm, SectionRange,
 };
 
 /// 編集区間の内側で対象オブジェクトを指す内部識別子。
@@ -286,6 +286,19 @@ pub trait SceneEditor {
         ticket: MutationTicket<'_>,
         layer: usize,
         locked: bool,
+    ) -> Result<(), EditError>;
+
+    /// BPM グリッドの一覧を置き換える。
+    ///
+    /// 部分更新ではない。渡した一覧がそのまま現在の一覧になる。
+    ///
+    /// **実装の義務**: 拍子を SDK の 32bit 符号付き整数へ写せない場合は、SDK を
+    /// 呼ばずに [`EditError::NotIssued`] を返す。写せない値を丸めて渡すと、
+    /// 要求元が指定していない拍子が書き込まれる。
+    fn set_grid_bpm_list(
+        &self,
+        ticket: MutationTicket<'_>,
+        entries: &[GridBpm],
     ) -> Result<(), EditError>;
 
     /// 編集カーソルの位置を設定する。ホストが範囲外の値をクランプする。

@@ -206,6 +206,18 @@ pub fn set_layer_state() -> Value {
     ])
 }
 
+/// `set_grid_bpm` の出力。
+///
+/// `entries` には置き換え後に読み直した一覧が入る。要求した値と一致するとは
+/// 限らない。
+pub fn set_grid_bpm() -> Value {
+    object(&[
+        ("project_epoch", string()),
+        ("project_revision", unsigned()),
+        ("entries", array(grid_bpm())),
+    ])
+}
+
 /// `apply_batch` の出力。
 ///
 /// `results` は入力と同じ位置で並ぶ。revision は要求全体で 1 つだけ持つ。

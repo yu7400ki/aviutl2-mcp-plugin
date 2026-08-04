@@ -18,10 +18,11 @@
 //!
 //! opaque handle は params にも result にも現れない。
 
-use crate::edit_info::{Cursor, DisplayRange, FrameRange};
+use crate::edit_info::{Cursor, DisplayRange, FrameRange, GridBpm};
 use crate::effect::EffectInfo;
 use crate::error::ErrorCode;
 use crate::item_value::{ItemValue, ItemWriteError, validate_item_value};
+use crate::number::FiniteF64;
 use crate::object::{LayerInfo, ObjectSummary, SectionRange};
 use crate::selector::{EffectSelector, ObjectSelector};
 use crate::validation::{
@@ -601,6 +602,55 @@ impl MoveObjectSectionParams {
     }
 }
 
+/// `set_grid_bpm` の params。
+///
+/// BPM グリッドはシーンに属し、対象を指す selector を持たない。守れるのは
+/// プロジェクト境界と現在シーンだけであり、「読み取った時点と同じ一覧か」は
+/// 確かめられない。応答は read-back で得た実際の一覧を返すため、要求元は
+/// それを見て判断する。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetGridBpmParams {
+    /// 現在シーンの一致確認に使う guard。
+    pub expected_scene_id: i32,
+    /// 置き換える BPM 情報の一覧。
+    ///
+    /// 部分更新ではない。指定した一覧がそのまま現在の一覧になる。0 件は
+    /// グリッドを消す指定であり、[`MAX_GRID_BPM_ENTRIES`] 件までを受け付ける。
+    pub entries: Vec<GridBpm>,
+    /// 応答が返した `project_epoch`。
+    ///
+    /// BPM グリッドは selector を持たないため、プロジェクト境界を照合する
+    /// 唯一の材料である。
+    pub expected_project_epoch: String,
+}
+
+impl SetGridBpmParams {
+    /// 要求内容だけで決まる検証を行う。
+    pub fn validate(&self) -> Result<(), EditInputError> {
+        validate_grid_bpm_entries(&self.entries)
+    }
+}
+
+/// BPM グリッドの一覧の置き換えの結果。
+///
+/// 一覧そのものが read-back であり、要求した値がどう正規化されたかはこの一覧が
+/// 答える。
+///
+/// BPM グリッドはプロジェクトへ保存される内容であるため、この変更は revision を
+/// 進める。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GridBpmOutcome {
+    /// 変更後のプロジェクトの epoch。
+    pub project_epoch: String,
+    /// 変更を反映したあとの revision。
+    pub project_revision: u64,
+    /// read-back で得た変更後の一覧。
+    ///
+    /// 要求した値と一致するとは限らない。ホストは単精度へ丸め、並べ替えもし得る。
+    pub entries: Vec<GridBpm>,
+}
+
 /// 中間点の変更の結果。
 ///
 /// 3 つの operation が同じ型を返す。区間の一覧そのものが read-back であり、
@@ -857,6 +907,16 @@ const FIELD_FOCUS: &str = "focus";
 const FIELD_DISPLAY: &str = "display";
 /// `section` フィールド名。
 const FIELD_SECTION: &str = "section";
+/// `entries` フィールド名。
+const FIELD_ENTRIES: &str = "entries";
+/// BPM 情報のテンポのフィールド名。
+const FIELD_TEMPO: &str = "tempo";
+/// BPM 情報の拍子のフィールド名。
+const FIELD_BEAT: &str = "beat";
+/// BPM 情報の開始位置のフィールド名。
+const FIELD_START: &str = "start";
+/// BPM 情報の拍子オフセットのフィールド名。
+const FIELD_OFFSET: &str = "offset";
 /// セレクターのレイヤー番号のフィールド名。
 const FIELD_SELECTOR_LAYER: &str = "selector.layer";
 /// セレクターの開始フレーム番号のフィールド名。
@@ -904,6 +964,43 @@ pub enum EditInputError {
     NoChangeRequested {
         /// いずれかの指定が要るフィールド名。
         fields: &'static [&'static str],
+    },
+    /// 一覧の要素数が受け付けられる上限を超えている。
+    #[error("{field} は {max} 件以下である必要があります: {count}")]
+    TooManyEntries {
+        /// 対象フィールド名。
+        field: &'static str,
+        /// 指定された件数。
+        count: usize,
+        /// 許容する最大件数。
+        max: usize,
+    },
+    /// BPM 情報の値が受け付けられる範囲の外にある。
+    #[error("entries[{index}].{field} は{expectation}必要があります")]
+    GridBpmOutOfRange {
+        /// 一覧の中での位置。
+        index: usize,
+        /// 対象フィールド名。
+        field: &'static str,
+        /// 満たすべき条件。
+        expectation: &'static str,
+    },
+    /// BPM 情報の拍子を SDK の型へ写せない。
+    ///
+    /// 範囲の誤りとは別に扱う。要求元が取る行動が違い、前者は意図した値を
+    /// 選び直すのに対し、こちらは値そのものが受け渡せない。
+    #[error("entries[{index}].beat を受け渡せません: {value}")]
+    GridBpmBeatNotRepresentable {
+        /// 一覧の中での位置。
+        index: usize,
+        /// 指定された値。
+        value: i64,
+    },
+    /// BPM 情報の開始位置が一覧の中で重複している。
+    #[error("entries[{index}].start が一覧の中で重複しています")]
+    DuplicateGridBpmStart {
+        /// 重複した側の、一覧の中での位置。
+        index: usize,
     },
     /// 文字列の検証に失敗した。
     #[error("{field}: {source}")]
@@ -953,6 +1050,18 @@ impl EditInputError {
             EditInputError::NoChangeRequested {
                 fields: &[FIELD_NAME, FIELD_ENABLED, FIELD_LOCKED],
             },
+            EditInputError::TooManyEntries {
+                field: FIELD_ENTRIES,
+                count: 0,
+                max: MAX_GRID_BPM_ENTRIES,
+            },
+            EditInputError::GridBpmOutOfRange {
+                index: 0,
+                field: FIELD_TEMPO,
+                expectation: "0 より大きい",
+            },
+            EditInputError::GridBpmBeatNotRepresentable { index: 0, value: 0 },
+            EditInputError::DuplicateGridBpmStart { index: 0 },
         ];
         all.extend(
             TextSyntaxError::ALL
@@ -991,8 +1100,18 @@ impl EditInputError {
             // であり、同じ事実を実態と照合して見つけた場合の失敗と同じ名前を
             // 名乗る。復帰できるかどうかはエラーコードの側が区別する。
             EditInputError::SectionIndexOutOfRange { .. } => Some("section_index_out_of_range"),
+            EditInputError::GridBpmOutOfRange { .. } => Some("grid_bpm_out_of_range"),
+            // 指すのは「引数を SDK の型へ写せない」という事実であり、同じ事実を
+            // 変更 API の入口で見つけた場合の失敗と同じ名前を名乗る。
+            EditInputError::GridBpmBeatNotRepresentable { .. } => {
+                Some("argument_not_representable")
+            }
+            // 指すのは「同じ対象を 2 度指定した」という事実であり、一括適用が
+            // 同じ対象を 2 度変更する要求へ与える名前と同じである。
+            EditInputError::DuplicateGridBpmStart { .. } => Some("duplicate_target"),
             EditInputError::PositionOutOfRange { .. }
             | EditInputError::IndexOutOfRange { .. }
+            | EditInputError::TooManyEntries { .. }
             | EditInputError::NoChangeRequested { .. } => None,
         }
     }
@@ -1005,6 +1124,10 @@ impl EditInputError {
             | EditInputError::IndexOutOfRange { .. }
             | EditInputError::SectionIndexOutOfRange { .. }
             | EditInputError::NoChangeRequested { .. }
+            | EditInputError::TooManyEntries { .. }
+            | EditInputError::GridBpmOutOfRange { .. }
+            | EditInputError::GridBpmBeatNotRepresentable { .. }
+            | EditInputError::DuplicateGridBpmStart { .. }
             | EditInputError::Text { .. }
             | EditInputError::Path { .. } => ErrorCode::InvalidArgument,
         }
@@ -1020,6 +1143,12 @@ impl EditInputError {
 /// レイヤーへの作成を要求内容だけの推測で拒否しない。範囲外の指定は
 /// ホストが失敗させる。
 const MAX_POSITION: u32 = i32::MAX as u32;
+
+/// BPM 情報の一覧に受け付ける最大件数。
+///
+/// SDK は上限を定めていない。上限が無い要求を受け付けないための、我々の側の
+/// 制約である。数そのものに根拠は無い。
+pub const MAX_GRID_BPM_ENTRIES: usize = 256;
 
 /// レイヤー番号とフレーム番号の組が受け渡せる範囲に収まることを確認する。
 ///
@@ -1040,6 +1169,76 @@ fn validate_position(field: &'static str, value: u32) -> Result<(), EditInputErr
         });
     }
     Ok(())
+}
+
+/// BPM 情報の一覧を検証する。
+///
+/// 要求内容だけで決まる検証であり、server と plugin の双方がこれを呼ぶ。
+/// 片方だけが検証すると、受理する要求の集合が経路ごとに分かれる。
+///
+/// **開始位置の昇順は求めない。** 並べ替えはホストの仕事であり、求めなかった
+/// 順序を強制すると、read-back の順序と要求の順序が食い違ったときに説明が要る。
+/// 順序が定まらない一覧だけを拒む——開始位置が等しい 2 件は前後を決められない。
+fn validate_grid_bpm_entries(entries: &[GridBpm]) -> Result<(), EditInputError> {
+    if entries.len() > MAX_GRID_BPM_ENTRIES {
+        return Err(EditInputError::TooManyEntries {
+            field: FIELD_ENTRIES,
+            count: entries.len(),
+            max: MAX_GRID_BPM_ENTRIES,
+        });
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        validate_grid_bpm(index, entry)?;
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        let start = entry.start.get();
+        if entries[..index]
+            .iter()
+            .any(|earlier| earlier.start.get() == start)
+        {
+            return Err(EditInputError::DuplicateGridBpmStart { index });
+        }
+    }
+    Ok(())
+}
+
+/// BPM 情報 1 件の値を検証する。
+fn validate_grid_bpm(index: usize, entry: &GridBpm) -> Result<(), EditInputError> {
+    let out_of_range = |field, expectation| EditInputError::GridBpmOutOfRange {
+        index,
+        field,
+        expectation,
+    };
+    if entry.tempo.get() <= 0.0 {
+        return Err(out_of_range(FIELD_TEMPO, "0 より大きい"));
+    }
+    if entry.beat < 1 {
+        return Err(out_of_range(FIELD_BEAT, "1 以上である"));
+    }
+    if entry.start.get() < 0.0 {
+        return Err(out_of_range(FIELD_START, "0 以上である"));
+    }
+    // ホストは tempo と offset を単精度で受け取る。単精度で無限大になる値を
+    // 書き込むと、以後の読み取りが非有限値として失敗する。
+    if !representable_as_single(entry.tempo) {
+        return Err(out_of_range(FIELD_TEMPO, "単精度で表せる"));
+    }
+    if !representable_as_single(entry.offset) {
+        return Err(out_of_range(FIELD_OFFSET, "単精度で表せる"));
+    }
+    // 拍子は SDK の 32bit 符号付き整数へそのまま渡す。
+    if i32::try_from(entry.beat).is_err() {
+        return Err(EditInputError::GridBpmBeatNotRepresentable {
+            index,
+            value: entry.beat,
+        });
+    }
+    Ok(())
+}
+
+/// 単精度へ写しても有限であるか。
+fn representable_as_single(value: FiniteF64) -> bool {
+    (value.get() as f32).is_finite()
 }
 
 /// 区間番号が中間点を指し得る範囲に収まることを確認する。
@@ -1093,7 +1292,6 @@ mod tests {
     use super::*;
     use crate::error::REASON_VALUES;
     use crate::fingerprint::{EffectFingerprintInput, ObjectFingerprintInput};
-    use crate::number::FiniteF64;
     use crate::validation::{MAX_ALIAS_BYTES, MAX_NAME_UTF16_UNITS, MAX_PATH_UTF16_UNITS};
     use serde_json::{Value, json};
 
@@ -1109,6 +1307,10 @@ mod tests {
             EditInputError::IndexOutOfRange { .. } => "IndexOutOfRange",
             EditInputError::SectionIndexOutOfRange { .. } => "SectionIndexOutOfRange",
             EditInputError::NoChangeRequested { .. } => "NoChangeRequested",
+            EditInputError::TooManyEntries { .. } => "TooManyEntries",
+            EditInputError::GridBpmOutOfRange { .. } => "GridBpmOutOfRange",
+            EditInputError::GridBpmBeatNotRepresentable { .. } => "GridBpmBeatNotRepresentable",
+            EditInputError::DuplicateGridBpmStart { .. } => "DuplicateGridBpmStart",
             EditInputError::Text { .. } => "Text",
             EditInputError::Path { .. } => "Path",
             EditInputError::ItemValue(_) => "ItemValue",
@@ -1122,6 +1324,10 @@ mod tests {
             "IndexOutOfRange",
             "SectionIndexOutOfRange",
             "NoChangeRequested",
+            "TooManyEntries",
+            "GridBpmOutOfRange",
+            "GridBpmBeatNotRepresentable",
+            "DuplicateGridBpmStart",
             "Text",
             "Path",
             "ItemValue",
@@ -2719,5 +2925,153 @@ mod tests {
         .unwrap();
         assert!(value.get("alias").is_none());
         assert!(value["object"].get("alias").is_none());
+    }
+
+    fn finite(value: f64) -> FiniteF64 {
+        FiniteF64::try_new(value).expect("有限値")
+    }
+
+    fn bpm(tempo: f64, beat: i64, start: f64, offset: f64) -> GridBpm {
+        GridBpm {
+            tempo: finite(tempo),
+            beat,
+            start: finite(start),
+            offset: finite(offset),
+        }
+    }
+
+    fn set_grid_bpm(entries: Vec<GridBpm>) -> SetGridBpmParams {
+        SetGridBpmParams {
+            expected_scene_id: 0,
+            entries,
+            expected_project_epoch: EPOCH.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_grid_bpm_list_is_accepted_when_every_value_is_in_range() {
+        set_grid_bpm(vec![bpm(120.0, 4, 0.0, 0.0), bpm(140.0, 3, 12.5, 0.25)])
+            .validate()
+            .expect("正常な一覧が拒否されました");
+    }
+
+    #[test]
+    fn an_empty_grid_bpm_list_is_accepted() {
+        // グリッドを消す指定である。ホストが無視するなら read-back の件数照合が
+        // 捕まえる。先回りして拒む理由が無い。
+        set_grid_bpm(Vec::new())
+            .validate()
+            .expect("0 件の一覧が拒否されました");
+    }
+
+    #[test]
+    fn a_grid_bpm_list_at_the_limit_is_accepted_and_one_more_is_not() {
+        let entries = |count: usize| {
+            (0..count)
+                .map(|index| bpm(120.0, 4, index as f64, 0.0))
+                .collect::<Vec<_>>()
+        };
+        set_grid_bpm(entries(MAX_GRID_BPM_ENTRIES))
+            .validate()
+            .expect("上限ちょうどの一覧が拒否されました");
+
+        let error = set_grid_bpm(entries(MAX_GRID_BPM_ENTRIES + 1))
+            .validate()
+            .expect_err("上限を超えた一覧が受理されました");
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+        // 件数の上限は対象フィールド名と上限で説明が尽きる。名前を足しても
+        // 要求元が取れる行動は変わらない。
+        assert_eq!(error.reason(), None);
+    }
+
+    #[test]
+    fn a_descending_grid_bpm_list_is_accepted() {
+        // 並べ替えはホストの仕事である。求めなかった順序を強制すると、
+        // read-back の順序と要求の順序が食い違ったときに説明が要る。
+        set_grid_bpm(vec![
+            bpm(120.0, 4, 30.0, 0.0),
+            bpm(120.0, 4, 20.0, 0.0),
+            bpm(120.0, 4, 10.0, 0.0),
+        ])
+        .validate()
+        .expect("降順の一覧が拒否されました");
+    }
+
+    #[test]
+    fn each_grid_bpm_rejection_names_its_own_reason() {
+        // 5 種の検証が別の名前を名乗ることを固定する。畳むと、要求元は
+        // 「値の直し方」と「そもそも受け渡せない」と「同じ位置を 2 度指した」を
+        // 区別できない。
+        let cases: &[(&str, Vec<GridBpm>, &str)] = &[
+            (
+                "単精度で無限大になる tempo",
+                vec![bpm(1.0e300, 4, 0.0, 0.0)],
+                "grid_bpm_out_of_range",
+            ),
+            (
+                "0 以下の tempo",
+                vec![bpm(0.0, 4, 0.0, 0.0)],
+                "grid_bpm_out_of_range",
+            ),
+            (
+                "1 未満の beat",
+                vec![bpm(120.0, 0, 0.0, 0.0)],
+                "grid_bpm_out_of_range",
+            ),
+            (
+                "負の start",
+                vec![bpm(120.0, 4, -1.0, 0.0)],
+                "grid_bpm_out_of_range",
+            ),
+            (
+                "重複した start",
+                vec![bpm(120.0, 4, 5.0, 0.0), bpm(140.0, 3, 5.0, 0.0)],
+                "duplicate_target",
+            ),
+            (
+                "i32 に収まらない beat",
+                vec![bpm(120.0, i64::from(i32::MAX) + 1, 0.0, 0.0)],
+                "argument_not_representable",
+            ),
+        ];
+        for (label, entries, reason) in cases {
+            let error = set_grid_bpm(entries.clone()).validate().expect_err(label);
+            assert_eq!(error.error_code(), ErrorCode::InvalidArgument, "{label}");
+            assert_eq!(error.reason(), Some(*reason), "{label}");
+            assert!(REASON_VALUES.contains(reason), "{label}");
+        }
+    }
+
+    #[test]
+    fn a_non_finite_grid_bpm_value_never_becomes_a_dto() {
+        // 有限であることは型が担保する。JSON が非有限数を運べる唯一の経路は
+        // 指数が範囲を超える表記であり、そこで拒否される。
+        let json = format!(
+            r#"{{"expected_scene_id":0,"entries":[{{"tempo":1e999,"beat":4,"start":0.0,"offset":0.0}}],"expected_project_epoch":"{EPOCH}"}}"#
+        );
+        assert!(serde_json::from_str::<SetGridBpmParams>(&json).is_err());
+    }
+
+    #[test]
+    fn set_grid_bpm_params_roundtrip() {
+        assert_roundtrip(set_grid_bpm(vec![bpm(120.0, 4, 1.5, 0.25)]));
+    }
+
+    #[test]
+    fn set_grid_bpm_params_reject_unknown_fields() {
+        let value = with_unknown_field(&set_grid_bpm(Vec::new()));
+        assert!(serde_json::from_value::<SetGridBpmParams>(value).is_err());
+    }
+
+    #[test]
+    fn grid_bpm_outcome_roundtrip() {
+        let outcome = GridBpmOutcome {
+            project_epoch: EPOCH.to_string(),
+            project_revision: 43,
+            entries: vec![bpm(120.0, 4, 0.0, 0.0)],
+        };
+        let s = serde_json::to_string(&outcome).unwrap();
+        let restored: GridBpmOutcome = serde_json::from_str(&s).unwrap();
+        assert_eq!(restored, outcome);
     }
 }

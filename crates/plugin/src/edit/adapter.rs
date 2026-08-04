@@ -30,11 +30,11 @@ use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchOperation, BatchOutcome, CreateObjectParams,
     CreateObjectSectionParams, Cursor, DeleteEffectParams, DeleteObjectParams,
     DeleteObjectSectionParams, DisplayRange, DisplayStart, EditOutcome, EffectInfo, EffectType,
-    FocusChange, FrameRange, ItemWriteError, LayerInfo, LayerStateOutcome, MoveObjectParams,
-    MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSelector, ObjectSource, ObjectSummary,
-    ObservedSelection, RangeChange, SectionRange, SelectionField, SelectionState,
-    SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSelectionParams, prepare_item_write,
+    FocusChange, FrameRange, GridBpmOutcome, ItemWriteError, LayerInfo, LayerStateOutcome,
+    MoveObjectParams, MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSelector, ObjectSource,
+    ObjectSummary, ObservedSelection, RangeChange, SectionRange, SelectionField, SelectionState,
+    SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
+    SetObjectNameParams, SetSelectionParams, prepare_item_write,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -1084,6 +1084,48 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                     locked: state.locked,
                     object_count,
                 },
+            })
+        })
+    }
+
+    fn set_grid_bpm(&self, params: &SetGridBpmParams) -> Result<GridBpmOutcome, EditError> {
+        self.ensure_editable()?;
+        let project = self.project.as_ref();
+        let entries = params.entries.as_slice();
+
+        self.edit_section(move |editor| {
+            let boundary = verify_boundary(
+                project,
+                editor.entry_edit_info(),
+                ExpectedEpoch::Only(params.expected_project_epoch.as_str()),
+                EditKind::Content,
+                &[params.expected_scene_id],
+                &[],
+            )?;
+
+            let permit = boundary.issue_permit(project)?;
+            permit.issue(&boundary, |ticket| {
+                editor.set_grid_bpm_list(ticket, entries)
+            })?;
+
+            // 置き換えの API は戻り値を持たない。同一区間内で読み直す。
+            let applied = attribute(&permit, &boundary, editor.reader().grid_bpm())?;
+            // **照合するのは件数だけである。** ホストは単精度で受け取るため
+            // 値は丸められ、順序も要求したものではない。どちらも正常な正規化で
+            // あり、失敗と診断してはならない。「送ったのに入っていない」は
+            // 正規化では説明できない。
+            if applied.len() != entries.len() {
+                return Err(permit.attribute(
+                    &boundary,
+                    EditError::UnsupportedTarget {
+                        reason: UnsupportedReason::ChangeNotApplied,
+                    },
+                ));
+            }
+            Ok(GridBpmOutcome {
+                project_epoch: boundary.epoch().to_string(),
+                project_revision: permit.project_revision(&boundary),
+                entries: applied,
             })
         })
     }

@@ -26,9 +26,9 @@ use aviutl2_mcp_core::{
     ObjectFilterError, PageError, PageRequest, PongProject, PongResult, ProtocolVersion,
     ReadOperation, RenderFrameParams, RenderFrameResult, RenderInputError, RenderOperation,
     RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult, ScaledBudgets,
-    SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSelectionParams, compute_client_mac, compute_server_mac, deserialize_json, take_page,
-    verify_mac,
+    SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
+    SetObjectNameParams, SetSelectionParams, compute_client_mac, compute_server_mac,
+    deserialize_json, take_page, verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -1000,6 +1000,7 @@ enum EditRequest {
     CreateObjectSection(Box<CreateObjectSectionParams>),
     DeleteObjectSection(Box<DeleteObjectSectionParams>),
     MoveObjectSection(Box<MoveObjectSectionParams>),
+    SetGridBpm(Box<SetGridBpmParams>),
     ApplyBatch(Box<ApplyBatchParams>),
 }
 
@@ -1054,6 +1055,7 @@ fn decode_edit_request(
         EditOperation::MoveObjectSection => {
             decoded!(MoveObjectSectionParams, EditRequest::MoveObjectSection)
         }
+        EditOperation::SetGridBpm => decoded!(SetGridBpmParams, EditRequest::SetGridBpm),
         EditOperation::ApplyBatch => {
             let params: ApplyBatchParams = decode_params(params)?;
             params.validate().map_err(batch_input_error)?;
@@ -1131,6 +1133,9 @@ fn dispatch_edit(adapter: &dyn EditAdapter, request: EditRequest) -> Result<Valu
         }
         EditRequest::MoveObjectSection(params) => {
             to_result(&adapter.move_object_section(&params).map_err(edit_error)?)
+        }
+        EditRequest::SetGridBpm(params) => {
+            to_result(&adapter.set_grid_bpm(&params).map_err(edit_error)?)
         }
         EditRequest::ApplyBatch(params) => {
             to_result(&adapter.apply_batch(&params).map_err(edit_error)?)
@@ -2755,9 +2760,10 @@ mod edit_tests {
     use super::*;
     use crate::edit::error::RollbackOutcome;
     use aviutl2_mcp_core::{
-        EditOutcome, LayerInfo, LayerStateOutcome, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS,
-        ObjectFingerprintInput, ObjectSectionsOutcome, ObjectSummary, SERVER_BATCH_REQUEST_BUDGET,
-        SectionRange, SelectionField, SelectionState, SetLayerStateParams, TRANSPORT_HEADROOM,
+        EditOutcome, GridBpmOutcome, LayerInfo, LayerStateOutcome, MAX_ITEM_VALUE_BYTES,
+        MAX_PATH_UTF16_UNITS, ObjectFingerprintInput, ObjectSectionsOutcome, ObjectSummary,
+        SERVER_BATCH_REQUEST_BUDGET, SectionRange, SelectionField, SelectionState,
+        SetLayerStateParams, TRANSPORT_HEADROOM,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -2863,6 +2869,15 @@ mod edit_tests {
             _: &MoveObjectSectionParams,
         ) -> Result<ObjectSectionsOutcome, EditError> {
             Ok(self.enter_sections("move_object_section"))
+        }
+
+        fn set_grid_bpm(&self, _: &SetGridBpmParams) -> Result<GridBpmOutcome, EditError> {
+            self.calls.lock().unwrap().push("set_grid_bpm");
+            Ok(GridBpmOutcome {
+                project_epoch: EPOCH.to_string(),
+                project_revision: 1,
+                entries: Vec::new(),
+            })
         }
 
         fn set_object_item(&self, _: &SetObjectItemParams) -> Result<EditOutcome, EditError> {
@@ -2995,6 +3010,11 @@ mod edit_tests {
                 "section": 1,
                 "frame": 160,
             }),
+            EditOperation::SetGridBpm => json!({
+                "expected_scene_id": SCENE_ID,
+                "entries": [{ "tempo": 120.0, "beat": 4, "start": 0.0, "offset": 0.0 }],
+                "expected_project_epoch": EPOCH,
+            }),
             EditOperation::ApplyBatch => batch_params(),
         })
     }
@@ -3027,6 +3047,7 @@ mod edit_tests {
             EditRequest::CreateObjectSection(params) => serde_json::to_value(params),
             EditRequest::DeleteObjectSection(params) => serde_json::to_value(params),
             EditRequest::MoveObjectSection(params) => serde_json::to_value(params),
+            EditRequest::SetGridBpm(params) => serde_json::to_value(params),
             EditRequest::ApplyBatch(params) => serde_json::to_value(params),
         };
         Ok(encoded.expect("params は直列化できる"))
@@ -3172,7 +3193,8 @@ mod edit_tests {
             vec![
                 EditOperation::CreateObject.as_str(),
                 EditOperation::SetLayerState.as_str(),
-                EditOperation::SetSelection.as_str()
+                EditOperation::SetSelection.as_str(),
+                EditOperation::SetGridBpm.as_str()
             ]
         );
     }

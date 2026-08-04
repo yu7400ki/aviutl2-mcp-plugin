@@ -12,9 +12,9 @@ use crate::mcp::render::RenderFrameOutput;
 use crate::mcp::summary::{TextBuilder, clamp_chars};
 use aviutl2_mcp_core::{
     BatchOutcome, BatchStepOutcome, EditInfo, EditOutcome, EffectItemValues, EvaluatedItem,
-    GetCurrentSceneResult, InstanceInfo, LayerStateOutcome, ListAvailableEffectsResult,
-    ListLayersResult, ListObjectsResult, ObjectDetail, ObjectSectionsOutcome, ObjectSummary,
-    PageMeta, SelectionField, SelectionState,
+    GetCurrentSceneResult, GridBpmOutcome, InstanceInfo, LayerStateOutcome,
+    ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, ObjectDetail,
+    ObjectSectionsOutcome, ObjectSummary, PageMeta, SelectionField, SelectionState,
 };
 
 /// 名前をそのまま行に載せるときの最大文字数。
@@ -408,6 +408,23 @@ pub fn object_sections(action: &str, outcome: &ObjectSectionsOutcome) -> String 
         "区間番号 i は sections[i] を指します。sections[0].start はオブジェクトの開始フレームであって中間点ではないため、区間 0 は削除も移動もできません",
     );
     finish_edit(text, outcome.project_revision)
+}
+
+/// `set_grid_bpm` の text content。
+///
+/// 一覧そのものは列挙しない。件数と、返る値の読み方だけを示し、完全な一覧は
+/// `structuredContent` が運ぶ。
+pub fn grid_bpm(outcome: &GridBpmOutcome) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(format!(
+        "BPM グリッドを {} 件の一覧へ置き換えました",
+        outcome.entries.len()
+    ));
+    text.push_line(format!("project_revision={}", outcome.project_revision));
+    text.push_line(
+        "entries には置き換え後に読み直した一覧が入ります。ホストは単精度で受け取り並べ替えもするため、要求した値や順序と一致するとは限りません",
+    );
+    text.finish()
 }
 
 /// `set_selection` の text content。

@@ -875,6 +875,14 @@ impl SceneEditor for CachingEditor<'_> {
             .move_object_section(ticket, object, section, frame)
     }
 
+    fn set_grid_bpm_list(
+        &self,
+        ticket: crate::edit::precondition::MutationTicket<'_>,
+        entries: &[GridBpm],
+    ) -> Result<(), EditError> {
+        self.inner.set_grid_bpm_list(ticket, entries)
+    }
+
     fn set_object_name(
         &self,
         ticket: crate::edit::precondition::MutationTicket<'_>,

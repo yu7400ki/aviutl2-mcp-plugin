@@ -209,6 +209,7 @@ pub const REASON_VALUES: &[&str] = &[
     "frame_out_of_range",
     "frame_outside_object",
     "frame_too_large",
+    "grid_bpm_out_of_range",
     "inverse_unavailable",
     "item_not_evaluatable",
     "item_not_found",

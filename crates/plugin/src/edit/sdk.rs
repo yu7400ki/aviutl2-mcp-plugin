@@ -24,7 +24,7 @@ use aviutl2::generic::{
 };
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EffectItemType, FrameRange,
-    SectionRange,
+    GridBpm, SectionRange,
 };
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -74,6 +74,22 @@ fn section_mutation_failure(operation: &'static str, error: &EditSectionError) -
         EditError::Sdk { operation } => EditError::SectionChangeRejected { operation },
         other => other,
     }
+}
+
+/// BPM 情報を SDK の型へ写す。
+///
+/// テンポと拍子オフセットは単精度へ落ちる。要求の検証が単精度で表せることを
+/// 確かめているため、ここで無限大にはならない。拍子は 32bit 符号付き整数へ
+/// 写せない場合に、SDK を呼ばずに失敗する。
+fn bpm_info(entry: &GridBpm) -> Result<aviutl2::generic::BpmInfo, EditError> {
+    Ok(aviutl2::generic::BpmInfo {
+        tempo: entry.tempo.get() as f32,
+        beat: i32::try_from(entry.beat).map_err(|_| EditError::NotIssued {
+            reason: NotIssuedReason::ArgumentNotRepresentable,
+        })?,
+        start: entry.start.get(),
+        offset: entry.offset.get() as f32,
+    })
 }
 
 /// メディア対応の確認方法。
@@ -524,6 +540,20 @@ impl SceneEditor for SdkSceneEditor<'_> {
         self.section
             .set_layer_lock(layer, locked)
             .map_err(|error| mutation_failure("set_layer_lock", &error))
+    }
+
+    fn set_grid_bpm_list(
+        &self,
+        _ticket: MutationTicket<'_>,
+        entries: &[GridBpm],
+    ) -> Result<(), EditError> {
+        let entries = entries
+            .iter()
+            .map(bpm_info)
+            .collect::<Result<Vec<_>, EditError>>()?;
+        self.section
+            .set_grid_bpm_list(&entries)
+            .map_err(|error| mutation_failure("set_grid_bpm_list", &error))
     }
 
     fn set_cursor(

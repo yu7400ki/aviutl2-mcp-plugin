@@ -68,10 +68,11 @@ pub use digest::{SHA256_HEX_LEN, SHA256_PREFIX, format_sha256};
 pub use edit::{
     AddEffectParams, CreateObjectParams, CreateObjectSectionParams, CursorPosition,
     DeleteEffectParams, DeleteObjectParams, DeleteObjectSectionParams, Destination, DisplayStart,
-    EditInputError, EditOutcome, FocusChange, LayerNameChange, LayerStateOutcome, MoveObjectParams,
-    MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSource, ObservedSelection, Placement,
-    RangeChange, SelectionField, SelectionState, SetEffectEnabledParams, SetLayerStateParams,
-    SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+    EditInputError, EditOutcome, FocusChange, GridBpmOutcome, LayerNameChange, LayerStateOutcome,
+    MAX_GRID_BPM_ENTRIES, MoveObjectParams, MoveObjectSectionParams, ObjectSectionsOutcome,
+    ObjectSource, ObservedSelection, Placement, RangeChange, SelectionField, SelectionState,
+    SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
+    SetObjectNameParams, SetSelectionParams,
 };
 pub use edit_info::{
     Cursor, DisplayRange, EditInfo, Extent, FrameRange, GridBpm, SceneInfo, SceneRef,
@@ -118,9 +119,9 @@ pub use operation::{
     OPERATION_GET_EFFECT_ITEM_VALUES, OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS,
     OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT,
     OPERATION_MOVE_OBJECT_SECTION, OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED,
-    OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME,
-    OPERATION_SET_SELECTION, ObjectFilter, ObjectFilterError, ReadOperation, RenderOperation,
-    TrackGroup,
+    OPERATION_SET_GRID_BPM, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
+    OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectFilter, ObjectFilterError,
+    ReadOperation, RenderOperation, TrackGroup,
 };
 pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
 pub use render::{

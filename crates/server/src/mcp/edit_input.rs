@@ -34,10 +34,11 @@ use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchInputError, BatchOperation, CreateObjectParams,
     CreateObjectSectionParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
     DeleteObjectSectionParams, Destination, DisplayStart, EditInputError, ErrorObject, FiniteF64,
-    FocusChange, ItemValue, LayerNameChange, MAX_ALIAS_BYTES, MAX_BATCH_OPERATIONS,
-    MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MoveObjectParams, MoveObjectSectionParams,
-    ObjectSource, Placement, RangeChange, SetEffectEnabledParams, SetLayerStateParams,
-    SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+    FocusChange, GridBpm, ItemValue, LayerNameChange, MAX_ALIAS_BYTES, MAX_BATCH_OPERATIONS,
+    MAX_GRID_BPM_ENTRIES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MoveObjectParams,
+    MoveObjectSectionParams, ObjectSource, Placement, RangeChange, SetEffectEnabledParams,
+    SetGridBpmParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
+    SetSelectionParams,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -737,6 +738,94 @@ impl SetSelectionInput {
     }
 }
 
+/// BPM グリッドの 1 件。
+///
+/// **未知フィールドを拒否しない。** `get_edit_info` が返した要素をそのまま
+/// 送り返す往復型であり、応答へ field が増えたときに往復が壊れる。
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+pub struct GridBpmInput {
+    /// テンポ。0 より大きい値を指定する。
+    pub tempo: f64,
+    /// 拍子。1 以上を指定する。
+    ///
+    /// 宣言した範囲は [`SetGridBpmParams::validate`] が実際に確かめる。
+    #[schemars(range(min = MIN_BEAT, max = MAX_BEAT))]
+    pub beat: i64,
+    /// 開始位置。秒であり、フレーム番号ではない。0 以上を指定する。
+    pub start: f64,
+    /// 拍子オフセット。秒であり、フレーム番号ではない。
+    pub offset: f64,
+}
+
+/// 拍子に許す最小値。
+const MIN_BEAT: i64 = 1;
+
+/// 拍子に許す最大値。
+///
+/// ホストは拍子を 32bit 符号付き整数で受け渡す。
+const MAX_BEAT: i64 = i32::MAX as i64;
+
+/// BPM 情報の一覧に指定できる最大件数。
+const MAX_GRID_BPM_COUNT: u32 = MAX_GRID_BPM_ENTRIES as u32;
+
+impl GridBpmInput {
+    /// IPC の DTO へ変換する。
+    ///
+    /// 有限であることだけを型が課す。値の範囲と重複は core の検証が見る。
+    fn to_grid_bpm(self) -> Result<GridBpm, ErrorObject> {
+        let finite = |field: &str, value: f64| {
+            FiniteF64::try_new(value).ok_or_else(|| {
+                invalid_argument(format!(
+                    "entries の {field} には有限の数値を指定してください"
+                ))
+            })
+        };
+        Ok(GridBpm {
+            tempo: finite("tempo", self.tempo)?,
+            beat: self.beat,
+            start: finite("start", self.start)?,
+            offset: finite("offset", self.offset)?,
+        })
+    }
+}
+
+/// `set_grid_bpm` の入力。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetGridBpmInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// 現在シーンの一致確認に使うシーン ID。
+    pub expected_scene_id: i32,
+    /// 置き換える BPM 情報の一覧。指定した一覧がそのまま現在の一覧になる。空配列でグリッドを消す。
+    ///
+    /// 宣言した件数は [`SetGridBpmParams::validate`] が実際に確かめる。
+    #[schemars(length(max = MAX_GRID_BPM_COUNT))]
+    pub entries: Vec<GridBpmInput>,
+    /// 直前の読み取りまたは編集の応答が返した project_epoch。BPM グリッドは selector を持たないため、これがプロジェクト境界を照合する唯一の材料である。
+    #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
+    pub expected_project_epoch: String,
+}
+
+impl SetGridBpmInput {
+    /// IPC の params へ変換する。
+    pub fn to_params(&self) -> Result<SetGridBpmParams, ErrorObject> {
+        let entries = self
+            .entries
+            .iter()
+            .map(|entry| entry.to_grid_bpm())
+            .collect::<Result<Vec<_>, _>>()?;
+        let params = SetGridBpmParams {
+            expected_scene_id: self.expected_scene_id,
+            entries,
+            expected_project_epoch: expected_project_epoch(&self.expected_project_epoch)?,
+        };
+        params.validate().map_err(from_input_error)?;
+        Ok(params)
+    }
+}
+
 /// `operations` に指定できる sub-operation の最大件数。
 const MAX_BATCH_OPERATION_COUNT: u32 = MAX_BATCH_OPERATIONS as u32;
 
@@ -995,6 +1084,12 @@ mod tests {
                 "section": 1,
                 "frame": 160,
             }),
+            EditOperation::SetGridBpm => json!({
+                "instance_id": SAMPLE_ID,
+                "expected_scene_id": 3,
+                "entries": [{ "tempo": 120.0, "beat": 4, "start": 0.0, "offset": 0.0 }],
+                "expected_project_epoch": SAMPLE_EPOCH,
+            }),
             EditOperation::ApplyBatch => json!({
                 "instance_id": SAMPLE_ID,
                 "operations": [batch_move_json()],
@@ -1037,6 +1132,7 @@ mod tests {
             EditOperation::CreateObjectSection => decoded!(CreateObjectSectionInput),
             EditOperation::DeleteObjectSection => decoded!(DeleteObjectSectionInput),
             EditOperation::MoveObjectSection => decoded!(MoveObjectSectionInput),
+            EditOperation::SetGridBpm => decoded!(SetGridBpmInput),
             EditOperation::ApplyBatch => decoded!(ApplyBatchInput),
         })
     }
