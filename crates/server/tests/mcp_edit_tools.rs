@@ -5,15 +5,17 @@ mod support;
 use aviutl2_mcp_core::{
     AuthSecret, BatchOutcome, BatchStepOutcome, Cursor, EditOutcome, EffectFingerprintInput,
     EffectInfo, EffectItem, EffectItemType, ErrorCode, ErrorObject, FrameRange, InstanceId,
-    InstanceState, ItemValue, LayerInfo, LayerStateOutcome, ObjectFingerprintInput, ObjectSelector,
-    ObjectSummary, RequestEnvelope, SelectionField, SelectionState,
+    InstanceState, ItemValue, LayerInfo, LayerStateOutcome, ObjectFingerprintInput,
+    ObjectSectionsOutcome, ObjectSelector, ObjectSummary, RequestEnvelope, SectionRange,
+    SelectionField, SelectionState,
 };
 use aviutl2_mcp_server::mcp::edit_input::{
-    AddEffectInput, ApplyBatchInput, BatchOperationInput, CreateObjectInput, CursorPositionInput,
-    DeleteEffectInput, DeleteObjectInput, DestinationInput, EffectSelectorInput, FocusChangeInput,
-    ItemValueInput, LayerNameChangeInput, MoveObjectInput, ObjectSourceInput, PlacementInput,
-    RangeChangeInput, SetEffectEnabledInput, SetLayerStateInput, SetObjectItemInput,
-    SetObjectNameInput, SetSelectionInput,
+    AddEffectInput, ApplyBatchInput, BatchOperationInput, CreateObjectInput,
+    CreateObjectSectionInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
+    DeleteObjectSectionInput, DestinationInput, EffectSelectorInput, FocusChangeInput,
+    ItemValueInput, LayerNameChangeInput, MoveObjectInput, MoveObjectSectionInput,
+    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetLayerStateInput,
+    SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::ObjectSelectorInput;
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
@@ -1515,4 +1517,177 @@ async fn a_batch_that_could_not_be_rolled_back_reaches_the_caller_intact() {
     let text = text_of(&result);
     assert!(text.contains("operations[1]"), "{text}");
     assert!(text.contains("必ず対象を読み直して"), "{text}");
+}
+
+/// 中間点の変更が返す応答。
+fn object_sections() -> Value {
+    serde_json::to_value(ObjectSectionsOutcome {
+        project_epoch: EPOCH.to_string(),
+        project_revision: APPLIED_REVISION,
+        object: sample_summary(),
+        sections: vec![
+            SectionRange {
+                start: 120,
+                end: 179,
+            },
+            SectionRange {
+                start: 180,
+                end: 240,
+            },
+        ],
+    })
+    .expect("直列化できる")
+}
+
+#[tokio::test]
+async fn create_object_section_tool_sends_create_object_section_operation() {
+    let expected = object_sections();
+    let harness = Harness::start(responses("create_object_section", expected.clone()));
+
+    let result = harness
+        .server
+        .create_object_section(Parameters(CreateObjectSectionInput {
+            instance_id: harness.instance_id(),
+            selector: selector_input(),
+            frame: 180,
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+
+    let request = harness.only_request();
+    assert_eq!(request.operation, "create_object_section");
+    assert_eq!(
+        request.params,
+        json!({
+            "selector": selector_json(),
+            "frame": 180,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn delete_object_section_tool_sends_delete_object_section_operation() {
+    let expected = object_sections();
+    let harness = Harness::start(responses("delete_object_section", expected.clone()));
+
+    let result = harness
+        .server
+        .delete_object_section(Parameters(DeleteObjectSectionInput {
+            instance_id: harness.instance_id(),
+            selector: selector_input(),
+            section: 1,
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+
+    let request = harness.only_request();
+    assert_eq!(request.operation, "delete_object_section");
+    assert_eq!(
+        request.params,
+        json!({
+            "selector": selector_json(),
+            "section": 1,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn move_object_section_tool_sends_move_object_section_operation() {
+    let expected = object_sections();
+    let harness = Harness::start(responses("move_object_section", expected.clone()));
+
+    let result = harness
+        .server
+        .move_object_section(Parameters(MoveObjectSectionInput {
+            instance_id: harness.instance_id(),
+            selector: selector_input(),
+            section: 1,
+            frame: 200,
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+
+    let request = harness.only_request();
+    assert_eq!(request.operation, "move_object_section");
+    assert_eq!(
+        request.params,
+        json!({
+            "selector": selector_json(),
+            "section": 1,
+            "frame": 200,
+        }),
+    );
+}
+
+/// 区間番号 0 の要求が IPC へ届かないことを確かめる。
+fn assert_section_zero_rejected(harness: &Harness, name: &str, result: &CallToolResult) {
+    assert_eq!(result.is_error, Some(true), "{name}");
+    let structured = structured(result);
+    assert_eq!(structured["code"], json!("invalid_argument"), "{name}");
+    assert_eq!(
+        structured["details"]["reason"],
+        json!("section_index_out_of_range"),
+        "{name}"
+    );
+    assert!(harness.requests().is_empty(), "{name} が IPC へ届きました");
+}
+
+#[tokio::test]
+async fn deleting_section_zero_is_rejected_before_any_ipc() {
+    // schema の minimum は宣言であり、要求がそれを満たすかを rmcp は検証しない。
+    // 宣言した制約は server 側で実際に確かめる。
+    let harness = Harness::start(responses("delete_object_section", object_sections()));
+    let result = harness
+        .server
+        .delete_object_section(Parameters(DeleteObjectSectionInput {
+            instance_id: harness.instance_id(),
+            selector: selector_input(),
+            section: 0,
+        }))
+        .await;
+    assert_section_zero_rejected(&harness, "delete_object_section", &result);
+}
+
+#[tokio::test]
+async fn moving_section_zero_is_rejected_before_any_ipc() {
+    let harness = Harness::start(responses("move_object_section", object_sections()));
+    let result = harness
+        .server
+        .move_object_section(Parameters(MoveObjectSectionInput {
+            instance_id: harness.instance_id(),
+            selector: selector_input(),
+            section: 0,
+            frame: 200,
+        }))
+        .await;
+    assert_section_zero_rejected(&harness, "move_object_section", &result);
+}
+
+#[tokio::test]
+async fn section_responses_carry_neither_the_alias_nor_a_handle() {
+    let harness = Harness::start(responses("create_object_section", object_sections()));
+
+    let result = harness
+        .server
+        .create_object_section(Parameters(CreateObjectSectionInput {
+            instance_id: harness.instance_id(),
+            selector: selector_input(),
+            frame: 180,
+        }))
+        .await;
+
+    let text = text_of(&result);
+    let structured = structured(&result).to_string();
+    let request = harness.only_request().params.to_string();
+    for forbidden in [SECRET_ALIAS, "[vo]", "_name=", "handle"] {
+        assert!(!text.contains(forbidden), "text: {text}");
+        assert!(!structured.contains(forbidden), "structured: {structured}");
+        assert!(!request.contains(forbidden), "params: {request}");
+    }
 }

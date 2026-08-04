@@ -29,11 +29,12 @@ use crate::mcp::input::{
 };
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchInputError, BatchOperation, CreateObjectParams,
-    CursorPosition, DeleteEffectParams, DeleteObjectParams, Destination, EditInputError,
-    EffectSelector, ErrorObject, FiniteF64, FocusChange, ItemValue, LayerNameChange,
-    MAX_ALIAS_BYTES, MAX_BATCH_OPERATIONS, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS,
-    MoveObjectParams, ObjectSource, Placement, RangeChange, SetEffectEnabledParams,
-    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+    CreateObjectSectionParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
+    DeleteObjectSectionParams, Destination, EditInputError, EffectSelector, ErrorObject, FiniteF64,
+    FocusChange, ItemValue, LayerNameChange, MAX_ALIAS_BYTES, MAX_BATCH_OPERATIONS,
+    MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MoveObjectParams, MoveObjectSectionParams,
+    ObjectSource, Placement, RangeChange, SetEffectEnabledParams, SetLayerStateParams,
+    SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -43,6 +44,12 @@ use serde::Deserialize;
 /// ホストは位置を 32bit 符号付き整数で受け渡すため、それに収まることだけを
 /// 課す。実際に配置できるかはホストが判定する。
 const MAX_POSITION: u32 = i32::MAX as u32;
+
+/// 区間番号に許す最小値。
+///
+/// 区間 0 の開始位置はオブジェクトの開始フレームであって中間点ではないため、
+/// 削除も移動もできない。
+const MIN_SECTION: u32 = 1;
 
 /// object alias に許す最大文字数。
 const MAX_ALIAS_CHARS: u32 = MAX_ALIAS_BYTES as u32;
@@ -574,6 +581,91 @@ impl LayerNameChangeInput {
     }
 }
 
+/// `create_object_section` の入力。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateObjectSectionInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// 対象オブジェクトのセレクター。
+    pub selector: ObjectSelectorInput,
+    /// 中間点を追加するフレーム番号。0 始まりのシーンの絶対フレーム番号。
+    #[schemars(range(max = MAX_POSITION))]
+    pub frame: u32,
+}
+
+impl CreateObjectSectionInput {
+    /// IPC の params へ変換する。
+    pub fn to_params(&self) -> Result<CreateObjectSectionParams, ErrorObject> {
+        let params = CreateObjectSectionParams {
+            selector: self.selector.to_selector()?,
+            frame: self.frame,
+        };
+        params.validate().map_err(from_input_error)?;
+        Ok(params)
+    }
+}
+
+/// `delete_object_section` の入力。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteObjectSectionInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// 対象オブジェクトのセレクター。
+    pub selector: ObjectSelectorInput,
+    /// 削除する中間点を開始位置に持つ区間の番号。1 以上。
+    ///
+    /// 下限の宣言は [`CreateObjectSectionParams::validate`] と同じ core の検証が
+    /// 実際に確かめる。宣言だけがあって検証されない制約は残さない。
+    #[schemars(range(min = MIN_SECTION, max = MAX_POSITION))]
+    pub section: u32,
+}
+
+impl DeleteObjectSectionInput {
+    /// IPC の params へ変換する。
+    pub fn to_params(&self) -> Result<DeleteObjectSectionParams, ErrorObject> {
+        let params = DeleteObjectSectionParams {
+            selector: self.selector.to_selector()?,
+            section: self.section,
+        };
+        params.validate().map_err(from_input_error)?;
+        Ok(params)
+    }
+}
+
+/// `move_object_section` の入力。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MoveObjectSectionInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// 対象オブジェクトのセレクター。
+    pub selector: ObjectSelectorInput,
+    /// 移動する中間点を開始位置に持つ区間の番号。1 以上。
+    #[schemars(range(min = MIN_SECTION, max = MAX_POSITION))]
+    pub section: u32,
+    /// 移動先のフレーム番号。0 始まりのシーンの絶対フレーム番号。
+    #[schemars(range(max = MAX_POSITION))]
+    pub frame: u32,
+}
+
+impl MoveObjectSectionInput {
+    /// IPC の params へ変換する。
+    pub fn to_params(&self) -> Result<MoveObjectSectionParams, ErrorObject> {
+        let params = MoveObjectSectionParams {
+            selector: self.selector.to_selector()?,
+            section: self.section,
+            frame: self.frame,
+        };
+        params.validate().map_err(from_input_error)?;
+        Ok(params)
+    }
+}
+
 /// `set_layer_state` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -901,6 +993,22 @@ mod tests {
                 "cursor": { "layer": 1, "frame": 2 },
                 "expected_project_epoch": SAMPLE_EPOCH,
             }),
+            EditOperation::CreateObjectSection => json!({
+                "instance_id": SAMPLE_ID,
+                "selector": object_selector_json(),
+                "frame": 150,
+            }),
+            EditOperation::DeleteObjectSection => json!({
+                "instance_id": SAMPLE_ID,
+                "selector": object_selector_json(),
+                "section": 1,
+            }),
+            EditOperation::MoveObjectSection => json!({
+                "instance_id": SAMPLE_ID,
+                "selector": object_selector_json(),
+                "section": 1,
+                "frame": 160,
+            }),
             EditOperation::ApplyBatch => json!({
                 "instance_id": SAMPLE_ID,
                 "operations": [batch_move_json()],
@@ -940,6 +1048,9 @@ mod tests {
             EditOperation::SetEffectEnabled => decoded!(SetEffectEnabledInput),
             EditOperation::SetLayerState => decoded!(SetLayerStateInput),
             EditOperation::SetSelection => decoded!(SetSelectionInput),
+            EditOperation::CreateObjectSection => decoded!(CreateObjectSectionInput),
+            EditOperation::DeleteObjectSection => decoded!(DeleteObjectSectionInput),
+            EditOperation::MoveObjectSection => decoded!(MoveObjectSectionInput),
             EditOperation::ApplyBatch => decoded!(ApplyBatchInput),
         })
     }

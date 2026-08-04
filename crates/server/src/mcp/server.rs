@@ -9,8 +9,9 @@ use crate::api::{ListInstancesResponse, list_instances};
 use crate::artifact::{Artifact, ArtifactStore, ArtifactStoreError, base_dir_for_registry};
 use crate::discovery::{DiscoveryConfig, list_registered_instances, resolve_instance};
 use crate::mcp::edit_input::{
-    AddEffectInput, ApplyBatchInput, CreateObjectInput, DeleteEffectInput, DeleteObjectInput,
-    MoveObjectInput, SetEffectEnabledInput, SetLayerStateInput, SetObjectItemInput,
+    AddEffectInput, ApplyBatchInput, CreateObjectInput, CreateObjectSectionInput,
+    DeleteEffectInput, DeleteObjectInput, DeleteObjectSectionInput, MoveObjectInput,
+    MoveObjectSectionInput, SetEffectEnabledInput, SetLayerStateInput, SetObjectItemInput,
     SetObjectNameInput, SetSelectionInput,
 };
 use crate::mcp::input::{
@@ -27,13 +28,15 @@ use aviutl2_mcp_core::{
     BatchOutcome, EditInfo, EditOutcome, ErrorCode, ErrorObject, GetCurrentSceneParams,
     GetCurrentSceneResult, GetEditInfoParams, InstanceId, LayerStateOutcome,
     ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, MAX_PAGE_LIMIT,
-    OPERATION_ADD_EFFECT, OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT, OPERATION_DELETE_EFFECT,
-    OPERATION_DELETE_OBJECT, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
+    OPERATION_ADD_EFFECT, OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT,
+    OPERATION_CREATE_OBJECT_SECTION, OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT,
+    OPERATION_DELETE_OBJECT_SECTION, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
     OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
-    OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT, OPERATION_RENDER_FRAME,
-    OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
-    OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail, RenderFrameResult,
-    RequestBudgetKind, ScaledBudgets, SelectionState, request_budget_kind,
+    OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT, OPERATION_MOVE_OBJECT_SECTION,
+    OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_LAYER_STATE,
+    OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail,
+    ObjectSectionsOutcome, RenderFrameResult, RequestBudgetKind, ScaledBudgets, SelectionState,
+    request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -1202,6 +1205,192 @@ impl AviUtl2McpServer {
         .await
     }
 
+    /// オブジェクトへ中間点を追加し、区間を 1 つ増やす。
+    /// frame は中間点を置くシーンの絶対フレーム番号であり、オブジェクト内の相対位置
+    /// ではない。get_object が返した sections の値をそのまま基準に使える。
+    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// 応答の sections は変更後の区間の一覧であり、get_object が返すものと同じ形である。
+    /// 区間の番号と中間点の番号は 1 つずれる。sections[i] が区間番号 i であり、
+    /// i が 1 以上のとき sections[i].start が i 番目の中間点のフレームである。
+    /// sections[0].start はオブジェクトの開始フレームであって中間点ではないため、
+    /// 区間 0 は delete_object_section でも move_object_section でも指定できない。
+    /// sections の末尾の end はオブジェクトの終了フレームである。
+    /// frame がオブジェクトの範囲外なら precondition_failed（frame_outside_object）、
+    /// 既に区間の開始フレームなら precondition_failed（section_boundary_exists）となる。
+    /// 同じ要求を再送しても中間点は重複しない。2 回目は section_boundary_exists で
+    /// 落ち、状態は 1 回目と同じである。
+    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
+    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
+    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
+    /// selector の project_epoch が拒否する。
+    /// selector には get_object や list_objects が返した値をそのまま指定する。
+    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
+    /// 対象が変化していた場合の precondition_failed では、details.current_object に
+    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
+    /// ロックされたレイヤー上の対象でも通る。中間点はオブジェクトの位置も長さも
+    /// 変えないため、ロックが止める削除にも時間軸上の移動にも当たらない。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    #[tool(
+        name = "create_object_section",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::create_object_section()
+        )
+    )]
+    pub async fn create_object_section(
+        &self,
+        Parameters(input): Parameters<CreateObjectSectionInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits();
+        self.run("create_object_section", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: ObjectSectionsOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_CREATE_OBJECT_SECTION,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::object_sections("中間点を追加しました", &result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// オブジェクトの中間点を 1 つ削除し、前後の区間を 1 つにまとめる。
+    /// section は削除する中間点を開始位置に持つ区間の番号であり、1 以上である。
+    /// 区間の番号と中間点の番号は 1 つずれる。sections[i] が区間番号 i であり、
+    /// i が 1 以上のとき sections[i].start が i 番目の中間点のフレームである。
+    /// sections[0].start はオブジェクトの開始フレームであって中間点ではないため、
+    /// 区間 0 は指定できず、指定すると invalid_argument（section_index_out_of_range）となる。
+    /// sections の末尾の end はオブジェクトの終了フレームである。
+    /// section が区間の数以上なら precondition_failed（section_index_out_of_range）となる。
+    /// 同じ事実でも、常に誤りである 0 は invalid_argument、対象の現在の状態に
+    /// よって決まる範囲外は precondition_failed になる。
+    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// 削除した中間点の移動パラメータは失われ、create_object_section で同じ
+    /// フレームへ中間点を戻しても元の値には戻らない。
+    /// 応答の sections は変更後の区間の一覧であり、get_object が返すものと同じ形である。
+    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
+    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
+    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
+    /// selector の project_epoch が拒否する。
+    /// selector には get_object や list_objects が返した値をそのまま指定する。
+    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
+    /// 対象が変化していた場合の precondition_failed では、details.current_object に
+    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
+    /// ロックされたレイヤー上の対象でも通る。中間点はオブジェクトの位置も長さも
+    /// 変えないため、ロックが止める削除にも時間軸上の移動にも当たらない。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    #[tool(
+        name = "delete_object_section",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::delete_object_section()
+        )
+    )]
+    pub async fn delete_object_section(
+        &self,
+        Parameters(input): Parameters<DeleteObjectSectionInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits();
+        self.run("delete_object_section", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: ObjectSectionsOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_DELETE_OBJECT_SECTION,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::object_sections("中間点を削除しました", &result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// オブジェクトの中間点を別のフレームへ移す。
+    /// section は移動する中間点を開始位置に持つ区間の番号であり、1 以上である。
+    /// frame は移動先のシーンの絶対フレーム番号であり、オブジェクト内の相対位置
+    /// ではない。frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// 区間の番号と中間点の番号は 1 つずれる。sections[i] が区間番号 i であり、
+    /// i が 1 以上のとき sections[i].start が i 番目の中間点のフレームである。
+    /// sections[0].start はオブジェクトの開始フレームであって中間点ではないため、
+    /// 区間 0 は指定できず、指定すると invalid_argument（section_index_out_of_range）となる。
+    /// sections の末尾の end はオブジェクトの終了フレームである。
+    /// 中間点は隣の中間点を追い越せない。移動できるのは sections[section-1].start より後、
+    /// sections[section+1].start より前（無ければオブジェクトの終了フレームまで）であり、
+    /// 外れると precondition_failed（section_move_crosses_boundary）となる。
+    /// section が区間の数以上なら precondition_failed（section_index_out_of_range）となる。
+    /// 応答の sections は変更後の区間の一覧であり、get_object が返すものと同じ形である。
+    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
+    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
+    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
+    /// selector の project_epoch が拒否する。
+    /// selector には get_object や list_objects が返した値をそのまま指定する。
+    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
+    /// 対象が変化していた場合の precondition_failed では、details.current_object に
+    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
+    /// ロックされたレイヤー上の対象でも通る。中間点はオブジェクトの位置も長さも
+    /// 変えないため、ロックが止める削除にも時間軸上の移動にも当たらない。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    #[tool(
+        name = "move_object_section",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::move_object_section()
+        )
+    )]
+    pub async fn move_object_section(
+        &self,
+        Parameters(input): Parameters<MoveObjectSectionInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits();
+        self.run("move_object_section", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: ObjectSectionsOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_MOVE_OBJECT_SECTION,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::object_sections("中間点を移動しました", &result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
     /// レイヤーの名前・表示・ロック状態を変更する。
     /// name と enabled と locked の 3 つ全てを省略した要求は受け付けない。
     /// name に {"type": "reset"} を指定すると標準のレイヤー名へ戻す。
@@ -2100,6 +2289,9 @@ mod tests {
         "set_effect_enabled",
         "delete_effect",
         "delete_object",
+        "create_object_section",
+        "delete_object_section",
+        "move_object_section",
         "set_layer_state",
         "set_selection",
         "apply_batch",
@@ -2134,6 +2326,12 @@ mod tests {
         ("set_effect_enabled", false, true),
         ("delete_effect", true, true),
         ("delete_object", true, true),
+        // 中間点の作成は作成系だが冪等と名乗る。あるフレームは境界であるか
+        // 無いかのどちらかであり、再送しても重複して作られる余地が無い。
+        ("create_object_section", false, true),
+        // 中間点を消すとその位置の移動パラメータが失われ、同じ tool では戻せない。
+        ("delete_object_section", true, true),
+        ("move_object_section", false, true),
         // 表示を切ってもロックを掛けても内容は失われず、同じ tool で戻せる。
         // 同じ状態を 2 度設定しても追加の変更を起こさない。
         ("set_layer_state", false, true),
@@ -2185,9 +2383,20 @@ mod tests {
     /// tool が説明の共通検査から黙って外れる。
     fn follows_the_edit_conventions(name: &str) -> bool {
         match name {
-            "create_object" | "move_object" | "set_object_name" | "set_object_item"
-            | "add_effect" | "set_effect_enabled" | "delete_effect" | "delete_object"
-            | "set_layer_state" | "set_selection" | APPLY_BATCH => true,
+            "create_object"
+            | "move_object"
+            | "set_object_name"
+            | "set_object_item"
+            | "add_effect"
+            | "set_effect_enabled"
+            | "delete_effect"
+            | "delete_object"
+            | "create_object_section"
+            | "delete_object_section"
+            | "move_object_section"
+            | "set_layer_state"
+            | "set_selection"
+            | APPLY_BATCH => true,
             "list_instances"
             | "get_edit_info"
             | "get_current_scene"
@@ -2255,7 +2464,7 @@ mod tests {
         assert_eq!(names, expected);
         // 件数そのものも固定する。router と表の両方から同じ tool を落とすと、
         // 集合の一致だけでは検出できない。
-        assert_eq!(names.len(), 19, "公開する tool の数が変わりました");
+        assert_eq!(names.len(), 22, "公開する tool の数が変わりました");
     }
 
     /// 共有設定を与えたサーバー。
@@ -2448,6 +2657,9 @@ mod tests {
             "set_effect_enabled" => schema::set_effect_enabled(),
             "delete_effect" => schema::delete_effect(),
             "delete_object" => schema::delete_object(),
+            "create_object_section" => schema::create_object_section(),
+            "delete_object_section" => schema::delete_object_section(),
+            "move_object_section" => schema::move_object_section(),
             "set_layer_state" => schema::set_layer_state(),
             "set_selection" => schema::set_selection(),
             "apply_batch" => schema::apply_batch(),
@@ -2629,6 +2841,11 @@ mod tests {
         OneUnit,
         /// 取り消し単位を作らず、取り消しが 1 つ前の編集へ飛ぶと述べる。
         NoUnitAndJumpsBack,
+        /// 取り消しについて何も述べない。
+        ///
+        /// **説明は保証である。** 取り消し単位を作るかを確かめていない operation は
+        /// どちらも述べない。述べれば、確かめていないことを保証したことになる。
+        Silent,
     }
 
     /// tool 名から、説明が取り消しについて述べる内容を引く。
@@ -2641,6 +2858,11 @@ mod tests {
             | "add_effect" | "set_effect_enabled" | "delete_effect" | "delete_object"
             | "set_layer_state" | "apply_batch" => UndoStatement::OneUnit,
             "set_selection" => UndoStatement::NoUnitAndJumpsBack,
+            // 中間点の 3 つは 1 回の編集区間で実行するが、SDK が取り消し単位を
+            // 作るかを確かめていない。
+            "create_object_section" | "delete_object_section" | "move_object_section" => {
+                UndoStatement::Silent
+            }
             other => panic!("{other} の取り消しの説明が定義されていません"),
         }
     }
@@ -2671,6 +2893,10 @@ mod tests {
                         "{name} の説明が取り消し単位を作ると読めます"
                     );
                 }
+                UndoStatement::Silent => assert!(
+                    !description.contains("取り消し単位"),
+                    "{name} の説明が確かめていない取り消しの挙動を述べています"
+                ),
             }
         }
     }
@@ -2720,6 +2946,8 @@ mod tests {
         StoppedAndNamesTheWayOut,
         /// ロックが止める範囲と、自身が影響を受けないことを述べる。
         DescribesTheScope,
+        /// ロックされたレイヤー上の対象でも通ることを述べる。
+        NotStopped,
         /// ロックについて何も述べない。
         Silent,
     }
@@ -2737,6 +2965,12 @@ mod tests {
             // 解き方も同じであるため、案内する側に属する。
             | "apply_batch" => LayerLockStatement::StoppedAndNamesTheWayOut,
             "set_layer_state" => LayerLockStatement::DescribesTheScope,
+            // 中間点はオブジェクトの位置も長さも変えない。ロックされたレイヤー
+            // 上でも通ることを明記しないと、要求元は解ける状況で先に
+            // set_layer_state を呼ぶ。
+            "create_object_section" | "delete_object_section" | "move_object_section" => {
+                LayerLockStatement::NotStopped
+            }
             "set_object_name"
             | "set_object_item"
             | "add_effect"
@@ -2770,6 +3004,16 @@ mod tests {
                         "{name} の説明が自身にロックが掛からないことを述べていません"
                     );
                 }
+                LayerLockStatement::NotStopped => {
+                    assert!(
+                        description.contains("ロックされたレイヤー上の対象でも通る"),
+                        "{name} の説明がロックに掛からないことを述べていません"
+                    );
+                    assert!(
+                        !description.contains("layer_locked"),
+                        "{name} の説明が掛からないロックによる拒否を述べています"
+                    );
+                }
                 LayerLockStatement::Silent => assert!(
                     !description.contains("layer_locked"),
                     "{name} の説明が掛からないロックによる拒否を述べています"
@@ -2786,8 +3030,17 @@ mod tests {
     /// 新しい tool が「触れない」側の既定へ黙って落ちる。**
     fn returns_a_current_object(name: &str) -> bool {
         match name {
-            "move_object" | "set_object_name" | "set_object_item" | "add_effect"
-            | "set_effect_enabled" | "delete_effect" | "delete_object" | "set_selection" => true,
+            "move_object"
+            | "set_object_name"
+            | "set_object_item"
+            | "add_effect"
+            | "set_effect_enabled"
+            | "delete_effect"
+            | "delete_object"
+            | "set_selection"
+            | "create_object_section"
+            | "delete_object_section"
+            | "move_object_section" => true,
             // 一括適用は 100 件のうちどれが落ちたかを併せて示す必要があるため、
             // 別のキー（failed_object）で返す。
             "create_object" | "set_layer_state" | "apply_batch" => false,
@@ -2950,6 +3203,96 @@ mod tests {
                 .map(|items| items.contains(&serde_json::json!("expected_project_epoch")))
                 .unwrap_or(false);
             assert_eq!(required, carries, "{name} の必須指定が食い違います");
+        }
+    }
+
+    #[test]
+    fn only_deleting_a_section_is_annotated_as_destructive() {
+        // 中間点を消すとその位置の移動パラメータが失われ、同じ tool では戻せない。
+        // 作成と移動は戻せるため、3 つを 1 つの tool へまとめず annotation を
+        // 分けている。
+        let destructive = |name: &str| {
+            tool_named(name)
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.destructive_hint)
+        };
+        assert_eq!(destructive("delete_object_section"), Some(true));
+        assert_eq!(destructive("create_object_section"), Some(false));
+        assert_eq!(destructive("move_object_section"), Some(false));
+    }
+
+    #[test]
+    fn the_batch_input_schema_does_not_accept_a_section_change() {
+        // 削除した中間点の移動パラメータを復元する手段が無く、
+        // delete_object_section の逆操作を構築できない。3 つのうち一部だけを
+        // 入れる形も採らない。
+        let schema = tool_named(APPLY_BATCH).input_schema.clone();
+        let declared = Value::Object(schema.as_ref().clone()).to_string();
+        for name in [
+            "create_object_section",
+            "delete_object_section",
+            "move_object_section",
+        ] {
+            assert!(
+                !declared.contains(name),
+                "{name} が一括適用の入力 schema に現れています"
+            );
+        }
+        // 受け付ける 2 種は現れる。走査そのものが働いていることを併せて固定する。
+        for name in ["move_object", "set_object_item"] {
+            assert!(declared.contains(name), "{name} が入力 schema にありません");
+        }
+    }
+
+    #[test]
+    fn the_section_input_schemas_declare_the_lower_bound_they_enforce() {
+        // 宣言した制約は server 側で実際に検証する。検証していない宣言を
+        // schema に残さない。検証の実体は core の validate である。
+        for name in ["delete_object_section", "move_object_section"] {
+            let tool = tool_named(name);
+            let section = tool.input_schema["properties"]["section"].clone();
+            assert_eq!(
+                section["minimum"],
+                serde_json::json!(1),
+                "{name} の section が下限を宣言していません"
+            );
+        }
+        // 追加は区間番号を取らない。宣言する下限も無い。
+        assert!(
+            tool_named("create_object_section").input_schema["properties"]
+                .get("section")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn section_tool_descriptions_explain_the_index_correspondence() {
+        // 「区間の番号」と「中間点の番号」が 1 つずれることは、要求元が自力で
+        // 気付ける情報ではない。
+        for name in [
+            "create_object_section",
+            "delete_object_section",
+            "move_object_section",
+        ] {
+            let description = description_of(name);
+            for keyword in [
+                "sections[i] が区間番号 i",
+                "sections[0].start はオブジェクトの開始フレームであって中間点ではない",
+                "sections の末尾の end はオブジェクトの終了フレーム",
+            ] {
+                assert!(
+                    description.contains(keyword),
+                    "{name} の説明に {keyword} がありません"
+                );
+            }
+        }
+        // フレームの意味も要求元が自力では決められない。
+        for name in ["create_object_section", "move_object_section"] {
+            assert!(
+                description_of(name).contains("シーンの絶対フレーム番号"),
+                "{name} の説明が frame の意味を述べていません"
+            );
         }
     }
 

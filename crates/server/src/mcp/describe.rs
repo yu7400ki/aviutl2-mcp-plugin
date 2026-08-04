@@ -13,7 +13,7 @@ use crate::mcp::summary::{TextBuilder, clamp_chars};
 use aviutl2_mcp_core::{
     BatchOutcome, BatchStepOutcome, EditInfo, EditOutcome, GetCurrentSceneResult, InstanceInfo,
     LayerStateOutcome, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
-    ObjectDetail, ObjectSummary, PageMeta, SelectionField, SelectionState,
+    ObjectDetail, ObjectSectionsOutcome, ObjectSummary, PageMeta, SelectionField, SelectionState,
 };
 
 /// 名前をそのまま行に載せるときの最大文字数。
@@ -355,6 +355,23 @@ pub fn layer_state(outcome: &LayerStateOutcome) -> String {
         "上の値は変更後に読み直した実際の状態です。レイヤーは fingerprint を持たないため、読み取り時からの変化は検出できません",
     );
     text.finish()
+}
+
+/// 中間点を変える 3 つの tool に共通する text content。
+///
+/// 区間そのものは列挙しない。件数と番号の対応だけを示し、完全な一覧は
+/// `structuredContent` が運ぶ。
+pub fn object_sections(action: &str, outcome: &ObjectSectionsOutcome) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(format!(
+        "{action}。{} 件の区間になりました",
+        outcome.sections.len()
+    ));
+    text.push_line(object_line(&outcome.object));
+    text.push_line(
+        "区間番号 i は sections[i] を指します。sections[0].start はオブジェクトの開始フレームであって中間点ではないため、区間 0 は削除も移動もできません",
+    );
+    finish_edit(text, outcome.project_revision)
 }
 
 /// `set_selection` の text content。
@@ -908,8 +925,50 @@ mod tests {
                 }),
             ),
             ("set_selection", selection_state(&selection)),
+            (
+                "create_object_section",
+                object_sections("中間点を追加しました", &sample_sections_outcome()),
+            ),
+            (
+                "delete_object_section",
+                object_sections("中間点を削除しました", &sample_sections_outcome()),
+            ),
+            (
+                "move_object_section",
+                object_sections("中間点を移動しました", &sample_sections_outcome()),
+            ),
             ("apply_batch", apply_batch(&sample_batch_outcome())),
         ]
+    }
+
+    /// 中間点を 1 つ持つ対象の変更結果。
+    fn sample_sections_outcome() -> ObjectSectionsOutcome {
+        ObjectSectionsOutcome {
+            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            project_revision: 43,
+            object: sample_summary(),
+            sections: vec![
+                aviutl2_mcp_core::SectionRange {
+                    start: 120,
+                    end: 179,
+                },
+                aviutl2_mcp_core::SectionRange {
+                    start: 180,
+                    end: 240,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn section_text_states_the_index_correspondence() {
+        // 区間の番号と中間点の番号が 1 つずれることは、要求元が自力で気付ける
+        // 情報ではない。
+        let text = object_sections("中間点を追加しました", &sample_sections_outcome());
+        assert!(text.contains("2 件の区間"), "{text}");
+        assert!(text.contains("sections[0].start"), "{text}");
+        assert!(text.contains("区間 0 は削除も移動もできません"), "{text}");
+        assert!(text.contains("project_revision=43"), "{text}");
     }
 
     /// 移動と設定変更を 1 件ずつ含む一括適用の結果。

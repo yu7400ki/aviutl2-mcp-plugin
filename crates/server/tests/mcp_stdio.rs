@@ -271,13 +271,18 @@ fn expected_annotations(name: &str) -> (bool, bool, bool) {
         "create_object" | "add_effect" | "apply_batch" => {
             (false, false, false)
         }
-        "delete_object" | "delete_effect" => (false, true, true),
+        // 中間点を消すとその位置の移動パラメータが失われ、同じ tool では戻せない。
+        "delete_object" | "delete_effect" | "delete_object_section" => (false, true, true),
+        // 中間点の作成は再送しても重複しない。あるフレームは境界であるか無いかの
+        // どちらかであり、2 回目は事前確認で落ちる。
         "move_object"
         | "set_object_name"
         | "set_object_item"
         | "set_effect_enabled"
         | "set_layer_state"
-        | "set_selection" => (false, false, true),
+        | "set_selection"
+        | "create_object_section"
+        | "move_object_section" => (false, false, true),
         other => panic!("{other} の annotation が定義されていません"),
     }
 }
@@ -1855,7 +1860,7 @@ fn a_corrupt_settings_file_leaves_every_tool_listed() {
     requests.push(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let session = run_session(&registry_dir, &requests);
 
-    assert_eq!(listed_tool_names(&session.response(2)).len(), 19);
+    assert_eq!(listed_tool_names(&session.response(2)).len(), 22);
     assert!(
         session.stderr.contains("設定を読み込めませんでした"),
         "破損が記録されていません: {}",
@@ -2078,7 +2083,7 @@ fn tools_list_changed_arrives_only_when_the_enabled_set_changes() {
     let session = server.finish();
     let before = listed_tool_names(&session.response(2));
     let after = listed_tool_names(&session.response(3));
-    assert_eq!(before.len(), 19, "{before:?}");
+    assert_eq!(before.len(), 22, "{before:?}");
     assert!(!after.contains(&"delete_object".to_string()), "{after:?}");
     assert_eq!(
         tool_list_changed_count(&session),

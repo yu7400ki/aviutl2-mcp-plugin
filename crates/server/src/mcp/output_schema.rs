@@ -125,6 +125,34 @@ pub fn delete_effect() -> Value {
     edit_outcome(object_summary(), null(), nothing_created())
 }
 
+/// `create_object_section` の出力。
+pub fn create_object_section() -> Value {
+    object_sections()
+}
+
+/// `delete_object_section` の出力。
+pub fn delete_object_section() -> Value {
+    object_sections()
+}
+
+/// `move_object_section` の出力。
+pub fn move_object_section() -> Value {
+    object_sections()
+}
+
+/// 中間点を変える 3 つの operation が共通して返す形。
+///
+/// 返すのは概要であって詳細ではない。alias も設定値も載らず、`sections` が
+/// read-back そのものになる。
+fn object_sections() -> Value {
+    object(&[
+        ("project_epoch", string()),
+        ("project_revision", unsigned()),
+        ("object", object_summary()),
+        ("sections", array(section_range())),
+    ])
+}
+
 /// `set_layer_state` の出力。
 ///
 /// `layer` には変更後に読み直した状態が入る。レイヤーは fingerprint を持たない
@@ -1040,6 +1068,51 @@ mod tests {
         let mut value = to_value(&outcome);
         value["layer"]["name"] = json!(null);
         assert_conforms(set_layer_state(), &value);
+    }
+
+    #[test]
+    fn object_sections_schemas_match_dto() {
+        let outcome = aviutl2_mcp_core::ObjectSectionsOutcome {
+            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            project_revision: 43,
+            object: sample_object_summary(),
+            sections: vec![
+                SectionRange {
+                    start: 120,
+                    end: 179,
+                },
+                SectionRange {
+                    start: 180,
+                    end: 240,
+                },
+            ],
+        };
+        let value = to_value(&outcome);
+        for schema in [
+            create_object_section(),
+            delete_object_section(),
+            move_object_section(),
+        ] {
+            assert_conforms(schema, &value);
+        }
+    }
+
+    #[test]
+    fn object_sections_schema_does_not_declare_an_alias() {
+        // 返すのは概要であって詳細ではない。schema が alias を宣言していれば、
+        // 応答へ載せる実装が入っても検出できなくなる。
+        let properties = create_object_section()["properties"]
+            .as_object()
+            .expect("properties がある")
+            .clone();
+        assert!(properties.get("alias").is_none());
+        assert!(
+            properties["object"]["properties"]
+                .as_object()
+                .expect("object の properties がある")
+                .get("alias")
+                .is_none()
+        );
     }
 
     #[test]
