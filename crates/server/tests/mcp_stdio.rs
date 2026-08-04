@@ -1776,3 +1776,307 @@ fn an_unknown_artifact_uri_is_simply_missing() {
 
     remove_test_registry(&registry_dir);
 }
+
+/// 設定ファイルを registry の基底へ原子的に置く。
+///
+/// server は registry の親を基底として設定ファイルの場所を導く。plugin が実際に
+/// 書く経路と同じく、一時ファイルへ書いてから名前を差し替える。
+fn write_settings(registry_dir: &Path, json: &str) {
+    let base = registry_dir.parent().expect("registry には親がある");
+    let temp = base.join(format!("settings.{}.tmp", InstanceId::new_v4()));
+    std::fs::write(&temp, json).expect("設定を書ける");
+    std::fs::rename(&temp, base.join("settings.json")).expect("設定を置換できる");
+}
+
+/// `tools/list` の応答に並ぶ tool 名。
+fn listed_tool_names(response: &Value) -> Vec<String> {
+    response["result"]["tools"]
+        .as_array()
+        .expect("tools は配列")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("name がある").to_string())
+        .collect()
+}
+
+/// tool 一覧の変更通知の件数。
+fn tool_list_changed_count(session: &Session) -> usize {
+    session
+        .messages()
+        .iter()
+        .filter(|message| message["method"] == json!("notifications/tools/list_changed"))
+        .count()
+}
+
+/// 監視が変化に気付くまでの余裕。
+///
+/// server が集合を確かめる間隔より長く採る。通知が届いていることを、応答の
+/// 到着より先に確かめられるようにするためである。
+const TOOL_LIST_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+#[test]
+fn the_first_tools_list_reflects_the_settings_on_disk() {
+    // peer が成立する前に書かれた設定は通知では届かない。最初の `tools/list` が
+    // そのときの内容を読むため、取りこぼしにはならない。
+    let registry_dir = temp_registry_dir();
+    write_settings(
+        &registry_dir,
+        r#"{"disabled_tools":["aviutl2_delete_object","aviutl2_list_instances"]}"#,
+    );
+
+    let mut requests = initialize_requests();
+    requests.push(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    let session = run_session(&registry_dir, &requests);
+
+    let capabilities = &session.response(1)["result"]["capabilities"];
+    assert_eq!(
+        capabilities["tools"]["listChanged"],
+        json!(true),
+        "tool 一覧の変更を通知する capability が立っていません: {capabilities}"
+    );
+
+    let names = listed_tool_names(&session.response(2));
+    assert!(
+        !names.contains(&"aviutl2_delete_object".to_string()),
+        "無効化した tool が掲載されています: {names:?}"
+    );
+    // 常時有効な tool は指定に含まれていても外れない。
+    assert!(
+        names.contains(&"aviutl2_list_instances".to_string()),
+        "常時有効な tool が外れました: {names:?}"
+    );
+    assert_eq!(tool_list_changed_count(&session), 0, "{}", session.stdout);
+
+    remove_test_registry(&registry_dir);
+}
+
+#[test]
+fn a_corrupt_settings_file_leaves_every_tool_listed() {
+    // 起動時から解析できない場合は全 tool 有効へ倒し、目立つ記録を残す。破損が
+    // tool を無言で消してはならない。
+    let registry_dir = temp_registry_dir();
+    write_settings(&registry_dir, "{ this is not json");
+
+    let mut requests = initialize_requests();
+    requests.push(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    let session = run_session(&registry_dir, &requests);
+
+    assert_eq!(listed_tool_names(&session.response(2)).len(), 19);
+    assert!(
+        session.stderr.contains("設定を読み込めませんでした"),
+        "破損が記録されていません: {}",
+        session.stderr
+    );
+
+    remove_test_registry(&registry_dir);
+}
+
+#[test]
+fn a_disabled_tool_call_never_reaches_the_instance() {
+    // 拒否は接続の手前で起きる。mock は 1 件も要求を受け取らない——生存確認の
+    // ping すら届かない。届く経路が生きていることは
+    // [`an_enabled_tool_still_reaches_the_instance_while_another_is_disabled`] が
+    // 同じ設定で確かめる。
+    let registry_dir = temp_registry_dir();
+    let edit_info = serde_json::to_value(sample_edit_info()).expect("直列化できる");
+    let mock = MockPipeServer::start_with_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        OperationResponses::from([("get_edit_info".to_string(), ok_result(edit_info))]),
+    );
+    mock.write_descriptor(&registry_dir);
+    write_settings(
+        &registry_dir,
+        r#"{"disabled_tools":["aviutl2_delete_object"]}"#,
+    );
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let instance_id = mock.instance_id().to_string();
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_delete_object",
+            "arguments": {
+                "instance_id": instance_id,
+                // 引数は妥当である。拒否の理由を「引数を解釈できない」に
+                // すり替えると、受付判定を外しても接続先へは届かず、この検査が
+                // 何も確かめないものになる。
+                "selector": {
+                    "project_epoch": "78be92d1-c8c9-44c6-ae52-387548971468",
+                    "scene_id": 3,
+                    "layer": 2,
+                    "frame": 120,
+                    "name": null,
+                    "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                },
+            },
+        },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+
+    // 応答の形より先に、接続先が何も受け取っていないことを見る。応答だけを見る
+    // 検査は、接続先へ送ってから結果を捨てる実装でも通ってしまう。
+    let received = mock.received_requests();
+    assert!(
+        received.is_empty(),
+        "無効な tool の call が接続先へ届きました: {received:?}"
+    );
+
+    let call = session.response(2);
+    assert_eq!(call["result"]["isError"], json!(true), "{call}");
+    let structured = &call["result"]["structuredContent"];
+    assert_eq!(structured["code"], json!("tool_disabled"), "{call}");
+    assert_eq!(structured["retryable"], json!(false), "{call}");
+    assert!(
+        structured["correlation_id"]
+            .as_str()
+            .is_some_and(|id| id.len() == 36),
+        "correlation_id がありません: {structured}"
+    );
+    assert!(
+        structured.get("details").is_some(),
+        "details がありません: {structured}"
+    );
+
+    drop(mock);
+    remove_test_registry(&registry_dir);
+}
+
+#[test]
+fn an_enabled_tool_still_reaches_the_instance_while_another_is_disabled() {
+    // 「1 件も届かない」が、mock がそもそも要求を受け取れないことの裏返しでない
+    // ことを確かめる。同じ設定で有効な tool は届く。
+    let registry_dir = temp_registry_dir();
+    let edit_info = serde_json::to_value(sample_edit_info()).expect("直列化できる");
+    let mock = MockPipeServer::start_with_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        OperationResponses::from([("get_edit_info".to_string(), ok_result(edit_info))]),
+    );
+    mock.write_descriptor(&registry_dir);
+    write_settings(
+        &registry_dir,
+        r#"{"disabled_tools":["aviutl2_delete_object"]}"#,
+    );
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_get_edit_info",
+            "arguments": { "instance_id": mock.instance_id().to_string() },
+        },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+    assert_eq!(session.response(2)["result"]["isError"], json!(false));
+    assert!(
+        mock.received_requests()
+            .iter()
+            .any(|request| request.operation == "get_edit_info"),
+        "有効な tool の要求が届いていません"
+    );
+
+    drop(mock);
+    remove_test_registry(&registry_dir);
+}
+
+#[test]
+fn disabling_a_tool_does_not_relax_the_checks_of_the_others() {
+    // 切替が制御するのは公開と受付だけである。残る tool の `instance_id` 必須も
+    // インスタンスの解決も、無効化によって緩まない。
+    let registry_dir = temp_registry_dir();
+    write_settings(
+        &registry_dir,
+        r#"{"disabled_tools":["aviutl2_delete_object","aviutl2_apply_batch"]}"#,
+    );
+    let unknown = InstanceId::new_v4().to_string();
+
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": { "name": "aviutl2_get_edit_info", "arguments": {} },
+    }));
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_get_edit_info",
+            "arguments": { "instance_id": unknown },
+        },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+    assert_structured_invalid_argument(&session.response(2));
+    assert_eq!(
+        session.response(3)["result"]["structuredContent"]["code"],
+        json!("instance_not_found"),
+        "{}",
+        session.response(3)
+    );
+
+    remove_test_registry(&registry_dir);
+}
+
+#[test]
+fn tools_list_changed_arrives_only_when_the_enabled_set_changes() {
+    // 通知は「公開する集合が実際に変わったとき」だけに出す。期限やログレベルの
+    // 変更で要求元に一覧を取り直させない。
+    let registry_dir = temp_registry_dir();
+    write_settings(&registry_dir, r#"{"log_level":"info"}"#);
+
+    let mut server = ServerProcess::start(&registry_dir, Some("info"));
+    for request in initialize_requests() {
+        server.send(&request);
+        if let Some(id) = request.get("id") {
+            server.read_until(std::slice::from_ref(id));
+        }
+    }
+
+    // 公開する集合に関わらない項目だけを変える。
+    write_settings(&registry_dir, r#"{"log_level":"warn"}"#);
+    std::thread::sleep(TOOL_LIST_SETTLE);
+    server.send(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    server.read_until(&[json!(2)]);
+
+    // 公開する集合を変える。
+    write_settings(
+        &registry_dir,
+        r#"{"log_level":"warn","disabled_tools":["aviutl2_delete_object"]}"#,
+    );
+    std::thread::sleep(TOOL_LIST_SETTLE);
+    server.send(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }));
+    server.read_until(&[json!(3)]);
+
+    let session = server.finish();
+    let before = listed_tool_names(&session.response(2));
+    let after = listed_tool_names(&session.response(3));
+    assert_eq!(before.len(), 19, "{before:?}");
+    assert!(
+        !after.contains(&"aviutl2_delete_object".to_string()),
+        "{after:?}"
+    );
+    assert_eq!(
+        tool_list_changed_count(&session),
+        1,
+        "通知の回数が集合の変化と一致しません: {}",
+        session.stdout
+    );
+
+    remove_test_registry(&registry_dir);
+}

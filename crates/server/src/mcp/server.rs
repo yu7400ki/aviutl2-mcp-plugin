@@ -19,6 +19,7 @@ use crate::mcp::input::{
 };
 use crate::mcp::render::{RenderFrameInput, RenderFrameOutput};
 use crate::mcp::summary::{MAX_TEXT_CHARS, clamp_chars};
+use crate::mcp::tool_catalog::{ToolListWatch, ToolVisibility};
 use crate::mcp::{describe, failure};
 use crate::redact;
 use crate::settings::SettingsSource;
@@ -39,11 +40,11 @@ use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ContentBlock, Implementation, ListResourcesResult,
-    PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, Resource,
-    ResourceContents, ServerCapabilities, ServerInfo,
+    ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult,
+    Resource, ResourceContents, ServerCapabilities, ServerInfo, Tool,
 };
-use rmcp::service::RequestContext;
-use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_handler, tool_router};
+use rmcp::service::{NotificationContext, RequestContext};
+use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_router};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -197,11 +198,12 @@ pub struct AviUtl2McpServer {
     tool_router: ToolRouter<Self>,
 }
 
-/// 実行予算の出所。
+/// 実行予算と tool の公開の出所。
 ///
 /// 設定を持つ場合は tool call のたびに現在の snapshot から引く。設定を持たない
 /// 構築口は固定値を使う——予算を明示して振る舞いを観測する試験と実機受け入れの
-/// ためであり、**製品の経路では使わない。**
+/// ためであり、**製品の経路では使わない。** その場合、tool の公開は既定
+/// （全 tool 有効）になる。
 #[derive(Clone)]
 enum LimitsSource {
     /// 構築時に与えられた固定値。
@@ -215,6 +217,22 @@ impl LimitsSource {
         match self {
             Self::Fixed(limits) => *limits,
             Self::Settings(source) => CallLimits::from_budgets(source.settings().budgets()),
+        }
+    }
+
+    /// 現在公開する tool の判定。
+    fn visibility(&self) -> ToolVisibility {
+        match self {
+            Self::Fixed(_) => ToolVisibility::all_enabled(),
+            Self::Settings(source) => ToolVisibility::from_settings(&source.settings()),
+        }
+    }
+
+    /// 共有設定の供給元。固定値の構築口は持たない。
+    fn shared(&self) -> Option<Arc<SettingsSource>> {
+        match self {
+            Self::Fixed(_) => None,
+            Self::Settings(source) => Some(Arc::clone(source)),
         }
     }
 }
@@ -282,6 +300,13 @@ impl AviUtl2McpServer {
         Self::from_limits_source(registry_dir, LimitsSource::Fixed(limits))
     }
 
+    /// 保管庫を持たず、共有設定から予算と tool の公開を引くサーバーを作る。
+    ///
+    /// 保管庫の用意を伴わずに設定の効き方を観測するための構築口である。
+    pub fn with_settings(registry_dir: PathBuf, settings: Arc<SettingsSource>) -> Self {
+        Self::from_limits_source(registry_dir, LimitsSource::Settings(settings))
+    }
+
     fn from_limits_source(registry_dir: PathBuf, limits: LimitsSource) -> Self {
         Self {
             registry_dir: Arc::new(registry_dir),
@@ -297,8 +322,64 @@ impl AviUtl2McpServer {
     }
 
     /// 登録済みの tool 定義を返す。
-    pub fn tools(&self) -> Vec<rmcp::model::Tool> {
+    ///
+    /// **公開の判定を通さない全体である。** 現在公開している一覧は
+    /// [`ServerHandler::list_tools`] が返す。
+    pub fn tools(&self) -> Vec<Tool> {
         self.tool_router.list_all()
+    }
+
+    /// 現在公開する tool の判定。
+    ///
+    /// **`tools/list` の filtering も call-time の受付判定もここだけを読む。**
+    /// 設定は 1 回の `Arc` の差し替えで反映されるため、半分だけ適用された状態を
+    /// 観測する経路が無い。
+    fn tool_visibility(&self) -> ToolVisibility {
+        self.limits.visibility()
+    }
+
+    /// 現在公開している tool 定義を返す。
+    ///
+    /// `tools/list` が返すのはこの一覧である。tool の定義そのものは router が
+    /// 持つものをそのまま使う——説明と schema の出所を 2 つにしない。
+    pub fn visible_tools(&self) -> Vec<Tool> {
+        let visibility = self.tool_visibility();
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .filter(|tool| visibility.allows(&tool.name))
+            .collect()
+    }
+
+    /// tool の call を受け付けるか。
+    ///
+    /// [`Self::visible_tools`] と同じ判定を読む。掲載しない tool の call を
+    /// 受け付ける、あるいはその逆になる余地が無い。
+    pub fn accepts_tool_call(&self, name: &str) -> bool {
+        self.tool_visibility().allows(name)
+    }
+
+    /// 公開していない tool の call を拒否する。
+    ///
+    /// **接続先へは何も送らない。** 判定は要求を受けた直後に行い、インスタンスの
+    /// 解決にも handshake にも進まない。
+    fn reject_disabled_tool(&self, tool: &str) -> CallToolResult {
+        let correlation_id = new_correlation_id();
+        tracing::warn!(
+            component = "mcp",
+            operation = tool,
+            correlation_id = %correlation_id,
+            result = "tool_disabled",
+            "tool call rejected by settings",
+        );
+        let error = failure::with_correlation_id(
+            failure::from_code(
+                ErrorCode::ToolDisabled,
+                "この tool はプラグイン設定で無効化されています",
+            ),
+            &correlation_id,
+        );
+        error_result(&error)
     }
 
     /// tool call 1 回をブロッキングタスクで実行し、結果を tool result へ変換する。
@@ -1372,12 +1453,21 @@ impl AviUtl2McpServer {
     }
 }
 
-#[tool_handler(router = self.tool_router)]
+/// 公開する tool の集合が変わっていないかを確かめる間隔。
+///
+/// 設定の変更は人手による稀な操作であり、遅れは体感されない。**遅れても正しさは
+/// 保たれる**——`tools/list` も call-time の受付判定も、要求の時点で現在の
+/// snapshot を読む。通知は要求元が古い一覧を持ち続ける時間を縮めるだけである。
+const TOOL_LIST_WATCH_INTERVAL: Duration = Duration::from_millis(500);
+
 impl ServerHandler for AviUtl2McpServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(
             ServerCapabilities::builder()
                 .enable_tools()
+                // 公開する tool は共有設定で切り替わる。要求元が一覧を取り直す
+                // 契機を得られるよう宣言する。
+                .enable_tool_list_changed()
                 .enable_resources()
                 .build(),
         );
@@ -1389,7 +1479,41 @@ impl ServerHandler for AviUtl2McpServer {
         info
     }
 
+    /// 公開している tool を列挙する。
+    ///
+    /// **ハンドラの実行時に現在の snapshot を読む。** 構築時に凍結しないため、
+    /// peer が成立する前に設定が変わっていても最初の `tools/list` が正しい一覧を
+    /// 返す。tool の定義そのものは router が持つものをそのまま使う——説明と
+    /// schema の出所を 2 つにしない。
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult {
+            tools: self.visible_tools(),
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    /// 名前から tool 定義を引く。
+    ///
+    /// 公開していない tool は「無い」ものとして扱う。`tools/list` に載らない
+    /// 名前が、別の経路からは在るものとして見えることを避ける。
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        if !self.accepts_tool_call(name) {
+            return None;
+        }
+        self.tool_router.get(name).cloned()
+    }
+
     /// tool call を処理する。
+    ///
+    /// 公開していない tool は接続先へ送らず `tool_disabled` で拒否する。判定は
+    /// `tools/list` と同じ snapshot を読むため、無効化が call の前でも最中でも
+    /// 観測される挙動は同じである。**既に実行を開始した call は途中で取り消さ
+    /// ない**——判定は受付の時点だけで行う。
     ///
     /// tool router は引数を型へ写せなかった場合、tool 本体を呼ばずに
     /// `isError: true` の結果を自前で組み立てて返す。その結果は本 server の
@@ -1401,11 +1525,51 @@ impl ServerHandler for AviUtl2McpServer {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let tool = request.name.to_string();
+        if !self.accepts_tool_call(&tool) {
+            return Ok(self.reject_disabled_tool(&tool));
+        }
         let result = self
             .tool_router
             .call(ToolCallContext::new(self, request, context))
             .await?;
         Ok(normalize_tool_result(&tool, result))
+    }
+
+    /// 初期化の完了を受けて、公開する tool の集合の変化を追い始める。
+    ///
+    /// `notifications/tools/list_changed` を送るのに要る peer は、ここで初めて
+    /// 手に入る。**peer が成立する前の変更は通知しない**——最初の `tools/list` が
+    /// そのときの snapshot を読むため、取りこぼしにはならない。
+    ///
+    /// 通知の送信に失敗しても記録は進める。次の `tools/list` が正であり、同じ
+    /// 変化を繰り返し通知しても要求元の得るものは変わらない。
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        tracing::info!("client initialized");
+        let Some(source) = self.limits.shared() else {
+            return;
+        };
+        let catalog = self
+            .tools()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        let mut watch = ToolListWatch::new(source, catalog);
+        let peer = context.peer;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(TOOL_LIST_WATCH_INTERVAL).await;
+                if peer.is_transport_closed() {
+                    return;
+                }
+                if !watch.changed() {
+                    continue;
+                }
+                tracing::debug!("公開する tool の集合が変わりました");
+                if let Err(e) = peer.notify_tool_list_changed().await {
+                    tracing::warn!(error = %e, "tool 一覧の変更を通知できませんでした");
+                }
+            }
+        });
     }
 
     /// resource を列挙する。
@@ -2090,6 +2254,111 @@ mod tests {
         // 件数そのものも固定する。router と表の両方から同じ tool を落とすと、
         // 集合の一致だけでは検出できない。
         assert_eq!(names.len(), 19, "公開する tool の数が変わりました");
+    }
+
+    /// 共有設定を与えたサーバー。
+    fn server_with(settings_json: &str) -> AviUtl2McpServer {
+        let settings = aviutl2_mcp_core::settings::SettingsDocument::parse(settings_json)
+            .expect("設定を解析できます")
+            .resolve(&aviutl2_mcp_core::settings::Settings::default())
+            .0;
+        AviUtl2McpServer::with_settings(
+            PathBuf::from(r"C:\nonexistent-registry"),
+            SettingsSource::fixed(settings),
+        )
+    }
+
+    fn visible_names(server: &AviUtl2McpServer) -> std::collections::BTreeSet<String> {
+        server
+            .visible_tools()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_registered_tools_match_the_shared_catalog() {
+        // 切替の対象を列挙する側は rmcp の属性を見られないため、名前の一覧を
+        // core が operation から導いている。規則から外れる tool を足すと、
+        // ここで集合が食い違って落ちる。
+        let registered: std::collections::BTreeSet<String> =
+            tools().iter().map(|tool| tool.name.to_string()).collect();
+        let shared: std::collections::BTreeSet<String> =
+            aviutl2_mcp_core::tool::all_tool_names().collect();
+        assert_eq!(registered, shared);
+        assert!(
+            shared.contains(aviutl2_mcp_core::tool::ALWAYS_ENABLED_TOOL),
+            "常時有効な tool が一覧に含まれていません"
+        );
+    }
+
+    #[test]
+    fn without_settings_every_registered_tool_is_listed() {
+        let server = server();
+        assert_eq!(visible_names(&server).len(), tools().len());
+    }
+
+    #[test]
+    fn a_disabled_tool_is_neither_listed_nor_accepted() {
+        let server = server_with(r#"{"disabled_tools":["aviutl2_delete_object"]}"#);
+        assert!(!visible_names(&server).contains("aviutl2_delete_object"));
+        assert!(!server.accepts_tool_call("aviutl2_delete_object"));
+        // 巻き添えにしない。
+        assert!(server.accepts_tool_call("aviutl2_delete_effect"));
+    }
+
+    #[test]
+    fn the_always_enabled_tool_survives_being_disabled() {
+        let server =
+            server_with(r#"{"disabled_tools":["aviutl2_list_instances","aviutl2_render_frame"]}"#);
+        let visible = visible_names(&server);
+        assert!(visible.contains(aviutl2_mcp_core::tool::ALWAYS_ENABLED_TOOL));
+        assert!(server.accepts_tool_call(aviutl2_mcp_core::tool::ALWAYS_ENABLED_TOOL));
+        assert!(!visible.contains("aviutl2_render_frame"));
+    }
+
+    #[test]
+    fn what_is_listed_is_exactly_what_is_accepted() {
+        // 掲載と受付が同じ判定を読むことを、全 tool について固定する。片方だけを
+        // 絞る実装になると、掲載していない tool の call が通る。
+        let server = server_with(
+            r#"{"disabled_tools":["aviutl2_delete_object","aviutl2_apply_batch","aviutl2_list_instances"]}"#,
+        );
+        let visible = visible_names(&server);
+        for tool in tools() {
+            assert_eq!(
+                visible.contains(tool.name.as_ref()),
+                server.accepts_tool_call(&tool.name),
+                "{} の掲載と受付が食い違っています",
+                tool.name
+            );
+        }
+        assert_eq!(visible.len(), tools().len() - 2);
+    }
+
+    #[test]
+    fn an_unknown_tool_name_is_not_treated_as_disabled() {
+        // 未知の名前は「無効化されている」ではなく「登録されていない」である。
+        // 判定を反転させると、未知の tool が tool_disabled を名乗る。
+        let server = server_with(r#"{"disabled_tools":["aviutl2_delete_object"]}"#);
+        assert!(server.accepts_tool_call("aviutl2_future_tool"));
+    }
+
+    #[test]
+    fn a_disabled_tool_is_rejected_with_the_documented_code() {
+        let server = server_with(r#"{"disabled_tools":["aviutl2_delete_object"]}"#);
+        let result = server.reject_disabled_tool("aviutl2_delete_object");
+        assert_eq!(result.is_error, Some(true));
+        let structured = result
+            .structured_content
+            .expect("失敗も structuredContent を持つ");
+        assert_eq!(structured["code"], serde_json::json!("tool_disabled"));
+        assert_eq!(structured["retryable"], serde_json::json!(false));
+        assert!(
+            structured["correlation_id"].is_string(),
+            "correlation_id が付いていません"
+        );
+        assert!(structured.get("details").is_some());
     }
 
     #[test]
