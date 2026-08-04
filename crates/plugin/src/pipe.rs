@@ -8,12 +8,12 @@ use crate::edit::EditAdapter;
 use crate::lifecycle::Lifecycle;
 use crate::read::ReadAdapter;
 use crate::render::RenderAdapter;
-use crate::security::ProtectedSecurityAttributes;
 use crate::session;
 use crate::win_io::{self, EventHandle, IoError, OverlappedOp, WaitOutcome};
 use anyhow::{Context, Result};
 use aviutl2_mcp_core::framing::{DecoderState, FrameDecoder, encode_frame};
 use aviutl2_mcp_core::identifier::pipe_name_for;
+use aviutl2_mcp_win::ProtectedSecurityAttributes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::sync::{Arc, Mutex};
@@ -631,10 +631,11 @@ mod tests {
 
     /// 起動処理中のまま、`ready` へ遷移させないライフサイクルを作る。
     fn temp_lifecycle_starting() -> (Arc<Lifecycle>, std::path::PathBuf) {
+        // 基底は registry writer に作らせる。手前で作ると保護されていない
+        // ディレクトリを渡すことになり、実際の起動と違う経路を通る。
         let dir =
             std::env::temp_dir().join(format!("aviutl2-mcp-pipe-test-{}", InstanceId::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
         let writer = crate::registry::RegistryWriter::for_dir(dir.clone());
         let id = InstanceId::new_v4();
         let lifecycle = Lifecycle::new(

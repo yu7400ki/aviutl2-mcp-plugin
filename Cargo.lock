@@ -127,6 +127,7 @@ dependencies = [
  "anyhow",
  "aviutl2",
  "aviutl2-mcp-core",
+ "aviutl2-mcp-win",
  "chrono",
  "png",
  "proptest",
@@ -146,6 +147,7 @@ name = "aviutl2-mcp-server"
 version = "0.1.0"
 dependencies = [
  "aviutl2-mcp-core",
+ "aviutl2-mcp-win",
  "base64",
  "chrono",
  "proptest",

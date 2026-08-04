@@ -23,9 +23,9 @@
 use crate::registry::discovery_root;
 use crate::render::error::{ArtifactStage, RenderError};
 use crate::render::slot::RenderedFrame;
-use crate::security::{create_protected_directory, create_protected_file};
 use anyhow::{Context, Result};
 use aviutl2_mcp_core::{ARTIFACT_MAX_BYTES, InstanceId};
+use aviutl2_mcp_win::{create_protected_directory, create_protected_file};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -266,12 +266,15 @@ impl HandoffDir {
     ///
     /// 基底から順に作る。基底を保護しなければ、その権限で配下ごと差し替え
     /// られるため、保護は基底から連続している必要がある。
+    ///
+    /// 既存のディレクトリは検証にとどめ、DACL を書き換えない。想定と異なれば
+    /// この要求を失敗させる。
     fn ensure_dir(&self) -> Result<()> {
         let mut ancestors: Vec<&Path> = self.dir.ancestors().take(3).collect();
         ancestors.reverse();
         for dir in ancestors {
             create_protected_directory(dir)
-                .context("引き渡し用ディレクトリを作成できませんでした")?;
+                .context("引き渡し用ディレクトリを用意できませんでした")?;
         }
         Ok(())
     }
@@ -353,7 +356,8 @@ fn encode_png_inner(width: u32, height: u32, pixels: &[u8]) -> Result<Vec<u8>, p
 
 /// 保護された DACL を持つ新規ファイルへ書き切って flush する。
 fn write_protected(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut file = create_protected_file(path)?;
+    let mut file =
+        create_protected_file(path).context("引き渡し用ファイルを作成できませんでした")?;
     file.write_all(bytes)
         .context("引き渡し用ファイルへの書き込みに失敗しました")?;
     // SAFETY: `file` は本関数が所有する有効なファイルハンドル。
@@ -605,10 +609,12 @@ mod tests {
         let handoff = root.dir_for(&instance_id);
         let artifact = handoff.write(&sample_frame()).expect("書き出しに失敗");
 
-        crate::security::assert_protected_dacl(&root.0);
-        crate::security::assert_protected_dacl(&root.0.join(HANDOFF_DIR));
-        crate::security::assert_protected_dacl(&handoff.dir);
-        crate::security::assert_protected_dacl(&handoff.artifact_path(&artifact.token));
+        aviutl2_mcp_win::test_support::assert_protected_dacl(&root.0);
+        aviutl2_mcp_win::test_support::assert_protected_dacl(&root.0.join(HANDOFF_DIR));
+        aviutl2_mcp_win::test_support::assert_protected_dacl(&handoff.dir);
+        aviutl2_mcp_win::test_support::assert_protected_dacl(
+            &handoff.artifact_path(&artifact.token),
+        );
     }
 
     #[test]

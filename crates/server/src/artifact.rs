@@ -13,9 +13,8 @@
 //! `artifact_id` をパスへ連結しないため、どのような文字列を与えても
 //! 「見つからない」で終わる。
 
-mod protected_dir;
-
 use aviutl2_mcp_core::{ARTIFACT_MAX_BYTES, InstanceId};
+use aviutl2_mcp_win::create_protected_directory;
 use chrono::{DateTime, TimeDelta, Utc};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -230,6 +229,14 @@ pub enum ArtifactStoreError {
     DirectoryUnavailable(#[source] std::io::Error),
 }
 
+/// 保護ディレクトリの用意の失敗を store の失敗へ写す。
+///
+/// 作れなかった場合も、既に在ったものが信用できなかった場合も、store は開けない。
+/// どちらであるかは包んだ理由が伝える。
+fn directory_unavailable(error: aviutl2_mcp_win::ProtectedDirError) -> ArtifactStoreError {
+    ArtifactStoreError::DirectoryUnavailable(error.into())
+}
+
 /// 現在時刻の供給元。
 ///
 /// 有効期限の判定を実時間から切り離し、期限切れを待たずに試験できるようにする。
@@ -318,6 +325,10 @@ impl ArtifactStore {
     /// ディレクトリを best effort で削除する。削除の対象は所有者が生きて
     /// いないことを確かめられ、かつ [`SESSION_STALE_AFTER`] より古いものだけ
     /// であり、稼働中の別 server の store には触れない。
+    ///
+    /// 既に存在するディレクトリは検証にとどめる。想定と異なる DACL を持つ
+    /// 場合は開けない。**DACL を保証できない場所へ利用者のプロジェクトの内容を
+    /// 書き出すより、起動しないほうがよい。**
     pub(crate) fn open_with(
         base_dir: PathBuf,
         ttl: Duration,
@@ -331,16 +342,13 @@ impl ArtifactStore {
         {
             std::fs::create_dir_all(parent).map_err(ArtifactStoreError::DirectoryUnavailable)?;
         }
-        protected_dir::create_protected_directory(&base_dir)
-            .map_err(ArtifactStoreError::DirectoryUnavailable)?;
+        create_protected_directory(&base_dir).map_err(directory_unavailable)?;
 
         let artifacts_root = base_dir.join(ARTIFACTS_DIR);
-        protected_dir::create_protected_directory(&artifacts_root)
-            .map_err(ArtifactStoreError::DirectoryUnavailable)?;
+        create_protected_directory(&artifacts_root).map_err(directory_unavailable)?;
 
         let session_dir = artifacts_root.join(Uuid::new_v4().to_string());
-        protected_dir::create_protected_directory(&session_dir)
-            .map_err(ArtifactStoreError::DirectoryUnavailable)?;
+        create_protected_directory(&session_dir).map_err(directory_unavailable)?;
         let lock =
             open_session_lock(&session_dir).map_err(ArtifactStoreError::DirectoryUnavailable)?;
 
@@ -558,7 +566,7 @@ impl ArtifactStore {
         if self.session_dir.is_dir() {
             return Ok(());
         }
-        protected_dir::create_protected_directory(&self.session_dir)?;
+        create_protected_directory(&self.session_dir)?;
         warn!("artifact store のディレクトリを作り直しました");
         *self.lock.lock().unwrap_or_else(|e| e.into_inner()) = open_session_lock(&self.session_dir)
             .map_err(|e| {

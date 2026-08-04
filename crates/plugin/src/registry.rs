@@ -7,9 +7,9 @@
 //! どの descriptor で失敗したかは [`crate::redact`] を通した形で添える。
 
 use crate::redact::{descriptor_file, instance_id as redact_instance_id};
-use crate::security::{create_protected_directory, create_protected_file};
 use anyhow::{Context, Result};
 use aviutl2_mcp_core::{InstanceDescriptor, InstanceId};
+use aviutl2_mcp_win::{create_protected_directory, create_protected_file};
 use std::io::Write;
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
@@ -66,17 +66,16 @@ impl RegistryWriter {
     /// ルート側の権限でサブディレクトリごと差し替えられるため、保護対象は
     /// ルートから連続している必要がある。
     ///
-    /// 既存ディレクトリに対しても毎回 DACL を再設定する。作成時点の DACL だけに
-    /// 依存すると、以前のバージョンが継承 ACE 付きで作成したディレクトリや
-    /// 外部から緩められた DACL がそのまま残るためで、これは
-    /// 「継承だけに依存しない」という DACL 規定に従った扱いである。
+    /// 既存のディレクトリは検証にとどめ、DACL を書き換えない。想定と異なれば
+    /// 失敗させる。**その場合 instance は登録されず、MCP からは見えない。**
+    /// 保証できない場所へ descriptor を置くより、見えないほうがよい。
     ///
-    /// `%LOCALAPPDATA%` 自体は作成対象にも DACL 設定対象にも含めない。
+    /// `%LOCALAPPDATA%` 自体は作成対象にも保護の対象にも含めない。
     fn ensure_directories(&self) -> Result<()> {
         create_protected_directory(&self.root_dir)
-            .context("registry ルートディレクトリを作成できませんでした")?;
+            .context("registry ルートディレクトリを用意できませんでした")?;
         create_protected_directory(&self.registry_dir)
-            .context("registry ディレクトリを作成できませんでした")?;
+            .context("registry ディレクトリを用意できませんでした")?;
         Ok(())
     }
 
@@ -320,8 +319,8 @@ mod tests {
 
         writer.write(&sample_descriptor()).unwrap();
 
-        crate::security::assert_protected_dacl(&dir);
-        crate::security::assert_protected_dacl(&dir.join("instances"));
+        aviutl2_mcp_win::test_support::assert_protected_dacl(&dir);
+        aviutl2_mcp_win::test_support::assert_protected_dacl(&dir.join("instances"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -553,13 +553,18 @@ pub fn write_frame(
 
 /// 試験ごとに独立した registry ディレクトリ。
 ///
-/// **基底の直下へ置く。** 描画成果物の保管庫と引き渡しディレクトリは registry の
-/// 親を基底として導かれるため、registry を一時ディレクトリの直下に置くと、
-/// 一時ディレクトリそのものが基底として扱われ、その DACL まで書き換えられる。
+/// **基底の直下へ `instances` として置く。** 描画成果物の保管庫と引き渡し
+/// ディレクトリはこの形のときだけ registry の親を基底として導かれる。
+///
+/// 基底と registry は保護された DACL で作る。plugin が実際に作る形と同じで
+/// あり、保護されていないディレクトリを渡すと server は保管庫を開けない。
 pub fn temp_registry_dir() -> PathBuf {
     let base = test_base_dir();
     let _ = std::fs::remove_dir_all(&base);
-    base.join("instances")
+    let registry_dir = base.join("instances");
+    aviutl2_mcp_win::create_protected_directory(&base).expect("基底を作れる");
+    aviutl2_mcp_win::create_protected_directory(&registry_dir).expect("registry を作れる");
+    registry_dir
 }
 
 /// [`temp_registry_dir`] が使う基底を新しく 1 つ作る。

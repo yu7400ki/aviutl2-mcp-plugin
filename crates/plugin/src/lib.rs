@@ -22,8 +22,6 @@ pub mod registry;
 #[cfg(windows)]
 pub mod render;
 #[cfg(windows)]
-pub mod security;
-#[cfg(windows)]
 pub mod session;
 #[cfg(all(windows, test))]
 mod test_support;

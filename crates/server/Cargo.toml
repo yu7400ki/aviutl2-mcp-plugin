@@ -46,6 +46,7 @@ path = "examples/live_render_acceptance.rs"
 
 [dependencies]
 aviutl2-mcp-core = { workspace = true }
+aviutl2-mcp-win = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 rmcp = { workspace = true }

@@ -670,7 +670,10 @@ fn dropping_the_store_removes_its_directory() {
 fn opening_the_store_removes_only_stale_sibling_sessions() {
     let base_dir = temp_base_dir();
     let artifacts_root = base_dir.join(ARTIFACTS_DIR);
-    std::fs::create_dir_all(&artifacts_root).unwrap();
+    // 先に動いた server が残した状態を再現する。保護は作成時に与えられており、
+    // 開き直す側はそれを検証するだけである。
+    create_protected_directory(&base_dir).unwrap();
+    create_protected_directory(&artifacts_root).unwrap();
 
     let stale = artifacts_root.join(Uuid::new_v4().to_string());
     let fresh = artifacts_root.join(Uuid::new_v4().to_string());
