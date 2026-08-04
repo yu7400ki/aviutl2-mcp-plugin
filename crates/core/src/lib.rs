@@ -42,6 +42,7 @@ pub mod render;
 pub mod selector;
 pub mod settings;
 pub mod state;
+pub mod tool;
 pub mod validation;
 pub mod wire_format;
 
@@ -128,6 +129,10 @@ pub use settings::{
     settings_location, settings_path,
 };
 pub use state::InstanceState;
+pub use tool::{
+    ALWAYS_ENABLED_TOOL, TOOL_NAME_PREFIX, ToolFamily, all_tool_names, togglable_tool_names,
+    tool_name,
+};
 pub use validation::{
     MAX_ALIAS_BYTES, MAX_ITEM_VALUE_BYTES, MAX_NAME_UTF16_UNITS, MAX_PATH_UTF16_UNITS,
     PathSyntaxError, TextSyntaxError, validate_alias, validate_control_free,

@@ -75,6 +75,8 @@ pub enum ErrorCode {
     EditBlocked,
     /// 未対応の operation。
     UnsupportedOperation,
+    /// 対象 tool がプラグイン設定で無効化されている。
+    ToolDisabled,
     /// SDK エラー。
     SdkError,
     /// 未知のコードを破棄せず raw 保持。
@@ -98,6 +100,7 @@ impl ErrorCode {
             ErrorCode::PreconditionFailed => "precondition_failed".to_string(),
             ErrorCode::EditBlocked => "edit_blocked".to_string(),
             ErrorCode::UnsupportedOperation => "unsupported_operation".to_string(),
+            ErrorCode::ToolDisabled => "tool_disabled".to_string(),
             ErrorCode::SdkError => "sdk_error".to_string(),
             ErrorCode::Unknown(s) => s.clone(),
         }
@@ -125,6 +128,9 @@ impl ErrorCode {
             | ErrorCode::NotFound
             | ErrorCode::AmbiguousSelector
             | ErrorCode::UnsupportedOperation
+            // 再送しても設定が変わるまで同じ結果になる。有効化は利用者が
+            // AviUtl2 のプラグイン設定で行う操作である。
+            | ErrorCode::ToolDisabled
             | ErrorCode::SdkError
             | ErrorCode::Unknown(_) => false,
         }
@@ -161,6 +167,7 @@ impl<'de> Deserialize<'de> for ErrorCode {
             "precondition_failed" => ErrorCode::PreconditionFailed,
             "edit_blocked" => ErrorCode::EditBlocked,
             "unsupported_operation" => ErrorCode::UnsupportedOperation,
+            "tool_disabled" => ErrorCode::ToolDisabled,
             "sdk_error" => ErrorCode::SdkError,
             _ => ErrorCode::Unknown(s),
         })
@@ -234,6 +241,7 @@ mod tests {
             ErrorCode::PreconditionFailed,
             ErrorCode::EditBlocked,
             ErrorCode::UnsupportedOperation,
+            ErrorCode::ToolDisabled,
             ErrorCode::SdkError,
         ] {
             let s = serde_json::to_string(&code).unwrap();
@@ -302,6 +310,7 @@ mod tests {
             ErrorCode::NotFound,
             ErrorCode::AmbiguousSelector,
             ErrorCode::UnsupportedOperation,
+            ErrorCode::ToolDisabled,
             ErrorCode::SdkError,
             ErrorCode::Unknown("future_code".to_string()),
         ] {
