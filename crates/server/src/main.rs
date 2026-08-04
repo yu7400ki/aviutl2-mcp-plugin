@@ -1,10 +1,10 @@
-use aviutl2_mcp_core::settings::{SettingsReader, SettingsRefresh, settings_path};
+use aviutl2_mcp_core::settings::{SettingsReader, SettingsRefresh, settings_location};
 use aviutl2_mcp_server::api::{ListInstancesRequest, aviutl2_list_instances};
 use aviutl2_mcp_server::artifact::base_dir_for_registry;
 use aviutl2_mcp_server::discovery::default_registry_dir;
 use aviutl2_mcp_server::init_logging;
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, REGISTRY_DIR_ENV};
-use aviutl2_mcp_server::settings::{SETTINGS_POLL_INTERVAL, SettingsWatcher};
+use aviutl2_mcp_server::settings::{ParentPolicy, SettingsWatcher};
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 use std::io::Write;
@@ -29,7 +29,8 @@ async fn main() -> ExitCode {
 
     // 設定は記録の準備より先に読む。ログレベルがそこから決まるためである。
     // 解決で生じた不整合は subscriber が立ってから流す。
-    let mut reader = SettingsReader::new(settings_path(&base_dir_for_registry(&registry_dir)));
+    let location = settings_location(&base_dir_for_registry(&registry_dir));
+    let mut reader = SettingsReader::new(location.path);
     let refresh = reader.refresh();
     init_logging(reader.settings().log_level());
     match refresh {
@@ -44,9 +45,20 @@ async fn main() -> ExitCode {
         }
     }
 
-    // MCP の受付を始める前に初期 snapshot を作る。以後の変更は 1 本の軽い
-    // スレッドが一定間隔で取り込む。
-    let watcher = SettingsWatcher::start(reader, SETTINGS_POLL_INTERVAL);
+    // MCP の受付を始める前に初期 snapshot を作り、そこから監視を始める。
+    // 外から指定された置き場所は作らない。存在しなければ起動しない。
+    let parent_policy = if location.overridden {
+        ParentPolicy::Require
+    } else {
+        ParentPolicy::Create
+    };
+    let watcher = match SettingsWatcher::start(reader, parent_policy) {
+        Ok(watcher) => watcher,
+        Err(e) => {
+            tracing::error!(error = %e, "設定ファイルの監視を開始できませんでした");
+            return ExitCode::FAILURE;
+        }
+    };
 
     // 描画成果物の保管庫は起動時に開く。保管庫はこのサービスが破棄されるときに
     // ディレクトリごと消えるため、寿命はプロセスの寿命と一致する。

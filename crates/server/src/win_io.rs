@@ -68,6 +68,14 @@ pub struct EventHandle {
     handle: HANDLE,
 }
 
+// SAFETY: イベントオブジェクトはスレッドを跨いで待機・シグナルしてよく、
+// `EventHandle` はハンドルの所有権を単一の値に閉じている。閉じるのは `Drop`
+// だけであり、複製されたハンドルは存在しない。
+unsafe impl Send for EventHandle {}
+// SAFETY: 共有参照から呼べるのは `SetEvent` と待機だけであり、いずれも
+// カーネル側で直列化される。
+unsafe impl Sync for EventHandle {}
+
 impl EventHandle {
     /// 非シグナル状態の手動リセットイベントを作成する。
     pub fn new_manual_reset() -> io::Result<Self> {
@@ -185,6 +193,38 @@ impl OverlappedOp {
             Err(err) if err.code() == ERROR_IO_PENDING.into() => {
                 self.pending = true;
                 Ok(IoIssue::Pending)
+            }
+            Err(err) => Err(to_io_error(err)),
+        }
+    }
+
+    /// 保留状態かどうか。
+    ///
+    /// 保留中の I/O を残したまま転送バッファを解放しないことが本型の役目であり、
+    /// その記録が実際に付いていることを試験がここで確かめる。
+    #[cfg(test)]
+    pub(crate) fn is_pending(&self) -> bool {
+        self.pending
+    }
+
+    /// 発行の成功が「完了」ではなく「登録」を意味する API のために分類する。
+    ///
+    /// **`ReadDirectoryChangesW` は overlapped ハンドルに対して成功を返しても、
+    /// それは要求が登録されたことしか意味しない。** [`OverlappedOp::classify`]
+    /// で完了として扱うと保留状態が記録されず、`Drop` がキャンセルを飛ばして
+    /// 転送バッファを解放する——カーネルはその後もそこへ書き込む。
+    ///
+    /// 成功も `ERROR_IO_PENDING` もどちらも保留として記録し、呼び出し側は必ず
+    /// 完了を待つ。
+    pub fn classify_queued(&mut self, result: windows::core::Result<()>) -> io::Result<()> {
+        match result {
+            Ok(()) => {
+                self.pending = true;
+                Ok(())
+            }
+            Err(err) if err.code() == ERROR_IO_PENDING.into() => {
+                self.pending = true;
+                Ok(())
             }
             Err(err) => Err(to_io_error(err)),
         }
@@ -699,6 +739,47 @@ mod tests {
             panic!("期限超過ではなく I/O エラーになる: {error:?}");
         };
         assert_eq!(error.raw_os_error(), Some(ERROR_INVALID_HANDLE.0 as i32));
+    }
+
+    #[test]
+    fn a_queued_issue_is_recorded_as_pending_even_when_it_succeeds() {
+        // `ReadDirectoryChangesW` は overlapped ハンドルに対して成功を返しても、
+        // それは要求が登録されたことしか意味しない。完了として扱うと保留状態が
+        // 記録されず、`Drop` がキャンセルを飛ばして転送バッファを解放する。
+        let pipe = PipePair::create();
+        // SAFETY: `pipe` は本テストの終わりまで生存し、`op` はその前に drop される。
+        let mut op = unsafe { OverlappedOp::new(pipe.client) }.unwrap();
+
+        op.begin().unwrap();
+        op.classify_queued(Ok(())).unwrap();
+        assert!(
+            op.is_pending(),
+            "成功した発行が保留として記録されていません"
+        );
+
+        // 期限超過の経路でキャンセルと完了待ちが走る。走らなければ保留のまま
+        // 次の発行の表明に掛かる。
+        let error = op
+            .await_completion(Instant::now() + SHORT_DEADLINE)
+            .expect_err("何も届かないため期限を超過する");
+        assert!(matches!(error, WinIoError::TimedOut), "{error:?}");
+        assert!(!op.is_pending());
+        op.begin().unwrap();
+    }
+
+    #[test]
+    fn a_queued_issue_reports_a_real_failure() {
+        let pipe = PipePair::create();
+        // SAFETY: `pipe` は本テストの終わりまで生存し、`op` はその前に drop される。
+        let mut op = unsafe { OverlappedOp::new(pipe.client) }.unwrap();
+
+        let error = op
+            .classify_queued(Err(windows::core::Error::from_hresult(
+                ERROR_INVALID_HANDLE.to_hresult(),
+            )))
+            .expect_err("発行の失敗はそのまま伝わる");
+        assert_eq!(error.raw_os_error(), Some(ERROR_INVALID_HANDLE.0 as i32));
+        assert!(!op.is_pending(), "失敗した発行を保留として記録しています");
     }
 
     #[test]

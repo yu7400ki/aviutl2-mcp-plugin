@@ -124,7 +124,8 @@ pub use selector::{EffectSelector, ObjectSelector};
 pub use settings::{
     SETTINGS_FILE_ENV, SETTINGS_FILE_NAME, SETTINGS_READ_ATTEMPTS, SETTINGS_SCHEMA_VERSION,
     Settings, SettingsChange, SettingsDocument, SettingsIssue, SettingsIssueReason,
-    SettingsParseError, SettingsReadError, SettingsReader, SettingsRefresh, settings_path,
+    SettingsLocation, SettingsParseError, SettingsReadError, SettingsReader, SettingsRefresh,
+    settings_location, settings_path,
 };
 pub use state::InstanceState;
 pub use validation::{

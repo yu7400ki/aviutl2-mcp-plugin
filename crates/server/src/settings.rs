@@ -1,38 +1,104 @@
 //! server 側の設定の監視と snapshot。
 //!
-//! # ディレクトリ監視ではなくポーリングで見る
+//! # 監視するのは親ディレクトリであり、ファイルではない
 //!
-//! 設定ファイルは原子的置換で差し替わる。**開いたままのハンドルを持つ監視は
-//! identity の差し替えを取りこぼす**が、毎回パスを `stat` する方式は取りこぼさ
-//! ない——ハンドルを持たないためである。退けたのは「ファイルを監視する」ことで
-//! あって、「ファイルを見に行く」ことではない。
+//! 設定ファイルは原子的置換で差し替わる。置換はファイルの identity を差し替える
+//! ため、**ファイルを掴んだ監視は rename-replace を取りこぼす。** ディレクトリを
+//! 監視すれば、作成・置換・削除のいずれも同じ経路で届く。
 //!
-//! | 観点 | ディレクトリ監視 | ポーリング |
-//! |---|---|---|
-//! | 依存 | 監視の crate、または自前の `ReadDirectoryChangesW` | 無し |
-//! | debounce | 要る（一時ファイル作成 + rename が連発する） | 要らない（間隔がそのまま debounce になる） |
-//! | 取りこぼし | ハンドル方式では起きる | 同一間隔内の 2 回の変更は最後の状態だけが見える |
+//! # 新しい足回りを書き起こさない
 //!
-//! **設定変更は人手による稀な操作であり、1 秒の遅れは体感されない。** 間隔は
-//! 設定にしない。利用者が調整して得るものが無い。
+//! `ReadDirectoryChangesW` は overlapped I/O であり、`OVERLAPPED` の寿命と保留
+//! I/O の排出を誤ると、カーネルが解放済みメモリへ書き込む。その規律は
+//! [`crate::win_io`] が既に持っている——[`OverlappedOp`] は `OVERLAPPED` をヒープへ
+//! 固定し、`Drop` で `CancelIoEx` と完了待ちを行う。停止も [`EventHandle`] を
+//! [`wait_any`] へ並べるだけで済む。**この監視は既存の作法の上に乗るだけであり、
+//! 新しい依存も新しい unsafe の型も持ち込まない。**
+//!
+//! # debounce を持たない
+//!
+//! 原子的置換は一時ファイルの作成と rename で複数の記録を生むが、再読込は冪等で
+//! あり、更新時刻と大きさが同じなら再解析もしない。**余分に読み直すだけで、
+//! 観測される値は常に最後の状態である。**
 //!
 //! # snapshot は 1 回の差し替えで反映する
 //!
 //! 読み手は [`SettingsSource::settings`] で現在の `Arc` を取り、その後の
 //! 差し替えに影響されない。半分だけ適用された状態を観測する経路が無い。
 
-use aviutl2_mcp_core::settings::{Settings, SettingsReader, SettingsRefresh};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::win_io::{EventHandle, OverlappedOp, WaitAnyOutcome, WinIoError, wait_any};
+use aviutl2_mcp_core::settings::{
+    SETTINGS_FILE_NAME, SETTINGS_READ_ATTEMPTS, Settings, SettingsReader, SettingsRefresh,
+};
+use aviutl2_mcp_win::create_protected_directory;
+use std::ffi::c_void;
+use std::io;
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
-use std::time::Duration;
-use tracing::warn;
+use std::time::{Duration, Instant};
+use tracing::{debug, error, warn};
+use windows::Win32::Foundation::{CloseHandle, ERROR_NOTIFY_ENUM_DIR, GENERIC_READ, HANDLE};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_NOTIFY_CHANGE_FILE_NAME,
+    FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING, ReadDirectoryChangesW,
+};
+use windows::core::PCWSTR;
 
-/// 設定ファイルを見に行く間隔。
+/// 変更の記録を受け取るバッファの大きさ（バイト）。
 ///
-/// **設定にしない。** 通知は最適化であり、正しさは要求のたびの判定が担保する。
-/// 間隔を延ばしても壊れない量に、利用者が触る意味は無い。
-pub const SETTINGS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// 溢れても正しさは失われない。溢れた場合は記録を読まずに読み直す。
+const NOTIFY_BUFFER_BYTES: usize = 4096;
+
+/// `FILE_NOTIFY_INFORMATION` の名前より前の部分の大きさ（バイト）。
+///
+/// `NextEntryOffset` / `Action` / `FileNameLength` の 3 つの `u32` が並び、その
+/// 直後から名前が UTF-16 で続く。**構造体の大きさを使わない**——末尾の
+/// `FileName` は長さ 1 の配列として宣言されており、整列のための詰め物が入る。
+const NOTIFY_HEADER_BYTES: usize = 3 * size_of::<u32>();
+
+/// 監視する変更の種類。
+///
+/// 置換は名前の付け替えとして、直接の編集は最終書き込みと大きさとして届く。
+/// 部分木は見ない。設定ファイルは親ディレクトリの直下にしか無い。
+const NOTIFY_FILTER: windows::Win32::Storage::FileSystem::FILE_NOTIFY_CHANGE =
+    windows::Win32::Storage::FileSystem::FILE_NOTIFY_CHANGE(
+        FILE_NOTIFY_CHANGE_FILE_NAME.0
+            | FILE_NOTIFY_CHANGE_LAST_WRITE.0
+            | FILE_NOTIFY_CHANGE_SIZE.0,
+    );
+
+/// 既にシグナル状態の完了を取り出すときに与える猶予。
+///
+/// [`wait_any`] が完了を告げた後にしか使わないため、実際には待たない。有限に
+/// するのは、万一シグナルが消えていても監視スレッドが止まらないためである。
+const COMPLETION_GRACE: Duration = Duration::from_secs(5);
+
+/// 設定ファイルの置き場所をどう扱うか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentPolicy {
+    /// 基底の直下。無ければ保護 DACL 付きで用意する。
+    Create,
+    /// 外から指定された場所。**存在を要求し、既存の ACL を変えない。**
+    Require,
+}
+
+/// 監視を始められなかった理由。
+#[derive(Debug, thiserror::Error)]
+pub enum SettingsWatchError {
+    /// 設定ファイルの置き場所を決められない。
+    #[error("設定ファイルの置き場所を決められませんでした")]
+    NoParent,
+    /// 指定された置き場所が存在しない。
+    #[error("設定ファイルの置き場所が存在しません")]
+    ParentMissing,
+    /// 置き場所を用意できない、または監視を開始できない。
+    #[error("設定ファイルの監視を開始できませんでした: {0}")]
+    Io(#[from] io::Error),
+}
 
 /// 現在の設定を配る口。
 ///
@@ -43,8 +109,8 @@ pub struct SettingsSource {
     current: RwLock<Arc<Settings>>,
     /// 差し替えた回数。
     ///
-    /// 間隔内の複数回の書き込みが 1 回だけ反映されることを、試験がこの値で
-    /// 確かめる。
+    /// **値が変わったときだけ増える。** 原子的置換が複数の記録を生んでも、
+    /// 読み直した内容が同じなら差し替えない。
     applied: AtomicU64,
 }
 
@@ -64,18 +130,24 @@ impl SettingsSource {
         Arc::clone(&self.current.read().unwrap_or_else(|e| e.into_inner()))
     }
 
-    /// 差し替えた回数。
+    /// 値が変わった回数。
     pub fn applied(&self) -> u64 {
         self.applied.load(Ordering::Acquire)
     }
 
-    fn replace(&self, settings: Arc<Settings>) {
-        *self.current.write().unwrap_or_else(|e| e.into_inner()) = settings;
+    /// 値が変わっていれば差し替える。変わったかどうかを返す。
+    fn replace_if_changed(&self, settings: Arc<Settings>) -> bool {
+        let mut current = self.current.write().unwrap_or_else(|e| e.into_inner());
+        if **current == *settings {
+            return false;
+        }
+        *current = settings;
         self.applied.fetch_add(1, Ordering::AcqRel);
+        true
     }
 }
 
-/// 設定ファイルを一定間隔で見に行く 1 本のスレッド。
+/// 設定ファイルの親ディレクトリを監視する 1 本のスレッド。
 ///
 /// **plugin と違い server はスレッドを 1 本持つ。** 有効 tool の集合が変わった
 /// ことを要求元へ知らせる経路は、要求が来るまで気付けない形では動かない。
@@ -83,44 +155,57 @@ impl SettingsSource {
 /// 同じではない。
 pub struct SettingsWatcher {
     source: Arc<SettingsSource>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<EventHandle>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl SettingsWatcher {
-    /// 起動時に読んだ読み取り口を引き継いで監視を始める。
+    /// 初期 snapshot を作り終えた読み取り口を引き継いで監視を始める。
     ///
     /// 初期 snapshot は呼び出し元が作る。**MCP の受付を始める前に読み終えて
     /// いる**ことが要るためであり、その時点の記録の準備は呼び出し元しか
     /// 知らない。
-    pub fn start(reader: SettingsReader, interval: Duration) -> Self {
+    pub fn start(
+        reader: SettingsReader,
+        parent_policy: ParentPolicy,
+    ) -> Result<Self, SettingsWatchError> {
+        let parent = reader
+            .path()
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .ok_or(SettingsWatchError::NoParent)?
+            .to_path_buf();
+        match parent_policy {
+            ParentPolicy::Create => {
+                create_protected_directory(&parent).map_err(|e| SettingsWatchError::Io(e.into()))?
+            }
+            ParentPolicy::Require => {
+                if !parent.is_dir() {
+                    return Err(SettingsWatchError::ParentMissing);
+                }
+            }
+        }
+
+        let directory = DirectoryHandle::open(&parent)?;
+        let stop = Arc::new(EventHandle::new_manual_reset()?);
         let source = Arc::new(SettingsSource {
             current: RwLock::new(reader.settings()),
             applied: AtomicU64::new(0),
         });
-        let stop = Arc::new(AtomicBool::new(false));
+
         let handle = std::thread::Builder::new()
             .name("aviutl2-mcp-settings".to_string())
             .spawn({
                 let source = Arc::clone(&source);
                 let stop = Arc::clone(&stop);
-                let mut reader = reader;
-                move || {
-                    while !stop.load(Ordering::Acquire) {
-                        std::thread::sleep(interval);
-                        if stop.load(Ordering::Acquire) {
-                            break;
-                        }
-                        poll_once(&mut reader, &source);
-                    }
-                }
-            })
-            .ok();
-        Self {
+                move || watch(directory, stop, reader, source)
+            })?;
+
+        Ok(Self {
             source,
             stop,
-            handle,
-        }
+            handle: Some(handle),
+        })
     }
 
     /// 現在の設定を配る口。
@@ -130,32 +215,268 @@ impl SettingsWatcher {
 }
 
 impl Drop for SettingsWatcher {
+    /// 停止を合図し、監視スレッドの終了を待つ。
+    ///
+    /// **待ち合わせるのが要である。** 監視スレッドは `OverlappedOp` を保持して
+    /// おり、その `Drop` が保留中の `ReadDirectoryChangesW` をキャンセルして
+    /// 完了を確定させる。待たずに戻ると、カーネルが受信バッファを手放す前に
+    /// スレッドの資源が解放され得る。
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+        if let Err(e) = self.stop.set() {
+            error!(error = %e, "設定監視の停止を合図できませんでした");
+        }
+        if let Some(handle) = self.handle.take()
+            && handle.join().is_err()
+        {
+            error!("設定監視スレッドが panic で終了しました");
         }
     }
 }
 
-/// 1 回分のポーリング。
+/// 監視対象のディレクトリハンドル。
+struct DirectoryHandle(HANDLE);
+
+// SAFETY: ファイルハンドルはスレッドを跨いで使用でき、`DirectoryHandle` は
+// 所有権を単一の値に閉じている。閉じるのは `Drop` だけである。
+unsafe impl Send for DirectoryHandle {}
+
+impl DirectoryHandle {
+    /// overlapped I/O で開く。
+    ///
+    /// 共有は読み・書き・削除のすべてを許す。**削除を許さないと、監視している
+    /// 間そのディレクトリを消せなくなる**——上書きで指定された場所を使う試験が
+    /// 後始末できない。
+    fn open(path: &Path) -> io::Result<Self> {
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide` は NUL 終端したパスであり、呼び出しの間だけ参照される。
+        // ディレクトリを開くには backup semantics が要る。
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                GENERIC_READ.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                None,
+            )
+        }
+        .map_err(|e| io::Error::other(format!("ディレクトリを開けませんでした: {e}")))?;
+        Ok(Self(handle))
+    }
+
+    fn handle(&self) -> HANDLE {
+        self.0
+    }
+}
+
+impl Drop for DirectoryHandle {
+    fn drop(&mut self) {
+        // SAFETY: 本型のみが所有しており、ここでのみ閉じられる。
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+/// 監視スレッドの本体。
+///
+/// `OverlappedOp` は `directory` より先に drop されなければならない。ここでは
+/// 関数内の変数の宣言順がそれを与える（後に宣言したものから drop される）。
+fn watch(
+    directory: DirectoryHandle,
+    stop: Arc<EventHandle>,
+    mut reader: SettingsReader,
+    source: Arc<SettingsSource>,
+) {
+    let settings_file = settings_file_name(reader.path());
+    // 記録は `FILE_NOTIFY_INFORMATION` の並びであり DWORD 境界に整列している
+    // 必要がある。`u32` の列として確保することで整列を型から得る。
+    let mut buffer = vec![0u32; NOTIFY_BUFFER_BYTES / size_of::<u32>()];
+
+    // SAFETY: `directory` は本関数の最後まで生存し、`op` はその前に drop される
+    // （後に宣言したものから drop される）。
+    let mut op = match unsafe { OverlappedOp::new(directory.handle()) } {
+        Ok(op) => op,
+        Err(e) => {
+            error!(error = %e, "設定監視の overlapped I/O を用意できませんでした");
+            return;
+        }
+    };
+
+    let mut first_issue = true;
+    loop {
+        if let Err(e) = op.begin() {
+            error!(error = %e, "設定監視の I/O を初期化できませんでした");
+            return;
+        }
+        // SAFETY: `buffer` は本関数のスコープで生存し、`op` の `Drop` が I/O の
+        // 完了を待ち合わせるため、カーネルの書き込み先は常に有効である。
+        let issued = unsafe {
+            ReadDirectoryChangesW(
+                directory.handle(),
+                buffer.as_mut_ptr() as *mut c_void,
+                (buffer.len() * size_of::<u32>()) as u32,
+                false,
+                NOTIFY_FILTER,
+                None,
+                Some(op.as_mut_ptr()),
+                None,
+            )
+        };
+        // **発行の成功は「登録された」ことしか意味しない。** 完了として扱うと
+        // 保留状態が記録されず、`Drop` がキャンセルを飛ばして受信バッファを
+        // 解放する経路ができる。
+        if let Err(e) = op.classify_queued(issued) {
+            error!(error = %e, "設定監視の変更通知を要求できませんでした");
+            return;
+        }
+
+        // 監視を登録し終えた直後に 1 度だけ読み直す。**初期 snapshot を作って
+        // から最初の要求を登録するまでの間に起きた変更は、通知として届かない。**
+        // 更新時刻と大きさが同じなら再解析しないため、費用は `stat` 1 回である。
+        if std::mem::take(&mut first_issue) {
+            reload(&mut reader, &source);
+        }
+
+        match wait_any(&[op.event(), stop.handle()], None) {
+            WaitAnyOutcome::Signaled(0) => {}
+            // 停止。`op` の `Drop` が保留中の I/O をキャンセルして完了を
+            // 確定させる。
+            WaitAnyOutcome::Signaled(_) => return,
+            WaitAnyOutcome::TimedOut => continue,
+            WaitAnyOutcome::Failed(e) => {
+                error!(error = %e, "設定監視の待機に失敗しました");
+                return;
+            }
+        }
+
+        let transferred = match op.await_completion(Instant::now() + COMPLETION_GRACE) {
+            Ok(transferred) => Some(transferred),
+            // 溢れは「何かが変わった」以上の情報を持たない。記録を読まずに
+            // 読み直す。
+            Err(WinIoError::Io(e)) if is_notify_overflow(&e) => None,
+            Err(e) => {
+                error!(error = %e, "設定監視の変更通知を取得できませんでした");
+                return;
+            }
+        };
+
+        if demands_reload(transferred, &buffer, &settings_file) {
+            reload(&mut reader, &source);
+        }
+    }
+}
+
+/// 記録の取得の失敗がバッファ溢れかどうか。
+///
+/// 溢れは「何かが変わった」以上の情報を持たない。記録を読まずに読み直す。
+fn is_notify_overflow(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(ERROR_NOTIFY_ENUM_DIR.0 as i32)
+}
+
+/// 受け取った記録が設定の読み直しを要求するか。
+///
+/// **判定できない場合は読み直す側へ倒す。** 取りこぼすより余分に読む方が安全で
+/// ある。転送 0 バイトはバッファ溢れであり、記録は 1 件も入っていない。
+fn demands_reload(transferred: Option<u32>, buffer: &[u32], settings_file: &[u16]) -> bool {
+    let Some(transferred) = transferred else {
+        return true;
+    };
+    if transferred == 0 {
+        return true;
+    }
+    // SAFETY: `buffer` は `u32` の列として確保してあり、その全体をバイト列と
+    // して読み直すだけである。参照の寿命は元の借用に縛られる。
+    let raw =
+        unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), size_of_val(buffer)) };
+    let bytes = (transferred as usize).min(raw.len());
+
+    let mut offset = 0usize;
+    let mut seen = false;
+    while offset + NOTIFY_HEADER_BYTES <= bytes {
+        let next = read_u32(raw, offset) as usize;
+        let name_bytes = read_u32(raw, offset + 2 * size_of::<u32>()) as usize;
+        let name_offset = offset + NOTIFY_HEADER_BYTES;
+        if name_offset + name_bytes > bytes || !name_bytes.is_multiple_of(size_of::<u16>()) {
+            // 記録が途中で切れている。読み直す側へ倒す。
+            return true;
+        }
+        let name: Vec<u16> = raw[name_offset..name_offset + name_bytes]
+            .chunks_exact(size_of::<u16>())
+            .map(|unit| u16::from_ne_bytes([unit[0], unit[1]]))
+            .collect();
+        seen = true;
+        if same_file_name(&name, settings_file) {
+            return true;
+        }
+        if next == 0 {
+            break;
+        }
+        offset += next;
+    }
+    // 1 件も読み解けなければ読み直す。
+    !seen
+}
+
+/// バイト列から native endian の `u32` を読む。
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_ne_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
+}
+
+/// 監視対象のファイル名を UTF-16 で取る。
+fn settings_file_name(path: &Path) -> Vec<u16> {
+    path.file_name()
+        .map(|name| name.encode_wide().collect())
+        .unwrap_or_else(|| SETTINGS_FILE_NAME.encode_utf16().collect())
+}
+
+/// ファイル名が一致するか。Windows のファイル名は大小を区別しない。
+fn same_file_name(left: &[u16], right: &[u16]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(l, r)| to_lower_ascii(*l) == to_lower_ascii(*r))
+}
+
+fn to_lower_ascii(unit: u16) -> u16 {
+    match u8::try_from(unit) {
+        Ok(byte) => u16::from(byte.to_ascii_lowercase()),
+        Err(_) => unit,
+    }
+}
+
+/// 設定を読み直し、値が変わっていれば snapshot を差し替える。
 ///
 /// 更新時刻と大きさが前回と同じなら何もしない。読み取りが一時的に失敗した
 /// 場合は有限回だけ試み、なお失敗すれば破損として直前の snapshot を維持する。
 /// **破損が、無効化していた tool を無言で再公開してはならない。**
-fn poll_once(reader: &mut SettingsReader, source: &SettingsSource) -> bool {
-    for attempt in 1..=aviutl2_mcp_core::settings::SETTINGS_READ_ATTEMPTS {
+fn reload(reader: &mut SettingsReader, source: &SettingsSource) -> bool {
+    for attempt in 1..=SETTINGS_READ_ATTEMPTS {
         match reader.refresh() {
             SettingsRefresh::Unchanged => return false,
             SettingsRefresh::Reloaded(issues) => {
                 for issue in &issues {
                     warn!("設定を補正しました: {issue}");
                 }
-                source.replace(reader.settings());
-                return true;
+                let changed = source.replace_if_changed(reader.settings());
+                if changed {
+                    debug!("設定を反映しました");
+                }
+                return changed;
             }
             SettingsRefresh::Failed(e) => {
-                if attempt == aviutl2_mcp_core::settings::SETTINGS_READ_ATTEMPTS {
+                if attempt == SETTINGS_READ_ATTEMPTS {
                     warn!("設定を読み直せませんでした。直前の設定を維持します: {e}");
                 }
             }
@@ -165,127 +486,4 @@ fn poll_once(reader: &mut SettingsReader, source: &SettingsSource) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use aviutl2_mcp_core::settings::MIN_ARTIFACT_TTL_SECONDS;
-    use std::path::{Path, PathBuf};
-
-    fn temp_settings_path() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "aviutl2-mcp-server-settings-{}.json",
-            uuid::Uuid::new_v4()
-        ))
-    }
-
-    fn write(path: &Path, text: &str) {
-        std::fs::write(path, text).unwrap();
-    }
-
-    #[test]
-    fn a_replaced_file_becomes_visible_on_the_next_poll() {
-        // 原子的置換で identity が差し替わっても、毎回パスを見に行く方式は
-        // 取りこぼさない。
-        let path = temp_settings_path();
-        write(&path, r#"{"log_level":"debug"}"#);
-        let mut reader = SettingsReader::new(path.clone());
-        reader.refresh();
-        let source = SettingsSource::fixed((*reader.settings()).clone());
-        assert_eq!(source.settings().log_level(), "debug");
-
-        let replacement = path.with_extension("tmp");
-        write(&replacement, r#"{"log_level":"trace"}"#);
-        std::fs::rename(&replacement, &path).unwrap();
-
-        assert!(poll_once(&mut reader, &source));
-        assert_eq!(source.settings().log_level(), "trace");
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn several_writes_within_one_interval_apply_once_as_the_last_state() {
-        // 間隔がそのまま debounce になる。間隔内の複数回の書き込みは、最後の
-        // 状態として 1 回だけ反映される。
-        let path = temp_settings_path();
-        write(&path, r#"{"log_level":"debug"}"#);
-        let mut reader = SettingsReader::new(path.clone());
-        reader.refresh();
-        let source = SettingsSource::fixed((*reader.settings()).clone());
-        let applied = source.applied();
-
-        write(&path, r#"{"log_level":"warn"}"#);
-        write(&path, r#"{"log_level":"error"}"#);
-        write(&path, r#"{"log_level":"trace"}"#);
-
-        assert!(poll_once(&mut reader, &source));
-        assert_eq!(
-            source.applied(),
-            applied + 1,
-            "書き込みの回数だけ反映しました"
-        );
-        assert_eq!(source.settings().log_level(), "trace");
-
-        // 変わっていなければ差し替えない。
-        assert!(!poll_once(&mut reader, &source));
-        assert_eq!(source.applied(), applied + 1);
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn a_corrupt_file_keeps_the_last_known_good_snapshot() {
-        let path = temp_settings_path();
-        write(&path, r#"{"artifact":{"ttl_seconds":120}}"#);
-        let mut reader = SettingsReader::new(path.clone());
-        reader.refresh();
-        let source = SettingsSource::fixed((*reader.settings()).clone());
-
-        write(&path, "{ broken");
-        assert!(!poll_once(&mut reader, &source));
-        assert_eq!(source.settings().artifact_ttl(), Duration::from_secs(120));
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn a_missing_file_yields_the_defaults() {
-        let path = temp_settings_path();
-        let mut reader = SettingsReader::new(path.clone());
-        let source = SettingsSource::fixed(Settings::default());
-
-        assert!(poll_once(&mut reader, &source));
-        assert_eq!(*source.settings(), Settings::default());
-    }
-
-    #[test]
-    fn out_of_range_values_are_clamped_before_they_reach_the_snapshot() {
-        // 丸めは共有の解決手続きが行う。server 側に独自の範囲判定は無い。
-        let path = temp_settings_path();
-        write(&path, r#"{"artifact":{"ttl_seconds":1}}"#);
-        let mut reader = SettingsReader::new(path.clone());
-        let source = SettingsSource::fixed(Settings::default());
-
-        assert!(poll_once(&mut reader, &source));
-        assert_eq!(
-            source.settings().artifact_ttl(),
-            Duration::from_secs(MIN_ARTIFACT_TTL_SECONDS)
-        );
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn the_watcher_stops_when_it_is_dropped() {
-        let path = temp_settings_path();
-        write(&path, r#"{"log_level":"debug"}"#);
-        let mut reader = SettingsReader::new(path.clone());
-        reader.refresh();
-
-        let watcher = SettingsWatcher::start(reader, Duration::from_millis(10));
-        let source = watcher.source();
-        assert_eq!(source.settings().log_level(), "debug");
-        drop(watcher);
-
-        let _ = std::fs::remove_file(&path);
-    }
-}
+mod tests;

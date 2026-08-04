@@ -117,16 +117,42 @@ pub const MIN_RENDER_DRAIN_TIMEOUT_MS: u64 = 0;
 /// 同上限（ミリ秒）。利用者が「終了しない」と判断する限度。
 pub const MAX_RENDER_DRAIN_TIMEOUT_MS: u64 = 30000;
 
+/// 設定ファイルの場所と、その決まり方。
+///
+/// **決まり方まで返すのは、置き場所を用意してよいかが変わるためである。**
+/// 基底の直下は我々が作る場所であり、無ければ作ってよい。外から与えられた
+/// 場所は利用者のものであり、**存在を要求するだけで作らない。**
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsLocation {
+    /// 設定ファイルのパス。
+    pub path: PathBuf,
+    /// [`SETTINGS_FILE_ENV`] による上書きで決まったか。
+    pub overridden: bool,
+}
+
 /// 設定ファイルの場所を解決する。
 ///
 /// [`SETTINGS_FILE_ENV`] が空でない値を持つ場合はそれを採り、そうでなければ
 /// `base_dir` の直下の [`SETTINGS_FILE_NAME`] とする。**plugin と server は
 /// 同じ規則を用いる。**
-pub fn settings_path(base_dir: &Path) -> PathBuf {
+pub fn settings_location(base_dir: &Path) -> SettingsLocation {
     match std::env::var(SETTINGS_FILE_ENV) {
-        Ok(value) if !value.trim().is_empty() => PathBuf::from(value),
-        _ => base_dir.join(SETTINGS_FILE_NAME),
+        Ok(value) if !value.trim().is_empty() => SettingsLocation {
+            path: PathBuf::from(value),
+            overridden: true,
+        },
+        _ => SettingsLocation {
+            path: base_dir.join(SETTINGS_FILE_NAME),
+            overridden: false,
+        },
     }
+}
+
+/// 設定ファイルのパスだけを解決する。
+///
+/// 決まり方を問わない呼び出し側のための薄い口である。
+pub fn settings_path(base_dir: &Path) -> PathBuf {
+    settings_location(base_dir).path
 }
 
 /// 設定の解決で生じた不整合。

@@ -505,6 +505,12 @@ fn the_settings_path_follows_the_environment_override_or_the_base_dir() {
     let base = Path::new(r"C:\base");
     if std::env::var(SETTINGS_FILE_ENV).is_err() {
         assert_eq!(settings_path(base), base.join(SETTINGS_FILE_NAME));
+        let location = settings_location(base);
+        assert!(
+            !location.overridden,
+            "上書きが無いのに上書き扱いになりました"
+        );
+        assert_eq!(location.path, base.join(SETTINGS_FILE_NAME));
     }
     assert_eq!(SETTINGS_FILE_NAME, "settings.json");
     assert_eq!(SETTINGS_FILE_ENV, "AVIUTL2_MCP_SETTINGS_FILE");
