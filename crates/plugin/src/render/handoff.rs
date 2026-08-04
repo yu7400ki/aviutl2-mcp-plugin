@@ -687,5 +687,11 @@ mod tests {
             !reported.contains(HANDOFF_DIR),
             "申告にディレクトリ名が含まれています: {reported}"
         );
+        // 識別子はファイル名そのものである。申告を構造体ごと記録しても
+        // 場所を組み立てる材料が漏れないことを、書き出す側でも固定する。
+        assert!(
+            !reported.contains(artifact.token.as_str()),
+            "申告に識別子が含まれています: {reported}"
+        );
     }
 }

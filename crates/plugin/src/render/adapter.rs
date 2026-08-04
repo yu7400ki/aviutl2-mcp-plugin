@@ -714,7 +714,9 @@ mod tests {
         assert_eq!(result.frame, 7);
         assert_eq!(result.width, 2);
         assert_eq!(result.height, 2);
-        assert_eq!(result.media_type, ARTIFACT_MEDIA_TYPE);
+        // 引き取る側は同じ media type を独立に名乗る。期待は取り決めそのものを
+        // 書き下し、共有の定義だけが変わったときに書き出す側でも落ちるようにする。
+        assert_eq!(result.media_type, "image/png");
         assert_eq!(result.project_epoch, fixture.project.epoch());
         assert_eq!(result.project_revision, fixture.project.revision());
         assert!(result.byte_length > 0);
