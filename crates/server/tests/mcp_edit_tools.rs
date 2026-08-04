@@ -845,6 +845,28 @@ async fn a_rejected_item_value_names_the_rule_it_broke() {
             "{reason} の応答に設定値が現れました"
         );
     }
+
+    // 空文字列は文字列値ではなくレイヤー名の指定で拒否される。名前を消す
+    // 指定は別に用意してあるため、空を「消す」意味へ黙って読み替えない。
+    let result = harness
+        .server
+        .aviutl2_set_layer_state(Parameters(SetLayerStateInput {
+            instance_id: harness.instance_id(),
+            expected_scene_id: SCENE_ID,
+            layer: 2,
+            name: Some(LayerNameChangeInput::Set {
+                name: String::new(),
+            }),
+            enabled: None,
+            locked: None,
+            expected_project_epoch: EPOCH.to_string(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("invalid_argument"));
+    assert_eq!(structured["details"]["reason"], json!("empty"));
 }
 
 #[tokio::test]
@@ -891,6 +913,31 @@ async fn a_batch_names_the_same_rule_as_the_same_edit_on_its_own() {
     assert_eq!(batched["details"]["reason"], alone["details"]["reason"]);
     assert_eq!(batched["details"]["failed_index"], json!(1));
     assert!(alone["details"].get("failed_index").is_none());
+
+    // フォルダも同じパス検証を通る。片方だけを固定すると、種別ごとに
+    // 検証を書き分ける形へ戻っても気付けない。
+    let folder = harness
+        .server
+        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+            instance_id: harness.instance_id(),
+            operations: vec![
+                move_operation(5),
+                BatchOperationInput::SetObjectItem {
+                    selector: effect_selector_input(),
+                    item: "フォルダ".to_string(),
+                    value: ItemValueInput::Folder {
+                        path: r"..\assets".to_string(),
+                    },
+                },
+            ],
+        }))
+        .await;
+
+    assert_eq!(folder.is_error, Some(true));
+    let folder = structured(&folder);
+    assert_eq!(folder["details"]["reason"], json!("not_absolute"));
+    assert_eq!(folder["details"]["failed_index"], json!(1));
+
     assert!(
         harness.mock.received_requests().is_empty(),
         "検証前に IPC を発生させない"

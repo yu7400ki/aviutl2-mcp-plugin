@@ -819,6 +819,72 @@ mod tests {
         assert_eq!(non_negative(1080), 1080);
     }
 
+    /// ホストが渡す編集情報の生の姿。
+    ///
+    /// ラッパーは各値を `as usize` で畳んでから所有型へ写すため、負値は
+    /// 巨大値として届く。生の値から組み立てなければ、その畳み込みを含む
+    /// 写しの経路を通らない。
+    fn raw_edit_info() -> aviutl2::sys::plugin2::EDIT_INFO {
+        aviutl2::sys::plugin2::EDIT_INFO {
+            width: 1920,
+            height: 1080,
+            rate: 30_000,
+            scale: 1_001,
+            sample_rate: 48_000,
+            frame: 0,
+            layer: 0,
+            frame_max: 100,
+            layer_max: 1,
+            display_frame_start: 0,
+            display_layer_start: 0,
+            display_frame_num: 100,
+            display_layer_num: 2,
+            select_range_start: -1,
+            select_range_end: -1,
+            grid_bpm_tempo: 120.0,
+            grid_bpm_beat: 4,
+            grid_bpm_offset: 0.0,
+            scene_id: 3,
+        }
+    }
+
+    /// 生の編集情報を、実際の写しの経路へ通す。
+    fn mapped(raw: &aviutl2::sys::plugin2::EDIT_INFO) -> Result<HostEditInfo, ReadError> {
+        host_edit_info(&unsafe { aviutl2::generic::EditInfo::from_raw(raw) })
+    }
+
+    #[test]
+    fn the_edit_info_mapping_reports_an_out_of_range_value() {
+        // 読み取り経路の写しは 1 か所しかなく、レンダリング経路もここを通る。
+        // 変換だけを見るテストは、写しがその変換を使っていることを見ていない。
+        let info = mapped(&raw_edit_info()).expect("正常な編集情報です");
+        assert_eq!(info.width, 1920);
+        assert_eq!(info.height, 1080);
+
+        // 負の解像度は巨大な usize として届く。位置や範囲として使えば
+        // 実在しない座標を指すため、値の範囲外として返す。
+        for raw in [
+            aviutl2::sys::plugin2::EDIT_INFO {
+                width: -1,
+                ..raw_edit_info()
+            },
+            aviutl2::sys::plugin2::EDIT_INFO {
+                height: -1,
+                ..raw_edit_info()
+            },
+            aviutl2::sys::plugin2::EDIT_INFO {
+                sample_rate: -1,
+                ..raw_edit_info()
+            },
+        ] {
+            let error = mapped(&raw).expect_err("範囲外として返ります");
+            assert_eq!(error.error_code(), ErrorCode::SdkError);
+            let details = error.details();
+            assert_eq!(details["sdk_operation"], "get_edit_info");
+            assert_eq!(details["reason"], "edit_info_out_of_range");
+        }
+    }
+
     #[test]
     fn an_unrepresentable_size_is_reported_as_an_out_of_range_value() {
         // 写せない大きさは呼び出しの失敗ではない。取得は成功しており、

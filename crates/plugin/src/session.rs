@@ -3334,6 +3334,27 @@ mod edit_tests {
                 "{label} が落ちた sub-operation の位置を運びませんでした"
             );
         }
+
+        // フォルダも同じパス検証を通る。片方だけを固定すると、種別ごとに
+        // 検証を書き分ける形へ戻っても気付けない。
+        let error = execute_edit(
+            &FakeEditAdapter::new(),
+            &InstanceState::Ready,
+            EditOperation::ApplyBatch,
+            &json!({
+                "operations": [{
+                    "type": "set_object_item",
+                    "selector": fake_effect_selector(),
+                    "item": "フォルダ",
+                    "value": { "type": "folder", "path": r"..\assets" },
+                }],
+            }),
+            within(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.details["reason"], json!("not_absolute"));
+        assert_eq!(error.details["failed_index"], json!(0));
     }
 
     #[test]
