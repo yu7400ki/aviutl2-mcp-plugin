@@ -207,17 +207,31 @@ impl OverlappedOp {
         self.pending
     }
 
-    /// 発行の成功が「完了」ではなく「登録」を意味する API のために分類する。
+    /// 発行の成功が「完了」ではなく「登録」を意味する API の I/O を発行する。
     ///
     /// **`ReadDirectoryChangesW` は overlapped ハンドルに対して成功を返しても、
     /// それは要求が登録されたことしか意味しない。** [`OverlappedOp::classify`]
     /// で完了として扱うと保留状態が記録されず、`Drop` がキャンセルを飛ばして
     /// 転送バッファを解放する——カーネルはその後もそこへ書き込む。
     ///
-    /// 成功も `ERROR_IO_PENDING` もどちらも保留として記録し、呼び出し側は必ず
-    /// 完了を待つ。
-    pub fn classify_queued(&mut self, result: windows::core::Result<()>) -> io::Result<()> {
-        match result {
+    /// **分類の仕方を呼び出し側に選ばせない。** [`OverlappedOp::begin`] から
+    /// 発行・分類までをこの 1 つの口に閉じ、成功も `ERROR_IO_PENDING` も
+    /// どちらも保留として記録する。呼び出し側は必ず完了を待つことになる。
+    ///
+    /// `issue` は `OVERLAPPED` のポインタを受け取り、API の戻り値を返す。
+    ///
+    /// # Safety
+    ///
+    /// `issue` がカーネルへ渡す転送バッファは、本 `OverlappedOp` が drop される
+    /// まで有効であり続けなければならない。`Drop` は保留中の I/O をキャンセル
+    /// して完了を待ち合わせるため、その順序さえ守れば解放済みメモリへの書き込み
+    /// は起きない。
+    pub unsafe fn issue_queued(
+        &mut self,
+        issue: impl FnOnce(*mut OVERLAPPED) -> windows::core::Result<()>,
+    ) -> io::Result<()> {
+        self.begin()?;
+        match issue(self.as_mut_ptr()) {
             Ok(()) => {
                 self.pending = true;
                 Ok(())
@@ -234,13 +248,37 @@ impl OverlappedOp {
     ///
     /// 期限超過・待機失敗のいずれでも、戻る前に I/O をキャンセルして
     /// カーネルが `OVERLAPPED` と転送バッファを手放したことを確認する。
+    ///
+    /// **完了として届いた I/O は、結果が失敗であっても保留ではない。** 相手の
+    /// 切断などで失敗した I/O もカーネルは既に `OVERLAPPED` と転送バッファを
+    /// 手放している。失敗を理由に保留のまま残すと、呼び出し元が次の発行へ
+    /// 進んだときに [`OverlappedOp::begin`] の表明へ掛かり、`Drop` は不要な
+    /// キャンセルの排出に失敗して [`std::process::abort`] へ落ちる。
+    ///
+    /// **完了状態そのものを取得できなかった場合だけは排出する。** それは
+    /// [`leaves_io_pending`] が真になる失敗であり、カーネルがまだ手放していない
+    /// 可能性を残す。
     pub fn await_completion(&mut self, deadline: Instant) -> Result<u32, WinIoError> {
         match self.event.wait(deadline) {
-            WaitOutcome::Signaled => {
-                let transferred = self.overlapped_result(false)?;
-                self.pending = false;
-                Ok(transferred)
-            }
+            WaitOutcome::Signaled => match self.raw_overlapped_result(false) {
+                Ok(transferred) => {
+                    self.pending = false;
+                    Ok(transferred)
+                }
+                // キャンセル完了は転送 0 バイトの完了として扱う。
+                Err(err) if err.code() == ERROR_OPERATION_ABORTED.into() => {
+                    self.pending = false;
+                    Ok(0)
+                }
+                Err(err) if leaves_io_pending(&err) => {
+                    self.cancel_and_drain();
+                    Err(WinIoError::Io(to_io_error(err)))
+                }
+                Err(err) => {
+                    self.pending = false;
+                    Err(WinIoError::Io(to_io_error(err)))
+                }
+            },
             WaitOutcome::TimedOut => {
                 self.cancel_and_drain();
                 Err(WinIoError::TimedOut)
@@ -750,8 +788,8 @@ mod tests {
         // SAFETY: `pipe` は本テストの終わりまで生存し、`op` はその前に drop される。
         let mut op = unsafe { OverlappedOp::new(pipe.client) }.unwrap();
 
-        op.begin().unwrap();
-        op.classify_queued(Ok(())).unwrap();
+        // SAFETY: 発行しないため、カーネルへ渡す転送バッファも存在しない。
+        unsafe { op.issue_queued(|_| Ok(())) }.unwrap();
         assert!(
             op.is_pending(),
             "成功した発行が保留として記録されていません"
@@ -773,13 +811,51 @@ mod tests {
         // SAFETY: `pipe` は本テストの終わりまで生存し、`op` はその前に drop される。
         let mut op = unsafe { OverlappedOp::new(pipe.client) }.unwrap();
 
-        let error = op
-            .classify_queued(Err(windows::core::Error::from_hresult(
-                ERROR_INVALID_HANDLE.to_hresult(),
-            )))
-            .expect_err("発行の失敗はそのまま伝わる");
+        // SAFETY: 発行が失敗を返すため、カーネルへ渡す転送バッファは無い。
+        let error = unsafe {
+            op.issue_queued(|_| {
+                Err(windows::core::Error::from_hresult(
+                    ERROR_INVALID_HANDLE.to_hresult(),
+                ))
+            })
+        }
+        .expect_err("発行の失敗はそのまま伝わる");
         assert_eq!(error.raw_os_error(), Some(ERROR_INVALID_HANDLE.0 as i32));
         assert!(!op.is_pending(), "失敗した発行を保留として記録しています");
+    }
+
+    #[test]
+    fn a_completion_that_carries_an_error_still_clears_the_pending_state() {
+        // 失敗として完了した I/O も、カーネルは既に `OVERLAPPED` と転送バッファ
+        // を手放している。保留のまま残すと次の発行が `begin` の表明に掛かり、
+        // `Drop` は不要なキャンセルの排出に失敗してプロセスを異常終了させる。
+        let mut pipe = PipePair::create();
+        let mut buf = [0u8; 8];
+        // SAFETY: `pipe` は本テストの終わりまで生存し、`op` はその前に drop される。
+        let mut op = unsafe { OverlappedOp::new(pipe.client) }.unwrap();
+
+        op.begin().unwrap();
+        // SAFETY: `buf` は本テストのスコープで生存し、`op` は同じスコープ内で
+        // 完了まで待ってから drop される。
+        let issued = unsafe { ReadFile(pipe.client, Some(&mut buf), None, Some(op.as_mut_ptr())) };
+        assert_eq!(op.classify(issued).unwrap(), IoIssue::Pending);
+
+        // 対向端を閉じると、保留中の読み取りは失敗として完了する。
+        pipe.close_server();
+
+        let error = op
+            .await_completion(Instant::now() + Duration::from_secs(5))
+            .expect_err("切断された pipe からは読み取れない");
+        assert!(
+            matches!(error, WinIoError::Io(_)),
+            "期限超過ではなく I/O エラーとして報告する: {error:?}"
+        );
+        assert!(
+            !op.is_pending(),
+            "失敗として完了した I/O が保留のまま残りました"
+        );
+        // 保留が残っていればここで表明に掛かる。
+        op.begin().unwrap();
     }
 
     #[test]

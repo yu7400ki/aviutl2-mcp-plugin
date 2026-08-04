@@ -310,28 +310,7 @@ fn watch(
 
     let mut first_issue = true;
     loop {
-        if let Err(e) = op.begin() {
-            error!(error = %e, "設定監視の I/O を初期化できませんでした");
-            return;
-        }
-        // SAFETY: `buffer` は本関数のスコープで生存し、`op` の `Drop` が I/O の
-        // 完了を待ち合わせるため、カーネルの書き込み先は常に有効である。
-        let issued = unsafe {
-            ReadDirectoryChangesW(
-                directory.handle(),
-                buffer.as_mut_ptr() as *mut c_void,
-                (buffer.len() * size_of::<u32>()) as u32,
-                false,
-                NOTIFY_FILTER,
-                None,
-                Some(op.as_mut_ptr()),
-                None,
-            )
-        };
-        // **発行の成功は「登録された」ことしか意味しない。** 完了として扱うと
-        // 保留状態が記録されず、`Drop` がキャンセルを飛ばして受信バッファを
-        // 解放する経路ができる。
-        if let Err(e) = op.classify_queued(issued) {
+        if let Err(e) = issue_watch(&mut op, &directory, &mut buffer) {
             error!(error = %e, "設定監視の変更通知を要求できませんでした");
             return;
         }
@@ -372,9 +351,45 @@ fn watch(
     }
 }
 
+/// 変更通知を 1 件要求する。
+///
+/// **発行の成功は「登録された」ことしか意味しない。** 完了として扱うと保留状態
+/// が記録されず、`Drop` がキャンセルを飛ばして受信バッファを解放する経路が
+/// できる——カーネルはその後もそこへ書き込む。`OverlappedOp::issue_queued` は
+/// 分類の仕方を選ばせないため、この形でしか要求を出せない。
+fn issue_watch(
+    op: &mut OverlappedOp,
+    directory: &DirectoryHandle,
+    buffer: &mut [u32],
+) -> io::Result<()> {
+    let pointer = buffer.as_mut_ptr().cast::<c_void>();
+    let length = size_of_val(buffer) as u32;
+    // SAFETY: `buffer` は呼び出し元が `op` より長く生存させ、`op` の `Drop` が
+    // I/O の完了を待ち合わせるため、カーネルの書き込み先は常に有効である。
+    unsafe {
+        op.issue_queued(|overlapped| {
+            ReadDirectoryChangesW(
+                directory.handle(),
+                pointer,
+                length,
+                false,
+                NOTIFY_FILTER,
+                None,
+                Some(overlapped),
+                None,
+            )
+        })
+    }
+}
+
 /// 記録の取得の失敗がバッファ溢れかどうか。
 ///
 /// 溢れは「何かが変わった」以上の情報を持たない。記録を読まずに読み直す。
+///
+/// **溢れは 2 つの形で届き得る。** `STATUS_NOTIFY_ENUM_DIR` は severity が
+/// SUCCESS であるため、`GetOverlappedResult` は成功したうえで転送 0 バイトを
+/// 返すのが通常の形である。それを [`demands_reload`] が拾う。ここで拾うのは
+/// 失敗として届いた場合であり、**どちらの経路でも読み直しへ倒れる。**
 fn is_notify_overflow(error: &io::Error) -> bool {
     error.raw_os_error() == Some(ERROR_NOTIFY_ENUM_DIR.0 as i32)
 }

@@ -85,6 +85,51 @@ fn the_watcher_detects_an_atomic_replace() {
 }
 
 #[test]
+fn a_watch_request_is_recorded_as_pending() {
+    // **発行の成功は「登録された」ことしか意味しない。** 完了として扱うと保留
+    // 状態が記録されず、`Drop` がキャンセルを飛ばして受信バッファを解放する
+    // ——カーネルはその後もそこへ書き込む。
+    //
+    // 危険が現れるのは「発行したまま資源を手放す」瞬間であり、試験の中では
+    // 資源の解放が速すぎて観測できない。**記録が付いていることを直接見る。**
+    let dir = TempDir::new();
+    let directory = DirectoryHandle::open(&dir.0).expect("ディレクトリを開けます");
+    let mut buffer = vec![0u32; NOTIFY_BUFFER_BYTES / size_of::<u32>()];
+    // SAFETY: `directory` は本テストの終わりまで生存し、`op` はその前に drop
+    // される（後に宣言したものから drop される）。`buffer` も同様である。
+    let mut op = unsafe { OverlappedOp::new(directory.handle()) }.expect("I/O を用意できます");
+
+    issue_watch(&mut op, &directory, &mut buffer).expect("変更通知を要求できます");
+
+    assert!(
+        op.is_pending(),
+        "変更通知の要求が保留として記録されていません"
+    );
+}
+
+#[test]
+fn a_change_made_before_the_watch_was_registered_is_still_picked_up() {
+    // 初期 snapshot を作ってから最初の要求を登録するまでの間に起きた変更は、
+    // 通知として届かない。**ここで書き込むのは監視を始める前であり、通知は
+    // 原理的に出ない。** 登録直後の読み直しだけが拾える。
+    let dir = TempDir::new();
+    dir.replace_settings(r#"{"log_level":"debug"}"#);
+    let reader = reader_for(&dir);
+    assert_eq!(reader.settings().log_level(), "debug");
+
+    dir.replace_settings(r#"{"log_level":"trace"}"#);
+
+    let watcher =
+        SettingsWatcher::start(reader, ParentPolicy::Require).expect("監視を開始できます");
+    let source = watcher.source();
+
+    assert!(
+        wait_until(|| source.settings().log_level() == "trace"),
+        "監視を始める前の変更が取り込まれませんでした"
+    );
+}
+
+#[test]
 fn the_watcher_detects_a_file_created_after_it_started() {
     // 監視の起点はディレクトリなので、まだ無いファイルの作成も検出できる。
     let dir = TempDir::new();
