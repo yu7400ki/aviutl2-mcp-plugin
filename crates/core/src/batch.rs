@@ -582,7 +582,11 @@ mod tests {
     /// 一覧の更新を促す。
     #[test]
     fn operation_types_that_cannot_be_sub_operations_are_rejected_by_the_decoder() {
-        // 逆操作を事前に組み立てられないため対象から外した 8 種。
+        // 逆操作を事前に組み立てられないため対象から外した 11 種。
+        //
+        // 中間点の 3 つは戻り値から成否を知れるが、削除した中間点の移動
+        // パラメータを復元する手段が無く、`delete_object_section` の逆操作を
+        // 構築できない。3 つのうち一部だけを受け付ける形は採らない。
         let excluded = [
             crate::operation::OPERATION_CREATE_OBJECT,
             crate::operation::OPERATION_DELETE_OBJECT,
@@ -592,6 +596,9 @@ mod tests {
             crate::operation::OPERATION_SET_EFFECT_ENABLED,
             crate::operation::OPERATION_SET_LAYER_STATE,
             crate::operation::OPERATION_SET_SELECTION,
+            crate::operation::OPERATION_CREATE_OBJECT_SECTION,
+            crate::operation::OPERATION_DELETE_OBJECT_SECTION,
+            crate::operation::OPERATION_MOVE_OBJECT_SECTION,
         ];
         // 一括適用そのものも sub-operation にはなれない。入れ子にできると、
         // 1 つの取り消し単位に収まる範囲を要求元が入れ子の深さで変えられる。

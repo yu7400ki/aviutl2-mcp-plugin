@@ -17,12 +17,13 @@ use crate::render::{RenderAdapter, RenderError};
 use anyhow::{Context, Result};
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchInputError, ClientAuth, ClientHello,
-    CreateObjectParams, DeleteEffectParams, DeleteObjectParams, EditInputError, EditOperation,
-    ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams,
-    GetObjectParams, InstanceId, InstanceState, KnownOperation, ListAvailableEffectsParams,
-    ListAvailableEffectsResult, ListLayersParams, ListLayersResult, ListObjectsParams,
-    ListObjectsResult, MoveObjectParams, Nonce, ObjectFilterError, PageError, PageRequest,
-    PongProject, PongResult, ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult,
+    CreateObjectParams, CreateObjectSectionParams, DeleteEffectParams, DeleteObjectParams,
+    DeleteObjectSectionParams, EditInputError, EditOperation, ErrorCode, ErrorObject,
+    GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GetObjectParams, InstanceId,
+    InstanceState, KnownOperation, ListAvailableEffectsParams, ListAvailableEffectsResult,
+    ListLayersParams, ListLayersResult, ListObjectsParams, ListObjectsResult, MoveObjectParams,
+    MoveObjectSectionParams, Nonce, ObjectFilterError, PageError, PageRequest, PongProject,
+    PongResult, ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult,
     RenderInputError, RenderOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind,
     ResponseResult, ScaledBudgets, SetEffectEnabledParams, SetLayerStateParams,
     SetObjectItemParams, SetObjectNameParams, SetSelectionParams, compute_client_mac,
@@ -984,6 +985,9 @@ enum EditRequest {
     SetEffectEnabled(Box<SetEffectEnabledParams>),
     SetLayerState(Box<SetLayerStateParams>),
     SetSelection(Box<SetSelectionParams>),
+    CreateObjectSection(Box<CreateObjectSectionParams>),
+    DeleteObjectSection(Box<DeleteObjectSectionParams>),
+    MoveObjectSection(Box<MoveObjectSectionParams>),
     ApplyBatch(Box<ApplyBatchParams>),
 }
 
@@ -1029,6 +1033,15 @@ fn decode_edit_request(
             decoded!(SetLayerStateParams, EditRequest::SetLayerState)
         }
         EditOperation::SetSelection => decoded!(SetSelectionParams, EditRequest::SetSelection),
+        EditOperation::CreateObjectSection => {
+            decoded!(CreateObjectSectionParams, EditRequest::CreateObjectSection)
+        }
+        EditOperation::DeleteObjectSection => {
+            decoded!(DeleteObjectSectionParams, EditRequest::DeleteObjectSection)
+        }
+        EditOperation::MoveObjectSection => {
+            decoded!(MoveObjectSectionParams, EditRequest::MoveObjectSection)
+        }
         EditOperation::ApplyBatch => {
             let params: ApplyBatchParams = decode_params(params)?;
             params.validate().map_err(batch_input_error)?;
@@ -1097,6 +1110,15 @@ fn dispatch_edit(adapter: &dyn EditAdapter, request: EditRequest) -> Result<Valu
         }
         EditRequest::SetSelection(params) => {
             to_result(&adapter.set_selection(&params).map_err(edit_error)?)
+        }
+        EditRequest::CreateObjectSection(params) => {
+            to_result(&adapter.create_object_section(&params).map_err(edit_error)?)
+        }
+        EditRequest::DeleteObjectSection(params) => {
+            to_result(&adapter.delete_object_section(&params).map_err(edit_error)?)
+        }
+        EditRequest::MoveObjectSection(params) => {
+            to_result(&adapter.move_object_section(&params).map_err(edit_error)?)
         }
         EditRequest::ApplyBatch(params) => {
             to_result(&adapter.apply_batch(&params).map_err(edit_error)?)
@@ -2611,8 +2633,8 @@ mod edit_tests {
     use crate::edit::error::RollbackOutcome;
     use aviutl2_mcp_core::{
         EditOutcome, LayerInfo, LayerStateOutcome, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS,
-        ObjectFingerprintInput, ObjectSummary, SERVER_BATCH_REQUEST_BUDGET, SelectionField,
-        SelectionState, SetLayerStateParams, TRANSPORT_HEADROOM,
+        ObjectFingerprintInput, ObjectSectionsOutcome, ObjectSummary, SERVER_BATCH_REQUEST_BUDGET,
+        SectionRange, SelectionField, SelectionState, SetLayerStateParams, TRANSPORT_HEADROOM,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -2642,6 +2664,19 @@ mod edit_tests {
         fn enter(&self, call: &'static str) -> EditOutcome {
             self.calls.lock().unwrap().push(call);
             EditOutcome::object_changed(EPOCH, 1, fake_summary())
+        }
+
+        fn enter_sections(&self, call: &'static str) -> ObjectSectionsOutcome {
+            self.calls.lock().unwrap().push(call);
+            ObjectSectionsOutcome {
+                project_epoch: EPOCH.to_string(),
+                project_revision: 1,
+                object: fake_summary(),
+                sections: vec![SectionRange {
+                    start: 100,
+                    end: 200,
+                }],
+            }
         }
     }
 
@@ -2684,6 +2719,27 @@ mod edit_tests {
 
         fn set_object_name(&self, _: &SetObjectNameParams) -> Result<EditOutcome, EditError> {
             Ok(self.enter("set_object_name"))
+        }
+
+        fn create_object_section(
+            &self,
+            _: &CreateObjectSectionParams,
+        ) -> Result<ObjectSectionsOutcome, EditError> {
+            Ok(self.enter_sections("create_object_section"))
+        }
+
+        fn delete_object_section(
+            &self,
+            _: &DeleteObjectSectionParams,
+        ) -> Result<ObjectSectionsOutcome, EditError> {
+            Ok(self.enter_sections("delete_object_section"))
+        }
+
+        fn move_object_section(
+            &self,
+            _: &MoveObjectSectionParams,
+        ) -> Result<ObjectSectionsOutcome, EditError> {
+            Ok(self.enter_sections("move_object_section"))
         }
 
         fn set_object_item(&self, _: &SetObjectItemParams) -> Result<EditOutcome, EditError> {
@@ -2795,6 +2851,19 @@ mod edit_tests {
                 "expected_project_epoch": EPOCH,
             }),
             EditOperation::SetSelection => selection_params(),
+            EditOperation::CreateObjectSection => json!({
+                "selector": fake_summary().selector,
+                "frame": 150,
+            }),
+            EditOperation::DeleteObjectSection => json!({
+                "selector": fake_summary().selector,
+                "section": 1,
+            }),
+            EditOperation::MoveObjectSection => json!({
+                "selector": fake_summary().selector,
+                "section": 1,
+                "frame": 160,
+            }),
             EditOperation::ApplyBatch => batch_params(),
         })
     }
@@ -2824,6 +2893,9 @@ mod edit_tests {
             EditRequest::SetEffectEnabled(params) => serde_json::to_value(params),
             EditRequest::SetLayerState(params) => serde_json::to_value(params),
             EditRequest::SetSelection(params) => serde_json::to_value(params),
+            EditRequest::CreateObjectSection(params) => serde_json::to_value(params),
+            EditRequest::DeleteObjectSection(params) => serde_json::to_value(params),
+            EditRequest::MoveObjectSection(params) => serde_json::to_value(params),
             EditRequest::ApplyBatch(params) => serde_json::to_value(params),
         };
         Ok(encoded.expect("params は直列化できる"))
@@ -3092,6 +3164,67 @@ mod edit_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn section_zero_never_reaches_the_edit_adapter() {
+        // 区間 0 の開始位置はオブジェクトの開始フレームであって中間点ではない。
+        // 対象の状態に依らず常に誤りであるため、編集区間へ入る前に落ちる。
+        for (operation, params) in [
+            (
+                EditOperation::DeleteObjectSection,
+                json!({
+                    "selector": fake_summary().selector,
+                    "section": 0,
+                }),
+            ),
+            (
+                EditOperation::MoveObjectSection,
+                json!({
+                    "selector": fake_summary().selector,
+                    "section": 0,
+                    "frame": 160,
+                }),
+            ),
+        ] {
+            let adapter = FakeEditAdapter::new();
+            let error = execute_edit(
+                &adapter,
+                &InstanceState::Ready,
+                operation,
+                &params,
+                within(),
+            )
+            .unwrap_err();
+
+            let name = operation.as_str();
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{name}");
+            assert_eq!(
+                error.details["reason"],
+                json!("section_index_out_of_range"),
+                "{name}"
+            );
+            assert!(adapter.calls().is_empty(), "{name} が編集口へ届きました");
+        }
+    }
+
+    #[test]
+    fn a_section_index_of_one_reaches_the_edit_adapter() {
+        // 区間の総数との比較は対象の現在の状態を要する。要求内容だけの検証は
+        // そこまで見ず、1 以上はそのまま編集口へ届く。
+        let adapter = FakeEditAdapter::new();
+        execute_edit(
+            &adapter,
+            &InstanceState::Ready,
+            EditOperation::DeleteObjectSection,
+            &json!({
+                "selector": fake_summary().selector,
+                "section": 1,
+            }),
+            within(),
+        )
+        .expect("区間番号 1 が編集口へ届きませんでした");
+        assert_eq!(adapter.calls(), vec!["delete_object_section"]);
     }
 
     #[test]

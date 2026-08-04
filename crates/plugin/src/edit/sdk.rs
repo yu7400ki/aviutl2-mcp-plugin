@@ -16,11 +16,15 @@ use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
 use crate::read::ReadError;
 use crate::read::host::{EditState, HostEditInfo, HostObject, ReadHost, SceneReader};
-use crate::read::sdk::{SdkReadHost, SdkSceneReader, host_edit_info, non_negative};
+use crate::read::sdk::{
+    SdkReadHost, SdkSceneReader, host_edit_info, non_negative, to_inclusive_sections,
+};
 use aviutl2::generic::{
     EditSection, EditSectionError, EffectHandle, MediaFileSupportMode, ObjectHandle, ReadSection,
 };
-use aviutl2_mcp_core::{AvailableEffect, AvailableEffectItem, Cursor, EffectItemType, FrameRange};
+use aviutl2_mcp_core::{
+    AvailableEffect, AvailableEffectItem, Cursor, EffectItemType, FrameRange, SectionRange,
+};
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -55,6 +59,19 @@ fn mutation_failure(operation: &'static str, error: &EditSectionError) -> EditEr
         EditSectionError::ApiCallFailed
         | EditSectionError::NonUtf8Data(_)
         | EditSectionError::ParseFailed(_) => sdk(operation),
+    }
+}
+
+/// 中間点の変更の失敗を、SDK が拒んだ場合とそれ以外に分けて写す。
+///
+/// 中間点の 3 つは戻り値が `bool` であり、ラッパーは `false` を
+/// [`EditSectionError::ApiCallFailed`] として返す。事前確認を通ったうえでの
+/// `false` は要求元に直せる誤りではないため、他の SDK 失敗と混ぜず専用の名前で
+/// 返す。届かなかった失敗の分類は [`mutation_failure`] のものをそのまま使う。
+fn section_mutation_failure(operation: &'static str, error: &EditSectionError) -> EditError {
+    match mutation_failure(operation, error) {
+        EditError::Sdk { operation } => EditError::SectionChangeRejected { operation },
+        other => other,
     }
 }
 
@@ -365,6 +382,49 @@ impl SceneEditor for SdkSceneEditor<'_> {
         self.section
             .delete_object(self.object(object.slot())?)
             .map_err(|error| mutation_failure("delete_object", &error))
+    }
+
+    fn object_sections(&self, object: &ResolvedObject<'_>) -> Result<Vec<SectionRange>, EditError> {
+        let ranges = self
+            .reader
+            .section
+            .get_object_section_ranges(self.object(object.slot())?)
+            .map_err(|_| sdk("get_object_section_frame"))?;
+        Ok(to_inclusive_sections(ranges))
+    }
+
+    fn create_object_section(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.section
+            .create_object_section(self.object(object.slot())?, frame)
+            .map_err(|error| section_mutation_failure("create_object_section", &error))
+    }
+
+    fn delete_object_section(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        section: usize,
+    ) -> Result<(), EditError> {
+        self.section
+            .delete_object_section(self.object(object.slot())?, section)
+            .map_err(|error| section_mutation_failure("delete_object_section", &error))
+    }
+
+    fn move_object_section(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        section: usize,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.section
+            .move_object_section(self.object(object.slot())?, section, frame)
+            .map_err(|error| section_mutation_failure("move_object_section", &error))
     }
 
     fn set_object_name(

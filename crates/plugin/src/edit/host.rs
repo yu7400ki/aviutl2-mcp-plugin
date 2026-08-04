@@ -17,7 +17,7 @@ use crate::edit::error::EditError;
 use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
 use crate::read::host::{EditState, HostEditInfo, HostObject, SceneReader};
-use aviutl2_mcp_core::{AvailableEffect, AvailableEffectItem, Cursor, FrameRange};
+use aviutl2_mcp_core::{AvailableEffect, AvailableEffectItem, Cursor, FrameRange, SectionRange};
 
 /// 編集区間の内側で対象オブジェクトを指す内部識別子。
 ///
@@ -173,6 +173,47 @@ pub trait SceneEditor {
         &self,
         ticket: MutationTicket<'_>,
         object: &ResolvedObject<'_>,
+    ) -> Result<(), EditError>;
+
+    /// 解決済みオブジェクトの中間点で区切られた区間を、いま読み直して返す。
+    ///
+    /// 事前確認と read-back の双方がここを通る。区間番号 `i` は返した列の
+    /// `i` 番目を指し、`sections[0].start` はオブジェクトの開始フレームである。
+    ///
+    /// **実装の義務**: [`SceneReader::object_detail`] が同じ対象に対して返す
+    /// `sections` と一致させる。両者が別の並びを返せば、読み取りが返した区間の
+    /// 番号で編集を指せなくなる。
+    fn object_sections(&self, object: &ResolvedObject<'_>) -> Result<Vec<SectionRange>, EditError>;
+
+    /// 指定フレームへ中間点を追加する。
+    fn create_object_section(
+        &self,
+        ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        frame: usize,
+    ) -> Result<(), EditError>;
+
+    /// 区間番号が指す中間点を削除する。
+    ///
+    /// 番号は「開始位置が中間点である区間」を指す。区間 0 の開始位置は
+    /// オブジェクトの開始フレームであり、中間点ではない。
+    fn delete_object_section(
+        &self,
+        ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        section: usize,
+    ) -> Result<(), EditError>;
+
+    /// 区間番号が指す中間点を別のフレームへ移す。
+    ///
+    /// 番号の意味は [`Self::delete_object_section`] と同じである。隣の中間点を
+    /// 越える移動は SDK が受け付けない。
+    fn move_object_section(
+        &self,
+        ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        section: usize,
+        frame: usize,
     ) -> Result<(), EditError>;
 
     /// オブジェクト名を設定する。`None` で標準名へ戻す。

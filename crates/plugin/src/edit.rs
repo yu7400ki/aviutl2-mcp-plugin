@@ -18,15 +18,16 @@ pub mod sdk;
 
 use crate::project::ProjectState;
 use aviutl2_mcp_core::{
-    AddEffectParams, ApplyBatchParams, BatchOutcome, CreateObjectParams, DeleteEffectParams,
-    DeleteObjectParams, EditOutcome, LayerStateOutcome, MoveObjectParams, SelectionState,
-    SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSelectionParams,
+    AddEffectParams, ApplyBatchParams, BatchOutcome, CreateObjectParams, CreateObjectSectionParams,
+    DeleteEffectParams, DeleteObjectParams, DeleteObjectSectionParams, EditOutcome,
+    LayerStateOutcome, MoveObjectParams, MoveObjectSectionParams, ObjectSectionsOutcome,
+    SelectionState, SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams,
+    SetObjectNameParams, SetSelectionParams,
 };
 use std::sync::Arc;
 
 pub use adapter::HostEditAdapter;
-pub use error::{EditError, UnsupportedReason};
+pub use error::{EditError, SectionPreconditionReason, UnsupportedReason};
 
 /// 編集 operation の実行口。
 ///
@@ -60,6 +61,28 @@ pub trait EditAdapter: Send + Sync {
     /// effect の有効・無効を変更する。
     fn set_effect_enabled(&self, params: &SetEffectEnabledParams)
     -> Result<EditOutcome, EditError>;
+
+    /// オブジェクトへ中間点を追加する。
+    ///
+    /// **レイヤーのロックはこの operation を止めない。** 中間点はオブジェクトの
+    /// 位置も長さも変えず、ロックが止める削除とも時間軸上の移動とも別である。
+    /// 以下の 2 つも同じ扱いになる。
+    fn create_object_section(
+        &self,
+        params: &CreateObjectSectionParams,
+    ) -> Result<ObjectSectionsOutcome, EditError>;
+
+    /// オブジェクトの中間点を削除する。
+    fn delete_object_section(
+        &self,
+        params: &DeleteObjectSectionParams,
+    ) -> Result<ObjectSectionsOutcome, EditError>;
+
+    /// オブジェクトの中間点を移動する。
+    fn move_object_section(
+        &self,
+        params: &MoveObjectSectionParams,
+    ) -> Result<ObjectSectionsOutcome, EditError>;
 
     /// レイヤーの名前・表示・ロックを変更する。
     ///

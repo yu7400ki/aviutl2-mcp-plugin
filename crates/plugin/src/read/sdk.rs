@@ -439,7 +439,7 @@ fn ensure_start_frame(object: HostObject, frame_start: usize) -> Result<HostObje
 }
 
 /// 終端を含まない区間を、終端を含む区間へ変換する。
-fn to_inclusive_sections(ranges: Vec<Range<usize>>) -> Vec<SectionRange> {
+pub(crate) fn to_inclusive_sections(ranges: Vec<Range<usize>>) -> Vec<SectionRange> {
     ranges
         .into_iter()
         .map(|range| SectionRange {

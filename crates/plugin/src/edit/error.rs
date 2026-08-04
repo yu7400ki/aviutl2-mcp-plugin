@@ -145,6 +145,72 @@ impl std::fmt::Display for NotIssuedReason {
     }
 }
 
+/// 中間点の変更が、読み直した区間の実態と食い違う理由。
+///
+/// いずれも判定に使う値がオブジェクトの現在の状態であり、要求元が持っているのは
+/// 読み取った時点の複製である。その間に UI で中間点が動けば、正しい手続きを
+/// 踏んだ要求が落ちる。復帰の手段は対象の読み直しであるため、要求の誤りでは
+/// なく前提条件の不整合として扱う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionPreconditionReason {
+    /// 中間点を置くフレームがオブジェクトの範囲の外にある。
+    FrameOutsideObject,
+    /// 指定したフレームが既に区間の開始フレームである。
+    SectionBoundaryExists,
+    /// 区間番号がオブジェクトの区間数以上である。
+    SectionIndexOutOfRange,
+    /// 移動先が隣の中間点を越えている。
+    ///
+    /// 中間点の順序が入れ替わらないことは SDK の不変条件であり、それを崩す
+    /// 要求は届く前に落とす。
+    SectionMoveCrossesBoundary,
+}
+
+impl SectionPreconditionReason {
+    /// 全 variant。
+    ///
+    /// [`SectionPreconditionReason::as_str`] が返し得る名前を数え上げるために
+    /// 用いる。
+    pub const ALL: &'static [SectionPreconditionReason] = &[
+        SectionPreconditionReason::FrameOutsideObject,
+        SectionPreconditionReason::SectionBoundaryExists,
+        SectionPreconditionReason::SectionIndexOutOfRange,
+        SectionPreconditionReason::SectionMoveCrossesBoundary,
+    ];
+
+    /// 応答へ載せる機械可読な名前。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SectionPreconditionReason::FrameOutsideObject => "frame_outside_object",
+            SectionPreconditionReason::SectionBoundaryExists => "section_boundary_exists",
+            SectionPreconditionReason::SectionIndexOutOfRange => "section_index_out_of_range",
+            SectionPreconditionReason::SectionMoveCrossesBoundary => {
+                "section_move_crosses_boundary"
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for SectionPreconditionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            SectionPreconditionReason::FrameOutsideObject => {
+                "指定されたフレームはオブジェクトの範囲外です"
+            }
+            SectionPreconditionReason::SectionBoundaryExists => {
+                "指定されたフレームは既に区間の開始位置です"
+            }
+            SectionPreconditionReason::SectionIndexOutOfRange => {
+                "指定された区間番号はオブジェクトの区間数を超えています"
+            }
+            SectionPreconditionReason::SectionMoveCrossesBoundary => {
+                "移動先が隣の中間点を越えています"
+            }
+        };
+        f.write_str(text)
+    }
+}
+
 /// 一括適用が失敗したあと、発行済みの変更をどこまで戻せたか。
 ///
 /// 巻き戻しは 1 件失敗しても止めず、全件を試みたうえで結末を名乗る。
@@ -299,6 +365,22 @@ pub enum EditError {
         /// 対応しない理由。
         reason: UnsupportedReason,
     },
+    /// 読み直した区間の実態が要求と食い違う。
+    #[error("{reason}")]
+    SectionPrecondition {
+        /// 食い違いの内容。
+        reason: SectionPreconditionReason,
+    },
+    /// 事前確認を通した中間点の変更を SDK が拒んだ。
+    ///
+    /// 食い違っているのは要求元ではなく我々と SDK である。要求元に直せることは
+    /// 無く、我々の事前確認の漏れか SDK の未知の制約かのどちらかであるため、
+    /// 失敗した SDK 関数名を添えてログを見るよう促す。
+    #[error("中間点の変更が拒否されました: {operation}")]
+    SectionChangeRejected {
+        /// 拒否した SDK 関数の名前。
+        operation: &'static str,
+    },
     /// SDK の呼び出しが失敗した。
     #[error("SDK の呼び出しに失敗しました: {operation}")]
     Sdk {
@@ -381,12 +463,13 @@ impl EditError {
             EditError::DestinationOccupied { .. }
             | EditError::LayerLocked { .. }
             | EditError::EpochMismatch { .. }
+            | EditError::SectionPrecondition { .. }
             | EditError::EffectFingerprintMismatch => ErrorCode::PreconditionFailed,
             EditError::EffectNotFound { .. } => ErrorCode::NotFound,
             EditError::DuplicateTarget => ErrorCode::InvalidArgument,
             EditError::ItemWrite(error) => error.error_code(),
             EditError::UnsupportedTarget { .. } => ErrorCode::UnsupportedOperation,
-            EditError::Sdk { .. } => ErrorCode::SdkError,
+            EditError::SectionChangeRejected { .. } | EditError::Sdk { .. } => ErrorCode::SdkError,
             EditError::NotIssued { reason } => match reason {
                 NotIssuedReason::TargetMissing => ErrorCode::NotFound,
                 NotIssuedReason::ArgumentNotRepresentable => ErrorCode::InvalidArgument,
@@ -505,6 +588,13 @@ impl EditError {
             EditError::ItemWrite(error) => fill_item_write_details(details, error),
             EditError::UnsupportedTarget { reason } => {
                 details.insert("reason".to_string(), json!(reason.as_str()));
+            }
+            EditError::SectionPrecondition { reason } => {
+                details.insert("reason".to_string(), json!(reason.as_str()));
+            }
+            EditError::SectionChangeRejected { operation } => {
+                details.insert("reason".to_string(), json!("section_change_rejected"));
+                details.insert("sdk_operation".to_string(), json!(operation));
             }
             EditError::Sdk { operation } => {
                 details.insert("sdk_operation".to_string(), json!(operation));
@@ -673,6 +763,12 @@ pub(crate) mod tests {
             EditError::NotIssued {
                 reason: NotIssuedReason::ArgumentNotRepresentable,
             },
+            EditError::SectionPrecondition {
+                reason: SectionPreconditionReason::FrameOutsideObject,
+            },
+            EditError::SectionChangeRejected {
+                operation: "create_object_section",
+            },
             EditError::Sdk {
                 operation: "create_effect",
             },
@@ -742,6 +838,8 @@ pub(crate) mod tests {
             EditError::DuplicateTarget => "DuplicateTarget",
             EditError::ItemWrite(_) => "ItemWrite",
             EditError::UnsupportedTarget { .. } => "UnsupportedTarget",
+            EditError::SectionPrecondition { .. } => "SectionPrecondition",
+            EditError::SectionChangeRejected { .. } => "SectionChangeRejected",
             EditError::Sdk { .. } => "Sdk",
             EditError::NotIssued { .. } => "NotIssued",
             EditError::Panicked => "Panicked",
@@ -765,6 +863,8 @@ pub(crate) mod tests {
             "DuplicateTarget",
             "ItemWrite",
             "UnsupportedTarget",
+            "SectionPrecondition",
+            "SectionChangeRejected",
             "Sdk",
             "NotIssued",
             "Panicked",
@@ -886,6 +986,10 @@ pub(crate) mod tests {
                 ErrorCode::NotFound,
                 // 引数を写せなかった。SDK の失敗ではなく要求の誤りである。
                 ErrorCode::InvalidArgument,
+                // 読み直した区間の実態と食い違った。復帰の手段は読み直しである。
+                ErrorCode::PreconditionFailed,
+                // 事前確認を通したのに SDK が拒んだ。要求元に直せることが無い。
+                ErrorCode::SdkError,
                 ErrorCode::SdkError,
                 ErrorCode::InternalError,
                 // 前提の作り方の誤りであり、要求を作り直しても解消しない。

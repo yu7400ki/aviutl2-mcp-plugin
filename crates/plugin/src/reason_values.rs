@@ -7,7 +7,9 @@
 //! **生成経路の無い名前が一覧に残らないこと**。前者だけでは使われなくなった
 //! 名前が積もり、後者だけでは新しい名前が黙って増える。
 
-use crate::edit::error::{EditError, NotIssuedReason, UnsupportedReason};
+use crate::edit::error::{
+    EditError, NotIssuedReason, SectionPreconditionReason, UnsupportedReason,
+};
 use crate::render::error::{BufferRule, RenderError};
 use crate::session::{batch_input_error, edit_input_error};
 use aviutl2_mcp_core::error::REASON_VALUES;
@@ -33,6 +35,11 @@ fn edit_failures() -> Vec<EditError> {
             NotIssuedReason::ALL
                 .iter()
                 .map(|reason| EditError::NotIssued { reason: *reason }),
+        )
+        .chain(
+            SectionPreconditionReason::ALL
+                .iter()
+                .map(|reason| EditError::SectionPrecondition { reason: *reason }),
         )
         .chain(
             PathSyntaxError::ALL

@@ -2066,6 +2066,27 @@ mod tests {
             Err(Self::unavailable())
         }
 
+        fn create_object_section(
+            &self,
+            _: &aviutl2_mcp_core::CreateObjectSectionParams,
+        ) -> Result<aviutl2_mcp_core::ObjectSectionsOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
+        fn delete_object_section(
+            &self,
+            _: &aviutl2_mcp_core::DeleteObjectSectionParams,
+        ) -> Result<aviutl2_mcp_core::ObjectSectionsOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
+        fn move_object_section(
+            &self,
+            _: &aviutl2_mcp_core::MoveObjectSectionParams,
+        ) -> Result<aviutl2_mcp_core::ObjectSectionsOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
         fn set_object_item(
             &self,
             _: &aviutl2_mcp_core::SetObjectItemParams,

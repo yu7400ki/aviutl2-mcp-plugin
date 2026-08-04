@@ -9,12 +9,15 @@ use crate::edit::fake::{
     CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, EFFECT_LIST, FakeEditHost, FakeLayer, FakeObject,
     FakeReadHost, Fault, ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX, MAX_FRAME,
     MAX_ITEM_VALUE, MAX_LAYER, MOVE_FRAME_SHIFT, MUTATIONS, PanicPoint, READ_SECTION, SCENE_ID,
+    SECTION_RANGES,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
 use aviutl2_mcp_core::{
-    CursorPosition, Destination, EditOperation, EffectItem, EffectItemType, EffectSelector,
-    ErrorCode, Fingerprint, ItemValue, LayerNameChange, ObjectSelector, PageRequest, Placement,
+    CreateObjectSectionParams, CursorPosition, DeleteObjectSectionParams, Destination,
+    EditOperation, EffectItem, EffectItemType, EffectSelector, ErrorCode, Fingerprint, ItemValue,
+    LayerNameChange, MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSelector, PageRequest,
+    Placement,
 };
 use serde_json::json;
 use std::sync::mpsc::channel;
@@ -337,6 +340,7 @@ fn an_ambiguous_selector_reports_the_candidate_count() {
             placement: scene.layers[1].objects[0].placement.clone(),
             alias: "[1:100]".to_string(),
             effects: Vec::new(),
+            section_points: Vec::new(),
         };
         scene.layers[1].objects.push(duplicate);
         drop(scene);
@@ -2739,6 +2743,34 @@ fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
                 })
                 .map(|outcome| outcome.project_revision)
         },
+        EditOperation::CreateObjectSection => |harness: &Harness, target| {
+            harness
+                .edit
+                .create_object_section(&CreateObjectSectionParams {
+                    selector: target,
+                    frame: 120,
+                })
+                .map(|outcome| outcome.project_revision)
+        },
+        EditOperation::DeleteObjectSection => |harness: &Harness, target| {
+            harness
+                .edit
+                .delete_object_section(&DeleteObjectSectionParams {
+                    selector: target,
+                    section: 1,
+                })
+                .map(|outcome| outcome.project_revision)
+        },
+        EditOperation::MoveObjectSection => |harness: &Harness, target| {
+            harness
+                .edit
+                .move_object_section(&MoveObjectSectionParams {
+                    selector: target,
+                    section: 1,
+                    frame: 160,
+                })
+                .map(|outcome| outcome.project_revision)
+        },
         // 選択状態はプロジェクトの内容ではない。revision を進めない。
         EditOperation::SetSelection => return None,
         // 一括適用に対応する編集口のメソッドはまだ無い。実装を足すときに
@@ -2857,7 +2889,12 @@ fn locked_layer(operation: EditOperation) -> Option<LockedLayer> {
         | EditOperation::DeleteEffect
         | EditOperation::SetEffectEnabled
         // ロックを外す手段そのものをロックで止めると、行き止まりが解けなくなる。
-        | EditOperation::SetLayerState => LockedLayer::Allowed,
+        | EditOperation::SetLayerState
+        // 中間点はオブジェクトの位置も長さも変えない。動くのはオブジェクトの
+        // 内側の分割位置だけであり、ロックが止める 2 つのいずれでもない。
+        | EditOperation::CreateObjectSection
+        | EditOperation::DeleteObjectSection
+        | EditOperation::MoveObjectSection => LockedLayer::Allowed,
         EditOperation::SetSelection => return None,
         // 一括適用に対応する編集口のメソッドはまだ無い。実装を足すときに
         // 可否をここへ書く。
@@ -3127,6 +3164,389 @@ fn disabling_an_input_item_is_reported_with_the_reread_state() {
         .expect("入力項目の無効化が拒否されました");
 
     assert!(!outcome.effect.expect("変更後の effect").enabled);
+}
+
+/// 中間点を 3 つ持つ対象を用意した一式を組む。
+///
+/// 区間は 4 つになる。区間番号 `i` と `sections[i]` の対応が 1 つずれていれば、
+/// 中間点が 1 つしか無い状態では区別できないため、番号を跨いで確かめられる
+/// 数の中間点を置く。
+fn harness_with_sections() -> Harness {
+    let harness = Harness::new();
+    harness.host.set_section_points(1, 100, vec![120, 150, 180]);
+    harness
+}
+
+/// 応答の区間を `(start, end)` の列として取り出す。
+fn section_pairs(outcome: &ObjectSectionsOutcome) -> Vec<(usize, usize)> {
+    outcome
+        .sections
+        .iter()
+        .map(|section| (section.start, section.end))
+        .collect()
+}
+
+#[test]
+fn the_section_index_addresses_the_same_element_of_the_sections_list() {
+    // 区間番号 i は sections[i] を指す。i 番目の中間点を sections[i-1] へ写す
+    // 実装は、区間 2 の削除で 120 ではなく 150 を消す。
+    let harness = harness_with_sections();
+    let outcome = harness
+        .edit
+        .delete_object_section(&DeleteObjectSectionParams {
+            selector: harness.selector(1, 100),
+            section: 2,
+        })
+        .expect("区間 2 の削除が拒否されました");
+
+    // 消えたのは sections[2].start = 150 であり、sections[1].start = 120 ではない。
+    assert_eq!(harness.host.section_points(1, 100), vec![120, 180]);
+    assert_eq!(
+        section_pairs(&outcome),
+        vec![(100, 119), (120, 179), (180, 200)]
+    );
+}
+
+#[test]
+fn moving_a_section_moves_the_boundary_that_starts_it() {
+    // 区間 1 の開始位置は 1 番目の中間点 120 である。1 つずれた実装は 150 を
+    // 動かし、応答の sections[1].start が要求したフレームにならない。
+    let harness = harness_with_sections();
+    let outcome = harness
+        .edit
+        .move_object_section(&MoveObjectSectionParams {
+            selector: harness.selector(1, 100),
+            section: 1,
+            frame: 110,
+        })
+        .expect("区間 1 の移動が拒否されました");
+
+    assert_eq!(harness.host.section_points(1, 100), vec![110, 150, 180]);
+    assert_eq!(outcome.sections[1].start, 110);
+    assert_eq!(
+        section_pairs(&outcome),
+        vec![(100, 109), (110, 149), (150, 179), (180, 200)]
+    );
+}
+
+#[test]
+fn creating_a_section_puts_the_frame_at_the_start_of_a_section() {
+    let harness = harness_with_sections();
+    let outcome = harness
+        .edit
+        .create_object_section(&CreateObjectSectionParams {
+            selector: harness.selector(1, 100),
+            frame: 160,
+        })
+        .expect("中間点の追加が拒否されました");
+
+    assert!(
+        outcome.sections.iter().any(|section| section.start == 160),
+        "追加したフレームが区間の開始フレームとして現れていません: {:?}",
+        outcome.sections
+    );
+    assert_eq!(
+        section_pairs(&outcome),
+        vec![(100, 119), (120, 149), (150, 159), (160, 179), (180, 200)]
+    );
+}
+
+#[test]
+fn the_section_response_carries_the_state_after_the_change() {
+    // 応答の sections は read-back そのものである。変更前の複製を返す実装では
+    // 件数が増えない。
+    let harness = harness_with_sections();
+    let before = harness
+        .read
+        .get_object(&harness.selector(1, 100))
+        .expect("対象の詳細を取得できませんでした")
+        .sections
+        .len();
+    let outcome = harness
+        .edit
+        .create_object_section(&CreateObjectSectionParams {
+            selector: harness.selector(1, 100),
+            frame: 160,
+        })
+        .expect("中間点の追加が拒否されました");
+
+    assert_eq!(outcome.sections.len(), before + 1);
+}
+
+#[test]
+fn the_section_response_carries_the_selector_after_the_change() {
+    // 応答の selector と fingerprint は変更後に読み直した値である。要求で
+    // 受け取った selector をそのまま返す実装では、対象の現在の姿が分からない。
+    let harness = harness_with_sections();
+    let selector = harness.selector(1, 100);
+    let outcome = harness
+        .edit
+        .delete_object_section(&DeleteObjectSectionParams {
+            selector: selector.clone(),
+            section: 1,
+        })
+        .expect("中間点の削除が拒否されました");
+
+    assert_eq!(outcome.object.selector.layer, selector.layer);
+    assert_eq!(outcome.object.selector.frame, selector.frame);
+    assert_eq!(outcome.object.selector.project_epoch, harness.epoch());
+    assert_eq!(
+        outcome.object.fingerprint,
+        outcome.object.selector.fingerprint
+    );
+    // 読み直した対象をそのまま次の編集へ渡せる。
+    harness
+        .edit
+        .delete_object_section(&DeleteObjectSectionParams {
+            selector: outcome.object.selector.clone(),
+            section: 1,
+        })
+        .expect("応答が返した selector で続けて編集できませんでした");
+}
+
+#[test]
+fn the_section_response_carries_no_alias() {
+    // 応答が返すのは概要であり詳細ではない。
+    let harness = harness_with_sections();
+    let outcome = harness
+        .edit
+        .create_object_section(&CreateObjectSectionParams {
+            selector: harness.selector(1, 100),
+            frame: 160,
+        })
+        .expect("中間点の追加が拒否されました");
+    let value = serde_json::to_value(&outcome).expect("応答は直列化できる");
+    assert!(
+        !value.to_string().contains("alias"),
+        "応答に alias が現れています: {value}"
+    );
+}
+
+/// 事前確認で落ちる要求と、そこで名乗るべき理由。
+fn section_precondition_failures(harness: &Harness) -> Vec<(&'static str, EditError)> {
+    let selector = || harness.selector(1, 100);
+    vec![
+        (
+            "frame_outside_object",
+            harness
+                .edit
+                .create_object_section(&CreateObjectSectionParams {
+                    selector: selector(),
+                    frame: 400,
+                })
+                .expect_err("オブジェクトの範囲外への追加が受理されました"),
+        ),
+        (
+            "section_boundary_exists",
+            harness
+                .edit
+                .create_object_section(&CreateObjectSectionParams {
+                    selector: selector(),
+                    frame: 150,
+                })
+                .expect_err("既にある境界への追加が受理されました"),
+        ),
+        (
+            "section_index_out_of_range",
+            harness
+                .edit
+                .delete_object_section(&DeleteObjectSectionParams {
+                    selector: selector(),
+                    section: 4,
+                })
+                .expect_err("区間数以上の番号が受理されました"),
+        ),
+        (
+            "section_move_crosses_boundary",
+            harness
+                .edit
+                .move_object_section(&MoveObjectSectionParams {
+                    selector: selector(),
+                    section: 1,
+                    frame: 150,
+                })
+                .expect_err("隣の中間点を越える移動が受理されました"),
+        ),
+    ]
+}
+
+#[test]
+fn every_section_precondition_names_its_own_reason() {
+    for (reason, error) in section_precondition_failures(&harness_with_sections()) {
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::PreconditionFailed,
+            "{reason} が前提条件の不整合になっていません"
+        );
+        assert_eq!(error.details()["reason"], json!(reason));
+        assert_eq!(error.details()["retry_requires"], json!("refetch"));
+    }
+}
+
+#[test]
+fn a_failed_section_precondition_leaves_the_project_untouched() {
+    let harness = harness_with_sections();
+    let failures = section_precondition_failures(&harness);
+    assert_eq!(failures.len(), 4, "事前確認の 4 種を網羅していません");
+    harness.assert_untouched();
+}
+
+#[test]
+fn a_move_that_stops_short_of_the_neighbours_is_accepted() {
+    // 事前確認が広すぎないことを確かめる。隣の中間点の直前・直後は通る。
+    let harness = harness_with_sections();
+    let outcome = harness
+        .edit
+        .move_object_section(&MoveObjectSectionParams {
+            selector: harness.selector(1, 100),
+            section: 2,
+            frame: 179,
+        })
+        .expect("隣の中間点を越えない移動が拒否されました");
+    assert_eq!(outcome.sections[2].start, 179);
+}
+
+#[test]
+fn a_move_to_the_end_of_the_object_is_accepted() {
+    // 最後の区間の移動先はオブジェクトの終了フレームまで許す。
+    let harness = harness_with_sections();
+    let outcome = harness
+        .edit
+        .move_object_section(&MoveObjectSectionParams {
+            selector: harness.selector(1, 100),
+            section: 3,
+            frame: 200,
+        })
+        .expect("終了フレームへの移動が拒否されました");
+    assert_eq!(outcome.sections[3].start, 200);
+
+    let error = harness
+        .edit
+        .move_object_section(&MoveObjectSectionParams {
+            selector: harness.selector(1, 100),
+            section: 3,
+            frame: 201,
+        })
+        .expect_err("終了フレームより後への移動が受理されました");
+    assert_eq!(
+        error.details()["reason"],
+        json!("section_move_crosses_boundary")
+    );
+}
+
+#[test]
+fn a_rejected_section_change_that_passed_the_precheck_names_the_sdk_function() {
+    // 事前確認を通ったのに false が返る経路。要求元に直せることが無いため、
+    // 要求の誤りではなく SDK の失敗として返す。
+    let harness = harness_with_sections();
+    let selector = harness.selector(1, 100);
+    harness.host.arm(|knobs| {
+        knobs.fault = Some(Fault::RejectSectionChange);
+    });
+
+    for (operation, error) in [
+        (
+            "create_object_section",
+            harness
+                .edit
+                .create_object_section(&CreateObjectSectionParams {
+                    selector: selector.clone(),
+                    frame: 160,
+                })
+                .expect_err("拒否された追加が成功として返りました"),
+        ),
+        (
+            "delete_object_section",
+            harness
+                .edit
+                .delete_object_section(&DeleteObjectSectionParams {
+                    selector: selector.clone(),
+                    section: 1,
+                })
+                .expect_err("拒否された削除が成功として返りました"),
+        ),
+        (
+            "move_object_section",
+            harness
+                .edit
+                .move_object_section(&MoveObjectSectionParams {
+                    selector: selector.clone(),
+                    section: 1,
+                    frame: 110,
+                })
+                .expect_err("拒否された移動が成功として返りました"),
+        ),
+    ] {
+        assert_eq!(error.error_code(), ErrorCode::SdkError, "{operation}");
+        assert_eq!(
+            error.details()["reason"],
+            json!("section_change_rejected"),
+            "{operation}"
+        );
+        assert_eq!(
+            error.details()["sdk_operation"],
+            json!(operation),
+            "{operation}"
+        );
+    }
+}
+
+#[test]
+fn the_precheck_reads_the_sections_inside_the_edit_section() {
+    // 事前確認は区間の内側で読み直した実態に対して行う。区間の外の複製で
+    // 判定する実装では、この記録が変更の前に現れない。
+    let harness = harness_with_sections();
+    let selector = harness.selector(1, 100);
+    harness.host.clear_calls();
+    harness
+        .edit
+        .create_object_section(&CreateObjectSectionParams {
+            selector,
+            frame: 160,
+        })
+        .expect("中間点の追加が拒否されました");
+
+    let calls = harness.host.calls();
+    let mutation = calls
+        .iter()
+        .position(|call| *call == "create_object_section")
+        .expect("変更 API が呼ばれていません");
+    let first_read = calls
+        .iter()
+        .position(|call| *call == SECTION_RANGES)
+        .expect("区間を読み直していません");
+    assert!(
+        first_read < mutation,
+        "事前確認の読み直しが変更より後です: {calls:?}"
+    );
+    // 読み直しは事前確認と read-back の 2 回だけである。
+    assert_eq!(
+        calls.iter().filter(|call| **call == SECTION_RANGES).count(),
+        2,
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn section_changes_do_not_read_the_effect_list() {
+    // 応答は effect を含まない。読めば、無関係な読み取り失敗が反映済みの変更を
+    // 失敗として報告させる。
+    let harness = harness_with_sections();
+    let selector = harness.selector(1, 100);
+    harness.host.clear_calls();
+    harness
+        .edit
+        .create_object_section(&CreateObjectSectionParams {
+            selector,
+            frame: 160,
+        })
+        .expect("中間点の追加が拒否されました");
+
+    assert!(
+        !harness.host.calls().contains(&EFFECT_LIST),
+        "配下 effect を読んでいます: {:?}",
+        harness.host.calls()
+    );
 }
 
 /// 一括適用の統合テスト。

@@ -789,6 +789,42 @@ impl SceneEditor for CachingEditor<'_> {
         self.inner.delete_object(ticket, object)
     }
 
+    fn object_sections(
+        &self,
+        object: &ResolvedObject<'_>,
+    ) -> Result<Vec<aviutl2_mcp_core::SectionRange>, EditError> {
+        self.inner.object_sections(object)
+    }
+
+    fn create_object_section(
+        &self,
+        ticket: crate::edit::precondition::MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.inner.create_object_section(ticket, object, frame)
+    }
+
+    fn delete_object_section(
+        &self,
+        ticket: crate::edit::precondition::MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        section: usize,
+    ) -> Result<(), EditError> {
+        self.inner.delete_object_section(ticket, object, section)
+    }
+
+    fn move_object_section(
+        &self,
+        ticket: crate::edit::precondition::MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        section: usize,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.inner
+            .move_object_section(ticket, object, section, frame)
+    }
+
     fn set_object_name(
         &self,
         ticket: crate::edit::precondition::MutationTicket<'_>,

@@ -66,11 +66,12 @@ pub use descriptor::{
 };
 pub use digest::{SHA256_HEX_LEN, SHA256_PREFIX, format_sha256};
 pub use edit::{
-    AddEffectParams, CreateObjectParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
-    Destination, EditInputError, EditOutcome, FocusChange, LayerNameChange, LayerStateOutcome,
-    MoveObjectParams, ObjectSource, Placement, RangeChange, SelectionField, SelectionState,
-    SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSelectionParams,
+    AddEffectParams, CreateObjectParams, CreateObjectSectionParams, CursorPosition,
+    DeleteEffectParams, DeleteObjectParams, DeleteObjectSectionParams, Destination, EditInputError,
+    EditOutcome, FocusChange, LayerNameChange, LayerStateOutcome, MoveObjectParams,
+    MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSource, Placement, RangeChange,
+    SelectionField, SelectionState, SetEffectEnabledParams, SetLayerStateParams,
+    SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
 };
 pub use edit_info::{Cursor, DisplayRange, EditInfo, Extent, FrameRange, SceneInfo, SceneRef};
 pub use effect::{
@@ -108,10 +109,11 @@ pub use operation::{
     EditOperation, GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams,
     GetObjectParams, KnownOperation, ListAvailableEffectsParams, ListAvailableEffectsResult,
     ListLayersParams, ListLayersResult, ListObjectsParams, ListObjectsResult, OPERATION_ADD_EFFECT,
-    OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT, OPERATION_DELETE_EFFECT,
-    OPERATION_DELETE_OBJECT, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
-    OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
-    OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT, OPERATION_RENDER_FRAME,
+    OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT, OPERATION_CREATE_OBJECT_SECTION,
+    OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT, OPERATION_DELETE_OBJECT_SECTION,
+    OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_OBJECT,
+    OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS,
+    OPERATION_MOVE_OBJECT, OPERATION_MOVE_OBJECT_SECTION, OPERATION_RENDER_FRAME,
     OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
     OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectFilter, ObjectFilterError,
     ReadOperation, RenderOperation,

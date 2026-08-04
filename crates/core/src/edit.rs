@@ -22,7 +22,7 @@ use crate::edit_info::{Cursor, FrameRange};
 use crate::effect::EffectInfo;
 use crate::error::ErrorCode;
 use crate::item_value::{ItemValue, ItemWriteError, validate_item_value};
-use crate::object::{LayerInfo, ObjectSummary};
+use crate::object::{LayerInfo, ObjectSummary, SectionRange};
 use crate::selector::{EffectSelector, ObjectSelector};
 use crate::validation::{
     PathSyntaxError, TextSyntaxError, validate_alias, validate_control_free, validate_name,
@@ -507,6 +507,91 @@ impl SetSelectionParams {
     }
 }
 
+/// `create_object_section` の params。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateObjectSectionParams {
+    /// 対象オブジェクト。
+    pub selector: ObjectSelector,
+    /// 中間点を追加するフレーム番号（0 始まり、シーンの絶対フレーム番号）。
+    pub frame: u32,
+}
+
+impl CreateObjectSectionParams {
+    /// 要求内容だけで決まる検証を行う。
+    ///
+    /// フレームがオブジェクトの範囲に入るかは対象の現在の状態で決まるため、
+    /// ここでは判定しない。
+    pub fn validate(&self) -> Result<(), EditInputError> {
+        validate_selector_position(&self.selector)?;
+        validate_position(FIELD_FRAME, self.frame)
+    }
+}
+
+/// `delete_object_section` の params。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteObjectSectionParams {
+    /// 対象オブジェクト。
+    pub selector: ObjectSelector,
+    /// 削除する中間点を開始位置に持つ区間の番号。1 以上。
+    pub section: u32,
+}
+
+impl DeleteObjectSectionParams {
+    /// 要求内容だけで決まる検証を行う。
+    pub fn validate(&self) -> Result<(), EditInputError> {
+        validate_selector_position(&self.selector)?;
+        validate_section(self.section)
+    }
+}
+
+/// `move_object_section` の params。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveObjectSectionParams {
+    /// 対象オブジェクト。
+    pub selector: ObjectSelector,
+    /// 移動する中間点を開始位置に持つ区間の番号。1 以上。
+    pub section: u32,
+    /// 移動先のフレーム番号（0 始まり、シーンの絶対フレーム番号）。
+    pub frame: u32,
+}
+
+impl MoveObjectSectionParams {
+    /// 要求内容だけで決まる検証を行う。
+    ///
+    /// 隣の中間点を越えるかは対象の現在の状態で決まるため、ここでは判定しない。
+    pub fn validate(&self) -> Result<(), EditInputError> {
+        validate_selector_position(&self.selector)?;
+        validate_section(self.section)?;
+        validate_position(FIELD_FRAME, self.frame)
+    }
+}
+
+/// 中間点の変更の結果。
+///
+/// 3 つの operation が同じ型を返す。区間の一覧そのものが read-back であり、
+/// 要求した中間点が実際にどこへ入ったかはこの一覧が答える。
+///
+/// 中間点はプロジェクトへ保存される内容であるため、この変更は revision を
+/// 進める。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectSectionsOutcome {
+    /// 変更後のプロジェクトの epoch。
+    pub project_epoch: String,
+    /// 変更を反映したあとの revision。
+    pub project_revision: u64,
+    /// read-back で得た変更後のオブジェクト。selector と fingerprint を含む。
+    pub object: ObjectSummary,
+    /// read-back で得た変更後の区間の一覧。
+    ///
+    /// 区間番号 `i` は `sections[i]` を指す。`sections[i].start`（i ≥ 1）が
+    /// i 番目の中間点のフレームであり、`sections[0].start` はオブジェクトの
+    /// 開始フレームであって中間点ではない。
+    pub sections: Vec<SectionRange>,
+}
+
 /// 構造を変更する編集の結果。
 ///
 /// [`ObjectSummary`] / [`EffectInfo`] は selector と fingerprint を内包する
@@ -715,6 +800,8 @@ const FIELD_CURSOR: &str = "cursor";
 const FIELD_SELECTED_RANGE: &str = "selected_range";
 /// `focus` フィールド名。
 const FIELD_FOCUS: &str = "focus";
+/// `section` フィールド名。
+const FIELD_SECTION: &str = "section";
 /// セレクターのレイヤー番号のフィールド名。
 const FIELD_SELECTOR_LAYER: &str = "selector.layer";
 /// セレクターの開始フレーム番号のフィールド名。
@@ -744,6 +831,18 @@ pub enum EditInputError {
         value: usize,
         /// 許容する最大値。
         max: usize,
+    },
+    /// 区間番号が中間点を開始位置に持つ区間を指していない。
+    ///
+    /// 区間 0 の開始位置はオブジェクトの開始フレームであって中間点ではない。
+    /// 対象の状態に依らず常に誤りであり、読み直しても 0 が有効になることは
+    /// 無いため、前提条件の不整合ではなく要求の誤りとして扱う。
+    #[error("{field} は 1 以上である必要があります: {value}")]
+    SectionIndexOutOfRange {
+        /// 対象フィールド名。
+        field: &'static str,
+        /// 指定された値。
+        value: u32,
     },
     /// 変更内容が 1 つも指定されていない。
     #[error("{} のいずれかを指定する必要があります", fields.join(" / "))]
@@ -792,6 +891,10 @@ impl EditInputError {
                 value: 0,
                 max: MAX_POSITION as usize,
             },
+            EditInputError::SectionIndexOutOfRange {
+                field: FIELD_SECTION,
+                value: 0,
+            },
             EditInputError::NoChangeRequested {
                 fields: &[FIELD_NAME, FIELD_ENABLED, FIELD_LOCKED],
             },
@@ -829,6 +932,10 @@ impl EditInputError {
             EditInputError::Text { source, .. } => Some(source.reason()),
             EditInputError::Path { source, .. } => Some(source.reason()),
             EditInputError::ItemValue(error) => error.reason(),
+            // 名前が指すのは「区間番号が中間点を開始位置に持たない」という事実
+            // であり、同じ事実を実態と照合して見つけた場合の失敗と同じ名前を
+            // 名乗る。復帰できるかどうかはエラーコードの側が区別する。
+            EditInputError::SectionIndexOutOfRange { .. } => Some("section_index_out_of_range"),
             EditInputError::PositionOutOfRange { .. }
             | EditInputError::IndexOutOfRange { .. }
             | EditInputError::NoChangeRequested { .. } => None,
@@ -841,6 +948,7 @@ impl EditInputError {
             EditInputError::ItemValue(error) => error.error_code(),
             EditInputError::PositionOutOfRange { .. }
             | EditInputError::IndexOutOfRange { .. }
+            | EditInputError::SectionIndexOutOfRange { .. }
             | EditInputError::NoChangeRequested { .. }
             | EditInputError::Text { .. }
             | EditInputError::Path { .. } => ErrorCode::InvalidArgument,
@@ -868,6 +976,20 @@ fn validate_position(field: &'static str, value: u32) -> Result<(), EditInputErr
         });
     }
     Ok(())
+}
+
+/// 区間番号が中間点を指し得る範囲に収まることを確認する。
+///
+/// 見るのは 0 でないことと受け渡せる範囲に収まることだけである。区間の総数との
+/// 比較は対象の現在の状態を要するため、変更を適用する側が行う。
+fn validate_section(value: u32) -> Result<(), EditInputError> {
+    if value == 0 {
+        return Err(EditInputError::SectionIndexOutOfRange {
+            field: FIELD_SECTION,
+            value,
+        });
+    }
+    validate_position(FIELD_SECTION, value)
 }
 
 /// セレクターの位置指定が受け渡せる範囲に収まることを確認する。
@@ -921,6 +1043,7 @@ mod tests {
         match error {
             EditInputError::PositionOutOfRange { .. } => "PositionOutOfRange",
             EditInputError::IndexOutOfRange { .. } => "IndexOutOfRange",
+            EditInputError::SectionIndexOutOfRange { .. } => "SectionIndexOutOfRange",
             EditInputError::NoChangeRequested { .. } => "NoChangeRequested",
             EditInputError::Text { .. } => "Text",
             EditInputError::Path { .. } => "Path",
@@ -933,6 +1056,7 @@ mod tests {
         const VARIANTS: &[&str] = &[
             "PositionOutOfRange",
             "IndexOutOfRange",
+            "SectionIndexOutOfRange",
             "NoChangeRequested",
             "Text",
             "Path",
@@ -2268,5 +2392,170 @@ mod tests {
             let error = failure.expect_err("範囲外のセレクターが受理されました");
             assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
         }
+    }
+
+    fn sample_create_section() -> CreateObjectSectionParams {
+        CreateObjectSectionParams {
+            selector: sample_object_selector(),
+            frame: 180,
+        }
+    }
+
+    fn sample_delete_section() -> DeleteObjectSectionParams {
+        DeleteObjectSectionParams {
+            selector: sample_object_selector(),
+            section: 1,
+        }
+    }
+
+    fn sample_move_section() -> MoveObjectSectionParams {
+        MoveObjectSectionParams {
+            selector: sample_object_selector(),
+            section: 1,
+            frame: 200,
+        }
+    }
+
+    #[test]
+    fn object_section_params_roundtrip() {
+        assert_roundtrip(sample_create_section());
+        assert_roundtrip(sample_delete_section());
+        assert_roundtrip(sample_move_section());
+    }
+
+    #[test]
+    fn object_section_params_reject_unknown_fields() {
+        assert!(
+            serde_json::from_value::<CreateObjectSectionParams>(with_unknown_field(
+                &sample_create_section()
+            ))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<DeleteObjectSectionParams>(with_unknown_field(
+                &sample_delete_section()
+            ))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<MoveObjectSectionParams>(with_unknown_field(
+                &sample_move_section()
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn object_section_params_reject_a_negative_number() {
+        // 負値は u32 へ復号できない。実行口へ届く前に落ちる。
+        let mut value = serde_json::to_value(sample_move_section()).unwrap();
+        value["frame"] = json!(-1);
+        assert!(serde_json::from_value::<MoveObjectSectionParams>(value).is_err());
+
+        let mut value = serde_json::to_value(sample_delete_section()).unwrap();
+        value["section"] = json!(-1);
+        assert!(serde_json::from_value::<DeleteObjectSectionParams>(value).is_err());
+    }
+
+    #[test]
+    fn section_zero_is_rejected_as_an_invalid_argument() {
+        // 区間 0 の開始位置はオブジェクトの開始フレームであって中間点ではない。
+        // 対象を読み直しても 0 が有効になることはないため、前提条件の不整合では
+        // なく要求の誤りとして返す。
+        for error in [
+            DeleteObjectSectionParams {
+                section: 0,
+                ..sample_delete_section()
+            }
+            .validate()
+            .expect_err("区間番号 0 の削除が受理されました"),
+            MoveObjectSectionParams {
+                section: 0,
+                ..sample_move_section()
+            }
+            .validate()
+            .expect_err("区間番号 0 の移動が受理されました"),
+        ] {
+            assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+            assert_eq!(error.reason(), Some("section_index_out_of_range"));
+            assert!(REASON_VALUES.contains(&"section_index_out_of_range"));
+        }
+    }
+
+    #[test]
+    fn section_one_is_accepted_without_knowing_the_object() {
+        // 区間の総数との比較は対象の現在の状態を要する。要求内容だけの検証は
+        // そこまで見ない。
+        sample_delete_section()
+            .validate()
+            .expect("区間番号 1 の削除が拒否されました");
+        sample_move_section()
+            .validate()
+            .expect("区間番号 1 の移動が拒否されました");
+        sample_create_section()
+            .validate()
+            .expect("中間点の追加が拒否されました");
+    }
+
+    #[test]
+    fn object_section_params_reject_values_beyond_i32() {
+        for error in [
+            CreateObjectSectionParams {
+                frame: MAX_POSITION + 1,
+                ..sample_create_section()
+            }
+            .validate()
+            .expect_err("i32 に収まらないフレームが受理されました"),
+            DeleteObjectSectionParams {
+                section: MAX_POSITION + 1,
+                ..sample_delete_section()
+            }
+            .validate()
+            .expect_err("i32 に収まらない区間番号が受理されました"),
+            MoveObjectSectionParams {
+                frame: MAX_POSITION + 1,
+                ..sample_move_section()
+            }
+            .validate()
+            .expect_err("i32 に収まらないフレームが受理されました"),
+        ] {
+            assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn object_sections_outcome_roundtrip() {
+        let outcome = ObjectSectionsOutcome {
+            project_epoch: EPOCH.to_string(),
+            project_revision: 43,
+            object: sample_summary(),
+            sections: vec![
+                SectionRange {
+                    start: 120,
+                    end: 179,
+                },
+                SectionRange {
+                    start: 180,
+                    end: 240,
+                },
+            ],
+        };
+        let s = serde_json::to_string(&outcome).unwrap();
+        let restored: ObjectSectionsOutcome = serde_json::from_str(&s).unwrap();
+        assert_eq!(restored, outcome);
+    }
+
+    #[test]
+    fn object_sections_outcome_carries_no_alias() {
+        // 応答が返すのは概要であり詳細ではない。alias も設定値も載らない。
+        let value = serde_json::to_value(ObjectSectionsOutcome {
+            project_epoch: EPOCH.to_string(),
+            project_revision: 43,
+            object: sample_summary(),
+            sections: Vec::new(),
+        })
+        .unwrap();
+        assert!(value.get("alias").is_none());
+        assert!(value["object"].get("alias").is_none());
     }
 }

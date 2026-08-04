@@ -73,6 +73,12 @@ pub(crate) enum Fault {
     ///
     /// 逆操作の材料が揃わない状況を作る。
     ItemValueUnreadable,
+    /// 中間点の変更 API が理由を伝えずに拒否する。
+    ///
+    /// 事前確認を通ったのに `false` が返る状況を作る。
+    RejectSectionChange,
+    /// 中間点の区間を読み直せない。
+    SectionsUnreadable,
 }
 
 /// panic させる位置。
@@ -114,6 +120,9 @@ pub(crate) const LAYER_LOCK: &str = "get_layer_lock";
 /// 設定項目の値を項目名で直接読んだことを表す記録。
 pub(crate) const ITEM_VALUE: &str = "get_effect_item_value";
 
+/// 中間点で区切られた区間を読み直したことを表す記録。
+pub(crate) const SECTION_RANGES: &str = "get_object_section_ranges";
+
 /// オブジェクトが存在する最大レイヤーを読み直したことを表す記録。
 pub(crate) const LAYER_MAX: &str = "get_edit_info";
 
@@ -133,6 +142,11 @@ pub(crate) struct FakeObject {
     pub(crate) placement: HostObjectPlacement,
     pub(crate) alias: String,
     pub(crate) effects: Vec<HostEffect>,
+    /// 中間点のフレーム番号を昇順に並べたもの。
+    ///
+    /// 区間の開始フレームではなく**中間点そのもの**を持つ。区間の開始フレームを
+    /// 持たせると、区間 0 の開始位置が中間点でないことが状態の形から消える。
+    pub(crate) section_points: Vec<usize>,
 }
 
 impl FakeObject {
@@ -152,11 +166,29 @@ impl FakeObject {
         HostObjectDetail {
             object: self.identity(),
             effects: self.effects.clone(),
-            sections: vec![SectionRange {
-                start: self.placement.frame_start,
-                end: self.placement.frame_end,
-            }],
+            sections: self.sections(),
         }
+    }
+
+    /// 中間点で区切られた区間を組み立てる。
+    ///
+    /// 区間 `i` の開始フレームは、`i` が 0 ならオブジェクトの開始フレーム、
+    /// 1 以上なら `i` 番目の中間点である。終端は次の区間の開始フレームの 1 つ
+    /// 手前で、最後の区間だけはオブジェクトの終了フレームで閉じる。
+    fn sections(&self) -> Vec<SectionRange> {
+        let mut starts = vec![self.placement.frame_start];
+        starts.extend(self.section_points.iter().copied());
+        starts
+            .iter()
+            .enumerate()
+            .map(|(index, &start)| SectionRange {
+                start,
+                end: match starts.get(index + 1) {
+                    Some(next) => next.saturating_sub(1),
+                    None => self.placement.frame_end,
+                },
+            })
+            .collect()
     }
 }
 
@@ -394,6 +426,29 @@ impl FakeEditHost {
         self.scene.lock().unwrap().layers[layer].locked = locked;
     }
 
+    /// 対象が持つ中間点のフレーム番号を差し替える。
+    pub(crate) fn set_section_points(&self, layer: usize, frame_start: usize, points: Vec<usize>) {
+        let mut scene = self.scene.lock().unwrap();
+        let object = scene.layers[layer]
+            .objects
+            .iter_mut()
+            .find(|object| object.placement.frame_start == frame_start)
+            .unwrap_or_else(|| {
+                panic!("レイヤー {layer} フレーム {frame_start} の対象がありません")
+            });
+        object.section_points = points;
+    }
+
+    /// 対象が持つ中間点のフレーム番号を読む。
+    pub(crate) fn section_points(&self, layer: usize, frame_start: usize) -> Vec<usize> {
+        let scene = self.scene.lock().unwrap();
+        scene
+            .find(layer, frame_start)
+            .unwrap_or_else(|| panic!("レイヤー {layer} フレーム {frame_start} の対象がありません"))
+            .section_points
+            .clone()
+    }
+
     /// フェイクが保持する状態を読む。
     pub(crate) fn scene(&self) -> FakeScene {
         self.scene.lock().unwrap().clone()
@@ -407,6 +462,9 @@ pub(crate) const MUTATIONS: &[&str] = &[
     "move_object",
     "delete_object",
     "set_object_name",
+    "create_object_section",
+    "delete_object_section",
+    "move_object_section",
     "create_effect",
     "delete_effect",
     "set_effect_enable",
@@ -621,8 +679,26 @@ impl FakeSceneEditor<'_> {
             Some(Fault::TargetGone) => Err(EditError::NotIssued {
                 reason: NotIssuedReason::TargetMissing,
             }),
+            // 中間点の 3 つは `bool` を返し、`false` は理由を伝えない。SDK 境界の
+            // 実装はそれを専用の失敗へ写す。
+            Some(Fault::RejectSectionChange) => {
+                Err(EditError::SectionChangeRejected { operation: call })
+            }
             _ => Ok(()),
         }
+    }
+
+    /// 解決済みトークンが指すオブジェクトへ変更を適用する。
+    fn with_object(
+        &self,
+        object: &ResolvedObject<'_>,
+        operation: &'static str,
+        apply: impl FnOnce(&mut FakeObject) -> Result<(), EditError>,
+    ) -> Result<(), EditError> {
+        let id = self.object_id(object.slot())?;
+        let mut scene = self.host.scene.lock().unwrap();
+        let found = scene.by_id_mut(id).ok_or(EditError::Sdk { operation })?;
+        apply(found)
     }
 }
 
@@ -986,6 +1062,79 @@ impl SceneEditor for FakeSceneEditor<'_> {
         Ok(())
     }
 
+    fn object_sections(&self, object: &ResolvedObject<'_>) -> Result<Vec<SectionRange>, EditError> {
+        self.host.record(SECTION_RANGES);
+        if self.host.knobs().fault == Some(Fault::SectionsUnreadable) {
+            return Err(EditError::Sdk {
+                operation: "get_object_section_frame",
+            });
+        }
+        let id = self.object_id(object.slot())?;
+        let scene = self.host.scene.lock().unwrap();
+        Ok(scene
+            .by_id(id)
+            .ok_or(EditError::Sdk {
+                operation: "get_object_section_frame",
+            })?
+            .sections())
+    }
+
+    fn create_object_section(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.mutation("create_object_section")?;
+        self.with_object(object, "create_object_section", |found| {
+            found.section_points.push(frame);
+            found.section_points.sort_unstable();
+            Ok(())
+        })
+    }
+
+    fn delete_object_section(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        section: usize,
+    ) -> Result<(), EditError> {
+        self.mutation("delete_object_section")?;
+        self.with_object(object, "delete_object_section", |found| {
+            // 区間 `i` の開始位置は `i` 番目の中間点である。1 つずらして
+            // 添字を引く実装は、ここで別の中間点を消す。
+            let point = section
+                .checked_sub(1)
+                .filter(|index| *index < found.section_points.len())
+                .ok_or(EditError::SectionChangeRejected {
+                    operation: "delete_object_section",
+                })?;
+            found.section_points.remove(point);
+            Ok(())
+        })
+    }
+
+    fn move_object_section(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        section: usize,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.mutation("move_object_section")?;
+        self.with_object(object, "move_object_section", |found| {
+            let point = section
+                .checked_sub(1)
+                .filter(|index| *index < found.section_points.len())
+                .ok_or(EditError::SectionChangeRejected {
+                    operation: "move_object_section",
+                })?;
+            found.section_points[point] = frame;
+            found.section_points.sort_unstable();
+            Ok(())
+        })
+    }
+
     fn set_object_name(
         &self,
         _ticket: MutationTicket<'_>,
@@ -1242,6 +1391,7 @@ impl FakeSceneEditor<'_> {
                 },
                 alias: alias.clone(),
                 effects: Vec::new(),
+                section_points: Vec::new(),
             },
         );
         if self.host.knobs().fault == Some(Fault::CreatePair) {
@@ -1261,6 +1411,7 @@ impl FakeSceneEditor<'_> {
                     },
                     alias,
                     effects: Vec::new(),
+                    section_points: Vec::new(),
                 },
             );
         }
@@ -1365,6 +1516,7 @@ pub(crate) fn fake_scene() -> FakeScene {
                 },
                 alias: "[0:0]".to_string(),
                 effects: Vec::new(),
+                section_points: Vec::new(),
             }]),
             FakeLayer::with(vec![
                 FakeObject {
@@ -1377,6 +1529,9 @@ pub(crate) fn fake_scene() -> FakeScene {
                     },
                     alias: "[1:100]".to_string(),
                     effects: vec![video(), blur(0, 20)],
+                    // 中間点を 1 つ持つ。区間は 2 つになり、区間番号 1 が
+                    // この中間点を指す。
+                    section_points: vec![150],
                 },
                 FakeObject {
                     id: 3,
@@ -1388,6 +1543,7 @@ pub(crate) fn fake_scene() -> FakeScene {
                     },
                     alias: "[1:300]".to_string(),
                     effects: vec![blur(0, 20)],
+                    section_points: Vec::new(),
                 },
             ]),
             FakeLayer {
@@ -1402,6 +1558,7 @@ pub(crate) fn fake_scene() -> FakeScene {
                     },
                     alias: "[2:0]".to_string(),
                     effects: Vec::new(),
+                    section_points: Vec::new(),
                 }])
             },
             // 編集情報が名乗る layer_max より先にある空レイヤー。ここへ作ると

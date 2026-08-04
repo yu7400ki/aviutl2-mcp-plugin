@@ -59,6 +59,15 @@ pub const OPERATION_SET_LAYER_STATE: &str = "set_layer_state";
 /// カーソル・選択範囲・フォーカスを変更する operation 名。
 pub const OPERATION_SET_SELECTION: &str = "set_selection";
 
+/// オブジェクトへ中間点を追加する operation 名。
+pub const OPERATION_CREATE_OBJECT_SECTION: &str = "create_object_section";
+
+/// オブジェクトの中間点を削除する operation 名。
+pub const OPERATION_DELETE_OBJECT_SECTION: &str = "delete_object_section";
+
+/// オブジェクトの中間点を移動する operation 名。
+pub const OPERATION_MOVE_OBJECT_SECTION: &str = "move_object_section";
+
 /// 複数の変更を 1 つの取り消し単位で適用する operation 名。
 pub const OPERATION_APPLY_BATCH: &str = "apply_batch";
 
@@ -154,6 +163,12 @@ pub enum EditOperation {
     SetLayerState,
     /// [`OPERATION_SET_SELECTION`]。
     SetSelection,
+    /// [`OPERATION_CREATE_OBJECT_SECTION`]。
+    CreateObjectSection,
+    /// [`OPERATION_DELETE_OBJECT_SECTION`]。
+    DeleteObjectSection,
+    /// [`OPERATION_MOVE_OBJECT_SECTION`]。
+    MoveObjectSection,
     /// [`OPERATION_APPLY_BATCH`]。
     ///
     /// 複数の変更をまとめて発行するが、区間の入り方も失敗の写し方も他の編集
@@ -166,7 +181,7 @@ impl EditOperation {
     /// 全 variant。
     ///
     /// 要素数と内容は `edit_operation_all_is_exhaustive` テストで固定する。
-    pub const ALL: [EditOperation; 11] = [
+    pub const ALL: [EditOperation; 14] = [
         EditOperation::CreateObject,
         EditOperation::MoveObject,
         EditOperation::DeleteObject,
@@ -177,6 +192,9 @@ impl EditOperation {
         EditOperation::SetEffectEnabled,
         EditOperation::SetLayerState,
         EditOperation::SetSelection,
+        EditOperation::CreateObjectSection,
+        EditOperation::DeleteObjectSection,
+        EditOperation::MoveObjectSection,
         EditOperation::ApplyBatch,
     ];
 
@@ -193,6 +211,9 @@ impl EditOperation {
             EditOperation::SetEffectEnabled => OPERATION_SET_EFFECT_ENABLED,
             EditOperation::SetLayerState => OPERATION_SET_LAYER_STATE,
             EditOperation::SetSelection => OPERATION_SET_SELECTION,
+            EditOperation::CreateObjectSection => OPERATION_CREATE_OBJECT_SECTION,
+            EditOperation::DeleteObjectSection => OPERATION_DELETE_OBJECT_SECTION,
+            EditOperation::MoveObjectSection => OPERATION_MOVE_OBJECT_SECTION,
             EditOperation::ApplyBatch => OPERATION_APPLY_BATCH,
         }
     }
@@ -310,7 +331,10 @@ impl KnownOperation {
                 | EditOperation::DeleteEffect
                 | EditOperation::SetEffectEnabled
                 | EditOperation::SetLayerState
-                | EditOperation::SetSelection => RequestBudgetKind::Edit,
+                | EditOperation::SetSelection
+                | EditOperation::CreateObjectSection
+                | EditOperation::DeleteObjectSection
+                | EditOperation::MoveObjectSection => RequestBudgetKind::Edit,
                 EditOperation::ApplyBatch => RequestBudgetKind::Batch,
             },
             KnownOperation::Render(operation) => match operation {
@@ -516,6 +540,9 @@ mod tests {
         assert_eq!(OPERATION_SET_EFFECT_ENABLED, "set_effect_enabled");
         assert_eq!(OPERATION_SET_LAYER_STATE, "set_layer_state");
         assert_eq!(OPERATION_SET_SELECTION, "set_selection");
+        assert_eq!(OPERATION_CREATE_OBJECT_SECTION, "create_object_section");
+        assert_eq!(OPERATION_DELETE_OBJECT_SECTION, "delete_object_section");
+        assert_eq!(OPERATION_MOVE_OBJECT_SECTION, "move_object_section");
         assert_eq!(OPERATION_APPLY_BATCH, "apply_batch");
     }
 
@@ -554,6 +581,18 @@ mod tests {
         assert_eq!(
             EditOperation::SetSelection.as_str(),
             OPERATION_SET_SELECTION
+        );
+        assert_eq!(
+            EditOperation::CreateObjectSection.as_str(),
+            OPERATION_CREATE_OBJECT_SECTION
+        );
+        assert_eq!(
+            EditOperation::DeleteObjectSection.as_str(),
+            OPERATION_DELETE_OBJECT_SECTION
+        );
+        assert_eq!(
+            EditOperation::MoveObjectSection.as_str(),
+            OPERATION_MOVE_OBJECT_SECTION
         );
         assert_eq!(EditOperation::ApplyBatch.as_str(), OPERATION_APPLY_BATCH);
     }
@@ -634,6 +673,9 @@ mod tests {
                 | EditOperation::SetEffectEnabled
                 | EditOperation::SetLayerState
                 | EditOperation::SetSelection
+                | EditOperation::CreateObjectSection
+                | EditOperation::DeleteObjectSection
+                | EditOperation::MoveObjectSection
                 | EditOperation::ApplyBatch => {}
             }
             assert!(
@@ -652,8 +694,11 @@ mod tests {
         assert_listed(EditOperation::SetEffectEnabled);
         assert_listed(EditOperation::SetLayerState);
         assert_listed(EditOperation::SetSelection);
+        assert_listed(EditOperation::CreateObjectSection);
+        assert_listed(EditOperation::DeleteObjectSection);
+        assert_listed(EditOperation::MoveObjectSection);
         assert_listed(EditOperation::ApplyBatch);
-        assert_eq!(EditOperation::ALL.len(), 11);
+        assert_eq!(EditOperation::ALL.len(), 14);
     }
 
     /// [`ReadOperation::ALL`] が全 variant を含むことを固定する。
@@ -756,9 +801,24 @@ mod tests {
             );
         }
         for op in EditOperation::ALL {
+            // `_` を使わない網羅 match である。網羅 match は「分類し忘れ」を
+            // 捕まえるが「誤って分類した」は捕まえない。期待値を variant ごとに
+            // 書き並べることで、後者もここで落ちる。
             let expected = match op {
                 EditOperation::ApplyBatch => RequestBudgetKind::Batch,
-                _ => RequestBudgetKind::Edit,
+                EditOperation::CreateObject
+                | EditOperation::MoveObject
+                | EditOperation::DeleteObject
+                | EditOperation::SetObjectName
+                | EditOperation::SetObjectItem
+                | EditOperation::AddEffect
+                | EditOperation::DeleteEffect
+                | EditOperation::SetEffectEnabled
+                | EditOperation::SetLayerState
+                | EditOperation::SetSelection
+                | EditOperation::CreateObjectSection
+                | EditOperation::DeleteObjectSection
+                | EditOperation::MoveObjectSection => RequestBudgetKind::Edit,
             };
             assert_eq!(
                 KnownOperation::Edit(op).budget_kind(),
@@ -772,6 +832,24 @@ mod tests {
                 RequestBudgetKind::Render,
                 "{op:?} が render の予算区分になっていません"
             );
+        }
+    }
+
+    #[test]
+    fn object_section_operations_are_ordinary_edits() {
+        // 中間点の操作の費用は単一編集と同じ形である（1 対象の解決 + 1 回の
+        // 変更）。新しい予算区分を作る理由が無い。
+        for op in [
+            EditOperation::CreateObjectSection,
+            EditOperation::DeleteObjectSection,
+            EditOperation::MoveObjectSection,
+        ] {
+            assert_eq!(
+                KnownOperation::Edit(op).budget_kind(),
+                RequestBudgetKind::Edit,
+                "{op:?}"
+            );
+            assert!(EditOperation::ALL.contains(&op));
         }
     }
 

@@ -14,10 +14,10 @@
 
 use crate::edit::EditAdapter;
 use crate::edit::batch;
-use crate::edit::error::{EditError, OccupiedRange, UnsupportedReason};
+use crate::edit::error::{EditError, OccupiedRange, SectionPreconditionReason, UnsupportedReason};
 use crate::edit::host::{EditHost, HostSelection, SceneEditor};
 use crate::edit::precondition::{
-    Boundary, EditKind, ExpectedEpoch, MutationPermit, verify_boundary,
+    Boundary, EditKind, ExpectedEpoch, MutationPermit, MutationTicket, verify_boundary,
 };
 use crate::edit::resolve::{
     ResolvedEffect, ResolvedObject, effect_info_at, resolve_effect, resolve_object,
@@ -28,12 +28,13 @@ use crate::read::ReadError;
 use crate::read::adapter::object_summary;
 use crate::read::host::{EditState, HostEffect, HostLayer, HostObjectPlacement};
 use aviutl2_mcp_core::{
-    AddEffectParams, ApplyBatchParams, BatchOperation, BatchOutcome, CreateObjectParams, Cursor,
-    DeleteEffectParams, DeleteObjectParams, EditOutcome, EffectInfo, EffectType, FocusChange,
-    FrameRange, ItemWriteError, LayerInfo, LayerStateOutcome, MoveObjectParams, ObjectSelector,
-    ObjectSource, ObjectSummary, RangeChange, SelectionField, SelectionState,
-    SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSelectionParams, prepare_item_write,
+    AddEffectParams, ApplyBatchParams, BatchOperation, BatchOutcome, CreateObjectParams,
+    CreateObjectSectionParams, Cursor, DeleteEffectParams, DeleteObjectParams,
+    DeleteObjectSectionParams, EditOutcome, EffectInfo, EffectType, FocusChange, FrameRange,
+    ItemWriteError, LayerInfo, LayerStateOutcome, MoveObjectParams, MoveObjectSectionParams,
+    ObjectSectionsOutcome, ObjectSelector, ObjectSource, ObjectSummary, RangeChange, SectionRange,
+    SelectionField, SelectionState, SetEffectEnabledParams, SetLayerStateParams,
+    SetObjectItemParams, SetObjectNameParams, SetSelectionParams, prepare_item_write,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -179,6 +180,64 @@ impl<H: EditHost> HostEditAdapter<H> {
         }
         Ok(())
     }
+
+    /// 中間点を変える 3 つの operation に共通する手順。
+    ///
+    /// 区間の読み直しを 1 回前倒しして事前確認へ使い、変更のあとにもう 1 度
+    /// 読み直して応答へ載せる。追加の SDK 呼び出しはこの読み直しだけである。
+    ///
+    /// **レイヤーのロックは確かめない。** 中間点はオブジェクトの位置も長さも
+    /// 変えず、ロックが止める削除とも時間軸上の移動とも別である。確かめると、
+    /// UI が許している編集をここからだけ拒むことになる。
+    fn change_sections(
+        &self,
+        selector: &ObjectSelector,
+        precheck: impl Fn(&[SectionRange]) -> Result<(), EditError> + Send,
+        apply: impl Fn(
+            &dyn SceneEditor,
+            MutationTicket<'_>,
+            &ResolvedObject<'_>,
+        ) -> Result<(), EditError>
+        + Send,
+    ) -> Result<ObjectSectionsOutcome, EditError> {
+        self.ensure_editable()?;
+        let project = self.project.as_ref();
+
+        self.edit_section(move |editor| {
+            let boundary = verify_boundary(
+                project,
+                editor.entry_edit_info(),
+                ExpectedEpoch::Absent,
+                EditKind::Content,
+                &[],
+                &[selector],
+            )?;
+            let object = resolve_object(editor, &boundary, selector)?;
+            // 事前確認は編集区間の内側で読み直した実態に対して行う。要求元が
+            // 持っているのは読み取った時点の複製であり、その間に UI で中間点が
+            // 動き得る。
+            precheck(&editor.object_sections(&object)?)?;
+
+            let permit = boundary.issue_permit(project)?;
+            permit.issue(&boundary, |ticket| apply(editor, ticket, &object))?;
+
+            // 中間点はオブジェクトの位置も長さも変えないため、対象は同じ位置で
+            // 読み直せる。要求した中間点が実際にどこへ入ったかは区間の一覧が
+            // 答える。
+            let object_summary = attribute(
+                &permit,
+                &boundary,
+                reread(editor, &boundary, object.layer(), object.frame_start()),
+            )?;
+            let sections = attribute(&permit, &boundary, editor.object_sections(&object))?;
+            Ok(ObjectSectionsOutcome {
+                project_epoch: boundary.epoch().to_string(),
+                project_revision: permit.project_revision(&boundary),
+                object: object_summary,
+                sections,
+            })
+        })
+    }
 }
 
 /// クロージャの panic を型付きの失敗へ変換し、戻り値はそのまま返す。
@@ -264,6 +323,70 @@ pub(crate) fn ensure_destination_free(
                 frame_end: occupant.frame_end,
             },
         });
+    }
+    Ok(())
+}
+
+/// 中間点を置くフレームが、いま読み直した区間と両立することを確かめる。
+///
+/// 見るのはオブジェクトの範囲に入ることと、既存の境界と重ならないことである。
+/// どちらも対象の現在の状態で決まるため、要求内容だけの検証では判定できない。
+fn ensure_section_can_be_created(sections: &[SectionRange], frame: usize) -> Result<(), EditError> {
+    let outside = || EditError::SectionPrecondition {
+        reason: SectionPreconditionReason::FrameOutsideObject,
+    };
+    let (Some(first), Some(last)) = (sections.first(), sections.last()) else {
+        return Err(outside());
+    };
+    if frame < first.start || last.end < frame {
+        return Err(outside());
+    }
+    if sections.iter().any(|section| section.start == frame) {
+        return Err(EditError::SectionPrecondition {
+            reason: SectionPreconditionReason::SectionBoundaryExists,
+        });
+    }
+    Ok(())
+}
+
+/// 区間番号が、いま読み直した区間の列を指していることを確かめる。
+///
+/// 番号 0 は要求内容だけで拒否済みであるため、ここで見るのは総数との比較だけで
+/// ある。区間の数はオブジェクトの現在の状態であり、要求元の手元では確定しない。
+fn ensure_section_exists(sections: &[SectionRange], section: usize) -> Result<(), EditError> {
+    if section < sections.len() {
+        return Ok(());
+    }
+    Err(EditError::SectionPrecondition {
+        reason: SectionPreconditionReason::SectionIndexOutOfRange,
+    })
+}
+
+/// 中間点の移動先が隣の中間点を越えないことを確かめる。
+///
+/// 動かせるのは 1 つ前の区間の開始位置より後、1 つ後の区間の開始位置より前
+/// である。1 つ後が無ければオブジェクトの終了フレームまでとなる。中間点の順序が
+/// 入れ替わらないことは SDK の不変条件であり、崩す要求は届く前に落とす。
+fn ensure_section_move_stays_between_neighbours(
+    sections: &[SectionRange],
+    section: usize,
+    frame: usize,
+) -> Result<(), EditError> {
+    let crosses = EditError::SectionPrecondition {
+        reason: SectionPreconditionReason::SectionMoveCrossesBoundary,
+    };
+    let Some(previous) = section.checked_sub(1).and_then(|index| sections.get(index)) else {
+        return Err(crosses);
+    };
+    if frame <= previous.start {
+        return Err(crosses);
+    }
+    let upper_limit_passed = match sections.get(section + 1) {
+        Some(next) => frame >= next.start,
+        None => sections.last().is_none_or(|last| frame > last.end),
+    };
+    if upper_limit_passed {
+        return Err(crosses);
     }
     Ok(())
 }
@@ -846,6 +969,48 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 info,
             ))
         })
+    }
+
+    fn create_object_section(
+        &self,
+        params: &CreateObjectSectionParams,
+    ) -> Result<ObjectSectionsOutcome, EditError> {
+        let frame = index(params.frame);
+        self.change_sections(
+            &params.selector,
+            move |sections| ensure_section_can_be_created(sections, frame),
+            move |editor, ticket, object| editor.create_object_section(ticket, object, frame),
+        )
+    }
+
+    fn delete_object_section(
+        &self,
+        params: &DeleteObjectSectionParams,
+    ) -> Result<ObjectSectionsOutcome, EditError> {
+        let section = index(params.section);
+        self.change_sections(
+            &params.selector,
+            move |sections| ensure_section_exists(sections, section),
+            move |editor, ticket, object| editor.delete_object_section(ticket, object, section),
+        )
+    }
+
+    fn move_object_section(
+        &self,
+        params: &MoveObjectSectionParams,
+    ) -> Result<ObjectSectionsOutcome, EditError> {
+        let section = index(params.section);
+        let frame = index(params.frame);
+        self.change_sections(
+            &params.selector,
+            move |sections| {
+                ensure_section_exists(sections, section)?;
+                ensure_section_move_stays_between_neighbours(sections, section, frame)
+            },
+            move |editor, ticket, object| {
+                editor.move_object_section(ticket, object, section, frame)
+            },
+        )
     }
 
     fn set_layer_state(
