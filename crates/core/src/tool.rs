@@ -19,7 +19,10 @@
 use crate::operation::{EditOperation, KnownOperation, ReadOperation, RenderOperation};
 
 /// MCP tool 名の接頭辞。
-pub const TOOL_NAME_PREFIX: &str = "aviutl2_";
+///
+/// 導出の材料であり、外へは出さない。**公開するのは導出の結果だけである**——
+/// 呼び出し側が接頭辞から名前を組み立て始めると、規則が 2 か所に散る。
+const TOOL_NAME_PREFIX: &str = "aviutl2_";
 
 /// 無効化できない tool。
 ///
@@ -86,7 +89,9 @@ impl ToolFamily {
 }
 
 /// operation に対応する tool の名前。
-pub fn tool_name(operation: KnownOperation) -> String {
+///
+/// [`TOOL_NAME_PREFIX`] と同じ理由で外へは出さない。
+fn tool_name(operation: KnownOperation) -> String {
     format!("{TOOL_NAME_PREFIX}{}", operation.as_str())
 }
 
