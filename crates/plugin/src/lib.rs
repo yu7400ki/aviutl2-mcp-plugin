@@ -30,6 +30,8 @@ pub mod render;
 pub mod session;
 #[cfg(windows)]
 pub mod settings;
+#[cfg(windows)]
+pub mod settings_ui;
 #[cfg(all(windows, test))]
 mod test_support;
 #[cfg(windows)]
@@ -189,6 +191,16 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
     fn register(&mut self, registry: &mut aviutl2::generic::HostAppHandle) {
         init_tracing();
         EDIT_HANDLE.init(registry.create_edit_handle());
+
+        // 設定画面はこの後の初期化に依存しない。**先に登録するのは、初期化が
+        // 失敗した状態でも設定を直せるようにするためである**——設定が原因で
+        // 失敗している場合、画面が唯一の修復手段になる。
+        //
+        // ラッパーの設定メニュー用のマクロを使わない。マクロが生成するブリッジは
+        // plugin の singleton のロックを保持したままハンドラを実行するが、
+        // ハンドラは利用者がダイアログを閉じるまで戻らない。**その間の終了手順が
+        // singleton へ到達できなくなる。**
+        registry.register_config_menu(settings_ui::MENU_NAME, settings_ui::config_menu_callback);
 
         // イベントハンドラは registry への登録直後から呼ばれ得るため、
         // 失敗し得る初期化より先に用意する。
