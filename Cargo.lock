@@ -149,7 +149,6 @@ dependencies = [
  "aviutl2-mcp-win",
  "base64",
  "chrono",
- "proptest",
  "rmcp",
  "schemars",
  "serde",
