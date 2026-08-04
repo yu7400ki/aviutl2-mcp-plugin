@@ -194,7 +194,7 @@ pub struct AviUtl2McpServer {
     /// registry から導いた基底の下へディレクトリを作り、そこへ保護された DACL を
     /// 設定するため、**開くかどうかを利用側が決められる形にしてある。**
     artifacts: Option<Arc<ArtifactStore>>,
-    limits: LimitsSource,
+    settings: SettingsOrFixed,
     tool_router: ToolRouter<Self>,
 }
 
@@ -205,7 +205,7 @@ pub struct AviUtl2McpServer {
 /// ためであり、**製品の経路では使わない。** その場合、tool の公開は既定
 /// （全 tool 有効）になる。
 #[derive(Clone)]
-enum LimitsSource {
+enum SettingsOrFixed {
     /// 構築時に与えられた固定値。
     ///
     /// この腕を作れるのは試験と実機受け入れの構築口だけであり、それらは
@@ -216,7 +216,7 @@ enum LimitsSource {
     Settings(Arc<SettingsSource>),
 }
 
-impl LimitsSource {
+impl SettingsOrFixed {
     fn limits(&self) -> CallLimits {
         match self {
             Self::Fixed(limits) => *limits,
@@ -273,7 +273,7 @@ impl AviUtl2McpServer {
             ArtifactStore::open(base_dir_for_registry(&registry_dir), Arc::clone(&settings))?;
         Ok(Self {
             artifacts: Some(Arc::new(store)),
-            ..Self::from_limits_source(registry_dir, LimitsSource::Settings(settings))
+            ..Self::from_settings_or_fixed(registry_dir, SettingsOrFixed::Settings(settings))
         })
     }
 
@@ -307,7 +307,7 @@ impl AviUtl2McpServer {
     /// 使わない。** 既定では公開しないため、`.exe` にこの経路は無い。
     #[cfg(any(test, feature = "test-support"))]
     pub fn without_artifact_store(registry_dir: PathBuf, limits: CallLimits) -> Self {
-        Self::from_limits_source(registry_dir, LimitsSource::Fixed(limits))
+        Self::from_settings_or_fixed(registry_dir, SettingsOrFixed::Fixed(limits))
     }
 
     /// 保管庫を持たず、共有設定から予算と tool の公開を引くサーバーを作る。
@@ -316,21 +316,21 @@ impl AviUtl2McpServer {
     /// 経路では使わない。** 既定では公開しないため、`.exe` にこの経路は無い。
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_settings(registry_dir: PathBuf, settings: Arc<SettingsSource>) -> Self {
-        Self::from_limits_source(registry_dir, LimitsSource::Settings(settings))
+        Self::from_settings_or_fixed(registry_dir, SettingsOrFixed::Settings(settings))
     }
 
-    fn from_limits_source(registry_dir: PathBuf, limits: LimitsSource) -> Self {
+    fn from_settings_or_fixed(registry_dir: PathBuf, settings: SettingsOrFixed) -> Self {
         Self {
             registry_dir: Arc::new(registry_dir),
             artifacts: None,
-            limits,
+            settings,
             tool_router: Self::tool_router(),
         }
     }
 
     /// tool call 1 回分の実行予算。
     fn limits(&self) -> CallLimits {
-        self.limits.limits()
+        self.settings.limits()
     }
 
     /// 登録済みの tool 定義を返す。
@@ -347,14 +347,14 @@ impl AviUtl2McpServer {
     /// 設定は 1 回の `Arc` の差し替えで反映されるため、半分だけ適用された状態を
     /// 観測する経路が無い。
     fn tool_visibility(&self) -> ToolVisibility {
-        self.limits.visibility()
+        self.settings.visibility()
     }
 
     /// 現在公開している tool 定義を返す。
     ///
     /// `tools/list` が返すのはこの一覧である。tool の定義そのものは router が
     /// 持つものをそのまま使う——説明と schema の出所を 2 つにしない。
-    pub fn visible_tools(&self) -> Vec<Tool> {
+    fn visible_tools(&self) -> Vec<Tool> {
         let visibility = self.tool_visibility();
         self.tool_router
             .list_all()
@@ -367,7 +367,7 @@ impl AviUtl2McpServer {
     ///
     /// [`Self::visible_tools`] と同じ判定を読む。掲載しない tool の call を
     /// 受け付ける、あるいはその逆になる余地が無い。
-    pub fn accepts_tool_call(&self, name: &str) -> bool {
+    fn accepts_tool_call(&self, name: &str) -> bool {
         self.tool_visibility().allows(name)
     }
 
@@ -1504,12 +1504,12 @@ impl ServerHandler for AviUtl2McpServer {
 
     /// 名前から tool 定義を引く。
     ///
-    /// 公開していない tool は「無い」ものとして扱う。`tools/list` に載らない
-    /// 名前が、別の経路からは在るものとして見えることを避ける。
+    /// **公開の判定を通さない。** この口は要求元へ tool を見せるためのものでは
+    /// なく、要求の起動方式を検証するために dispatch が内側で引くだけである。
+    /// ここで公開していない tool を「無い」ことにすると、その検証が飛ばされ、
+    /// 公開していない tool への要求が受付判定へ届かずに別の失敗になる。
+    /// **公開しているかどうかは [`ServerHandler::call_tool`] が判定する。**
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        if !self.accepts_tool_call(name) {
-            return None;
-        }
         self.tool_router.get(name).cloned()
     }
 
@@ -1554,7 +1554,7 @@ impl ServerHandler for AviUtl2McpServer {
     /// 変化を繰り返し通知しても要求元の得るものは変わらない。
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
         tracing::info!("client initialized");
-        let Some(source) = self.limits.shared() else {
+        let Some(source) = self.settings.shared() else {
             return;
         };
         let catalog = self
@@ -2162,8 +2162,12 @@ mod tests {
 
     /// 登録済みの tool 名を、annotation の 3 表から引く。
     ///
-    /// 表と router が一致することは [`all_tools_are_registered`] が固定する。
-    fn all_tool_names() -> impl Iterator<Item = &'static str> {
+    /// **共有の一覧（`aviutl2_mcp_core::tool::all_tool_names`）とは別の出所で
+    /// ある。** 一方は annotation と説明を検査するための手書きの表、もう一方は
+    /// operation からの導出であり、**両者が router と一致することを別々の試験が
+    /// 固定する**（[`all_tools_are_registered`] と
+    /// [`the_registered_tools_match_the_shared_catalog`]）。
+    fn annotated_tool_names() -> impl Iterator<Item = &'static str> {
         READ_TOOLS
             .iter()
             .copied()
@@ -2206,7 +2210,7 @@ mod tests {
 
     /// 編集の説明規約が掛かる tool。
     fn edit_like_tools() -> Vec<&'static str> {
-        all_tool_names()
+        annotated_tool_names()
             .filter(|name| follows_the_edit_conventions(name))
             .collect()
     }
@@ -2253,8 +2257,9 @@ mod tests {
         // すると annotation も説明も検査されないまま公開される。
         let names: std::collections::BTreeSet<String> =
             tools().iter().map(|tool| tool.name.to_string()).collect();
-        let expected: std::collections::BTreeSet<String> =
-            all_tool_names().map(|name| name.to_string()).collect();
+        let expected: std::collections::BTreeSet<String> = annotated_tool_names()
+            .map(|name| name.to_string())
+            .collect();
         assert_eq!(names, expected);
         // 件数そのものも固定する。router と表の両方から同じ tool を落とすと、
         // 集合の一致だけでは検出できない。
@@ -3323,9 +3328,9 @@ mod tests {
         // plugin と server が同じファイルから別の結論を得る形ができる。
         let settings = settings_with_scale(50);
         let source = SettingsSource::fixed(settings.clone());
-        let server = AviUtl2McpServer::from_limits_source(
+        let server = AviUtl2McpServer::from_settings_or_fixed(
             PathBuf::from("registry"),
-            LimitsSource::Settings(source),
+            SettingsOrFixed::Settings(source),
         );
 
         let budgets = settings.budgets();

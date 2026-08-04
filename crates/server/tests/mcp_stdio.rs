@@ -1996,7 +1996,7 @@ fn an_enabled_tool_still_reaches_the_instance_while_another_is_disabled() {
 #[test]
 fn disabling_a_tool_does_not_relax_the_checks_of_the_others() {
     // 切替が制御するのは公開と受付だけである。残る tool の `instance_id` 必須も
-    // インスタンスの解決も、無効化によって緩まない。
+    // インスタンスの解決も path の構文検証も、無効化によって緩まない。
     let registry_dir = temp_registry_dir();
     write_settings(
         &registry_dir,
@@ -2020,6 +2020,22 @@ fn disabling_a_tool_does_not_relax_the_checks_of_the_others() {
             "arguments": { "instance_id": unknown },
         },
     }));
+    // path の構文検証は接続先へ出る前に効く。インスタンスが存在しなくても、
+    // 先に落ちるのはこちらである。
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_create_object",
+            "arguments": {
+                "instance_id": unknown,
+                "expected_project_epoch": "78be92d1-c8c9-44c6-ae52-387548971468",
+                "source": { "type": "media_file", "path": "assets\\clip.png" },
+                "placement": { "scene_id": 0, "layer": 1, "frame": 0 },
+            },
+        },
+    }));
 
     let session = run_session(&registry_dir, &requests);
     assert_structured_invalid_argument(&session.response(2));
@@ -2028,6 +2044,13 @@ fn disabling_a_tool_does_not_relax_the_checks_of_the_others() {
         json!("instance_not_found"),
         "{}",
         session.response(3)
+    );
+    let rejected_path = session.response(4);
+    assert_structured_invalid_argument(&rejected_path);
+    assert_eq!(
+        rejected_path["result"]["structuredContent"]["details"]["reason"],
+        json!("not_absolute"),
+        "path の構文検証の種別が届いていません: {rejected_path}"
     );
 
     remove_test_registry(&registry_dir);
@@ -2093,6 +2116,202 @@ fn tools_list_changed_arrives_only_when_the_enabled_set_changes() {
         notified < listed,
         "通知が変化後の一覧より後に届きました: {}",
         session.stdout
+    );
+
+    remove_test_registry(&registry_dir);
+}
+
+/// 実行中の call を捕まえるために接続先へ与える応答の遅れ。
+const IN_FLIGHT_DELAY: std::time::Duration = std::time::Duration::from_millis(2000);
+
+/// call が接続先へ届くまでの余裕。
+const IN_FLIGHT_GRACE: std::time::Duration = std::time::Duration::from_millis(300);
+
+#[test]
+fn a_running_call_is_not_cancelled_when_its_tool_is_disabled() {
+    // 無効化が効くのは次の受付からである。**実行を始めた call は途中で取り消さ
+    // ない。** 応答を遅らせた接続先へ要求を送り、その最中に無効化する。
+    let registry_dir = temp_registry_dir();
+    let edit_info = serde_json::to_value(sample_edit_info()).expect("直列化できる");
+    let mock = MockPipeServer::start_with_delayed_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        OperationResponses::from([("get_edit_info".to_string(), ok_result(edit_info.clone()))]),
+        IN_FLIGHT_DELAY,
+    );
+    mock.write_descriptor(&registry_dir);
+    write_settings(&registry_dir, r#"{"log_level":"info"}"#);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let call = |id: u64| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": "aviutl2_get_edit_info",
+                "arguments": { "instance_id": mock.instance_id().to_string() },
+            },
+        })
+    };
+
+    let mut server = ServerProcess::start(&registry_dir, Some("info"));
+    for request in initialize_requests() {
+        server.send(&request);
+        if let Some(id) = request.get("id") {
+            server.read_until(std::slice::from_ref(id));
+        }
+    }
+
+    // 実行を始めさせてから無効化する。応答を待つのは無効化が届いた後である。
+    server.send(&call(2));
+    std::thread::sleep(IN_FLIGHT_GRACE);
+    write_settings(
+        &registry_dir,
+        r#"{"disabled_tools":["aviutl2_get_edit_info"]}"#,
+    );
+    std::thread::sleep(SETTINGS_DELIVERY);
+    server.read_until(&[json!(2)]);
+
+    // 同じ tool をもう一度呼ぶ。受付は次から効く。
+    server.send(&call(3));
+    server.read_until(&[json!(3)]);
+
+    let session = server.finish();
+    let running = session.response(2);
+    assert_eq!(
+        running["result"]["isError"],
+        json!(false),
+        "実行中の call が取り消されました: {running}"
+    );
+    assert_eq!(running["result"]["structuredContent"], edit_info);
+    assert_eq!(
+        session.response(3)["result"]["structuredContent"]["code"],
+        json!("tool_disabled"),
+        "無効化が次の受付へ効いていません: {}",
+        session.response(3)
+    );
+
+    drop(mock);
+    remove_test_registry(&registry_dir);
+}
+
+#[test]
+fn disabling_a_tool_does_not_bypass_the_identity_checks_of_the_others() {
+    // 対象の同一性の検証は無効化と無関係に効く。selector が運ぶ材料は入口で
+    // 構文を検査され、接続先が返した precondition_failed はそのまま届く。
+    let registry_dir = temp_registry_dir();
+    let mismatch = ErrorObject::new(ErrorCode::PreconditionFailed, "対象が変化しました", true)
+        .with_details(json!({ "reason": "fingerprint_mismatch" }));
+    let mock = MockPipeServer::start_with_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        OperationResponses::from([("delete_object".to_string(), err_result(mismatch))]),
+    );
+    mock.write_descriptor(&registry_dir);
+    write_settings(
+        &registry_dir,
+        r#"{"disabled_tools":["aviutl2_apply_batch"]}"#,
+    );
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let instance_id = mock.instance_id().to_string();
+    let selector = |fingerprint: &str| {
+        json!({
+            "project_epoch": "78be92d1-c8c9-44c6-ae52-387548971468",
+            "scene_id": 3,
+            "layer": 2,
+            "frame": 120,
+            "name": null,
+            "fingerprint": fingerprint,
+        })
+    };
+
+    let mut requests = initialize_requests();
+    // 同一性の材料は入口で構文を検査される。
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_delete_object",
+            "arguments": {
+                "instance_id": instance_id,
+                "selector": selector("not-a-fingerprint"),
+            },
+        },
+    }));
+    // 構文が通れば接続先まで届き、同一性の不一致が返る。
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "aviutl2_delete_object",
+            "arguments": {
+                "instance_id": instance_id,
+                "selector": selector(
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                ),
+            },
+        },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+    assert_structured_invalid_argument(&session.response(2));
+    let mismatched = session.response(3);
+    assert_eq!(
+        mismatched["result"]["structuredContent"]["code"],
+        json!("precondition_failed"),
+        "同一性の不一致が届いていません: {mismatched}"
+    );
+    assert_eq!(
+        mismatched["result"]["structuredContent"]["details"]["reason"],
+        json!("fingerprint_mismatch"),
+        "不一致の種別が届いていません: {mismatched}"
+    );
+
+    drop(mock);
+    remove_test_registry(&registry_dir);
+}
+
+#[test]
+fn a_disabled_tool_answers_a_task_request_the_same_way_an_enabled_one_does() {
+    // 要求の起動方式の検証は、受付判定より前に tool 定義を引いて行われる。
+    // **公開していない tool をそこで「無い」ことにすると検証が飛ばされ、同じ
+    // 要求が tool によって違う失敗になる。** 定義を引く口は公開の判定を通さない。
+    let registry_dir = temp_registry_dir();
+    write_settings(
+        &registry_dir,
+        r#"{"disabled_tools":["aviutl2_delete_object"]}"#,
+    );
+
+    let as_task = |id: u64, name: &str| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": {}, "task": {} },
+        })
+    };
+
+    let mut requests = initialize_requests();
+    requests.push(as_task(2, "aviutl2_delete_object"));
+    requests.push(as_task(3, "aviutl2_get_edit_info"));
+
+    let session = run_session(&registry_dir, &requests);
+    let disabled = &session.response(2)["error"];
+    let enabled = &session.response(3)["error"];
+    assert!(enabled.is_object(), "{}", session.response(3));
+    assert_eq!(
+        disabled, enabled,
+        "公開していない tool だけが別の失敗になりました: {disabled} / {enabled}"
     );
 
     remove_test_registry(&registry_dir);
