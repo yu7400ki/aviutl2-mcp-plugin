@@ -4,6 +4,8 @@
 //! MCP server からの要求を受け付ける。
 
 #[cfg(windows)]
+mod atomic_file;
+#[cfg(windows)]
 pub mod edit;
 #[cfg(windows)]
 pub mod identity;
@@ -26,6 +28,8 @@ pub mod registry;
 pub mod render;
 #[cfg(windows)]
 pub mod session;
+#[cfg(windows)]
+pub mod settings;
 #[cfg(all(windows, test))]
 mod test_support;
 #[cfg(windows)]
@@ -61,21 +65,25 @@ const LOG_ENV: &str = "AVIUTL2_MCP_LOG";
 /// DLL は初期化が複数回呼ばれ得るため、設定は初回のみ行い、
 /// 既に global subscriber が設定済みの場合も何もせず戻る。
 ///
-/// 既定 level は debug ビルドで `debug`、release ビルドで `info`。
-/// `AVIUTL2_MCP_LOG` 環境変数（`RUST_LOG` と同じ書式）で上書きできる。
+/// level は `AVIUTL2_MCP_LOG` 環境変数（`RUST_LOG` と同じ書式）、共有設定の
+/// `log_level`、ビルド既定の順に採る。**環境変数を先に見るのは、設定ファイル
+/// ごと読めない状況を診断する経路を残すためである。**
+///
+/// **level はプロセスの寿命の間ずっと固定である。** subscriber は一度しか
+/// 立てられず、差し替えの層を持つと出力経路が 1 段増える。設定を変えたときに
+/// 効くのは次回の起動からになる。
 #[cfg(windows)]
 fn init_tracing() {
     use aviutl2::tracing_subscriber::EnvFilter;
 
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
-        let default_level = if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "info"
-        };
+        // 記録の準備より先に設定を読む。生じた不整合は subscriber が立って
+        // から流す。読めなくても既定値で続行する。
+        let issues = settings::initialize();
+        let configured = settings::current().log_level().to_string();
         let filter =
-            EnvFilter::try_from_env(LOG_ENV).unwrap_or_else(|_| EnvFilter::new(default_level));
+            EnvFilter::try_from_env(LOG_ENV).unwrap_or_else(|_| EnvFilter::new(&configured));
 
         // 他所で global subscriber が設定済みの場合は上書きせず、そのまま続行する。
         let _ = aviutl2::tracing_subscriber::fmt()
@@ -84,6 +92,8 @@ fn init_tracing() {
             .event_format(aviutl2::logger::AviUtl2Formatter)
             .with_writer(aviutl2::logger::AviUtl2LogWriter)
             .try_init();
+
+        settings::report_issues(&issues);
     });
 }
 
@@ -379,6 +389,8 @@ fn descriptor_project(path: &std::path::Path) -> DescriptorProject {
 /// 本体を、後始末に要る口だけを受け取る関数へ切り出してある。終了手順の側を
 /// 委譲だけにすることで、ここで行うことが plugin の他の状態に依存しないことを
 /// 型で示し、SDK 無しでも確かめられるようにしている。
+///
+/// 待つ上限は設定から引く。0 を選べば待たずに切り離す。
 #[cfg(windows)]
 fn shutdown_renders<D>(render_adapter: Option<&Arc<D>>)
 where
@@ -387,7 +399,7 @@ where
     let Some(render_adapter) = render_adapter else {
         return;
     };
-    render::drain_render_tasks(render_adapter, render::RENDER_DRAIN_TIMEOUT);
+    render::drain_render_tasks(render_adapter, render::render_drain_timeout());
     // 以後この instance が成果物を書くことはない。
     render_adapter.discard_artifacts();
 }
@@ -901,6 +913,52 @@ mod tests {
             !logs.contains(&instance_id.to_string()),
             "完全な instance_id がログに出ています: {logs}"
         );
+    }
+
+    /// ワークスペースのルート `Cargo.toml` が panic 戦略を上書きしていないこと。
+    ///
+    /// **`panic = "abort"` を持ち込むと、この crate の `catch_unwind` が
+    /// すべて無言で死ぬ。** コンパイルも実行も通るが、panic が unwind しない
+    /// ため捕捉に到達せず、要求 1 件の panic がホストのプロセスを落とす。
+    ///
+    /// 落ちたときに名前で理由を告げるための検査である。**性質としての確認は
+    /// [`catch_unwind_actually_catches_a_panic`] が行う。どちらか一方にしない。**
+    #[test]
+    fn the_workspace_does_not_abort_on_panic() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("ワークスペースルートを辿れません")
+            .join("Cargo.toml");
+        let manifest = std::fs::read_to_string(&root).expect("ルートの Cargo.toml を読めません");
+
+        for line in manifest.lines() {
+            let line = line.trim();
+            let Some(value) = line.strip_prefix("panic") else {
+                continue;
+            };
+            let Some(value) = value.trim_start().strip_prefix('=') else {
+                continue;
+            };
+            assert_eq!(
+                value.trim().trim_matches('"'),
+                "unwind",
+                "ルートの Cargo.toml が panic 戦略を上書きしています: {line}"
+            );
+        }
+    }
+
+    /// `catch_unwind` が実際に panic を捕まえること。
+    ///
+    /// **`panic = "abort"` では、このテストはプロセスごと落ちて失敗する。**
+    /// 設定ファイルの文字列を読む検査より強い——捕捉層が効いているかどうかを
+    /// 性質として確かめる。
+    #[test]
+    fn catch_unwind_actually_catches_a_panic() {
+        let caught = with_silent_panic_hook(|| {
+            std::panic::catch_unwind(|| panic!("捕捉されるべき panic")).is_err()
+        });
+        assert!(caught, "panic が捕捉されませんでした");
     }
 
     #[test]

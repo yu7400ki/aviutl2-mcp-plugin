@@ -40,15 +40,6 @@ use windows::core::PCWSTR;
 
 pub use aviutl2_mcp_core::{ARTIFACT_MEDIA_TYPE, HandoffToken};
 
-/// 引き渡し用ファイルを掃除するまでの時間。
-///
-/// 要求 1 件に与えられる時間より十分長く採る。引き取り中のファイルを消さない
-/// ための余裕である。
-///
-/// 掃除の期限は書き出す側だけのものであり、引き取る側は知らない。両端で共有する
-/// 取り決めとは置き場所を分ける。
-pub const HANDOFF_TTL: Duration = Duration::from_secs(120);
-
 /// 書き終えた引き渡し用ファイルの申告。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandoffArtifact {
@@ -176,11 +167,14 @@ impl HandoffDir {
         remove_if_exists(&self.temp_path(token));
     }
 
-    /// `HANDOFF_TTL` より古いファイルを消す。
+    /// `ttl` より古いファイルを消す。
     ///
     /// 正常時、ファイルは受け取る側が引き取った直後に消える。これは失敗経路の
     /// ための保険であり、新しい要求を受けたときに行う。専用のスレッドは持たない。
-    pub fn sweep_expired(&self, now: SystemTime) {
+    ///
+    /// `ttl` は設定から来る。下限は「引き取り中のファイルを消さない」ための
+    /// 最低限であり、倍率を適用した描画の要求フェーズ予算を下回らない。
+    pub fn sweep_expired(&self, now: SystemTime, ttl: Duration) {
         let entries = match std::fs::read_dir(self.dir()) {
             Ok(entries) => entries,
             // まだ 1 度も書いていない場合はディレクトリ自体が無い。
@@ -195,10 +189,7 @@ impl HandoffDir {
             let expired = entry
                 .metadata()
                 .and_then(|metadata| metadata.modified())
-                .map(|modified| {
-                    now.duration_since(modified)
-                        .is_ok_and(|age| age >= HANDOFF_TTL)
-                })
+                .map(|modified| now.duration_since(modified).is_ok_and(|age| age >= ttl))
                 .unwrap_or(false);
             if expired && std::fs::remove_file(entry.path()).is_ok() {
                 swept += 1;
@@ -390,6 +381,9 @@ mod tests {
     use super::*;
     use aviutl2_mcp_core::HANDOFF_DIR;
 
+    /// 掃除の期限。実際の値は設定から来るため、ここでは 1 つ固定して使う。
+    const TEST_TTL: Duration = Duration::from_secs(120);
+
     /// 一時的な基底ディレクトリ。
     struct TempRoot(PathBuf);
 
@@ -565,13 +559,16 @@ mod tests {
         let handoff = root.dir_for(&InstanceId::new_v4());
         let fresh = handoff.write(&sample_frame()).expect("書き出しに失敗");
 
-        handoff.sweep_expired(SystemTime::now());
+        handoff.sweep_expired(SystemTime::now(), TEST_TTL);
         assert!(
             handoff.artifact_path(&fresh.token).exists(),
             "書いたばかりのファイルが消えました"
         );
 
-        handoff.sweep_expired(SystemTime::now() + HANDOFF_TTL + Duration::from_secs(1));
+        handoff.sweep_expired(
+            SystemTime::now() + TEST_TTL + Duration::from_secs(1),
+            TEST_TTL,
+        );
         assert!(
             !handoff.artifact_path(&fresh.token).exists(),
             "期限を過ぎたファイルが残りました"
@@ -586,7 +583,10 @@ mod tests {
         let my_artifact = mine.write(&sample_frame()).expect("書き出しに失敗");
         let other_artifact = other.write(&sample_frame()).expect("書き出しに失敗");
 
-        mine.sweep_expired(SystemTime::now() + HANDOFF_TTL + Duration::from_secs(1));
+        mine.sweep_expired(
+            SystemTime::now() + TEST_TTL + Duration::from_secs(1),
+            TEST_TTL,
+        );
 
         assert!(!mine.artifact_path(&my_artifact.token).exists());
         assert!(

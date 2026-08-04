@@ -51,7 +51,7 @@ use std::time::Duration;
 pub use adapter::HostRenderAdapter;
 pub use buffer::{BYTES_PER_PIXEL, ExtractedFrame, FrameLayout};
 pub use error::{ArtifactStage, BufferRule, RenderError, RenderStage};
-pub use handoff::{ARTIFACT_MEDIA_TYPE, HANDOFF_TTL, HandoffArtifact, HandoffDir, HandoffToken};
+pub use handoff::{ARTIFACT_MEDIA_TYPE, HandoffArtifact, HandoffDir, HandoffToken};
 pub use slot::{
     ABANDONED_ENTRY_TTL, MAX_ABANDONED_RENDERS, RENDER_WAIT_TICK, RenderInventory, RenderSlot,
     RenderedFrame, SlotWait, StopRequest, deliver_frame, deliver_frame_guarded, guard_callback,
@@ -63,7 +63,12 @@ pub use slot::{
 /// タスクが、この時間で完了する見込みは高くない。** それでも有限にするのは、
 /// ホストの終了を無期限に止める方が確実に有害だからである。利用者はプロセスを
 /// 強制終了するしかなくなり、その方がデータを失う。
-pub const RENDER_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+///
+/// 実際に使う値は設定から引く。**要求フェーズの外にあるため、予算の倍率は
+/// 掛からない。** どの不等式にも入らない量であり、要求元は知らない。
+pub fn render_drain_timeout() -> Duration {
+    crate::settings::current().render_drain_timeout()
+}
 
 /// レンダリング operation の実行口。
 ///
@@ -232,7 +237,7 @@ mod tests {
         // 投入したタスクが全て完了していれば待つ必要が無い。費用も危険も無い
         // 経路を既定にする。
         let drain = FakeDrain::new(0, Duration::ZERO);
-        drain_render_tasks(&drain, RENDER_DRAIN_TIMEOUT);
+        drain_render_tasks(&drain, render_drain_timeout());
         assert_eq!(drain.waited(), 0);
         assert_eq!(drain.calls(), vec!["outstanding"]);
     }
@@ -242,7 +247,7 @@ mod tests {
         // 実行中のタスクは放棄済みではない。放棄済みだけを数える実装はここで
         // 0 件と判定し、待たずにアンロードへ進む。
         let drain = FakeDrain::new(1, Duration::ZERO);
-        drain_render_tasks(&drain, RENDER_DRAIN_TIMEOUT);
+        drain_render_tasks(&drain, render_drain_timeout());
         assert_eq!(drain.waited(), 1);
     }
 

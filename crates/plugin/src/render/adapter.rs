@@ -156,7 +156,8 @@ impl<H: RenderHost> RenderAdapter for HostRenderAdapter<H> {
         }
         // 受け付けると決まった時点で、取り残された引き渡し用ファイルを掃除する。
         // 専用のスレッドは持たない。
-        self.handoff.sweep_expired(SystemTime::now());
+        self.handoff
+            .sweep_expired(SystemTime::now(), crate::settings::current().handoff_ttl());
 
         let before = self.edit_info()?;
         ensure_scene(&before, params.expected_scene_id)?;
@@ -289,7 +290,7 @@ fn ensure_renderable_frame(info: &HostEditInfo, frame: u32) -> Result<(), Render
 mod tests {
     use super::*;
     use crate::read::host::ReadHost;
-    use crate::render::handoff::{HANDOFF_TTL, HandoffToken};
+    use crate::render::handoff::HandoffToken;
     use crate::render::slot::{MAX_ABANDONED_RENDERS, deliver_frame_guarded, guard_callback};
     use crate::test_support::with_silent_panic_hook;
     use aviutl2_mcp_core::{
@@ -1081,7 +1082,7 @@ mod tests {
         let stale = HandoffToken::parse(&rendered(&fixture, 7).handoff_token).unwrap();
         fixture
             .handoff
-            .age_entries(HANDOFF_TTL + Duration::from_secs(1));
+            .age_entries(crate::settings::current().handoff_ttl() + Duration::from_secs(1));
 
         let fresh = HandoffToken::parse(&rendered(&fixture, 8).handoff_token).unwrap();
 

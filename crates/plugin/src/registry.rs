@@ -6,22 +6,13 @@
 //! 失敗の説明は上位でログへ出るため、絶対パスと完全な識別子を含めない。
 //! どの descriptor で失敗したかは [`crate::redact`] を通した形で添える。
 
-use crate::redact::{descriptor_file, instance_id as redact_instance_id};
+use crate::atomic_file::write_protected_atomic;
+use crate::redact::instance_id as redact_instance_id;
 use anyhow::{Context, Result};
 use aviutl2_mcp_core::{InstanceDescriptor, InstanceId};
-use aviutl2_mcp_win::{create_protected_directory, create_protected_file};
-use std::io::Write;
-use std::mem;
-use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::AsRawHandle;
-use std::path::{Path, PathBuf};
+use aviutl2_mcp_win::create_protected_directory;
+use std::path::PathBuf;
 use std::sync::Mutex;
-use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Storage::FileSystem::{
-    DeleteFileW, FlushFileBuffers, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    ReplaceFileW,
-};
-use windows::core::PCWSTR;
 
 /// registry への descriptor 書き込みを担当する。
 ///
@@ -92,32 +83,10 @@ impl RegistryWriter {
 
         let tmp_path = self.temp_path(&descriptor.instance_id);
         let target_path = self.target_path(&descriptor.instance_id);
-        let _temp_file = TempFileGuard(&tmp_path);
 
-        let mut file = create_protected_file(&tmp_path).with_context(|| {
+        write_protected_atomic(&tmp_path, &target_path, json.as_bytes()).with_context(|| {
             format!(
-                "一時ファイルを作成できませんでした: descriptor={}",
-                descriptor_file(&tmp_path)
-            )
-        })?;
-        file.write_all(json.as_bytes()).with_context(|| {
-            format!(
-                "一時ファイルへの書き込みに失敗しました: descriptor={}",
-                descriptor_file(&tmp_path)
-            )
-        })?;
-
-        unsafe {
-            let raw_handle = file.as_raw_handle();
-            FlushFileBuffers(HANDLE(raw_handle))
-                .ok()
-                .context("ファイルバッファの flush に失敗しました")?;
-        }
-        mem::drop(file);
-
-        atomic_replace(&tmp_path, &target_path).with_context(|| {
-            format!(
-                "descriptor の原子的置換に失敗しました: instance_id={}",
+                "descriptor の書き込みに失敗しました: instance_id={}",
                 redact_instance_id(&descriptor.instance_id)
             )
         })?;
@@ -152,55 +121,6 @@ impl RegistryWriter {
         self.registry_dir
             .join(format!("{}.json.{}.tmp", instance_id, random))
     }
-}
-
-struct TempFileGuard<'a>(&'a Path);
-
-impl<'a> Drop for TempFileGuard<'a> {
-    fn drop(&mut self) {
-        if self.0.exists() {
-            let wide = to_wide(self.0);
-            unsafe {
-                let _ = DeleteFileW(PCWSTR(wide.as_ptr()));
-            }
-        }
-    }
-}
-
-fn atomic_replace(temp_path: &Path, target_path: &Path) -> Result<()> {
-    let temp_wide = to_wide(temp_path);
-    let target_wide = to_wide(target_path);
-
-    unsafe {
-        if target_path.exists() {
-            ReplaceFileW(
-                PCWSTR(target_wide.as_ptr()),
-                PCWSTR(temp_wide.as_ptr()),
-                None,
-                windows::Win32::Storage::FileSystem::REPLACE_FILE_FLAGS(0),
-                None,
-                None,
-            )
-            .ok()
-            .context("ReplaceFileW に失敗しました")?;
-        } else {
-            MoveFileExW(
-                PCWSTR(temp_wide.as_ptr()),
-                PCWSTR(target_wide.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-            .ok()
-            .context("MoveFileExW に失敗しました")?;
-        }
-    }
-    Ok(())
-}
-
-fn to_wide(path: &Path) -> Vec<u16> {
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
 }
 
 #[cfg(test)]

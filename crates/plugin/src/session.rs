@@ -21,14 +21,12 @@ use aviutl2_mcp_core::{
     ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams,
     GetObjectParams, InstanceId, InstanceState, KnownOperation, ListAvailableEffectsParams,
     ListAvailableEffectsResult, ListLayersParams, ListLayersResult, ListObjectsParams,
-    ListObjectsResult, MoveObjectParams, Nonce, ObjectFilterError, PLUGIN_BATCH_TIMEOUT,
-    PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT,
-    PLUGIN_RENDER_ARTIFACT_TIMEOUT, PLUGIN_RENDER_WAIT_TIMEOUT, PLUGIN_WRITE_TIMEOUT, PageError,
-    PageRequest, PongProject, PongResult, ProtocolVersion, ReadOperation, RenderFrameParams,
-    RenderFrameResult, RenderInputError, RenderOperation, RequestBudgetKind, RequestEnvelope,
-    RequestId, ResponseEnvelope, ResponseKind, ResponseResult, SetEffectEnabledParams,
-    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
-    compute_client_mac, compute_server_mac, deserialize_json, take_page, verify_mac,
+    ListObjectsResult, MoveObjectParams, Nonce, ObjectFilterError, PageError, PageRequest,
+    PongProject, PongResult, ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult,
+    RenderInputError, RenderOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind,
+    ResponseResult, ScaledBudgets, SetEffectEnabledParams, SetLayerStateParams,
+    SetObjectItemParams, SetObjectNameParams, SetSelectionParams, compute_client_mac,
+    compute_server_mac, deserialize_json, take_page, verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -36,6 +34,15 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// 現在の設定が定める期限配分。
+///
+/// 予算 15 種には設定の倍率が掛かる。**倍率は全項へ同じ比で掛かり、採用の前に
+/// 不等式を検査してある**ため、ここで引く値は要求元の予算と常に噛み合う。
+/// plugin 側で範囲を判定し直さないことが、両端が同じ結論に至る根拠である。
+fn budgets() -> ScaledBudgets {
+    crate::settings::current().budgets()
+}
 
 /// handshake（M1 受信 〜 M3 検証）全体に許す上限。
 ///
@@ -45,7 +52,9 @@ use std::time::{Duration, Instant};
 ///
 /// 要求元は接続・handshake・ping をまとめた 1 つの予算で待つため、上限は
 /// その予算の内側から配分する。
-pub(crate) const HANDSHAKE_TIMEOUT: Duration = PLUGIN_HANDSHAKE_TIMEOUT;
+pub(crate) fn handshake_timeout() -> Duration {
+    budgets().plugin_handshake()
+}
 
 /// 認証済み接続で次の要求フレームを待つ上限。
 ///
@@ -70,48 +79,35 @@ const REQUEST_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 /// 受信側がバッファを読み出さない場合でも送信側が滞留しないようにする。
 /// 要求が deadline を指定した場合は、この上限と deadline の短い方を採用する。
 ///
-/// [`READ_TIMEOUT`] とは別枠で確保するため、読み取りが実行の上限を使い切っても
-/// 応答を送る持ち時間が残る。
-const WRITE_TIMEOUT: Duration = PLUGIN_WRITE_TIMEOUT;
+/// 実行の上限とは別枠で確保するため、実行が上限を使い切っても応答を送る
+/// 持ち時間が残る。
+fn write_timeout() -> Duration {
+    budgets().plugin_write()
+}
 
-/// 読み取り operation の実行に許す上限。
-///
-/// 要求が deadline を指定した場合は、この上限と deadline の短い方を採用する。
-/// 応答の送信はこの期限とは別に区切るため、読み取りがこの上限を使い切っても
-/// 送信の持ち時間は [`WRITE_TIMEOUT`] のまま残る。送信へ充てるのは要求の
-/// deadline までの残りと [`WRITE_TIMEOUT`] の短い方であり、読み取りに費やした
-/// 時間そのものは差し引かない。
-const READ_TIMEOUT: Duration = PLUGIN_READ_TIMEOUT;
+/// 読み取りの実行に許す上限。
+#[cfg(test)]
+fn read_timeout() -> Duration {
+    budgets().plugin_execution(aviutl2_mcp_core::RequestBudgetKind::Read)
+}
 
-/// 編集 operation の実行に許す上限。
-///
-/// 要求が deadline を指定した場合は、この上限と deadline の短い方を採用する。
-/// 応答の送信はこの期限とは別に区切るため、編集がこの上限を使い切っても
-/// 送信の持ち時間は [`WRITE_TIMEOUT`] のまま残る。
-///
-/// この上限が効くのは編集区間へ入る前の判定に限られる。区間へ入った後は
-/// ホストのメインスレッドがコールバックを走らせるまで戻らず、割り込む手段が
-/// 無いため、超過しても待つほかない。
-const EDIT_TIMEOUT: Duration = PLUGIN_EDIT_TIMEOUT;
+/// 編集の実行に許す上限。
+#[cfg(test)]
+fn edit_timeout() -> Duration {
+    budgets().plugin_execution(aviutl2_mcp_core::RequestBudgetKind::Edit)
+}
 
 /// 一括適用の実行に許す上限。
-///
-/// 編集と同じ役割を持ち、効くのが編集区間へ入る前の判定に限られることも
-/// 同じである。単一の編集より長いのは費用の主項が違うためで、一括適用の
-/// 事前解決相は「異なるレイヤー数 × レイヤー内オブジェクト数」に比例し、
-/// 変更を 1 つも発行しないうちに単一編集の上限へ届き得る。
-const BATCH_TIMEOUT: Duration = PLUGIN_BATCH_TIMEOUT;
+#[cfg(test)]
+fn batch_timeout() -> Duration {
+    budgets().plugin_execution(aviutl2_mcp_core::RequestBudgetKind::Batch)
+}
 
 /// レンダリングの実行に許す上限。
-///
-/// 完了通知の待ちと、成果物の符号化・書き出しの取り分を合わせた長さである。
-/// 内訳ごとの上限はレンダリングの実行口が持つため、ここではその合計だけを
-/// 要求の期限と突き合わせる。
-///
-/// 応答の送信はこの期限とは別に区切るため、レンダリングがこの上限を使い
-/// 切っても送信の持ち時間は [`WRITE_TIMEOUT`] のまま残る。
-const RENDER_TIMEOUT: Duration =
-    PLUGIN_RENDER_WAIT_TIMEOUT.saturating_add(PLUGIN_RENDER_ARTIFACT_TIMEOUT);
+#[cfg(test)]
+fn render_timeout() -> Duration {
+    budgets().plugin_execution(aviutl2_mcp_core::RequestBudgetKind::Render)
+}
 
 /// 読み取りを受け付けられない状態で案内する再試行間隔（ミリ秒）。
 ///
@@ -172,7 +168,7 @@ fn run_connection(
 /// 切断する。未認証の相手へ失敗理由を開示しないため、理由はローカルログにのみ
 /// 記録する。`auth_secret`・nonce・MAC はログに出さない。
 fn perform_handshake(stream: &PipeStream, lifecycle: &Lifecycle) -> Result<()> {
-    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let deadline = Instant::now() + handshake_timeout();
 
     let client_hello = read_frame_as::<ClientHello>(stream, deadline)
         .context("ClientHello の受信に失敗しました")?;
@@ -241,6 +237,12 @@ fn run_request_loop(
             // draining では新規要求を受け付けず、接続を閉じる。
             break;
         }
+
+        // 別のプロセスが書いた設定をここで取り込む。費用は `stat` 1 回であり、
+        // 更新時刻と大きさが同じなら再解析しない。**設定のために専用の
+        // スレッドを持たないのは、要求が来ないときに設定が古いことを誰も
+        // 観測しないためである。**
+        crate::settings::refresh();
 
         let deadline = Instant::now() + REQUEST_IDLE_TIMEOUT;
         let body = match stream
@@ -509,22 +511,25 @@ fn resolve_execution_deadline(
 /// 引くと、要求元が使う予算の区分と plugin 側の上限が別々の一覧で決まり、
 /// 片方だけを変えても気付けない。
 ///
-/// **どちらの `match` も `_` を使わない網羅 `match` で書く。** operation の族
-/// も予算の区分も、足すと腕が足りずコンパイルが落ちる。上限を決めないまま
-/// 新しい operation が既定へ落ちることがない。
+/// **`match` は `_` を使わない網羅 `match` で書く。** operation の族を足すと
+/// 腕が足りずコンパイルが落ちる。上限を決めないまま新しい operation が既定へ
+/// 落ちることがない。区分ごとの値は
+/// [`ScaledBudgets::plugin_execution`](aviutl2_mcp_core::ScaledBudgets::plugin_execution)
+/// が持ち、こちらも網羅で分岐する。
+///
+/// 編集と一括適用の上限が効くのは編集区間へ入る前の判定に限られる。区間へ
+/// 入った後はホストのメインスレッドがコールバックを走らせるまで戻らず、
+/// 割り込む手段が無いため、超過しても待つほかない。レンダリングの上限は完了
+/// 通知の待ちと成果物の書き出しの合計であり、内訳ごとの上限はレンダリングの
+/// 実行口が持つ。
 fn execution_timeout(operation: Operation) -> Duration {
     let known = match operation {
-        Operation::Ping => return WRITE_TIMEOUT,
+        Operation::Ping => return write_timeout(),
         Operation::Read(operation) => KnownOperation::Read(operation),
         Operation::Edit(operation) => KnownOperation::Edit(operation),
         Operation::Render(operation) => KnownOperation::Render(operation),
     };
-    match known.budget_kind() {
-        RequestBudgetKind::Read => READ_TIMEOUT,
-        RequestBudgetKind::Edit => EDIT_TIMEOUT,
-        RequestBudgetKind::Batch => BATCH_TIMEOUT,
-        RequestBudgetKind::Render => RENDER_TIMEOUT,
-    }
+    budgets().plugin_execution(known.budget_kind())
 }
 
 /// 実行口を持たない operation へ返すエラー。
@@ -665,12 +670,12 @@ fn decide_send(
     deadline_unix_ms: Option<u64>,
 ) -> SendDecision {
     let RequestDeadline::Within(read_deadline) = read_deadline else {
-        return SendDecision::Send(now + WRITE_TIMEOUT);
+        return SendDecision::Send(now + write_timeout());
     };
     if now >= read_deadline {
         return SendDecision::Discard;
     }
-    match resolve_request_deadline(now, now_unix_ms, WRITE_TIMEOUT, deadline_unix_ms) {
+    match resolve_request_deadline(now, now_unix_ms, write_timeout(), deadline_unix_ms) {
         RequestDeadline::Within(deadline) => SendDecision::Send(deadline),
         RequestDeadline::Exceeded => SendDecision::Discard,
     }
@@ -711,12 +716,12 @@ fn resolve_read_response(
         SendDecision::Discard => match outcome {
             Ok(_) => ReadResponse {
                 outcome: Err(timeout_after_execution()),
-                deadline: now + WRITE_TIMEOUT,
+                deadline: now + write_timeout(),
                 discarded: true,
             },
             Err(error) => ReadResponse {
                 outcome: Err(error),
-                deadline: now + WRITE_TIMEOUT,
+                deadline: now + write_timeout(),
                 discarded: false,
             },
         },
@@ -751,7 +756,7 @@ fn resolve_read_response(
 /// **これは読み取りと異なる規則である。** 読み取りは要求の残り時間と送信上限の
 /// 短い方を採る。捨ててよい結果と、捨ててはいけない結果の差がここに出る。
 fn retained_send_deadline(now: Instant) -> Instant {
-    now + WRITE_TIMEOUT
+    now + write_timeout()
 }
 
 /// レンダリングの結果を応答として送り、送れなかった成果物を実行口へ戻す。
@@ -1367,7 +1372,7 @@ fn send_error(
     error: ErrorObject,
 ) -> Result<()> {
     let response = response_envelope(request_id, instance_id, Err(error));
-    send_response(stream, &response, Instant::now() + WRITE_TIMEOUT)
+    send_response(stream, &response, Instant::now() + write_timeout())
 }
 
 /// エラーコードから既定の再試行可否を採ってエラーを組み立てる。
@@ -1722,7 +1727,7 @@ mod tests {
             &InstanceState::Ready,
             operation,
             &params,
-            RequestDeadline::Within(Instant::now() + READ_TIMEOUT),
+            RequestDeadline::Within(Instant::now() + read_timeout()),
         )
     }
 
@@ -2048,7 +2053,7 @@ mod tests {
                 &InstanceState::Starting,
                 operation,
                 &params,
-                RequestDeadline::Within(Instant::now() + READ_TIMEOUT),
+                RequestDeadline::Within(Instant::now() + read_timeout()),
             )
             .unwrap_err();
 
@@ -2098,7 +2103,7 @@ mod tests {
                     &state,
                     operation,
                     &params,
-                    RequestDeadline::Within(Instant::now() + READ_TIMEOUT),
+                    RequestDeadline::Within(Instant::now() + read_timeout()),
                 )
                 .unwrap_err();
 
@@ -2159,7 +2164,7 @@ mod tests {
                 &InstanceState::Starting,
                 operation,
                 &params,
-                RequestDeadline::Within(Instant::now() + READ_TIMEOUT),
+                RequestDeadline::Within(Instant::now() + read_timeout()),
             )
             .unwrap_err();
 
@@ -2217,24 +2222,28 @@ mod tests {
         // 読み取りが実行の上限まで走っても、応答送信の持ち時間が要求元の
         // 要求フェーズ予算の内側に残る。ここが崩れると、完了した読み取りを
         // 誰も待っていない窓へ送ることになる。
+        let read = read_timeout();
+        let edit = edit_timeout();
+        let write = write_timeout();
+        let handshake = handshake_timeout();
         assert!(
-            READ_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_READ_REQUEST_BUDGET,
-            "読み取り {READ_TIMEOUT:?} と送信 {WRITE_TIMEOUT:?} が要求フェーズ予算 {SERVER_READ_REQUEST_BUDGET:?} に収まらない"
+            read + write + TRANSPORT_HEADROOM <= SERVER_READ_REQUEST_BUDGET,
+            "読み取り {read:?} と送信 {write:?} が要求フェーズ予算 {SERVER_READ_REQUEST_BUDGET:?} に収まらない"
         );
 
         // 編集が実行の上限まで走っても、応答送信の持ち時間が編集要求フェーズ
         // 予算の内側に残る。編集は結果を破棄しないため、この余地が無いと
         // 応答を送り切れないまま接続が切れ得る。
         assert!(
-            EDIT_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_EDIT_REQUEST_BUDGET,
-            "編集 {EDIT_TIMEOUT:?} と送信 {WRITE_TIMEOUT:?} が編集要求フェーズ予算 {SERVER_EDIT_REQUEST_BUDGET:?} に収まらない"
+            edit + write + TRANSPORT_HEADROOM <= SERVER_EDIT_REQUEST_BUDGET,
+            "編集 {edit:?} と送信 {write:?} が編集要求フェーズ予算 {SERVER_EDIT_REQUEST_BUDGET:?} に収まらない"
         );
 
         // handshake が解決フェーズの予算を使い切ると、続く ping の往復に
         // 持ち時間が残らず、応答している接続が期限超過として扱われる。
         assert!(
-            HANDSHAKE_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_RESOLVE_BUDGET,
-            "handshake {HANDSHAKE_TIMEOUT:?} と ping 応答 {WRITE_TIMEOUT:?} が解決フェーズ予算 {SERVER_RESOLVE_BUDGET:?} に収まらない"
+            handshake + write + TRANSPORT_HEADROOM <= SERVER_RESOLVE_BUDGET,
+            "handshake {handshake:?} と ping 応答 {write:?} が解決フェーズ予算 {SERVER_RESOLVE_BUDGET:?} に収まらない"
         );
 
         // 接続を保持する上限（REQUEST_IDLE_TIMEOUT）はここで主張しない。掛かる
@@ -2259,16 +2268,16 @@ mod tests {
         let now = Instant::now();
         let deadline = |operation| resolve_execution_deadline(now, NOW_UNIX_MS, operation, None);
 
-        assert_eq!(execution_timeout(Operation::Ping), WRITE_TIMEOUT);
+        assert_eq!(execution_timeout(Operation::Ping), write_timeout());
         assert_eq!(
             deadline(Operation::Ping),
-            RequestDeadline::Within(now + WRITE_TIMEOUT)
+            RequestDeadline::Within(now + write_timeout())
         );
 
         for operation in ReadOperation::ALL {
             assert_eq!(
                 deadline(Operation::Read(operation)),
-                RequestDeadline::Within(now + READ_TIMEOUT),
+                RequestDeadline::Within(now + read_timeout()),
                 "{} が読み取りの上限から外れました",
                 operation.as_str()
             );
@@ -2276,9 +2285,9 @@ mod tests {
 
         for operation in EditOperation::ALL {
             let expected = if operation == EditOperation::ApplyBatch {
-                BATCH_TIMEOUT
+                batch_timeout()
             } else {
-                EDIT_TIMEOUT
+                edit_timeout()
             };
             assert_eq!(
                 deadline(Operation::Edit(operation)),
@@ -2291,7 +2300,7 @@ mod tests {
         for operation in aviutl2_mcp_core::RenderOperation::ALL {
             assert_eq!(
                 deadline(Operation::Render(operation)),
-                RequestDeadline::Within(now + RENDER_TIMEOUT),
+                RequestDeadline::Within(now + render_timeout()),
                 "{} がレンダリングの上限から外れました",
                 operation.as_str()
             );
@@ -2467,7 +2476,7 @@ mod tests {
                 RequestDeadline::Within(now + Duration::from_secs(4)),
                 None,
             ),
-            SendDecision::Send(now + WRITE_TIMEOUT)
+            SendDecision::Send(now + write_timeout())
         );
         assert_eq!(
             decide_send(
@@ -2476,7 +2485,7 @@ mod tests {
                 RequestDeadline::Within(now + Duration::from_secs(4)),
                 Some((NOW_UNIX_MS + 60_000) as u64),
             ),
-            SendDecision::Send(now + WRITE_TIMEOUT)
+            SendDecision::Send(now + write_timeout())
         );
     }
 
@@ -2517,7 +2526,7 @@ mod tests {
         let now = Instant::now();
         assert_eq!(
             decide_send(now, NOW_UNIX_MS, RequestDeadline::Exceeded, Some(0)),
-            SendDecision::Send(now + WRITE_TIMEOUT)
+            SendDecision::Send(now + write_timeout())
         );
     }
 
@@ -2541,7 +2550,7 @@ mod tests {
         assert_eq!(error.code, ErrorCode::Timeout);
         assert!(error.retryable);
         assert!(response.discarded);
-        assert_eq!(response.deadline, now + WRITE_TIMEOUT);
+        assert_eq!(response.deadline, now + write_timeout());
     }
 
     #[test]
@@ -2568,7 +2577,7 @@ mod tests {
                 !response.discarded,
                 "捨てる結果が無いのに破棄として扱われました"
             );
-            assert_eq!(response.deadline, now + WRITE_TIMEOUT);
+            assert_eq!(response.deadline, now + write_timeout());
         }
     }
 
@@ -3472,7 +3481,7 @@ mod edit_tests {
         // 期限際まで掛かった編集の送信に数ミリ秒しか残らないと、適用済みの
         // 変更が要求元からは無応答に見える。
         let now = Instant::now();
-        assert_eq!(retained_send_deadline(now), now + WRITE_TIMEOUT);
+        assert_eq!(retained_send_deadline(now), now + write_timeout());
 
         // 読み取りは要求の残り時間で縮める。捨ててよい結果と捨ててはいけない
         // 結果の差がここに出る。
@@ -3480,7 +3489,7 @@ mod edit_tests {
             resolve_request_deadline(
                 now,
                 NOW_UNIX_MS,
-                WRITE_TIMEOUT,
+                write_timeout(),
                 Some((NOW_UNIX_MS + 200) as u64)
             ),
             RequestDeadline::Within(now + Duration::from_millis(200))
@@ -3493,9 +3502,9 @@ mod edit_tests {
         // 落ちると、事前解決相だけで尽きる要求が実行前の期限超過になる。
         assert_eq!(
             execution_timeout(Operation::Edit(EditOperation::ApplyBatch)),
-            BATCH_TIMEOUT
+            batch_timeout()
         );
-        assert_ne!(BATCH_TIMEOUT, EDIT_TIMEOUT);
+        assert_ne!(batch_timeout(), edit_timeout());
 
         // 一括適用以外の編集は編集の上限のままである。
         for operation in EditOperation::ALL {
@@ -3504,7 +3513,7 @@ mod edit_tests {
             }
             assert_eq!(
                 execution_timeout(Operation::Edit(operation)),
-                EDIT_TIMEOUT,
+                edit_timeout(),
                 "{} が編集の上限から外れました",
                 operation.as_str()
             );
@@ -3513,9 +3522,11 @@ mod edit_tests {
         // 一括適用が実行の上限まで走っても、応答送信の持ち時間が一括適用の
         // 要求フェーズ予算の内側に残る。一括適用は結果を破棄しないため、
         // この余地が無いと応答を送り切れないまま接続が切れ得る。
+        let batch = batch_timeout();
+        let write = write_timeout();
         assert!(
-            BATCH_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM <= SERVER_BATCH_REQUEST_BUDGET,
-            "一括適用 {BATCH_TIMEOUT:?} と送信 {WRITE_TIMEOUT:?} が要求フェーズ予算 {SERVER_BATCH_REQUEST_BUDGET:?} に収まらない"
+            batch + write + TRANSPORT_HEADROOM <= SERVER_BATCH_REQUEST_BUDGET,
+            "一括適用 {batch:?} と送信 {write:?} が要求フェーズ予算 {SERVER_BATCH_REQUEST_BUDGET:?} に収まらない"
         );
     }
 
@@ -3561,7 +3572,7 @@ mod edit_tests {
         // 一括適用が期限を使い切っても結果は捨てない。捨てると、1 要求ぶんの
         // 変更がまとめて要求元からは無応答として観測される。
         let now = Instant::now();
-        assert_eq!(retained_send_deadline(now), now + WRITE_TIMEOUT);
+        assert_eq!(retained_send_deadline(now), now + write_timeout());
 
         // 読み取りは同じ状況で結果を捨てる。捨ててよい結果と、捨ててはいけない
         // 結果の差がここに出る。
@@ -4070,7 +4081,7 @@ mod render_tests {
         // レンダリングの結果を捨てると引き渡し用ファイルが宙に浮く。受け取る
         // 側は識別子を得ていないため掃除できない。
         let now = Instant::now();
-        assert_eq!(retained_send_deadline(now), now + WRITE_TIMEOUT);
+        assert_eq!(retained_send_deadline(now), now + write_timeout());
 
         // 読み取りは同じ状況で結果を捨てる。破棄経路をレンダリングへ
         // 再利用しないことが、この差として現れる。
@@ -4430,25 +4441,27 @@ mod render_tests {
     fn a_render_is_given_its_own_execution_budget() {
         assert_eq!(
             execution_timeout(Operation::Render(RenderOperation::RenderFrame)),
-            RENDER_TIMEOUT
+            render_timeout()
         );
         // 最も短い予算へ落ちると、投入した瞬間に予算が尽きる。
-        assert_ne!(RENDER_TIMEOUT, READ_TIMEOUT);
-        assert_ne!(RENDER_TIMEOUT, EDIT_TIMEOUT);
+        assert_ne!(render_timeout(), read_timeout());
+        assert_ne!(render_timeout(), edit_timeout());
 
         // 実行の上限は、実行口が持つ 2 つの段の取り分をどちらも覆う。片方だけを
         // 数えると、もう一方の段へ入った時点で既に上限を超えている。
-        assert!(RENDER_TIMEOUT > PLUGIN_RENDER_WAIT_TIMEOUT);
-        assert!(RENDER_TIMEOUT > PLUGIN_RENDER_ARTIFACT_TIMEOUT);
+        assert!(render_timeout() > budgets().plugin_render_wait());
+        assert!(render_timeout() > budgets().plugin_render_artifact());
 
         // レンダリングが実行の上限まで走っても、応答送信と、要求元が応答を
         // 受けてから行う成果物の引き取りの持ち時間が要求フェーズ予算の内側に
         // 残る。**引き取りの段を数え忘れると、どの層の期限にも捕まらないまま
         // 予算を超えてから成功する経路ができる。**
+        let render = render_timeout();
+        let write = write_timeout();
         assert!(
-            RENDER_TIMEOUT + WRITE_TIMEOUT + TRANSPORT_HEADROOM + SERVER_ARTIFACT_INGEST_BUDGET
+            render + write + TRANSPORT_HEADROOM + SERVER_ARTIFACT_INGEST_BUDGET
                 <= SERVER_RENDER_REQUEST_BUDGET,
-            "レンダリング {RENDER_TIMEOUT:?} と送信 {WRITE_TIMEOUT:?} と引き取り {SERVER_ARTIFACT_INGEST_BUDGET:?} が要求フェーズ予算 {SERVER_RENDER_REQUEST_BUDGET:?} に収まらない"
+            "レンダリング {render:?} と送信 {write:?} と引き取り {SERVER_ARTIFACT_INGEST_BUDGET:?} が要求フェーズ予算 {SERVER_RENDER_REQUEST_BUDGET:?} に収まらない"
         );
     }
 

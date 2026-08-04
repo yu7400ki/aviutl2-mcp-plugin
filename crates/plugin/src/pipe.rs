@@ -1930,7 +1930,7 @@ mod tests {
 
         // 期限超過で接続が破棄され待受が再確立されるので、黙ったクライアントを
         // 保持したままでも 2 本目が handshake から ping まで完走できる。
-        let budget = crate::session::HANDSHAKE_TIMEOUT + Duration::from_secs(15);
+        let budget = crate::session::handshake_timeout() + Duration::from_secs(15);
         let client = connect_client_within(&name, budget);
         let version = complete_handshake(&client, id, &secret);
         exchange_ping(&client, id, version);
