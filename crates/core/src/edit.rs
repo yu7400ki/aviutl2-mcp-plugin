@@ -775,6 +775,21 @@ pub enum EditInputError {
 }
 
 impl EditInputError {
+    /// 失敗の種別を表す機械可読な名前を返す。名前を持たない失敗では `None`。
+    ///
+    /// 名前は種別だけを表し、検証に落ちたパスも文字列も含まない。どのフィールド
+    /// で落ちたかは説明の文面が担う。
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            EditInputError::Text { source, .. } => Some(source.reason()),
+            EditInputError::Path { source, .. } => Some(source.reason()),
+            EditInputError::ItemValue(error) => error.reason(),
+            EditInputError::PositionOutOfRange { .. }
+            | EditInputError::IndexOutOfRange { .. }
+            | EditInputError::NoChangeRequested { .. } => None,
+        }
+    }
+
     /// 対応するエラーコードを返す。
     pub fn error_code(&self) -> ErrorCode {
         match self {
@@ -845,12 +860,62 @@ fn validate_path_field(field: &'static str, path: &str) -> Result<(), EditInputE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::REASON_VALUES;
     use crate::fingerprint::{EffectFingerprintInput, ObjectFingerprintInput};
     use crate::number::FiniteF64;
     use crate::validation::{MAX_ALIAS_BYTES, MAX_NAME_UTF16_UNITS, MAX_PATH_UTF16_UNITS};
     use serde_json::{Value, json};
 
     const EPOCH: &str = "78be92d1-c8c9-44c6-ae52-387548971468";
+
+    #[test]
+    fn input_failures_carry_the_reason_of_the_syntax_error_they_wrap() {
+        // 検証の実体は core にあり、失敗の種別名も core が持つ。要求元へ
+        // 届けるのは既にある名前であって、経路ごとに付け直す名前ではない。
+        for error in PathSyntaxError::ALL {
+            let mapped = EditInputError::Path {
+                field: FIELD_PATH,
+                source: *error,
+            };
+            assert_eq!(mapped.reason(), Some(error.reason()), "{error}");
+            assert!(REASON_VALUES.contains(&error.reason()));
+        }
+        for error in TextSyntaxError::ALL {
+            let mapped = EditInputError::Text {
+                field: FIELD_NAME,
+                source: *error,
+            };
+            assert_eq!(mapped.reason(), Some(error.reason()), "{error}");
+            assert!(REASON_VALUES.contains(&error.reason()));
+        }
+        assert_eq!(
+            EditInputError::ItemValue(ItemWriteError::Path(PathSyntaxError::UncPath)).reason(),
+            Some("unc_path")
+        );
+    }
+
+    #[test]
+    fn position_failures_have_no_reason() {
+        // 範囲外の位置は対象フィールド名と上限で説明が尽きる。名前を足しても
+        // 要求元が取れる行動は変わらない。
+        for error in [
+            EditInputError::PositionOutOfRange {
+                field: FIELD_LAYER,
+                value: 0,
+                max: 0,
+            },
+            EditInputError::IndexOutOfRange {
+                field: FIELD_SELECTOR_LAYER,
+                value: 0,
+                max: 0,
+            },
+            EditInputError::NoChangeRequested {
+                fields: &["enabled"],
+            },
+        ] {
+            assert_eq!(error.reason(), None, "{error}");
+        }
+    }
 
     fn sample_summary() -> ObjectSummary {
         ObjectSummary::new(

@@ -750,13 +750,37 @@ impl ApplyBatchInput {
 /// **何番目の sub-operation で落ちたかを添える。** 100 件の要求に対して位置の
 /// 分からない `invalid_argument` は、訂正の手掛かりとして足りない。要求全体の
 /// 誤り（件数）は位置を持たないため添えない。
+///
+/// **失敗の種別も単独編集と同じ名前で添える。** 同じ入力が経路によって違う
+/// 応答になれば、要求元は一括適用のためだけの分岐を持つことになる。
 fn from_batch_input_error(error: BatchInputError) -> ErrorObject {
-    let failed_index = error.failed_index();
-    let mapped = from_code(error.error_code(), error.to_string());
-    match failed_index {
-        Some(index) => mapped.with_details(serde_json::json!({ "failed_index": index })),
-        None => mapped,
+    with_input_details(
+        from_code(error.error_code(), error.to_string()),
+        error.reason(),
+        error.failed_index(),
+    )
+}
+
+/// 入力検証の失敗へ、種別の名前と落ちた位置を添える。
+///
+/// どちらも持たない失敗には `details` を付けない。載せるのは名前と 0 始まりの
+/// 整数だけであり、検証に落ちた値そのものは含まない。
+fn with_input_details(
+    mapped: ErrorObject,
+    reason: Option<&str>,
+    failed_index: Option<usize>,
+) -> ErrorObject {
+    let mut details = serde_json::Map::new();
+    if let Some(reason) = reason {
+        details.insert("reason".to_string(), serde_json::json!(reason));
     }
+    if let Some(index) = failed_index {
+        details.insert("failed_index".to_string(), serde_json::json!(index));
+    }
+    if details.is_empty() {
+        return mapped;
+    }
+    mapped.with_details(serde_json::Value::Object(details))
 }
 
 /// 前提の epoch が schema で宣言した文字数の範囲に収まることを確かめる。
@@ -767,10 +791,18 @@ fn expected_project_epoch(value: &str) -> Result<String, ErrorObject> {
 
 /// core の入力検証の失敗を tool result のエラーへ写す。
 ///
-/// 説明には検証に失敗した値そのものを含めない。過大な入力をそのまま応答へ
-/// 写すと、入力の誤りを伝える応答自体が過大になる。
+/// **どの規則で落ちたかを機械可読な形で添える。** パスの構文検証は 7 種、
+/// 文字列の構文検証は 4 種の失敗を持ち、要求元が取れる行動はそれぞれ異なる。
+/// 名前が無ければ、要求元は説明の文面を解析するほかない。
+///
+/// 説明にも補助情報にも、検証に失敗した値そのものを含めない。過大な入力を
+/// そのまま応答へ写すと、入力の誤りを伝える応答自体が過大になる。
 fn from_input_error(error: EditInputError) -> ErrorObject {
-    from_code(error.error_code(), error.to_string())
+    with_input_details(
+        from_code(error.error_code(), error.to_string()),
+        error.reason(),
+        None,
+    )
 }
 
 #[cfg(test)]

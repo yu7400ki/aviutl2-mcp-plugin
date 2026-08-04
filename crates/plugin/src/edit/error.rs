@@ -561,20 +561,15 @@ impl EditError {
 
 /// 設定項目への書き込み失敗の補助情報を書き込む。
 ///
-/// 載せるのは項目名と、書き込みを公開しない種別であることだけである。値そのもの
-/// と、種別の照合に用いた表記は要求元の内容であり、応答へ反響させない。
+/// 載せるのは項目名と失敗の種別だけである。値そのものと、種別の照合に用いた
+/// 表記は要求元の内容であり、応答へ反響させない。種別の名前はパスも文字列も
+/// 含まないため、パス値・文字列値の検証に落ちた場合もそのまま載せられる。
 fn fill_item_write_details(details: &mut Map<String, Value>, error: &ItemWriteError) {
-    match error {
-        ItemWriteError::ItemNotFound { item } => {
-            details.insert("item".to_string(), json!(truncate(item)));
-        }
-        ItemWriteError::UnsupportedItemType { .. } => {
-            details.insert("reason".to_string(), json!("item_type_not_writable"));
-        }
-        ItemWriteError::UnknownValue
-        | ItemWriteError::ValueKindMismatch { .. }
-        | ItemWriteError::Text(_)
-        | ItemWriteError::Path(_) => {}
+    if let ItemWriteError::ItemNotFound { item } = error {
+        details.insert("item".to_string(), json!(truncate(item)));
+    }
+    if let Some(reason) = error.reason() {
+        details.insert("reason".to_string(), json!(reason));
     }
 }
 
@@ -1288,19 +1283,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn item_write_failures_name_the_syntax_rule_they_broke() {
+        // 実行側で落ちた検証も、要求内容だけで落ちた検証と同じ名前を返す。
+        // ここで名前を落とすと、要求元は説明の文面を解析するほかない。
+        for source in PathSyntaxError::ALL {
+            let error = EditError::ItemWrite(ItemWriteError::Path(*source));
+            assert_eq!(error.error_code(), ErrorCode::InvalidArgument, "{error}");
+            assert_eq!(error.details()["reason"], json!(source.reason()), "{error}");
+        }
+        for source in TextSyntaxError::ALL {
+            let error = EditError::ItemWrite(ItemWriteError::Text(*source));
+            assert_eq!(error.error_code(), ErrorCode::InvalidArgument, "{error}");
+            assert_eq!(error.details()["reason"], json!(source.reason()), "{error}");
+        }
+    }
+
+    #[test]
     fn details_and_messages_do_not_expose_values_or_pointers() {
         // 設定値・alias・パスを含む失敗を作り、応答へ現れないことを確かめる。
-        let secrets = [
-            EditError::ItemWrite(ItemWriteError::Text(TextSyntaxError::TooLongBytes {
-                bytes: 9_000,
-                max: 8_192,
-            })),
-            EditError::ItemWrite(ItemWriteError::Path(PathSyntaxError::DeviceNamespace)),
-            EditError::ItemWrite(ItemWriteError::ValueKindMismatch {
+        // 検証の失敗種別は補助情報へ載るようになったため、**名前ごと**確かめる。
+        // 種別の名前はパスも設定値も含まないため、載せても方針は変わらない。
+        let secrets: Vec<EditError> = PathSyntaxError::ALL
+            .iter()
+            .map(|source| EditError::ItemWrite(ItemWriteError::Path(*source)))
+            .chain(
+                TextSyntaxError::ALL
+                    .iter()
+                    .map(|source| EditError::ItemWrite(ItemWriteError::Text(*source))),
+            )
+            .chain([EditError::ItemWrite(ItemWriteError::ValueKindMismatch {
                 item_type: EffectItemType::Integer.kind_name(),
                 value_kind: "text",
-            }),
-        ];
+            })])
+            .collect();
         for error in all_errors().into_iter().chain(secrets) {
             let text = format!("{} {}", error, error.details());
             assert!(!text.contains("0x"), "{text}");
@@ -1308,6 +1323,19 @@ pub(crate) mod tests {
             assert!(!text.to_lowercase().contains("pointer"), "{text}");
             assert!(!text.contains(r"C:\"), "{text}");
         }
+    }
+
+    #[test]
+    fn the_reason_of_a_syntax_failure_carries_no_value() {
+        // 名前は種別だけを表す。長さや位置が混ざれば、応答へ載せた時点で
+        // 検証対象の内容が漏れる。
+        let error = EditError::ItemWrite(ItemWriteError::Text(TextSyntaxError::TooLongBytes {
+            bytes: 9_000,
+            max: 8_192,
+        }));
+        let reason = error.details()["reason"].as_str().unwrap().to_string();
+        assert_eq!(reason, "too_long");
+        assert!(!reason.contains(|c: char| c.is_ascii_digit()), "{reason}");
     }
 
     #[test]

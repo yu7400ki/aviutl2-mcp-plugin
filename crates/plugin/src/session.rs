@@ -33,7 +33,7 @@ use aviutl2_mcp_core::{
 use chrono::Utc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1153,12 +1153,43 @@ fn render_error(error: RenderError) -> ErrorObject {
         .with_details(error.details())
 }
 
+/// 入力検証の失敗へ添える補助情報を組み立てる。値が 1 つも無ければ `None`。
+///
+/// 添えるのは失敗の種別名と、一括適用で落ちた sub-operation の位置だけである。
+/// どちらも要求元の内容を反響させず、設定値・alias・パスそのものを含まない。
+fn input_error_details(reason: Option<&str>, failed_index: Option<usize>) -> Option<Value> {
+    let mut details = Map::new();
+    if let Some(reason) = reason {
+        details.insert("reason".to_string(), json!(reason));
+    }
+    if let Some(index) = failed_index {
+        details.insert("failed_index".to_string(), json!(index));
+    }
+    (!details.is_empty()).then_some(Value::Object(details))
+}
+
+/// 組み立てた補助情報があればエラーへ添える。
+fn with_details(mapped: ErrorObject, details: Option<Value>) -> ErrorObject {
+    match details {
+        Some(details) => mapped.with_details(details),
+        None => mapped,
+    }
+}
+
 /// 要求内容だけで決まる検証の失敗を応答用のエラーへ変換する。
 ///
-/// 失敗の説明には対象フィールド名と規則の上限だけが現れる。設定値・alias・
-/// パスそのものは含まない。
+/// **どの規則で落ちたかを機械可読な形で添える。** パスの構文検証は 7 種、
+/// 文字列の構文検証は 4 種の失敗を持ち、要求元が取れる行動はそれぞれ異なる
+/// （ローカルへ複製する・絶対パスにする・短い場所へ移す）。名前が無ければ、
+/// 要求元は説明の文面を解析するほかない。
+///
+/// 失敗の説明にも補助情報にも、対象フィールド名と規則の上限だけが現れる。
+/// 設定値・alias・パスそのものは含まない。
 fn edit_input_error(error: EditInputError) -> ErrorObject {
-    error_object(error.error_code(), error.to_string())
+    with_details(
+        error_object(error.error_code(), error.to_string()),
+        input_error_details(error.reason(), None),
+    )
 }
 
 /// 一括適用の要求内容だけで決まる検証の失敗を応答用のエラーへ変換する。
@@ -1171,18 +1202,22 @@ fn edit_input_error(error: EditInputError) -> ErrorObject {
 /// **要求元がこの層へ届く前に同じ検証を通っているとは限らない。** 検証を備えた
 /// 口を経由しない要求でも、位置は同じ形で返る必要がある。
 ///
-/// 添えるのは 0 始まりの整数だけである。失敗の説明に現れるのは対象フィールド名
-/// と規則の上限に限られ、設定値・alias・パスそのものは含まない。
+/// **sub-operation の失敗は単独編集と同じ名前を添える。** 同じ入力が経路に
+/// よって違う応答になれば、要求元は一括適用のためだけの分岐を持つことになる。
+///
+/// 添えるのは 0 始まりの整数と失敗の種別名だけである。失敗の説明に現れるのは
+/// 対象フィールド名と規則の上限に限られ、設定値・alias・パスそのものは含まない。
 fn batch_input_error(error: BatchInputError) -> ErrorObject {
-    let failed_index = error.failed_index();
-    let mapped = error_object(error.error_code(), error.to_string());
-    match failed_index {
-        Some(index) => mapped.with_details(json!({ "failed_index": index })),
-        None => mapped,
-    }
+    with_details(
+        error_object(error.error_code(), error.to_string()),
+        input_error_details(error.reason(), error.failed_index()),
+    )
 }
 
 /// レンダリングの要求内容だけで決まる検証の失敗を応答用のエラーへ変換する。
+///
+/// この検証が見るのはフレーム番号が受け渡せる範囲に収まることだけであり、
+/// 失敗の種別は 1 つしかない。分岐する先が無いため名前は添えない。
 fn render_input_error(error: RenderInputError) -> ErrorObject {
     error_object(error.error_code(), error.to_string())
 }
@@ -2559,9 +2594,9 @@ mod tests {
 mod edit_tests {
     use super::*;
     use aviutl2_mcp_core::{
-        EditOutcome, LayerInfo, LayerStateOutcome, ObjectFingerprintInput, ObjectSummary,
-        SERVER_BATCH_REQUEST_BUDGET, SelectionField, SelectionState, SetLayerStateParams,
-        TRANSPORT_HEADROOM,
+        EditOutcome, LayerInfo, LayerStateOutcome, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS,
+        ObjectFingerprintInput, ObjectSummary, SERVER_BATCH_REQUEST_BUDGET, SelectionField,
+        SelectionState, SetLayerStateParams, TRANSPORT_HEADROOM,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -3062,20 +3097,57 @@ mod edit_tests {
         assert!(adapter.calls().is_empty());
     }
 
+    /// パスの構文検証が拒否する入力と、返るべき失敗の種別名。
+    ///
+    /// 実機で観測した入力集合をそのまま用い、長さと NUL を足して 7 種すべてを
+    /// 覆う。どれも同じ `invalid_argument` で返るため、区別できるのは名前だけ
+    /// である。
+    fn rejected_path_cases() -> Vec<(String, &'static str, &'static str)> {
+        vec![
+            (String::new(), "空文字列", "empty_path"),
+            ("C:\\movie\0.mp4".to_string(), "NUL", "contains_nul"),
+            (
+                format!("C:\\{}", "a".repeat(MAX_PATH_UTF16_UNITS)),
+                "長さ超過",
+                "path_too_long",
+            ),
+            (
+                r"\\.\pipe\aviutl2".to_string(),
+                "device namespace",
+                "device_namespace",
+            ),
+            (
+                r"\\?\C:\movie.mp4".to_string(),
+                "device namespace の別表記",
+                "device_namespace",
+            ),
+            (
+                r"C:\movie.mp4:stream".to_string(),
+                "代替データストリーム",
+                "alternate_data_stream",
+            ),
+            (r"..\movie.mp4".to_string(), "相対パス", "not_absolute"),
+            (
+                r"\\server\share\movie.mp4".to_string(),
+                "ネットワークパス",
+                "unc_path",
+            ),
+            (
+                "//server/share/movie.mp4".to_string(),
+                "区切りを揃えたネットワークパス",
+                "unc_path",
+            ),
+            (r"\\server\share".to_string(), "共有そのもの", "unc_path"),
+        ]
+    }
+
     #[test]
     fn rejected_paths_never_reach_the_edit_section() {
         // パスの構文は要求元の側でも検証されるが、そこを通らない要求もある。
         // 実行側で弾けなければ、ネットワーク越しの接続や device namespace への
         // 到達をホストへ任せることになる。
-        let cases = [
-            ("", "空文字列"),
-            (r"..\movie.mp4", "相対パス"),
-            (r"\\.\pipe\aviutl2", "device namespace"),
-            (r"C:\movie.mp4:stream", "代替データストリーム"),
-            (r"\\server\share\movie.mp4", "ネットワークパス"),
-            ("//server/share/movie.mp4", "区切りを揃えたネットワークパス"),
-        ];
-        for (path, label) in cases {
+        for (path, label, _) in rejected_path_cases() {
+            let path = path.as_str();
             for (operation, params) in [
                 (
                     EditOperation::CreateObject,
@@ -3115,6 +3187,168 @@ mod edit_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn rejected_paths_name_the_rule_they_broke() {
+        // 7 種はいずれも invalid_argument で返る。名前が無ければ、要求元は
+        // 「ローカルへ複製する」「絶対パスにする」「短い場所へ移す」のどれを
+        // 取ればよいか説明の文面からしか読めない。
+        //
+        // メディアファイルからの作成と設定値の書き込みは別の検証を通るが、
+        // 同じ入力には同じ名前が返る。
+        for (path, label, reason) in rejected_path_cases() {
+            let path = path.as_str();
+            for (operation, params) in [
+                (
+                    EditOperation::CreateObject,
+                    json!({
+                        "source": { "type": "media_file", "path": path },
+                        "placement": { "scene_id": SCENE_ID, "layer": 1, "frame": 0 },
+                        "expected_project_epoch": EPOCH,
+                    }),
+                ),
+                (
+                    EditOperation::SetObjectItem,
+                    json!({
+                        "selector": fake_effect_selector(),
+                        "item": "ファイル",
+                        "value": { "type": "file", "path": path },
+                    }),
+                ),
+            ] {
+                let error = execute_edit(
+                    &FakeEditAdapter::new(),
+                    &InstanceState::Ready,
+                    operation,
+                    &params,
+                    within(),
+                )
+                .unwrap_err();
+
+                assert_eq!(error.code, ErrorCode::InvalidArgument, "{label}");
+                assert_eq!(
+                    error.details["reason"],
+                    json!(reason),
+                    "{label} が {operation:?} で名乗った種別が想定と異なります"
+                );
+                assert!(
+                    !error.details.to_string().contains("movie"),
+                    "{label} の補助情報にパスが現れました: {}",
+                    error.details
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_texts_name_the_rule_they_broke() {
+        // 文字列の検証も同じである。空・NUL・制御文字・長さ超過はいずれも
+        // invalid_argument であり、要求元が取れる行動だけが異なる。
+        let item = |value: String| {
+            (
+                EditOperation::SetObjectItem,
+                json!({
+                    "selector": fake_effect_selector(),
+                    "item": "文字",
+                    "value": { "type": "text", "value": value },
+                }),
+            )
+        };
+        let cases = [
+            (
+                "空文字列",
+                "empty",
+                (
+                    EditOperation::SetLayerState,
+                    json!({
+                        "expected_scene_id": SCENE_ID,
+                        "layer": 1,
+                        "name": { "type": "set", "name": "" },
+                        "expected_project_epoch": EPOCH,
+                    }),
+                ),
+            ),
+            ("NUL", "contains_nul", item("あ\0い".to_string())),
+            (
+                "制御文字",
+                "contains_control",
+                item("あ\u{1}い".to_string()),
+            ),
+            (
+                "長さ超過",
+                "too_long",
+                item("あ".repeat(MAX_ITEM_VALUE_BYTES)),
+            ),
+        ];
+        for (label, reason, (operation, params)) in cases {
+            let error = execute_edit(
+                &FakeEditAdapter::new(),
+                &InstanceState::Ready,
+                operation,
+                &params,
+                within(),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{label}");
+            assert_eq!(
+                error.details["reason"],
+                json!(reason),
+                "{label} が名乗った種別が想定と異なります"
+            );
+            assert!(
+                !error.details.to_string().contains('あ'),
+                "{label} の補助情報に設定値が現れました: {}",
+                error.details
+            );
+        }
+    }
+
+    #[test]
+    fn a_batch_gives_the_same_reason_as_the_same_edit_on_its_own() {
+        // 一括適用は位置を添えるが、失敗の種別は単独編集と同じ名前で返る。
+        // 経路ごとに違う名前を返せば、要求元は一括適用のためだけの分岐を持つ。
+        for (path, label, reason) in rejected_path_cases() {
+            let operation = json!({
+                "type": "set_object_item",
+                "selector": fake_effect_selector(),
+                "item": "ファイル",
+                "value": { "type": "file", "path": path.as_str() },
+            });
+            let error = execute_edit(
+                &FakeEditAdapter::new(),
+                &InstanceState::Ready,
+                EditOperation::ApplyBatch,
+                &json!({ "operations": [operation] }),
+                within(),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{label}");
+            assert_eq!(error.details["reason"], json!(reason), "{label}");
+            assert_eq!(
+                error.details["failed_index"],
+                json!(0),
+                "{label} が落ちた sub-operation の位置を運びませんでした"
+            );
+        }
+    }
+
+    #[test]
+    fn a_batch_failure_of_the_request_as_a_whole_has_no_reason() {
+        // 件数の誤りに対応する単独編集は無い。名前を持たない失敗へ名前を
+        // 与えると、要求元は存在しない種別の分岐を書くことになる。
+        let error = execute_edit(
+            &FakeEditAdapter::new(),
+            &InstanceState::Ready,
+            EditOperation::ApplyBatch,
+            &json!({ "operations": [] }),
+            within(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.details.get("reason"), None, "{:?}", error.details);
     }
 
     #[test]
@@ -3474,7 +3708,7 @@ mod edit_tests {
     fn batch_validation_failures_only_use_allowed_details_keys() {
         // 検証の失敗が返す補助情報も、実行の失敗と同じ許可キー一覧に従う。
         // 一覧に無いキーが出れば、要求元は解釈できない値を受け取る。
-        const ALLOWED: &[&str] = &["failed_index"];
+        const ALLOWED: &[&str] = &["failed_index", "reason"];
 
         let mut other_scene = fake_summary().selector;
         other_scene.scene_id = SCENE_ID + 1;

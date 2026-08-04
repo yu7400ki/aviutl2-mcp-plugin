@@ -139,6 +139,22 @@ pub enum ItemWriteError {
 }
 
 impl ItemWriteError {
+    /// 失敗の種別を表す機械可読な名前を返す。名前を持たない失敗では `None`。
+    ///
+    /// 名前は種別だけを表し、書き込もうとした値・パス・設定項目名を含まない。
+    /// 値の形が種別と対応しないことと未対応種別の生値は、種別名と値の形を
+    /// 別のキーで返せるため名前を持たない。
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            ItemWriteError::UnsupportedItemType { .. } => Some("item_type_not_writable"),
+            ItemWriteError::Text(error) => Some(error.reason()),
+            ItemWriteError::Path(error) => Some(error.reason()),
+            ItemWriteError::UnknownValue
+            | ItemWriteError::ItemNotFound { .. }
+            | ItemWriteError::ValueKindMismatch { .. } => None,
+        }
+    }
+
     /// 対応するエラーコードを返す。
     pub fn error_code(&self) -> ErrorCode {
         match self {
@@ -314,7 +330,59 @@ fn encode_path(path: &str) -> Result<String, ItemWriteError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::REASON_VALUES;
     use crate::validation::{MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS};
+
+    #[test]
+    fn write_failures_carry_the_reason_of_the_syntax_error_they_wrap() {
+        // 検証の失敗種別をそのまま名乗る。写し替える層を挟むと、種別の
+        // 取り違えが起きても誰も落ちない。
+        for error in PathSyntaxError::ALL {
+            assert_eq!(
+                ItemWriteError::Path(*error).reason(),
+                Some(error.reason()),
+                "{error}"
+            );
+        }
+        for error in TextSyntaxError::ALL {
+            assert_eq!(
+                ItemWriteError::Text(*error).reason(),
+                Some(error.reason()),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_failures_only_name_reasons_from_the_shared_value_set() {
+        let named = [
+            ItemWriteError::UnsupportedItemType {
+                item_type: "figure".to_string(),
+            },
+            ItemWriteError::Text(TextSyntaxError::ContainsNul),
+            ItemWriteError::Path(PathSyntaxError::UncPath),
+        ];
+        for error in named {
+            let reason = error.reason().expect("名前を持つ失敗です");
+            assert!(
+                REASON_VALUES.contains(&reason),
+                "{reason} が reason の値域にありません"
+            );
+        }
+        // 種別名と値の形を別のキーで返せる失敗は名前を持たない。
+        for error in [
+            ItemWriteError::UnknownValue,
+            ItemWriteError::ItemNotFound {
+                item: "範囲".to_string(),
+            },
+            ItemWriteError::ValueKindMismatch {
+                item_type: "integer".to_string(),
+                value_kind: "text",
+            },
+        ] {
+            assert_eq!(error.reason(), None, "{error}");
+        }
+    }
 
     fn sample_values() -> Vec<ItemValue> {
         vec![

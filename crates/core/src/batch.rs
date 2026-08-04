@@ -274,6 +274,20 @@ impl BatchInputError {
         }
     }
 
+    /// 失敗の種別を表す機械可読な名前を返す。名前を持たない失敗では `None`。
+    ///
+    /// sub-operation の失敗は単独編集と同じ名前へ写す。同じ入力が経路によって
+    /// 違う名前で返ることを避ける。要求全体の誤りは単独編集に対応するものが
+    /// 無いため名前を持たない。
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            BatchInputError::Operation { source, .. } => source.reason(),
+            BatchInputError::OperationCountOutOfRange { .. }
+            | BatchInputError::SceneIdMismatch { .. }
+            | BatchInputError::DuplicateTarget { .. } => None,
+        }
+    }
+
     /// 対応するエラーコードを返す。
     ///
     /// sub-operation の失敗は単独編集と同じコードへ写す。同じ入力が経路に
@@ -334,8 +348,44 @@ mod tests {
     use crate::fingerprint::{EffectFingerprintInput, ObjectFingerprintInput};
     use crate::item_value::ItemWriteError;
     use crate::number::FiniteF64;
-    use crate::validation::{MAX_NAME_UTF16_UNITS, TextSyntaxError};
+    use crate::validation::{MAX_NAME_UTF16_UNITS, PathSyntaxError, TextSyntaxError};
     use serde_json::{Value, json};
+
+    #[test]
+    fn a_sub_operation_keeps_the_reason_of_the_edit_it_wraps() {
+        // 同じ入力が単独編集と一括適用で違う名前を得ると、要求元は一括適用の
+        // ためだけの分岐を持つことになる。
+        let source = EditInputError::ItemValue(ItemWriteError::Path(PathSyntaxError::UncPath));
+        let wrapped = BatchInputError::Operation {
+            index: 3,
+            source: source.clone(),
+        };
+        assert_eq!(wrapped.reason(), source.reason());
+        assert_eq!(wrapped.failed_index(), Some(3));
+    }
+
+    #[test]
+    fn a_failure_of_the_request_as_a_whole_has_no_reason() {
+        // 件数・シーンの不揃い・重複は単独編集に対応するものが無い。名前を
+        // 与えると、要求元は存在しない種別の分岐を書くことになる。
+        for error in [
+            BatchInputError::OperationCountOutOfRange {
+                count: 0,
+                max: MAX_BATCH_OPERATIONS,
+            },
+            BatchInputError::SceneIdMismatch {
+                index: 1,
+                expected: 0,
+                actual: 1,
+            },
+            BatchInputError::DuplicateTarget {
+                index: 1,
+                first_index: 0,
+            },
+        ] {
+            assert_eq!(error.reason(), None, "{error}");
+        }
+    }
 
     const EPOCH: &str = "78be92d1-c8c9-44c6-ae52-387548971468";
 
