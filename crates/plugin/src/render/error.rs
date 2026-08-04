@@ -345,6 +345,7 @@ pub(crate) mod tests {
             RenderError::Read(ReadError::Sdk {
                 operation: "get_edit_info",
             }),
+            RenderError::Read(ReadError::EditInfoOutOfRange),
             RenderError::Read(ReadError::Panicked),
             RenderError::SceneMismatch {
                 expected: 0,
@@ -470,6 +471,8 @@ pub(crate) mod tests {
             vec![
                 ErrorCode::HostBusy,
                 ErrorCode::EditBlocked,
+                ErrorCode::SdkError,
+                // 編集情報の値が範囲外。呼び出しの失敗と同じコードで返る。
                 ErrorCode::SdkError,
                 ErrorCode::InternalError,
                 ErrorCode::PreconditionFailed,

@@ -267,17 +267,13 @@ fn ensure_renderable_frame(info: &HostEditInfo, frame: u32) -> Result<(), Render
         || info.height as usize > representable
         || info.frame_max > representable
     {
-        return Err(RenderError::Sdk {
-            operation: "get_edit_info",
-        });
+        return Err(ReadError::EditInfoOutOfRange.into());
     }
     if frame as usize > info.frame_max {
         return Err(RenderError::FrameOutOfRange);
     }
     if info.width == 0 || info.height == 0 {
-        return Err(RenderError::Sdk {
-            operation: "get_edit_info",
-        });
+        return Err(ReadError::EditInfoOutOfRange.into());
     }
     let frame_bytes = (info.width as u64)
         .checked_mul(info.height as u64)
@@ -395,6 +391,10 @@ mod tests {
         /// 2 回目以降の編集情報。完了後のシーン切り替えを再現する。
         later_info: Option<HostEditInfo>,
         edit_info_calls: AtomicUsize,
+        /// 編集情報の取得そのものを失敗させる。
+        ///
+        /// 返ってきた値が範囲外である場合と作り分けるために持つ。
+        edit_info_fails: bool,
         issue_fails: bool,
         panic_at: Option<PanicPoint>,
         completion: Completion,
@@ -415,6 +415,7 @@ mod tests {
                 info: fake_edit_info(),
                 later_info: None,
                 edit_info_calls: AtomicUsize::new(0),
+                edit_info_fails: false,
                 issue_fails: false,
                 panic_at: None,
                 completion: Completion::Immediate,
@@ -492,6 +493,11 @@ mod tests {
                 Some(PanicPoint::EditInfo),
                 "編集情報の取得で panic させます"
             );
+            if self.edit_info_fails {
+                return Err(RenderError::Sdk {
+                    operation: "get_edit_info",
+                });
+            }
             let calls = self.edit_info_calls.fetch_add(1, Ordering::Relaxed);
             Ok(if calls == 0 {
                 self.info.clone()
@@ -892,12 +898,46 @@ mod tests {
             let (code, details) = failed(&fixture, 7);
             assert_eq!(code, ErrorCode::SdkError);
             assert_eq!(details["sdk_operation"], json!("get_edit_info"));
+            assert_eq!(details["reason"], json!("edit_info_out_of_range"));
             assert_eq!(
                 fixture.host.issued(),
                 0,
                 "信頼できない編集情報のまま投入しました"
             );
         }
+    }
+
+    #[test]
+    fn a_failed_edit_info_call_is_told_apart_from_an_out_of_range_value() {
+        // どちらも同じ関数を名指しする sdk_error として返る。名前が付かなければ
+        // 要求元も運用者も、呼び出しが失敗したのかホストが壊れた値を返したのかを
+        // 切り分けられない。
+        let call_failed = fixture(FakeRenderHost {
+            edit_info_fails: true,
+            ..FakeRenderHost::new()
+        });
+        let (call_code, call_details) = failed(&call_failed, 7);
+        assert_eq!(call_code, ErrorCode::SdkError);
+        assert_eq!(call_details["sdk_operation"], json!("get_edit_info"));
+        assert!(
+            call_details.get("reason").is_none(),
+            "呼び出しの失敗に名前が付きました: {call_details}"
+        );
+
+        let out_of_range = fixture(FakeRenderHost {
+            info: HostEditInfo {
+                width: i32::MAX as u32 + 1,
+                ..fake_edit_info()
+            },
+            ..FakeRenderHost::new()
+        });
+        let (value_code, value_details) = failed(&out_of_range, 7);
+        assert_eq!(value_code, call_code);
+        assert_eq!(
+            value_details["sdk_operation"],
+            call_details["sdk_operation"]
+        );
+        assert_eq!(value_details["reason"], json!("edit_info_out_of_range"));
     }
 
     #[test]

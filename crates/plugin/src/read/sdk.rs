@@ -468,21 +468,20 @@ fn assign_effect_indices(names: &[String]) -> Vec<usize> {
 /// 読み取りと編集区間の入口はどちらもこの 1 か所を通る。同じ規約を 2 通りに
 /// 実装すると、同じホストの同じ値を層ごとに別の値として読むことになる。
 ///
-/// 負値を `as usize` で畳んだ巨大値は 0 へ丸め、u32 へ写せない大きさは SDK の
-/// 失敗として扱う。畳まれた値をそのまま返すと、位置や範囲として使ったときに
-/// 実在しない座標を指す。
+/// 負値を `as usize` で畳んだ巨大値は 0 へ丸め、u32 へ写せない大きさは
+/// [`ReadError::EditInfoOutOfRange`] として扱う。畳まれた値をそのまま返すと、
+/// 位置や範囲として使ったときに実在しない座標を指す。
 pub(crate) fn host_edit_info(info: &aviutl2::generic::EditInfo) -> Result<HostEditInfo, ReadError> {
-    let size = |value: usize| u32::try_from(value).map_err(|_| sdk("get_edit_info"));
     Ok(HostEditInfo {
         scene_id: info.scene_id,
-        width: size(info.width)?,
-        height: size(info.height)?,
+        width: edit_info_size(info.width)?,
+        height: edit_info_size(info.height)?,
         // 有理数へ畳まれた後の分子・分母であり、ホストが保持する生の
         // rate/scale は約分によって失われている。分母は有理数を構築できた
         // 時点で 0 にならない。
         fps_rate: *info.fps.numer(),
         fps_scale: *info.fps.denom(),
-        sample_rate: size(info.sample_rate)?,
+        sample_rate: edit_info_size(info.sample_rate)?,
         cursor_frame: non_negative(info.frame),
         cursor_layer: non_negative(info.layer),
         frame_max: non_negative(info.frame_max),
@@ -494,6 +493,14 @@ pub(crate) fn host_edit_info(info: &aviutl2::generic::EditInfo) -> Result<HostEd
         select_range_start: info.select_range_start.map(non_negative),
         select_range_end: info.select_range_end.map(non_negative),
     })
+}
+
+/// 編集情報が持つ大きさを、受け渡せる幅へ写す。
+///
+/// 写せないことは呼び出しの失敗ではない。取得そのものは成功しており、
+/// 返ってきた値が範囲外だったのだから、両者は別の失敗として名乗る。
+fn edit_info_size(value: usize) -> Result<u32, ReadError> {
+    u32::try_from(value).map_err(|_| ReadError::EditInfoOutOfRange)
 }
 
 /// ラッパーが負値を `as usize` で畳んだ値を 0 へ丸める。
@@ -810,6 +817,18 @@ mod tests {
         assert_eq!(non_negative(i32::MAX as usize), i32::MAX as usize);
         assert_eq!(non_negative(0), 0);
         assert_eq!(non_negative(1080), 1080);
+    }
+
+    #[test]
+    fn an_unrepresentable_size_is_reported_as_an_out_of_range_value() {
+        // 写せない大きさは呼び出しの失敗ではない。取得は成功しており、
+        // 応答は同じ関数を名指ししたまま失敗の種別だけを分ける。
+        assert_eq!(edit_info_size(1920).unwrap(), 1920);
+        let error = edit_info_size(u32::MAX as usize + 1).unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::SdkError);
+        let details = error.details();
+        assert_eq!(details["sdk_operation"], "get_edit_info");
+        assert_eq!(details["reason"], "edit_info_out_of_range");
     }
 
     #[test]

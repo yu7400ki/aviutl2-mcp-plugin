@@ -14,6 +14,15 @@ const NOT_READY_RETRY_AFTER_MS: u64 = 500;
 /// 再生や出力は利用者の操作が終わるまで続くため、準備待ちより長く採る。
 const EDIT_BLOCKED_RETRY_AFTER_MS: u64 = 2_000;
 
+/// 編集情報を取得する SDK 関数の名前。
+///
+/// 呼び出しの失敗と値の範囲外は同じ関数から来る。同じ名前を 2 か所に書くと、
+/// 片方だけを変えたときに両者が別の関数から来たように見える。
+pub(crate) const EDIT_INFO_OPERATION: &str = "get_edit_info";
+
+/// 編集情報の値が受け渡せる範囲を超えていたことを表す名前。
+pub(crate) const REASON_EDIT_INFO_OUT_OF_RANGE: &str = "edit_info_out_of_range";
+
 /// 読み取りの失敗。
 ///
 /// 補助情報には SDK のハンドル・生ポインタ・秘匿値を含めない。含めるのは
@@ -75,6 +84,13 @@ pub enum ReadError {
         /// 失敗した SDK 関数の名前。
         operation: &'static str,
     },
+    /// 編集情報は取得できたが、返ってきた値が受け渡せる範囲に収まらない。
+    ///
+    /// 呼び出しは成功しており、失敗したのは値の検証である。[`ReadError::Sdk`]
+    /// と同じコードで返るのは、どちらもホスト側の異常であって要求元に打つ手が
+    /// 無いためである。区別は補助情報の `reason` が担う。
+    #[error("編集情報の値が受け渡せる範囲を超えています")]
+    EditInfoOutOfRange,
     /// 参照区間の処理で panic を捕捉した。
     #[error("読み取り処理で panic を捕捉しました")]
     Panicked,
@@ -91,7 +107,7 @@ impl ReadError {
             | ReadError::FingerprintMismatch { .. } => ErrorCode::PreconditionFailed,
             ReadError::ObjectNotFound { .. } => ErrorCode::NotFound,
             ReadError::AmbiguousObject { .. } => ErrorCode::AmbiguousSelector,
-            ReadError::Sdk { .. } => ErrorCode::SdkError,
+            ReadError::Sdk { .. } | ReadError::EditInfoOutOfRange => ErrorCode::SdkError,
             ReadError::Panicked => ErrorCode::InternalError,
         }
     }
@@ -135,6 +151,10 @@ impl ReadError {
                 json!({ "candidate_count": candidate_count })
             }
             ReadError::Sdk { operation } => json!({ "sdk_operation": operation }),
+            ReadError::EditInfoOutOfRange => json!({
+                "sdk_operation": EDIT_INFO_OPERATION,
+                "reason": REASON_EDIT_INFO_OUT_OF_RANGE,
+            }),
             ReadError::Panicked => json!({}),
         }
     }
@@ -170,8 +190,82 @@ pub(crate) mod tests {
             ReadError::Sdk {
                 operation: "get_object_alias",
             },
+            ReadError::EditInfoOutOfRange,
             ReadError::Panicked,
         ]
+    }
+
+    /// variant を表す名前を返す。
+    ///
+    /// 網羅 match で書く。variant を足すとここがコンパイルエラーになり、
+    /// すぐ下の一覧と [`all_errors`] へ足す必要があることが分かる。
+    fn variant_name(error: &ReadError) -> &'static str {
+        match error {
+            ReadError::NotReady => "NotReady",
+            ReadError::EditBlocked { .. } => "EditBlocked",
+            ReadError::SceneMismatch { .. } => "SceneMismatch",
+            ReadError::EpochMismatch => "EpochMismatch",
+            ReadError::FingerprintMismatch { .. } => "FingerprintMismatch",
+            ReadError::ObjectNotFound { .. } => "ObjectNotFound",
+            ReadError::AmbiguousObject { .. } => "AmbiguousObject",
+            ReadError::Sdk { .. } => "Sdk",
+            ReadError::EditInfoOutOfRange => "EditInfoOutOfRange",
+            ReadError::Panicked => "Panicked",
+        }
+    }
+
+    #[test]
+    fn all_errors_covers_every_variant() {
+        const VARIANTS: &[&str] = &[
+            "NotReady",
+            "EditBlocked",
+            "SceneMismatch",
+            "EpochMismatch",
+            "FingerprintMismatch",
+            "ObjectNotFound",
+            "AmbiguousObject",
+            "Sdk",
+            "EditInfoOutOfRange",
+            "Panicked",
+        ];
+        let covered: Vec<&str> = all_errors().iter().map(variant_name).collect();
+        for variant in VARIANTS {
+            assert!(
+                covered.contains(variant),
+                "{variant} の代表値が一覧にありません"
+            );
+        }
+        for variant in &covered {
+            assert!(
+                VARIANTS.contains(variant),
+                "{variant} が網羅すべき variant の一覧にありません"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_call_and_an_out_of_range_value_are_told_apart() {
+        // どちらも同じ関数から来る同じコードの失敗である。区別が付かないと、
+        // 要求元も運用者も「ホストが壊れているのか、呼び出しに失敗したのか」
+        // を切り分けられない。
+        let called = ReadError::Sdk {
+            operation: EDIT_INFO_OPERATION,
+        };
+        let out_of_range = ReadError::EditInfoOutOfRange;
+
+        assert_eq!(called.error_code(), out_of_range.error_code());
+        assert_eq!(
+            called.details()["sdk_operation"],
+            out_of_range.details()["sdk_operation"]
+        );
+        assert!(
+            called.details().get("reason").is_none(),
+            "呼び出しの失敗に名前が付きました"
+        );
+        assert_eq!(
+            out_of_range.details()["reason"],
+            json!(REASON_EDIT_INFO_OUT_OF_RANGE)
+        );
     }
 
     #[test]
@@ -188,6 +282,9 @@ pub(crate) mod tests {
                 ErrorCode::PreconditionFailed,
                 ErrorCode::NotFound,
                 ErrorCode::AmbiguousSelector,
+                ErrorCode::SdkError,
+                // 取得は成功したが値が範囲外だった。要求元に打つ手が無い点は
+                // 呼び出しの失敗と同じであり、コードは分けない。
                 ErrorCode::SdkError,
                 ErrorCode::InternalError,
             ]
@@ -242,6 +339,7 @@ pub(crate) mod tests {
             "current_scene_id",
             "candidate_count",
             "sdk_operation",
+            "reason",
             // 読み直した対象の概要と、それが内包するセレクター。
             "current_object",
             "layer",

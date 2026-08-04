@@ -565,6 +565,18 @@ mod tests {
     /// 配下 effect の一覧を引いたことを表す記録。
     const EFFECT_LIST: &str = "get_effect_list";
 
+    /// 編集情報の取得が失敗するしかた。
+    ///
+    /// どちらも同じ SDK 関数から来る同じコードの失敗であり、フェイクの境界で
+    /// 作り分けなければ区別が付いているかを確かめられない。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum EditInfoFailure {
+        /// 呼び出しそのものが失敗した。
+        CallFailed,
+        /// 取得は成功したが、返ってきた値が受け渡せる範囲を超えている。
+        OutOfRange,
+    }
+
     /// テスト用のオブジェクト。
     ///
     /// 同一性の材料と配下 effect を別に保つ。読み取り経路がそれぞれを別の呼び
@@ -595,6 +607,8 @@ mod tests {
         later_state: Option<EditState>,
         edit_state_calls: AtomicUsize,
         info: HostEditInfo,
+        /// 編集情報の取得を失敗させるしかた。
+        edit_info_failure: Option<EditInfoFailure>,
         scene_name: Option<String>,
         grid_bpm: Vec<FiniteF64>,
         layers: Vec<FakeLayer>,
@@ -634,6 +648,7 @@ mod tests {
                 later_state: None,
                 edit_state_calls: AtomicUsize::new(0),
                 info: fake_edit_info(),
+                edit_info_failure: None,
                 scene_name: Some("Scene 1".to_string()),
                 grid_bpm: vec![FiniteF64::try_new(120.0).unwrap()],
                 layers: fake_layers(),
@@ -693,7 +708,13 @@ mod tests {
                 Some(PanicPoint::EditInfo),
                 "参照区間の外で panic させます"
             );
-            Ok(self.info.clone())
+            match self.edit_info_failure {
+                Some(EditInfoFailure::CallFailed) => Err(ReadError::Sdk {
+                    operation: "get_edit_info",
+                }),
+                Some(EditInfoFailure::OutOfRange) => Err(ReadError::EditInfoOutOfRange),
+                None => Ok(self.info.clone()),
+            }
         }
 
         fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError> {
@@ -1126,6 +1147,37 @@ mod tests {
         let error = adapter.get_edit_info().unwrap_err();
         assert_eq!(error.details()["edit_state"], "save");
         assert!(error.retryable());
+    }
+
+    #[test]
+    fn a_failed_edit_info_call_is_told_apart_from_an_out_of_range_value() {
+        // 読み取り経路にも同じ切り分けが要る。片方の経路だけを直すと、同じ
+        // 壊れ方が呼び出し口によって別の応答になる。
+        let call_failed = adapter_with(|_| FakeHost {
+            edit_info_failure: Some(EditInfoFailure::CallFailed),
+            ..FakeHost::new()
+        });
+        let call_error = call_failed.get_edit_info().unwrap_err();
+        let call_details = call_error.details();
+        assert_eq!(call_error.error_code(), ErrorCode::SdkError);
+        assert_eq!(call_details["sdk_operation"], "get_edit_info");
+        assert!(
+            call_details.get("reason").is_none(),
+            "呼び出しの失敗に名前が付きました: {call_details}"
+        );
+
+        let out_of_range = adapter_with(|_| FakeHost {
+            edit_info_failure: Some(EditInfoFailure::OutOfRange),
+            ..FakeHost::new()
+        });
+        let value_error = out_of_range.get_edit_info().unwrap_err();
+        let value_details = value_error.details();
+        assert_eq!(value_error.error_code(), call_error.error_code());
+        assert_eq!(
+            value_details["sdk_operation"],
+            call_details["sdk_operation"]
+        );
+        assert_eq!(value_details["reason"], "edit_info_out_of_range");
     }
 
     #[test]
