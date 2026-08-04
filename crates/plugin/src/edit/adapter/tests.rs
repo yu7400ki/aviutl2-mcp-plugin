@@ -3669,5 +3669,36 @@ fn section_changes_do_not_read_the_effect_list() {
     );
 }
 
+#[test]
+fn the_fake_names_the_call_that_could_not_produce_a_value() {
+    // `sdk_operation` は失敗の出所を伝える値である。種別が違えば呼ばれる関数も
+    // 違うのだから、名乗る関数も違う。フェイクが片方の名前で固定していると、
+    // 出所の取り違えに気付ける経路がどこにも無くなる。
+    use crate::read::host::{ReadHost, SceneReader};
+
+    let harness = Harness::new();
+    let object = harness.summary(1, 100);
+    let host = FakeReadHost(harness.host.clone());
+
+    let named = |missing_as_check: bool| {
+        host.enter_read_section(move |scene: &dyn SceneReader| {
+            let error = if missing_as_check {
+                scene
+                    .effect_check_values(object.layer, object.frame_start, 0, &["無い項目"], &[0])
+                    .expect_err("存在しない項目で値が返りました")
+            } else {
+                scene
+                    .effect_track_values(object.layer, object.frame_start, 0, &["無い項目"], &[0.0])
+                    .expect_err("存在しない項目で値が返りました")
+            };
+            error.details()["sdk_operation"].clone()
+        })
+        .expect("参照区間へ入れます")
+    };
+
+    assert_eq!(named(false), json!("get_effect_track_value"));
+    assert_eq!(named(true), json!("get_effect_check_value"));
+}
+
 /// 一括適用の統合テスト。
 mod apply_batch;
