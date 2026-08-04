@@ -63,7 +63,8 @@
 //! 本ターゲットは MCP server ではないため、対話用の出力は stdout へ書く。
 
 use aviutl2_mcp_core::{
-    EditInfo, ErrorCode, ErrorObject, OPERATION_RENDER_FRAME, RenderFormat, RenderFrameParams,
+    ARTIFACT_EXTENSION, EditInfo, ErrorCode, ErrorObject, OPERATION_RENDER_FRAME, RenderFormat,
+    RenderFrameParams, format_sha256,
 };
 use aviutl2_mcp_server::api::ListInstancesResponse;
 use aviutl2_mcp_server::artifact::{
@@ -968,15 +969,7 @@ fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
 /// 応答は `"sha256:" と 64 桁の小文字十六進` で名乗る。同じ書式へ揃えてから
 /// 比べる。
 fn sha256_of(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let digest = Sha256::digest(bytes);
-    let mut value = String::with_capacity("sha256:".len() + digest.len() * 2);
-    value.push_str("sha256:");
-    for byte in digest {
-        value.push(DIGITS[usize::from(byte >> 4)] as char);
-        value.push(DIGITS[usize::from(byte & 0x0f)] as char);
-    }
-    value
+    format_sha256(&Sha256::digest(bytes))
 }
 
 /// ディレクトリ以下にある PNG ファイルの数を数える。
@@ -996,7 +989,7 @@ fn count_png_files(dir: &Path) -> usize {
         let path = entry.path();
         if path.is_dir() {
             count += count_png_files(&path);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("png") {
+        } else if path.extension().and_then(|e| e.to_str()) == Some(ARTIFACT_EXTENSION) {
             count += 1;
         }
     }
