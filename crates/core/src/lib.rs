@@ -40,6 +40,7 @@ pub mod operation;
 pub mod page;
 pub mod render;
 pub mod selector;
+pub mod settings;
 pub mod state;
 pub mod validation;
 pub mod wire_format;
@@ -52,11 +53,12 @@ pub use batch::{
     MAX_BATCH_OPERATIONS,
 };
 pub use budget::{
-    PLUGIN_BATCH_TIMEOUT, PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_READ_TIMEOUT,
-    PLUGIN_RENDER_ARTIFACT_TIMEOUT, PLUGIN_RENDER_WAIT_TIMEOUT, PLUGIN_WRITE_TIMEOUT,
-    RequestBudgetKind, SERVER_ARTIFACT_INGEST_BUDGET, SERVER_BATCH_REQUEST_BUDGET,
-    SERVER_CONNECT_WAIT_CAP, SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET,
-    SERVER_RENDER_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, TRANSPORT_HEADROOM, request_budget_kind,
+    BudgetInequality, PLUGIN_BATCH_TIMEOUT, PLUGIN_EDIT_TIMEOUT, PLUGIN_HANDSHAKE_TIMEOUT,
+    PLUGIN_READ_TIMEOUT, PLUGIN_RENDER_ARTIFACT_TIMEOUT, PLUGIN_RENDER_WAIT_TIMEOUT,
+    PLUGIN_WRITE_TIMEOUT, RequestBudgetKind, SERVER_ARTIFACT_INGEST_BUDGET,
+    SERVER_BATCH_REQUEST_BUDGET, SERVER_CONNECT_WAIT_CAP, SERVER_EDIT_REQUEST_BUDGET,
+    SERVER_READ_REQUEST_BUDGET, SERVER_RENDER_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, ScaledBudgets,
+    TRANSPORT_HEADROOM, request_budget_kind,
 };
 pub use descriptor::{
     AuthSecret, DescriptorProject, InstanceDescriptor, InstanceInfo, InstanceProject,
@@ -119,6 +121,11 @@ pub use render::{
     RenderInputError,
 };
 pub use selector::{EffectSelector, ObjectSelector};
+pub use settings::{
+    SETTINGS_FILE_ENV, SETTINGS_FILE_NAME, SETTINGS_READ_ATTEMPTS, SETTINGS_SCHEMA_VERSION,
+    Settings, SettingsChange, SettingsDocument, SettingsIssue, SettingsIssueReason,
+    SettingsParseError, SettingsReadError, SettingsReader, SettingsRefresh, settings_path,
+};
 pub use state::InstanceState;
 pub use validation::{
     MAX_ALIAS_BYTES, MAX_ITEM_VALUE_BYTES, MAX_NAME_UTF16_UNITS, MAX_PATH_UTF16_UNITS,

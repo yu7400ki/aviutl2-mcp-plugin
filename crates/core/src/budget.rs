@@ -154,6 +154,256 @@ pub fn request_budget_kind(operation: &str) -> RequestBudgetKind {
     }
 }
 
+/// 予算一式が満たすべき不等式。
+///
+/// いずれも「plugin の各段の合計と余白が、server のフェーズ予算に収まる」形を
+/// している。倍率を掛けた予算一式は、採用の前にこの全てを満たすことを
+/// [`ScaledBudgets::first_violation`] で確かめる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetInequality {
+    /// 読み取りの各段が read の要求フェーズ予算に収まる。
+    ReadRequest,
+    /// 編集の各段が編集の要求フェーズ予算に収まる。
+    EditRequest,
+    /// 一括適用の各段が一括適用の要求フェーズ予算に収まる。
+    BatchRequest,
+    /// 描画の各段と成果物の引き取りが render の要求フェーズ予算に収まる。
+    RenderRequest,
+    /// 接続待ち・handshake・ping 応答が解決フェーズ予算に収まる。
+    Resolve,
+    /// 読み取りが上限まで走った後にも応答送信の持ち時間が残る。
+    WriteAfterRead,
+    /// 編集が上限まで走った後にも応答送信の持ち時間が残る。
+    WriteAfterEdit,
+}
+
+impl BudgetInequality {
+    /// 全ての不等式。
+    pub const ALL: [Self; 7] = [
+        Self::ReadRequest,
+        Self::EditRequest,
+        Self::BatchRequest,
+        Self::RenderRequest,
+        Self::Resolve,
+        Self::WriteAfterRead,
+        Self::WriteAfterEdit,
+    ];
+
+    /// 記録に用いる名前。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadRequest => "read_request",
+            Self::EditRequest => "edit_request",
+            Self::BatchRequest => "batch_request",
+            Self::RenderRequest => "render_request",
+            Self::Resolve => "resolve",
+            Self::WriteAfterRead => "write_after_read",
+            Self::WriteAfterEdit => "write_after_edit",
+        }
+    }
+}
+
+impl std::fmt::Display for BudgetInequality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 整数百分率を掛けた期限配分の一式。
+///
+/// 予算は 15 個あり、いずれも不等式で結ばれている。個別に動かせる形にすると
+/// どの不等式も破れるため、可変にするのは全体へ掛かる 1 つの倍率だけとする。
+///
+/// **倍率が線形性を保つことは示せるが、丸めは保たない。** 整数百分率を掛けて
+/// ミリ秒へ落とす際、左辺の各項の切り捨てと右辺の切り捨ては独立に起きる。
+/// したがって [`ScaledBudgets::new`] は組み上げた一式が不等式を満たすことを
+/// 実際に確かめ、満たさない倍率を採用させない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScaledBudgets {
+    percent: u32,
+    server_resolve: Duration,
+    server_read_request: Duration,
+    server_edit_request: Duration,
+    server_batch_request: Duration,
+    server_render_request: Duration,
+    server_artifact_ingest: Duration,
+    server_connect_wait_cap: Duration,
+    plugin_handshake: Duration,
+    plugin_read: Duration,
+    plugin_edit: Duration,
+    plugin_batch: Duration,
+    plugin_render_wait: Duration,
+    plugin_render_artifact: Duration,
+    plugin_write: Duration,
+    transport_headroom: Duration,
+}
+
+/// 期限へ整数百分率を掛ける。
+///
+/// ミリ秒へ切り捨てる。予算はいずれも秒の桁であり、最小の倍率でもミリ秒の桁で
+/// 意味を保つ。
+fn scale(base: Duration, percent: u32) -> Duration {
+    let millis = base.as_millis() as u64;
+    Duration::from_millis(millis.saturating_mul(u64::from(percent)) / 100)
+}
+
+impl ScaledBudgets {
+    /// 倍率を掛けた予算一式を組み立て、不等式を検査する。
+    ///
+    /// 破れている不等式があればそれを返し、一式を渡さない。**採用の可否を
+    /// ここで閉じることで、片方の側だけが倍率を採る形を作れないようにする。**
+    pub fn checked(percent: u32) -> Result<Self, BudgetInequality> {
+        let budgets = Self::build(percent);
+        match budgets.first_violation() {
+            Some(inequality) => Err(inequality),
+            None => Ok(budgets),
+        }
+    }
+
+    /// 検査を経ずに一式を組み立てる。
+    fn build(percent: u32) -> Self {
+        Self {
+            percent,
+            server_resolve: scale(SERVER_RESOLVE_BUDGET, percent),
+            server_read_request: scale(SERVER_READ_REQUEST_BUDGET, percent),
+            server_edit_request: scale(SERVER_EDIT_REQUEST_BUDGET, percent),
+            server_batch_request: scale(SERVER_BATCH_REQUEST_BUDGET, percent),
+            server_render_request: scale(SERVER_RENDER_REQUEST_BUDGET, percent),
+            server_artifact_ingest: scale(SERVER_ARTIFACT_INGEST_BUDGET, percent),
+            server_connect_wait_cap: scale(SERVER_CONNECT_WAIT_CAP, percent),
+            plugin_handshake: scale(PLUGIN_HANDSHAKE_TIMEOUT, percent),
+            plugin_read: scale(PLUGIN_READ_TIMEOUT, percent),
+            plugin_edit: scale(PLUGIN_EDIT_TIMEOUT, percent),
+            plugin_batch: scale(PLUGIN_BATCH_TIMEOUT, percent),
+            plugin_render_wait: scale(PLUGIN_RENDER_WAIT_TIMEOUT, percent),
+            plugin_render_artifact: scale(PLUGIN_RENDER_ARTIFACT_TIMEOUT, percent),
+            plugin_write: scale(PLUGIN_WRITE_TIMEOUT, percent),
+            transport_headroom: scale(TRANSPORT_HEADROOM, percent),
+        }
+    }
+
+    /// 倍率を掛けない予算一式（100%）。
+    pub fn unscaled() -> Self {
+        Self::checked(100).expect("既定の予算は不等式を満たす")
+    }
+
+    /// 適用した整数百分率。
+    pub fn percent(self) -> u32 {
+        self.percent
+    }
+
+    /// 破れている不等式のうち最初のもの。全て成り立つなら `None`。
+    pub fn first_violation(self) -> Option<BudgetInequality> {
+        BudgetInequality::ALL
+            .into_iter()
+            .find(|inequality| !self.holds(*inequality))
+    }
+
+    /// 指定した不等式が成り立つか。
+    pub fn holds(self, inequality: BudgetInequality) -> bool {
+        match inequality {
+            BudgetInequality::ReadRequest => {
+                self.plugin_read + self.plugin_write + self.transport_headroom
+                    <= self.server_read_request
+            }
+            BudgetInequality::EditRequest => {
+                self.plugin_edit + self.plugin_write + self.transport_headroom
+                    <= self.server_edit_request
+            }
+            BudgetInequality::BatchRequest => {
+                self.plugin_batch + self.plugin_write + self.transport_headroom
+                    <= self.server_batch_request
+            }
+            BudgetInequality::RenderRequest => {
+                self.plugin_render_wait
+                    + self.plugin_render_artifact
+                    + self.plugin_write
+                    + self.server_artifact_ingest
+                    + self.transport_headroom
+                    <= self.server_render_request
+            }
+            BudgetInequality::Resolve => {
+                self.server_connect_wait_cap
+                    + self.plugin_handshake
+                    + self.plugin_write
+                    + self.transport_headroom
+                    <= self.server_resolve
+            }
+            BudgetInequality::WriteAfterRead => {
+                self.plugin_write < self.server_read_request.saturating_sub(self.plugin_read)
+            }
+            BudgetInequality::WriteAfterEdit => {
+                self.plugin_write < self.server_edit_request.saturating_sub(self.plugin_edit)
+            }
+        }
+    }
+
+    /// server の解決フェーズ予算。
+    pub fn server_resolve(self) -> Duration {
+        self.server_resolve
+    }
+
+    /// server の 1 候補あたりの接続待ちの上限。
+    pub fn server_connect_wait_cap(self) -> Duration {
+        self.server_connect_wait_cap
+    }
+
+    /// server の成果物引き取りの上限。
+    pub fn server_artifact_ingest(self) -> Duration {
+        self.server_artifact_ingest
+    }
+
+    /// 区分ごとの server 要求フェーズ予算。
+    pub fn server_request_phase(self, kind: RequestBudgetKind) -> Duration {
+        match kind {
+            RequestBudgetKind::Read => self.server_read_request,
+            RequestBudgetKind::Edit => self.server_edit_request,
+            RequestBudgetKind::Batch => self.server_batch_request,
+            RequestBudgetKind::Render => self.server_render_request,
+        }
+    }
+
+    /// plugin の handshake の上限。
+    pub fn plugin_handshake(self) -> Duration {
+        self.plugin_handshake
+    }
+
+    /// plugin の応答 1 フレームの送信の上限。
+    pub fn plugin_write(self) -> Duration {
+        self.plugin_write
+    }
+
+    /// plugin が描画の完了通知を待つ上限。
+    pub fn plugin_render_wait(self) -> Duration {
+        self.plugin_render_wait
+    }
+
+    /// plugin が描画結果の符号化と書き出しに使う上限。
+    pub fn plugin_render_artifact(self) -> Duration {
+        self.plugin_render_artifact
+    }
+
+    /// 区分ごとの plugin 実行段の上限。
+    ///
+    /// render は完了待ちと成果物の書き出しの合計であり、内訳ごとの上限は
+    /// レンダリングの実行口が持つ。
+    pub fn plugin_execution(self, kind: RequestBudgetKind) -> Duration {
+        match kind {
+            RequestBudgetKind::Read => self.plugin_read,
+            RequestBudgetKind::Edit => self.plugin_edit,
+            RequestBudgetKind::Batch => self.plugin_batch,
+            RequestBudgetKind::Render => self
+                .plugin_render_wait
+                .saturating_add(self.plugin_render_artifact),
+        }
+    }
+
+    /// 段の境界に残す余白。
+    pub fn transport_headroom(self) -> Duration {
+        self.transport_headroom
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +562,103 @@ mod tests {
                 "{op:?} が描画として区分されていません"
             );
         }
+    }
+
+    #[test]
+    fn unscaled_budgets_match_the_constants() {
+        // 倍率 100% の一式が定数そのものであること。ここが崩れると、倍率を
+        // 設定しない利用者の挙動が黙って変わる。
+        let budgets = ScaledBudgets::unscaled();
+        assert_eq!(budgets.percent(), 100);
+        assert_eq!(budgets.server_resolve(), SERVER_RESOLVE_BUDGET);
+        assert_eq!(budgets.server_connect_wait_cap(), SERVER_CONNECT_WAIT_CAP);
+        assert_eq!(
+            budgets.server_artifact_ingest(),
+            SERVER_ARTIFACT_INGEST_BUDGET
+        );
+        assert_eq!(
+            budgets.server_request_phase(RequestBudgetKind::Read),
+            SERVER_READ_REQUEST_BUDGET
+        );
+        assert_eq!(
+            budgets.server_request_phase(RequestBudgetKind::Edit),
+            SERVER_EDIT_REQUEST_BUDGET
+        );
+        assert_eq!(
+            budgets.server_request_phase(RequestBudgetKind::Batch),
+            SERVER_BATCH_REQUEST_BUDGET
+        );
+        assert_eq!(
+            budgets.server_request_phase(RequestBudgetKind::Render),
+            SERVER_RENDER_REQUEST_BUDGET
+        );
+        assert_eq!(budgets.plugin_handshake(), PLUGIN_HANDSHAKE_TIMEOUT);
+        assert_eq!(budgets.plugin_write(), PLUGIN_WRITE_TIMEOUT);
+        assert_eq!(budgets.plugin_render_wait(), PLUGIN_RENDER_WAIT_TIMEOUT);
+        assert_eq!(
+            budgets.plugin_render_artifact(),
+            PLUGIN_RENDER_ARTIFACT_TIMEOUT
+        );
+        assert_eq!(
+            budgets.plugin_execution(RequestBudgetKind::Read),
+            PLUGIN_READ_TIMEOUT
+        );
+        assert_eq!(
+            budgets.plugin_execution(RequestBudgetKind::Edit),
+            PLUGIN_EDIT_TIMEOUT
+        );
+        assert_eq!(
+            budgets.plugin_execution(RequestBudgetKind::Batch),
+            PLUGIN_BATCH_TIMEOUT
+        );
+        assert_eq!(
+            budgets.plugin_execution(RequestBudgetKind::Render),
+            PLUGIN_RENDER_WAIT_TIMEOUT + PLUGIN_RENDER_ARTIFACT_TIMEOUT
+        );
+        assert_eq!(budgets.transport_headroom(), TRANSPORT_HEADROOM);
+    }
+
+    #[test]
+    fn every_budget_scale_in_range_satisfies_all_inequalities() {
+        // 10〜400 の全数（391 通り）を確かめる。倍率が線形性を保つことは
+        // 示せるが、ミリ秒への切り捨ては保たない。破れる倍率が実在しなくても
+        // この検査は残す — 定数を変えたときに気付ける唯一の場所である。
+        let mut rejected = Vec::new();
+        for percent in 10..=400u32 {
+            match ScaledBudgets::checked(percent) {
+                Ok(budgets) => assert_eq!(budgets.percent(), percent),
+                Err(inequality) => rejected.push((percent, inequality)),
+            }
+        }
+        assert!(
+            rejected.is_empty(),
+            "不等式を破る倍率があります: {rejected:?}"
+        );
+    }
+
+    #[test]
+    fn a_budget_scale_that_breaks_an_inequality_is_rejected_with_its_name() {
+        // 拒否の経路そのものを確かめる。倍率 0 では全ての予算が 0 になり、
+        // 応答送信の持ち時間が残らない。破れた不等式が名前で返ることも
+        // あわせて固定する。
+        assert_eq!(
+            ScaledBudgets::checked(0),
+            Err(BudgetInequality::WriteAfterRead)
+        );
+    }
+
+    #[test]
+    fn each_inequality_can_be_observed_independently() {
+        // 7 つの不等式が別々の判定であること。1 つに畳まれていると、
+        // 破れた理由を記録できない。
+        let budgets = ScaledBudgets::unscaled();
+        for inequality in BudgetInequality::ALL {
+            assert!(
+                budgets.holds(inequality),
+                "既定の予算が {inequality} を満たしません"
+            );
+        }
+        assert_eq!(budgets.first_violation(), None);
     }
 
     #[test]
