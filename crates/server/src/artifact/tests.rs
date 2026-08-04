@@ -667,6 +667,36 @@ fn dropping_the_store_removes_its_directory() {
 }
 
 #[test]
+fn an_unprotected_base_dir_stops_the_store_from_opening() {
+    // DACL を保証できない場所へ利用者のプロジェクトの内容を書き出すより、
+    // 開けないほうがよい。失敗させることと壊さないことを同じ試験で確かめる。
+    let base_dir = temp_base_dir();
+    std::fs::create_dir_all(&base_dir).unwrap();
+    let before = aviutl2_mcp_win::test_support::security_descriptor_bytes(&base_dir);
+
+    let opened = ArtifactStore::open_with(base_dir.clone(), ARTIFACT_TTL, FixedClock::new());
+    let Err(error) = opened else {
+        panic!("保護されていない基底で store を開けました");
+    };
+    assert!(
+        matches!(error, ArtifactStoreError::DirectoryUnavailable(_)),
+        "{error:?}"
+    );
+
+    assert_eq!(
+        aviutl2_mcp_win::test_support::security_descriptor_bytes(&base_dir),
+        before,
+        "開けなかった基底の DACL が書き換わりました"
+    );
+    assert!(
+        !base_dir.join(ARTIFACTS_DIR).exists(),
+        "開けなかった基底の下にディレクトリが作られました"
+    );
+
+    let _ = std::fs::remove_dir_all(&base_dir);
+}
+
+#[test]
 fn opening_the_store_removes_only_stale_sibling_sessions() {
     let base_dir = temp_base_dir();
     let artifacts_root = base_dir.join(ARTIFACTS_DIR);

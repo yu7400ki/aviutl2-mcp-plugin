@@ -136,7 +136,7 @@ pub struct Artifact {
     /// UUID v4。handoff token とは別の値であり、これを見てもレンダリング元の
     /// プロセスが書いたファイルの名前は導けない。
     pub artifact_id: String,
-    /// MIME type。本 Phase は PNG のみを公開する。
+    /// MIME type。値は [`ARTIFACT_MEDIA_TYPE`] だけである。
     pub media_type: &'static str,
     /// 実体のバイト数。
     pub byte_length: u64,
