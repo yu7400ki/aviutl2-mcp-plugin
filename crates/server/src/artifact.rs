@@ -66,6 +66,12 @@ const HANDOFF_DIR: &str = "render";
 /// artifact store を置く、基底直下のディレクトリ名。
 const ARTIFACTS_DIR: &str = "artifacts";
 
+/// registry を置く、基底直下のディレクトリ名。
+///
+/// 基底を導けるのは registry ディレクトリがこの名前で終わるときだけである
+/// （[`base_dir_for_registry`]）。
+const REGISTRY_DIR_NAME: &str = "instances";
+
 /// 成果物ファイルの拡張子。
 const ARTIFACT_EXTENSION: &str = "png";
 
@@ -245,10 +251,29 @@ impl ArtifactClock for SystemClock {
 
 /// discovery が使う registry ディレクトリから、handoff と store の基底を導く。
 ///
-/// registry は基底直下の `instances` として作られるため、その親が基底である。
-/// 親を取れない場合は registry 自身を基底として扱う。基底を独立に決めると
-/// discovery と食い違う余地が生まれるため、常に registry から導く。
+/// 親を 1 段辿るのは、registry ディレクトリの最終要素が [`REGISTRY_DIR_NAME`]
+/// であるときに限る。**この名前は我々が決めたものである**——registry を書く側は
+/// 必ず基底直下のこの名前へ置くため、名前が一致することは「我々と同じ形をして
+/// いる」ことを意味し、そのときに限り親は我々の基底である。
+///
+/// 一致しない場合は registry ディレクトリ自身を基底とする。**基底は上へ出ない。**
+/// registry の場所は外から与えられ得るため、常に親を辿ると `%TEMP%` や
+/// ボリュームのルートが基底になり、その配下すべてが保護の適用対象になる。
+///
+/// 一致の判定は完全一致で行う。Windows のパスは大小を区別しないが、区別しない
+/// 判定にすると別の同値性の議論を呼び込む。**辿らない側へ倒れるだけであり、
+/// 危険側ではない。**
+///
+/// 基底を独立に決めると discovery と食い違う余地が生まれるため、導き方を
+/// 狭めた後も基底は registry ディレクトリだけから決まる。
 pub fn base_dir_for_registry(registry_dir: &Path) -> PathBuf {
+    let is_registry_shaped = registry_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == REGISTRY_DIR_NAME);
+    if !is_registry_shaped {
+        return registry_dir.to_path_buf();
+    }
     registry_dir
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())

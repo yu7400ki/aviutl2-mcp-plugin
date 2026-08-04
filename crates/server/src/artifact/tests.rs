@@ -205,9 +205,23 @@ fn handoff_path_is_built_from_the_own_base_and_the_resolved_instance() {
 }
 
 #[test]
-fn base_dir_is_the_parent_of_the_registry_dir() {
+fn base_dir_is_the_parent_only_when_the_registry_dir_has_our_shape() {
     let base = Path::new(r"C:\Users\someone\AppData\Local\AviUtl2Mcp");
     assert_eq!(base_dir_for_registry(&base.join("instances")), base);
+
+    // 我々が置く形でなければ辿らない。辿ると、registry の場所を指す値ひとつで
+    // 基底が上のディレクトリごと保護の適用対象になる。
+    assert_eq!(
+        base_dir_for_registry(&base.join("other")),
+        base.join("other")
+    );
+
+    // 一致は完全一致で見る。大小違いは辿らない側へ倒れる。
+    assert_eq!(
+        base_dir_for_registry(&base.join("Instances")),
+        base.join("Instances")
+    );
+
     // 親を取れない場合も基底を作れないままにはしない。
     assert_eq!(
         base_dir_for_registry(Path::new("instances")),
