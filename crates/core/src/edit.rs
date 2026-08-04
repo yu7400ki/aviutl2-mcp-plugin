@@ -45,8 +45,7 @@ pub struct Placement {
 impl Placement {
     /// 位置指定の範囲を検証する。
     pub fn validate(&self) -> Result<(), EditInputError> {
-        validate_position(FIELD_LAYER, self.layer)?;
-        validate_position(FIELD_FRAME, self.frame)
+        validate_layer_frame(self.layer, self.frame)
     }
 }
 
@@ -63,8 +62,7 @@ pub struct Destination {
 impl Destination {
     /// 位置指定の範囲を検証する。
     pub fn validate(&self) -> Result<(), EditInputError> {
-        validate_position(FIELD_LAYER, self.layer)?;
-        validate_position(FIELD_FRAME, self.frame)
+        validate_layer_frame(self.layer, self.frame)
     }
 }
 
@@ -115,8 +113,7 @@ pub struct CursorPosition {
 impl CursorPosition {
     /// 位置指定の範囲を検証する。
     pub fn validate(&self) -> Result<(), EditInputError> {
-        validate_position(FIELD_LAYER, self.layer)?;
-        validate_position(FIELD_FRAME, self.frame)
+        validate_layer_frame(self.layer, self.frame)
     }
 }
 
@@ -136,8 +133,7 @@ pub struct DisplayStart {
 impl DisplayStart {
     /// 位置指定の範囲を検証する。
     pub fn validate(&self) -> Result<(), EditInputError> {
-        validate_position(FIELD_LAYER, self.layer)?;
-        validate_position(FIELD_FRAME, self.frame)
+        validate_layer_frame(self.layer, self.frame)
     }
 }
 
@@ -776,8 +772,10 @@ pub struct SelectionState {
 
 /// 編集の区間を抜けたあとに読み取った選択状態の値。
 ///
-/// [`SelectionState`] の反映値はいずれも同じ 1 回の読み取りから来る。組にして
-/// 渡すことで、別々の時点で読んだ値を混ぜて組み立てられない形にする。
+/// [`SelectionState`] の反映値を 1 つの引数へまとめる。**値が同じ読み取りから
+/// 来ることを型が確かめるわけではない**——それは組み立てる側の責務である。
+/// この型が課すのは、反映値を 1 つでも埋め忘れれば組み立てられないことだけで
+/// ある。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObservedSelection {
     /// 反映後のカーソル位置。
@@ -1022,6 +1020,15 @@ impl EditInputError {
 /// レイヤーへの作成を要求内容だけの推測で拒否しない。範囲外の指定は
 /// ホストが失敗させる。
 const MAX_POSITION: u32 = i32::MAX as u32;
+
+/// レイヤー番号とフレーム番号の組が受け渡せる範囲に収まることを確認する。
+///
+/// タイムライン上の 1 点を指す型はいずれも同じ規則に従う。型ごとに書き分けると、
+/// 一方だけを直したときに規則が分かれる。
+fn validate_layer_frame(layer: u32, frame: u32) -> Result<(), EditInputError> {
+    validate_position(FIELD_LAYER, layer)?;
+    validate_position(FIELD_FRAME, frame)
+}
 
 /// 位置指定が受け渡せる範囲に収まることを確認する。
 fn validate_position(field: &'static str, value: u32) -> Result<(), EditInputError> {
@@ -1683,23 +1690,38 @@ mod tests {
             })
         );
 
-        assert_eq!(
-            SetSelectionParams {
-                cursor: Some(CursorPosition {
+        for (cursor, field) in [
+            (
+                CursorPosition {
                     layer: 0,
                     frame: over,
-                }),
-                selected_range: None,
-                focus: None,
-                ..sample_set_selection()
-            }
-            .validate(),
-            Err(EditInputError::PositionOutOfRange {
-                field: FIELD_FRAME,
-                value: over,
-                max: MAX_POSITION,
-            })
-        );
+                },
+                FIELD_FRAME,
+            ),
+            (
+                CursorPosition {
+                    layer: over,
+                    frame: 0,
+                },
+                FIELD_LAYER,
+            ),
+        ] {
+            assert_eq!(
+                SetSelectionParams {
+                    cursor: Some(cursor),
+                    selected_range: None,
+                    focus: None,
+                    display: None,
+                    ..sample_set_selection()
+                }
+                .validate(),
+                Err(EditInputError::PositionOutOfRange {
+                    field,
+                    value: over,
+                    max: MAX_POSITION,
+                })
+            );
+        }
 
         assert_eq!(
             SetSelectionParams {

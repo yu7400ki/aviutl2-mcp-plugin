@@ -59,7 +59,7 @@
 use aviutl2_mcp_core::{
     AvailableEffect, EditInfo, EditOutcome, EffectInfo, EffectItem, EffectItemType, EffectSelector,
     EffectType, ErrorCode, ErrorObject, ItemValue, LayerInfo, LayerStateOutcome, ObjectDetail,
-    ObjectSelector, ObjectSummary, SelectionState,
+    ObjectSelector, ObjectSummary, SelectionField, SelectionState,
 };
 use aviutl2_mcp_server::api::ListInstancesResponse;
 use aviutl2_mcp_server::discovery::default_registry_dir;
@@ -5795,7 +5795,7 @@ fn expect_media_paths_rejected(
     Ok(notes)
 }
 
-/// カーソル・選択範囲・フォーカスの変更とクランプを確かめる。
+/// カーソル・選択範囲・フォーカス・表示開始位置の変更とクランプを確かめる。
 fn check_set_selection(
     harness: &Harness,
     report: &mut Report,
@@ -5805,7 +5805,13 @@ fn check_set_selection(
     let info = require(harness.edit_info(&instance.id), "編集情報を取得できません")?;
     let object = resolve_object(harness, instance, context.scene_id, context.target)?;
 
-    // 範囲内の指定で、3 項目すべてが変わることを見る。
+    // 範囲内の指定で、4 軸すべてが変わることを見る。
+    //
+    // focus と display を同時に送るのはこの経路だけである。フォーカスの設定は
+    // 編集区間の処理が終わってからホストが反映するため、それが対象を見せるために
+    // 表示位置を動かすなら、display は要求どおり設定されたのに観測値が食い違い
+    // not_applied へ落ちる。フェイクのフォーカス設定は表示位置を触らないため、
+    // この食い違いは実機でしか現れない。
     let expected = precondition(harness, instance)?;
     let state = require(
         harness.set_selection(
@@ -5835,8 +5841,22 @@ fn check_set_selection(
     if state.applied.is_empty() {
         return Err("適用できた項目がありません".to_string());
     }
+    if !state.applied.contains(&SelectionField::Display) {
+        return Err(format!(
+            "範囲内の表示開始位置 layer={} frame={} を要求したのに観測値が layer={} frame={} でした。\
+             要求した位置まで表示を寄せられないか、フォーカスの設定が表示位置を動かしています（適用={:?} 未適用={:?}）",
+            context.target.layer,
+            context.target.frame,
+            state.display.layer_start,
+            state.display.frame_start,
+            state.applied,
+            state.not_applied
+        ));
+    }
 
-    // 範囲外の指定がクランプされ、応答が実際の値を返すことを見る。
+    // 範囲外の指定がクランプされ、応答が実際の値を返すことを見る。cursor は
+    // クランプされても applied のままだが、display は反映値まで照合するため
+    // not_applied へ現れる。
     let beyond = info.extent.frame_max.saturating_add(100_000);
     let expected = precondition(harness, instance)?;
     let clamped = require(
@@ -5848,17 +5868,23 @@ fn check_set_selection(
                     layer: context.target.layer as u32,
                     frame: beyond as u32,
                 }),
+                display: Some(DisplayStartInput {
+                    layer: context.target.layer as u32,
+                    frame: beyond as u32,
+                }),
                 ..SelectionChange::default()
             },
             expected,
         ),
-        "範囲外のカーソル位置を指定できません",
+        "範囲外のカーソル位置と表示開始位置を指定できません",
     )?;
     let clamped_frame = clamped.cursor.frame;
+    let clamped_display_frame = clamped.display.frame_start;
+    let clamped_display_not_applied = clamped.not_applied.contains(&SelectionField::Display);
 
     let undo = ask(
-        "いま行ったこと: MCP からカーソル位置・選択範囲・フォーカスを変更しました。\n\
-         続けて、範囲の外にあるフレーム番号をカーソル位置として指定しました。\n\
+        "いま行ったこと: MCP からカーソル位置・選択範囲・フォーカス・表示開始位置を変更しました。\n\
+         続けて、範囲の外にあるフレーム番号をカーソル位置と表示開始位置として指定しました。\n\
          お願いすること: AviUtl2 で「元に戻す」を 1 回だけ実行してください。\n\
          確認する場所: タイムライン上のカーソル（時間軸の縦線）の位置。\n\
          回答: カーソルが動く前の位置へ戻ったら 戻る\n\
@@ -5867,7 +5893,7 @@ fn check_set_selection(
     );
     report.observe(
         "set_selection_undo_unit",
-        "カーソル・選択範囲・フォーカスの変更は取り消し単位を作るか",
+        "カーソル・選択範囲・フォーカス・表示開始位置の変更は取り消し単位を作るか",
         if undo.is_empty() {
             "未回答".to_string()
         } else {
@@ -5875,7 +5901,7 @@ fn check_set_selection(
         },
     );
 
-    // 後始末: カーソルと選択範囲を元へ戻す。
+    // 後始末: カーソル・選択範囲・フォーカス・表示開始位置を元へ戻す。
     let expected = precondition(harness, instance)?;
     let _ = harness.set_selection(
         &instance.id,
@@ -5900,12 +5926,26 @@ fn check_set_selection(
             "範囲外のフレーム {beyond} がクランプされずに {clamped_frame} として返りました"
         ));
     }
+    if clamped_display_frame >= beyond {
+        return Err(format!(
+            "範囲外のフレーム {beyond} が表示開始位置としてクランプされずに {clamped_display_frame} として返りました"
+        ));
+    }
+    if !clamped_display_not_applied {
+        return Err(format!(
+            "表示開始位置が {clamped_display_frame} へクランプされたのに not_applied へ現れませんでした（適用={:?} 未適用={:?}）",
+            clamped.applied, clamped.not_applied
+        ));
+    }
     Ok(vec![
         format!(
             "適用={:?} 未適用={:?} observed_after_edit={}",
             state.applied, state.not_applied, state.observed_after_edit
         ),
         format!("frame={beyond} の指定が {clamped_frame} へクランプされた"),
+        format!(
+            "表示開始位置の frame={beyond} の指定が {clamped_display_frame} へクランプされ not_applied へ現れた"
+        ),
     ])
 }
 

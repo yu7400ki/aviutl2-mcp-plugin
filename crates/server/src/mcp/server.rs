@@ -1503,7 +1503,11 @@ impl AviUtl2McpServer {
     /// cursor と selected_range と focus と display の 4 つ全てを省略した要求は受け付けない。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// cursor と display はどちらも設定できる範囲へ調整されるため、要求した値が
-    /// そのまま入るとは限らない。応答の display には調整後の表示範囲が入る。
+    /// そのまま入るとは限らない。応答の cursor と display には調整後の値が入る。
+    /// ただし調整の扱いは 2 つで違う。cursor はクランプされても applied に入る。
+    /// 実際に入った位置は応答の cursor を読んで確かめる。
+    /// display はクランプされると not_applied に入る。
+    /// したがって display だけは applied を見れば要求どおりの位置か判別できる。
     /// display の反映可否は表示開始位置だけで判定する。応答が返す表示フレーム数と
     /// 表示レイヤー数は厳密な値ではなく、判定にも使えない。
     /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
@@ -2982,7 +2986,18 @@ mod tests {
             ("set_effect_enabled", &["fingerprint", "出力 item"]),
             ("delete_effect", &["fingerprint", "not_found"]),
             ("delete_object", &["not_found"]),
-            ("set_selection", &["原子的", "クランプ", "全てを省略"]),
+            (
+                "set_selection",
+                &[
+                    "原子的",
+                    "クランプ",
+                    "全てを省略",
+                    // クランプの扱いが軸ごとに違うことを読み分けられなければ、
+                    // cursor のクランプも not_applied に出ると読める。
+                    "cursor はクランプされても applied に入る",
+                    "display はクランプされると not_applied に入る",
+                ],
+            ),
             (
                 "set_layer_state",
                 &[
