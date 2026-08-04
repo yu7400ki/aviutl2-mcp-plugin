@@ -4,16 +4,18 @@ mod support;
 
 use aviutl2_mcp_core::AuthSecret;
 use aviutl2_mcp_core::{
-    AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags, EffectType,
-    ErrorCode, ErrorObject, Extent, FiniteF64, FrameRange, GetCurrentSceneResult, InstanceId,
-    InstanceState, LayerInfo, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
-    ObjectDetail, ObjectFingerprintInput, ObjectSummary, PageMeta, RequestEnvelope, SceneInfo,
-    SectionRange,
+    AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
+    EffectItemValues, EffectType, ErrorCode, ErrorObject, EvaluatedItem, Extent, FiniteF64,
+    FrameRange, GetCurrentSceneResult, InstanceId, InstanceState, LayerInfo,
+    ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, ObjectDetail,
+    ObjectFingerprintInput, ObjectSummary, PageMeta, RequestEnvelope, SceneInfo, SectionRange,
+    TrackGroup,
 };
+use aviutl2_mcp_server::mcp::edit_input::EffectSelectorInput;
 use aviutl2_mcp_server::mcp::input::{
-    AvailableEffectsPageInput, GetObjectInput, InstanceInput, ListAvailableEffectsInput,
-    ListInstancesInput, ListLayersInput, ListObjectsInput, ObjectFilterInput, ObjectSelectorInput,
-    PageInput,
+    AvailableEffectsPageInput, GetEffectItemValuesInput, GetObjectInput, InstanceInput,
+    ListAvailableEffectsInput, ListInstancesInput, ListLayersInput, ListObjectsInput,
+    ObjectFilterInput, ObjectSelectorInput, PageInput,
 };
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
 use rmcp::handler::server::wrapper::Parameters;
@@ -398,6 +400,140 @@ async fn list_available_effects_tool_sends_effect_type() {
             "snapshot_revision": null,
         }),
     );
+}
+
+/// 立ち絵オブジェクトの effect を指すセレクター。
+fn effect_selector_input() -> EffectSelectorInput {
+    let selector = selector_input();
+    let fingerprint = selector.fingerprint.clone();
+    EffectSelectorInput {
+        object: selector,
+        effect_name: "標準描画".to_string(),
+        effect_index: 0,
+        fingerprint,
+    }
+}
+
+/// 評価した値を含む応答。
+fn sample_effect_item_values() -> EffectItemValues {
+    EffectItemValues {
+        project_revision: 42,
+        frames: vec![
+            FiniteF64::try_new(120.0).expect("有限値"),
+            FiniteF64::try_new(120.5).expect("有限値"),
+        ],
+        items: vec![
+            EvaluatedItem::Track {
+                name: "X".to_string(),
+                values: vec![
+                    FiniteF64::try_new(640.0).expect("有限値"),
+                    FiniteF64::try_new(645.25).expect("有限値"),
+                ],
+                group: Some(TrackGroup {
+                    name: "座標".to_string(),
+                    index: 0,
+                    count: 3,
+                    item_names: vec!["X".to_string(), "Y".to_string()],
+                }),
+            },
+            EvaluatedItem::Check {
+                name: "反転".to_string(),
+                values: vec![true, false],
+            },
+        ],
+        truncated: false,
+    }
+}
+
+#[tokio::test]
+async fn get_effect_item_values_tool_sends_the_effect_and_the_frames() {
+    let expected = serde_json::to_value(sample_effect_item_values()).expect("直列化できる");
+    let harness = Harness::start(responses("get_effect_item_values", expected.clone()));
+
+    let result = harness
+        .server
+        .get_effect_item_values(Parameters(GetEffectItemValuesInput {
+            instance_id: harness.instance_id(),
+            effect: effect_selector_input(),
+            frames: vec![120.0, 120.5],
+            items: Some(vec!["X".to_string(), "反転".to_string()]),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+    let requests = harness.read_requests();
+    assert_eq!(requests[0].operation, "get_effect_item_values");
+    assert_eq!(requests[0].params["frames"], json!([120.0, 120.5]));
+    assert_eq!(requests[0].params["items"], json!(["X", "反転"]));
+}
+
+#[tokio::test]
+async fn the_evaluated_values_reach_the_structured_content_but_not_the_text() {
+    // 値そのものを返すのがこの tool の目的であり、structuredContent には載せる。
+    // text content は既存の規則どおり値を載せない。
+    let expected = serde_json::to_value(sample_effect_item_values()).expect("直列化できる");
+    let harness = Harness::start(responses("get_effect_item_values", expected.clone()));
+
+    let result = harness
+        .server
+        .get_effect_item_values(Parameters(GetEffectItemValuesInput {
+            instance_id: harness.instance_id(),
+            effect: effect_selector_input(),
+            frames: vec![120.0, 120.5],
+            items: None,
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(
+        structured(&result)["items"][0]["values"],
+        json!([640.0, 645.25])
+    );
+    let text = text_of(&result);
+    for value in ["640", "645.25", "true", "false"] {
+        assert!(
+            !text.contains(value),
+            "text content に値が載りました: {text}"
+        );
+    }
+    for forbidden in ["alias", "fingerprint", "handle"] {
+        assert!(
+            !text.contains(forbidden),
+            "text content に秘匿値が載りました: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn out_of_range_frame_and_item_counts_never_reach_the_instance() {
+    // 件数は要求内容だけで決まる。接続前に落とさなければ、要求の誤りが転送の
+    // 失敗として報告される。
+    let over_frames: Vec<f64> = vec![120.0; 17];
+    let over_items: Vec<String> = (0..33).map(|index| format!("項目{index}")).collect();
+    for (frames, items) in [
+        (Vec::new(), None),
+        (over_frames, None),
+        (vec![120.0], Some(Vec::new())),
+        (vec![120.0], Some(over_items)),
+    ] {
+        let harness = Harness::start(OperationResponses::new());
+        let result = harness
+            .server
+            .get_effect_item_values(Parameters(GetEffectItemValuesInput {
+                instance_id: harness.instance_id(),
+                effect: effect_selector_input(),
+                frames,
+                items,
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true), "{}", text_of(&result));
+        assert!(
+            harness.read_requests().is_empty(),
+            "件数の誤りが接続先へ送られました"
+        );
+    }
 }
 
 #[tokio::test]
