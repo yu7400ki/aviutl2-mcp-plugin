@@ -238,12 +238,6 @@ fn run_request_loop(
             break;
         }
 
-        // 別のプロセスが書いた設定をここで取り込む。費用は `stat` 1 回であり、
-        // 更新時刻と大きさが同じなら再解析しない。**設定のために専用の
-        // スレッドを持たないのは、要求が来ないときに設定が古いことを誰も
-        // 観測しないためである。**
-        crate::settings::refresh();
-
         let deadline = Instant::now() + REQUEST_IDLE_TIMEOUT;
         let body = match stream
             .read_frame(deadline)
@@ -252,6 +246,18 @@ fn run_request_loop(
             Some(b) => b,
             None => break,
         };
+
+        // 別のプロセスが書いた設定をここで取り込む。費用は `stat` 1 回であり、
+        // 更新時刻と大きさが同じなら再解析しない。
+        //
+        // **要求が届いてから読む。** 到着を待っている間（最大
+        // [`REQUEST_IDLE_TIMEOUT`]）に書かれた変更は、待つ前に読んだのでは
+        // その要求に効かない。費用は変わらず、契機は「要求 1 件の処理を
+        // 始めるとき」に一致する。
+        //
+        // **設定のために専用のスレッドを持たないのは、要求が来ないときに設定が
+        // 古いことを誰も観測しないためである。**
+        crate::settings::refresh();
 
         let request: RequestEnvelope = deserialize_json(&body)
             .map_err(|e| anyhow::anyhow!("RequestEnvelope のデコードに失敗しました: {e}"))?;
