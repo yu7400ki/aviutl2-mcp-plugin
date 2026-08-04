@@ -3,18 +3,18 @@
 mod support;
 
 use aviutl2_mcp_core::{
-    AuthSecret, BatchOutcome, BatchStepOutcome, Cursor, EditOutcome, EffectFingerprintInput,
-    EffectInfo, EffectItem, EffectItemType, ErrorCode, ErrorObject, FrameRange, InstanceId,
-    InstanceState, ItemValue, LayerInfo, LayerStateOutcome, ObjectFingerprintInput,
-    ObjectSectionsOutcome, ObjectSelector, ObjectSummary, RequestEnvelope, SectionRange,
-    SelectionField, SelectionState,
+    AuthSecret, BatchOutcome, BatchStepOutcome, Cursor, DisplayRange, EditOutcome,
+    EffectFingerprintInput, EffectInfo, EffectItem, EffectItemType, ErrorCode, ErrorObject,
+    FrameRange, InstanceId, InstanceState, ItemValue, LayerInfo, LayerStateOutcome,
+    ObjectFingerprintInput, ObjectSectionsOutcome, ObjectSelector, ObjectSummary,
+    ObservedSelection, RequestEnvelope, SectionRange, SelectionField, SelectionState,
 };
 use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, ApplyBatchInput, BatchOperationInput, CreateObjectInput,
     CreateObjectSectionInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
-    DeleteObjectSectionInput, DestinationInput, FocusChangeInput, ItemValueInput,
-    LayerNameChangeInput, MoveObjectInput, MoveObjectSectionInput, ObjectSourceInput,
-    PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetLayerStateInput,
+    DeleteObjectSectionInput, DestinationInput, DisplayStartInput, FocusChangeInput,
+    ItemValueInput, LayerNameChangeInput, MoveObjectInput, MoveObjectSectionInput,
+    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetLayerStateInput,
     SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::{EffectSelectorInput, ObjectSelectorInput};
@@ -232,14 +232,22 @@ fn selection_state() -> Value {
     serde_json::to_value(SelectionState::observed(
         EPOCH,
         EXPECTED_REVISION,
-        Cursor {
-            frame: 120,
-            layer: 2,
+        ObservedSelection {
+            cursor: Cursor {
+                frame: 120,
+                layer: 2,
+            },
+            selected_range: Some(FrameRange { start: 0, end: 10 }),
+            focus: Some(sample_summary()),
+            display: DisplayRange {
+                frame_start: 60,
+                layer_start: 1,
+                frame_num: 600,
+                layer_num: 10,
+            },
         },
-        Some(FrameRange { start: 0, end: 10 }),
-        Some(sample_summary()),
         vec![SelectionField::Cursor, SelectionField::Focus],
-        vec![SelectionField::SelectedRange],
+        vec![SelectionField::SelectedRange, SelectionField::Display],
     ))
     .expect("直列化できる")
 }
@@ -587,6 +595,10 @@ async fn set_selection_tool_sends_the_scene_guard_and_changes() {
             focus: Some(FocusChangeInput::Set {
                 object: selector_input(),
             }),
+            display: Some(DisplayStartInput {
+                layer: 1,
+                frame: 60,
+            }),
             expected_project_epoch: EPOCH.to_string(),
         }))
         .await;
@@ -603,6 +615,7 @@ async fn set_selection_tool_sends_the_scene_guard_and_changes() {
             "cursor": { "layer": 2, "frame": 120 },
             "selected_range": { "type": "clear" },
             "focus": { "type": "set", "object": selector_json() },
+            "display": { "layer": 1, "frame": 60 },
             "expected_project_epoch": EPOCH,
         }),
     );
@@ -958,6 +971,7 @@ async fn malformed_instance_id_never_reaches_an_edit_operation() {
             cursor: Some(CursorPositionInput { layer: 0, frame: 0 }),
             selected_range: None,
             focus: None,
+            display: None,
             expected_project_epoch: EPOCH.to_string(),
         }))
         .await;

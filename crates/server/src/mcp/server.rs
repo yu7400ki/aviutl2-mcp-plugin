@@ -1498,9 +1498,14 @@ impl AviUtl2McpServer {
         .await
     }
 
-    /// カーソル位置・選択範囲・フォーカス対象を変更する。
-    /// cursor と selected_range と focus の 3 つ全てを省略した要求は受け付けない。
+    /// どこを見て何を選んでいるかを変更する。cursor はカーソル位置、selected_range は
+    /// フレーム範囲選択、focus はフォーカス対象、display はレイヤー編集の表示開始位置である。
+    /// cursor と selected_range と focus と display の 4 つ全てを省略した要求は受け付けない。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// cursor と display はどちらも設定できる範囲へ調整されるため、要求した値が
+    /// そのまま入るとは限らない。応答の display には調整後の表示範囲が入る。
+    /// display の反映可否は表示開始位置だけで判定する。応答が返す表示フレーム数と
+    /// 表示レイヤー数は厳密な値ではなく、判定にも使えない。
     /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
     /// project_epoch をそのまま指定する。省略はできない。focus を省略した要求は
     /// selector を 1 つも持たないため、これがプロジェクト境界を照合する材料である。

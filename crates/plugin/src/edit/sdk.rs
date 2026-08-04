@@ -23,7 +23,8 @@ use aviutl2::generic::{
     EditSection, EditSectionError, EffectHandle, MediaFileSupportMode, ObjectHandle, ReadSection,
 };
 use aviutl2_mcp_core::{
-    AvailableEffect, AvailableEffectItem, Cursor, EffectItemType, FrameRange, SectionRange,
+    AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EffectItemType, FrameRange,
+    SectionRange,
 };
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -125,6 +126,12 @@ impl EditHost for SdkEditHost {
                 _ => None,
             },
             focus,
+            display: DisplayRange {
+                frame_start: info.display_frame_start,
+                layer_start: info.display_layer_start,
+                frame_num: info.display_frame_num,
+                layer_num: info.display_layer_num,
+            },
         })
     }
 
@@ -528,6 +535,17 @@ impl SceneEditor for SdkSceneEditor<'_> {
         self.section
             .set_cursor_layer_frame(layer, frame)
             .map_err(|error| mutation_failure("set_cursor_layer_frame", &error))
+    }
+
+    fn set_display_start(
+        &self,
+        _ticket: MutationTicket<'_>,
+        layer: usize,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.section
+            .set_display_layer_frame(layer, frame)
+            .map_err(|error| mutation_failure("set_display_layer_frame", &error))
     }
 
     fn set_select_range(

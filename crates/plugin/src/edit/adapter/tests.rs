@@ -1460,6 +1460,7 @@ fn changing_the_selection_does_not_advance_the_revision() {
             cursor: Some(CursorPosition { layer: 1, frame: 5 }),
             selected_range: None,
             focus: None,
+            display: None,
             expected_project_epoch: harness.epoch(),
         })
         .expect("選択状態の変更に失敗しました");
@@ -1485,6 +1486,7 @@ fn changing_the_selection_ignores_an_advanced_revision_but_not_a_stale_epoch() {
             cursor: Some(CursorPosition { layer: 1, frame: 5 }),
             selected_range: None,
             focus: None,
+            display: None,
             expected_project_epoch: epoch,
         })
         .expect("revision が進んだだけで選択状態の変更が拒否されました");
@@ -1496,6 +1498,7 @@ fn changing_the_selection_ignores_an_advanced_revision_but_not_a_stale_epoch() {
             cursor: Some(CursorPosition { layer: 1, frame: 5 }),
             selected_range: None,
             focus: None,
+            display: None,
             expected_project_epoch: "別のプロジェクト".to_string(),
         })
         .expect_err("別プロジェクトの前提が受理されました");
@@ -1519,6 +1522,7 @@ fn the_selection_is_applied_in_a_fixed_order() {
             focus: Some(FocusChange::Set {
                 object: harness.selector(1, 100),
             }),
+            display: None,
             expected_project_epoch: harness.epoch(),
         })
         .expect("選択状態の変更に失敗しました");
@@ -1570,6 +1574,7 @@ fn a_focus_target_is_resolved_before_it_is_set() {
             cursor: None,
             selected_range: None,
             focus: Some(FocusChange::Set { object: selector }),
+            display: None,
             expected_project_epoch: harness.epoch(),
         })
         .expect_err("照合を経ずにフォーカスが設定されました");
@@ -1592,6 +1597,7 @@ fn a_scene_guard_protects_the_selection() {
             cursor: Some(CursorPosition { layer: 1, frame: 5 }),
             selected_range: None,
             focus: None,
+            display: None,
             expected_project_epoch: harness.epoch(),
         })
         .expect_err("別シーンの前提が受理されました");
@@ -2028,6 +2034,7 @@ fn every_nested_selector_is_checked_including_the_ones_inside_other_inputs() {
             cursor: None,
             selected_range: None,
             focus: Some(FocusChange::Set { object: focus }),
+            display: None,
             expected_project_epoch: harness.epoch(),
         })
         .expect_err("フォーカス対象の epoch 不一致が受理されました");
@@ -2050,6 +2057,7 @@ fn the_selection_change_names_which_epoch_did_not_match() {
             focus: Some(FocusChange::Set {
                 object: harness.selector(1, 100),
             }),
+            display: None,
             expected_project_epoch: "別のプロジェクト".to_string(),
         })
         .expect_err("別プロジェクトの前提が受理されました");
@@ -2065,6 +2073,7 @@ fn the_selection_change_names_which_epoch_did_not_match() {
             cursor: None,
             selected_range: None,
             focus: Some(FocusChange::Set { object: focus }),
+            display: None,
             expected_project_epoch: harness.epoch(),
         })
         .expect_err("別プロジェクトのフォーカス対象が受理されました");
@@ -2080,6 +2089,7 @@ fn the_selection_change_names_which_epoch_did_not_match() {
             cursor: Some(CursorPosition { layer: 1, frame: 5 }),
             selected_range: None,
             focus: None,
+            display: None,
             expected_project_epoch: "別のプロジェクト".to_string(),
         })
         .expect_err("別プロジェクトの前提が受理されました");
@@ -2175,6 +2185,7 @@ fn a_partially_applied_selection_reports_both_lists() {
             cursor: None,
             selected_range: None,
             focus: Some(FocusChange::Set { object: focus }),
+            display: None,
             expected_project_epoch: harness.epoch(),
         })
         .expect("適用できた項目を伝える手段が失われました");
@@ -2202,6 +2213,7 @@ fn the_same_selection_failure_does_not_change_success_by_what_else_was_requested
             focus: Some(FocusChange::Set {
                 object: focus.clone(),
             }),
+            display: None,
             expected_project_epoch: harness.epoch(),
         })
         .expect("フォーカスだけの要求");
@@ -2218,6 +2230,7 @@ fn the_same_selection_failure_does_not_change_success_by_what_else_was_requested
             cursor: Some(CursorPosition { layer: 0, frame: 1 }),
             selected_range: None,
             focus: Some(FocusChange::Set { object: focus }),
+            display: None,
             expected_project_epoch: harness.epoch(),
         })
         .expect("カーソルを併せた要求");
@@ -2236,6 +2249,7 @@ fn every_requested_selection_field_appears_in_exactly_one_list() {
             cursor: Some(CursorPosition { layer: 1, frame: 5 }),
             selected_range: Some(RangeChange::Clear {}),
             focus: Some(FocusChange::Clear {}),
+            display: None,
             expected_project_epoch: harness.epoch(),
         })
         .expect("選択状態の変更");

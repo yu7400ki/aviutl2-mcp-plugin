@@ -33,11 +33,11 @@ use crate::mcp::input::{
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchInputError, BatchOperation, CreateObjectParams,
     CreateObjectSectionParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
-    DeleteObjectSectionParams, Destination, EditInputError, ErrorObject, FiniteF64, FocusChange,
-    ItemValue, LayerNameChange, MAX_ALIAS_BYTES, MAX_BATCH_OPERATIONS, MAX_ITEM_VALUE_BYTES,
-    MAX_PATH_UTF16_UNITS, MoveObjectParams, MoveObjectSectionParams, ObjectSource, Placement,
-    RangeChange, SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams,
-    SetObjectNameParams, SetSelectionParams,
+    DeleteObjectSectionParams, Destination, DisplayStart, EditInputError, ErrorObject, FiniteF64,
+    FocusChange, ItemValue, LayerNameChange, MAX_ALIAS_BYTES, MAX_BATCH_OPERATIONS,
+    MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MoveObjectParams, MoveObjectSectionParams,
+    ObjectSource, Placement, RangeChange, SetEffectEnabledParams, SetLayerStateParams,
+    SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -154,6 +154,27 @@ pub struct CursorPositionInput {
 impl CursorPositionInput {
     fn to_position(self) -> CursorPosition {
         CursorPosition {
+            layer: self.layer,
+            frame: self.frame,
+        }
+    }
+}
+
+/// レイヤー編集の表示開始位置。
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayStartInput {
+    /// 0 始まりの表示開始レイヤー番号。
+    #[schemars(range(max = MAX_POSITION))]
+    pub layer: u32,
+    /// 0 始まりの表示開始フレーム番号。
+    #[schemars(range(max = MAX_POSITION))]
+    pub frame: u32,
+}
+
+impl DisplayStartInput {
+    fn to_start(self) -> DisplayStart {
+        DisplayStart {
             layer: self.layer,
             frame: self.frame,
         }
@@ -687,6 +708,9 @@ pub struct SetSelectionInput {
     /// フォーカス対象。省略時は変更しない。
     #[serde(default)]
     pub focus: Option<FocusChangeInput>,
+    /// レイヤー編集の表示開始位置。省略時は変更しない。設定できる範囲へ調整される。
+    #[serde(default)]
+    pub display: Option<DisplayStartInput>,
     /// 直前の読み取りまたは編集の応答が返した project_epoch。focus を省略した要求は selector を 1 つも持たないため、これがプロジェクト境界を照合する材料である。
     #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
     pub expected_project_epoch: String,
@@ -705,6 +729,7 @@ impl SetSelectionInput {
             cursor: self.cursor.map(CursorPositionInput::to_position),
             selected_range: self.selected_range.map(RangeChangeInput::to_change),
             focus,
+            display: self.display.map(DisplayStartInput::to_start),
             expected_project_epoch: expected_project_epoch(&self.expected_project_epoch)?,
         };
         params.validate().map_err(from_input_error)?;

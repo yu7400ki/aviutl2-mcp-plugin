@@ -265,6 +265,7 @@ pub fn set_selection() -> Value {
         ("cursor", cursor()),
         ("selected_range", nullable(frame_range())),
         ("focus", nullable(object_summary())),
+        ("display", display_range()),
         ("applied", array(selection_field())),
         ("not_applied", array(selection_field())),
         ("observed_after_edit", boolean()),
@@ -297,7 +298,7 @@ fn nothing_created() -> Value {
 
 /// 選択状態のうち適用できた項目。
 fn selection_field() -> Value {
-    json!({ "type": "string", "enum": ["cursor", "selected_range", "focus"] })
+    json!({ "type": "string", "enum": ["cursor", "selected_range", "focus", "display"] })
 }
 
 /// 一覧応答の共通形。
@@ -605,8 +606,8 @@ mod tests {
         EffectItemValues, EffectType, EvaluatedItem, Extent, FiniteF64, FrameRange,
         GetCurrentSceneResult, InstanceId, InstanceInfo, InstanceProject, InstanceState, ItemValue,
         LayerInfo, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, ObjectDetail,
-        ObjectFingerprintInput, ObjectSummary, PageMeta, SceneInfo, SceneRef, SectionRange,
-        SelectionField, SelectionState, TrackGroup, TrackInfo,
+        ObjectFingerprintInput, ObjectSummary, ObservedSelection, PageMeta, SceneInfo, SceneRef,
+        SectionRange, SelectionField, SelectionState, TrackGroup, TrackInfo,
     };
 
     /// 値が schema に適合するかを再帰的に検査する。
@@ -1058,16 +1059,25 @@ mod tests {
         SelectionState::observed(
             "78be92d1-c8c9-44c6-ae52-387548971468",
             42,
-            Cursor {
-                frame: 120,
-                layer: 2,
+            ObservedSelection {
+                cursor: Cursor {
+                    frame: 120,
+                    layer: 2,
+                },
+                selected_range: Some(FrameRange { start: 0, end: 10 }),
+                focus: Some(sample_object_summary()),
+                display: DisplayRange {
+                    frame_start: 60,
+                    layer_start: 1,
+                    frame_num: 600,
+                    layer_num: 10,
+                },
             },
-            Some(FrameRange { start: 0, end: 10 }),
-            Some(sample_object_summary()),
             vec![
                 SelectionField::Cursor,
                 SelectionField::SelectedRange,
                 SelectionField::Focus,
+                SelectionField::Display,
             ],
             Vec::new(),
         )

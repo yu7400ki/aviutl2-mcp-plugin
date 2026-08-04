@@ -21,8 +21,8 @@ use crate::read::host::{
 };
 use crate::test_support::alias_with_effects;
 use aviutl2_mcp_core::{
-    AvailableEffect, AvailableEffectItem, Cursor, EffectFlags, EffectItem, EffectItemType,
-    EffectType, FiniteF64, FrameRange, ItemValue, SectionRange,
+    AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EffectFlags, EffectItem,
+    EffectItemType, EffectType, FiniteF64, FrameRange, ItemValue, SectionRange,
 };
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -234,6 +234,7 @@ pub(crate) struct FakeScene {
     pub(crate) cursor: Cursor,
     pub(crate) selected_range: Option<FrameRange>,
     pub(crate) focus: Option<usize>,
+    pub(crate) display: DisplayRange,
 }
 
 impl FakeScene {
@@ -476,6 +477,7 @@ pub(crate) const MUTATIONS: &[&str] = &[
     "set_layer_enable",
     "set_layer_lock",
     "set_cursor_layer_frame",
+    "set_display_layer_frame",
     "set_select_range",
     "set_focus_object",
 ];
@@ -521,6 +523,7 @@ impl EditHost for FakeEditHost {
                 .focus
                 .and_then(|id| scene.by_id(id))
                 .map(FakeObject::identity),
+            display: scene.display,
         })
     }
 
@@ -1411,6 +1414,25 @@ impl SceneEditor for FakeSceneEditor<'_> {
         Ok(())
     }
 
+    fn set_display_start(
+        &self,
+        _ticket: MutationTicket<'_>,
+        layer: usize,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.mutation("set_display_layer_frame")?;
+        // ホストは範囲外の値をクランプする。表示フレーム数・レイヤー数は開始位置
+        // とは無関係にホストが決めるため、要求値と一致しない値を返す。
+        let mut scene = self.host.scene.lock().unwrap();
+        scene.display = DisplayRange {
+            frame_start: frame.min(MAX_FRAME),
+            layer_start: layer.min(MAX_LAYER),
+            frame_num: DISPLAY_FRAME_NUM,
+            layer_num: DISPLAY_LAYER_NUM,
+        };
+        Ok(())
+    }
+
     fn set_select_range(
         &self,
         _ticket: MutationTicket<'_>,
@@ -1537,10 +1559,14 @@ pub(crate) const CREATE_FRAME_SHIFT: usize = 5;
 /// ホストが移動先を自動調整する量。
 pub(crate) const MOVE_FRAME_SHIFT: usize = 7;
 
-/// カーソルがクランプされる上限。
+/// カーソルと表示開始位置がクランプされる上限。
 pub(crate) const MAX_LAYER: usize = 9;
-/// カーソルがクランプされる上限。
+/// カーソルと表示開始位置がクランプされる上限。
 pub(crate) const MAX_FRAME: usize = 999;
+/// ホストが返す表示フレーム数。表示開始フレームとは一致しない。
+pub(crate) const DISPLAY_FRAME_NUM: usize = 600;
+/// ホストが返す表示レイヤー数。表示開始レイヤーとは一致しない。
+pub(crate) const DISPLAY_LAYER_NUM: usize = 4;
 /// ホストが設定項目の値を丸める上限。
 pub(crate) const MAX_ITEM_VALUE: i64 = 100;
 
@@ -1682,6 +1708,12 @@ pub(crate) fn fake_scene() -> FakeScene {
         cursor: Cursor { frame: 0, layer: 0 },
         selected_range: None,
         focus: None,
+        display: DisplayRange {
+            frame_start: 0,
+            layer_start: 0,
+            frame_num: DISPLAY_FRAME_NUM,
+            layer_num: DISPLAY_LAYER_NUM,
+        },
     }
 }
 

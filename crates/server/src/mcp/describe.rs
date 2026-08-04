@@ -425,6 +425,13 @@ pub fn selection_state(state: &SelectionState) -> String {
         Some(object) => format!("フォーカス {}", object_line(object)),
         None => "フォーカスなし".to_string(),
     });
+    text.push_line(format!(
+        "表示開始 frame={} layer={} 表示数 frame={} layer={}（表示数は厳密な値ではありません）",
+        state.display.frame_start,
+        state.display.layer_start,
+        state.display.frame_num,
+        state.display.layer_num,
+    ));
     text.push_line(format!("適用できた項目: {}", applied_label(&state.applied)));
     if !state.not_applied.is_empty() {
         text.push_line(format!(
@@ -506,6 +513,7 @@ fn selection_field_label(field: &SelectionField) -> &'static str {
         SelectionField::Cursor => "cursor",
         SelectionField::SelectedRange => "selected_range",
         SelectionField::Focus => "focus",
+        SelectionField::Display => "display",
     }
 }
 
@@ -572,14 +580,23 @@ mod tests {
     use super::*;
     use crate::mcp::summary::{MAX_TEXT_CHARS, TRUNCATION_NOTICE};
     use aviutl2_mcp_core::{
-        AvailableEffect, Cursor, EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem,
-        EffectItemType, EffectType, FiniteF64, FrameRange, InstanceId, InstanceProject,
-        InstanceState, ItemValue, LayerInfo, ObjectFingerprintInput, ObjectSummary, SceneInfo,
-        SectionRange, TrackGroup,
+        AvailableEffect, Cursor, DisplayRange, EffectFingerprintInput, EffectFlags, EffectInfo,
+        EffectItem, EffectItemType, EffectType, FiniteF64, FrameRange, InstanceId, InstanceProject,
+        InstanceState, ItemValue, LayerInfo, ObjectFingerprintInput, ObjectSummary,
+        ObservedSelection, SceneInfo, SectionRange, TrackGroup,
     };
 
     /// 上限を必ず超える件数。要求上限を無視した応答でも打ち切られることを確かめる。
     const OVERSIZED_COUNT: usize = 2_000;
+
+    fn sample_display_range() -> DisplayRange {
+        DisplayRange {
+            frame_start: 60,
+            layer_start: 1,
+            frame_num: 600,
+            layer_num: 10,
+        }
+    }
 
     fn page(total: u32, count: u32) -> PageMeta {
         PageMeta {
@@ -959,14 +976,21 @@ mod tests {
         let selection = SelectionState::observed(
             "78be92d1-c8c9-44c6-ae52-387548971468",
             43,
-            Cursor {
-                frame: 120,
-                layer: 2,
+            ObservedSelection {
+                cursor: Cursor {
+                    frame: 120,
+                    layer: 2,
+                },
+                selected_range: Some(FrameRange { start: 0, end: 10 }),
+                focus: Some(summary),
+                display: sample_display_range(),
             },
-            Some(FrameRange { start: 0, end: 10 }),
-            Some(summary),
             vec![SelectionField::Cursor],
-            vec![SelectionField::SelectedRange, SelectionField::Focus],
+            vec![
+                SelectionField::SelectedRange,
+                SelectionField::Focus,
+                SelectionField::Display,
+            ],
         );
         vec![
             ("create_object", create_object(&created)),
@@ -1252,9 +1276,12 @@ mod tests {
         let state = SelectionState::observed(
             "78be92d1-c8c9-44c6-ae52-387548971468",
             43,
-            Cursor { frame: 5, layer: 1 },
-            None,
-            None,
+            ObservedSelection {
+                cursor: Cursor { frame: 5, layer: 1 },
+                selected_range: None,
+                focus: None,
+                display: sample_display_range(),
+            },
             Vec::new(),
             vec![SelectionField::Cursor],
         );
@@ -1272,9 +1299,12 @@ mod tests {
         let state = SelectionState::observed(
             "78be92d1-c8c9-44c6-ae52-387548971468",
             43,
-            Cursor { frame: 5, layer: 1 },
-            None,
-            None,
+            ObservedSelection {
+                cursor: Cursor { frame: 5, layer: 1 },
+                selected_range: None,
+                focus: None,
+                display: sample_display_range(),
+            },
             vec![SelectionField::Cursor],
             Vec::new(),
         );

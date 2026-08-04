@@ -18,7 +18,7 @@
 //!
 //! opaque handle は params にも result にも現れない。
 
-use crate::edit_info::{Cursor, FrameRange};
+use crate::edit_info::{Cursor, DisplayRange, FrameRange};
 use crate::effect::EffectInfo;
 use crate::error::ErrorCode;
 use crate::item_value::{ItemValue, ItemWriteError, validate_item_value};
@@ -113,6 +113,27 @@ pub struct CursorPosition {
 }
 
 impl CursorPosition {
+    /// 位置指定の範囲を検証する。
+    pub fn validate(&self) -> Result<(), EditInputError> {
+        validate_position(FIELD_LAYER, self.layer)?;
+        validate_position(FIELD_FRAME, self.frame)
+    }
+}
+
+/// レイヤー編集の表示開始位置。
+///
+/// カーソルと同じくホストが設定できる範囲へ調整するため、要求値がそのまま
+/// 反映されるとは限らない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayStart {
+    /// 表示開始レイヤー番号（0 始まり）。
+    pub layer: u32,
+    /// 表示開始フレーム番号（0 始まり）。
+    pub frame: u32,
+}
+
+impl DisplayStart {
     /// 位置指定の範囲を検証する。
     pub fn validate(&self) -> Result<(), EditInputError> {
         validate_position(FIELD_LAYER, self.layer)?;
@@ -476,6 +497,9 @@ pub struct SetSelectionParams {
     /// フォーカス対象。省略時は変更しない。
     #[serde(default)]
     pub focus: Option<FocusChange>,
+    /// レイヤー編集の表示開始位置。省略時は変更しない。
+    #[serde(default)]
+    pub display: Option<DisplayStart>,
     /// 応答が返した `project_epoch`。
     ///
     /// `focus` を省略した要求はセレクターを 1 つも持たないため、プロジェクト
@@ -486,12 +510,21 @@ pub struct SetSelectionParams {
 impl SetSelectionParams {
     /// 要求内容だけで決まる検証を行う。
     ///
-    /// 3 つ全ての省略は拒否する。何も変更しない編集要求は、成功したのか
+    /// 4 つ全ての省略は拒否する。何も変更しない編集要求は、成功したのか
     /// 無視されたのかをクライアントが区別できない。
     pub fn validate(&self) -> Result<(), EditInputError> {
-        if self.cursor.is_none() && self.selected_range.is_none() && self.focus.is_none() {
+        if self.cursor.is_none()
+            && self.selected_range.is_none()
+            && self.focus.is_none()
+            && self.display.is_none()
+        {
             return Err(EditInputError::NoChangeRequested {
-                fields: &[FIELD_CURSOR, FIELD_SELECTED_RANGE, FIELD_FOCUS],
+                fields: &[
+                    FIELD_CURSOR,
+                    FIELD_SELECTED_RANGE,
+                    FIELD_FOCUS,
+                    FIELD_DISPLAY,
+                ],
             });
         }
         if let Some(cursor) = &self.cursor {
@@ -502,6 +535,9 @@ impl SetSelectionParams {
         }
         if let Some(FocusChange::Set { object }) = &self.focus {
             validate_selector_position(object)?;
+        }
+        if let Some(display) = &self.display {
+            display.validate()?;
         }
         Ok(())
     }
@@ -717,6 +753,8 @@ pub struct SelectionState {
     pub selected_range: Option<FrameRange>,
     /// 反映後のフォーカス対象。未選択は null。
     pub focus: Option<ObjectSummary>,
+    /// 反映後のタイムライン表示範囲。
+    pub display: DisplayRange,
     /// 実際に適用できた項目。部分適用を伝える唯一の手段である。
     pub applied: Vec<SelectionField>,
     /// 要求されたが適用できなかった項目。
@@ -736,23 +774,38 @@ pub struct SelectionState {
     pub observed_after_edit: bool,
 }
 
+/// 編集の区間を抜けたあとに読み取った選択状態の値。
+///
+/// [`SelectionState`] の反映値はいずれも同じ 1 回の読み取りから来る。組にして
+/// 渡すことで、別々の時点で読んだ値を混ぜて組み立てられない形にする。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservedSelection {
+    /// 反映後のカーソル位置。
+    pub cursor: Cursor,
+    /// 反映後の選択範囲。未選択は `None`。
+    pub selected_range: Option<FrameRange>,
+    /// 反映後のフォーカス対象。未選択は `None`。
+    pub focus: Option<ObjectSummary>,
+    /// 反映後のタイムライン表示範囲。
+    pub display: DisplayRange,
+}
+
 impl SelectionState {
     /// 編集の区間を抜けたあとに観測した状態として組み立てる。
     pub fn observed(
         project_epoch: impl Into<String>,
         project_revision: u64,
-        cursor: Cursor,
-        selected_range: Option<FrameRange>,
-        focus: Option<ObjectSummary>,
+        observed: ObservedSelection,
         applied: Vec<SelectionField>,
         not_applied: Vec<SelectionField>,
     ) -> Self {
         Self {
             project_epoch: project_epoch.into(),
             project_revision,
-            cursor,
-            selected_range,
-            focus,
+            cursor: observed.cursor,
+            selected_range: observed.selected_range,
+            focus: observed.focus,
+            display: observed.display,
             applied,
             not_applied,
             observed_after_edit: true,
@@ -770,6 +823,8 @@ pub enum SelectionField {
     SelectedRange,
     /// フォーカス対象。
     Focus,
+    /// レイヤー編集の表示開始位置。
+    Display,
 }
 
 /// `layer` フィールド名。
@@ -800,6 +855,8 @@ const FIELD_CURSOR: &str = "cursor";
 const FIELD_SELECTED_RANGE: &str = "selected_range";
 /// `focus` フィールド名。
 const FIELD_FOCUS: &str = "focus";
+/// `display` フィールド名。
+const FIELD_DISPLAY: &str = "display";
 /// `section` フィールド名。
 const FIELD_SECTION: &str = "section";
 /// セレクターのレイヤー番号のフィールド名。
@@ -1243,7 +1300,20 @@ mod tests {
             focus: Some(FocusChange::Set {
                 object: sample_object_selector(),
             }),
+            display: Some(DisplayStart {
+                layer: 1,
+                frame: 60,
+            }),
             expected_project_epoch: EPOCH.to_string(),
+        }
+    }
+
+    fn sample_display_range() -> DisplayRange {
+        DisplayRange {
+            frame_start: 60,
+            layer_start: 1,
+            frame_num: 600,
+            layer_num: 10,
         }
     }
 
@@ -1674,13 +1744,14 @@ mod tests {
             cursor: None,
             selected_range: None,
             focus: None,
+            display: None,
             expected_project_epoch: EPOCH.to_string(),
         };
         let error = params.validate().unwrap_err();
         assert_eq!(
             error,
             EditInputError::NoChangeRequested {
-                fields: &["cursor", "selected_range", "focus"],
+                fields: &["cursor", "selected_range", "focus", "display"],
             }
         );
         assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
@@ -1691,11 +1762,64 @@ mod tests {
                 cursor: None,
                 selected_range: None,
                 focus: Some(FocusChange::Clear {}),
+                display: None,
                 ..sample_set_selection()
             }
             .validate(),
             Ok(())
         );
+        // 表示開始位置だけの指定でも変更要求として成立する。
+        assert_eq!(
+            SetSelectionParams {
+                cursor: None,
+                selected_range: None,
+                focus: None,
+                display: Some(DisplayStart {
+                    layer: 3,
+                    frame: 90,
+                }),
+                ..sample_set_selection()
+            }
+            .validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn set_selection_rejects_a_display_start_outside_the_transferable_range() {
+        let over = MAX_POSITION + 1;
+        for (display, field) in [
+            (
+                DisplayStart {
+                    layer: over,
+                    frame: 0,
+                },
+                FIELD_LAYER,
+            ),
+            (
+                DisplayStart {
+                    layer: 0,
+                    frame: over,
+                },
+                FIELD_FRAME,
+            ),
+        ] {
+            assert_eq!(
+                SetSelectionParams {
+                    cursor: None,
+                    selected_range: None,
+                    focus: None,
+                    display: Some(display),
+                    ..sample_set_selection()
+                }
+                .validate(),
+                Err(EditInputError::PositionOutOfRange {
+                    field,
+                    value: over,
+                    max: MAX_POSITION,
+                })
+            );
+        }
     }
 
     #[test]
@@ -2210,9 +2334,12 @@ mod tests {
         let state = serde_json::to_value(SelectionState::observed(
             EPOCH,
             42,
-            Cursor { frame: 0, layer: 0 },
-            None,
-            Some(sample_summary()),
+            ObservedSelection {
+                cursor: Cursor { frame: 0, layer: 0 },
+                selected_range: None,
+                focus: Some(sample_summary()),
+                display: sample_display_range(),
+            },
             Vec::new(),
             Vec::new(),
         ))
@@ -2231,12 +2358,15 @@ mod tests {
         let state = SelectionState::observed(
             EPOCH,
             42,
-            Cursor {
-                frame: 120,
-                layer: 2,
+            ObservedSelection {
+                cursor: Cursor {
+                    frame: 120,
+                    layer: 2,
+                },
+                selected_range: Some(FrameRange { start: 10, end: 20 }),
+                focus: Some(sample_summary()),
+                display: sample_display_range(),
             },
-            Some(FrameRange { start: 10, end: 20 }),
-            Some(sample_summary()),
             vec![SelectionField::Cursor, SelectionField::Focus],
             Vec::new(),
         );
@@ -2254,9 +2384,12 @@ mod tests {
         let state = SelectionState::observed(
             EPOCH,
             42,
-            Cursor { frame: 0, layer: 0 },
-            None,
-            None,
+            ObservedSelection {
+                cursor: Cursor { frame: 0, layer: 0 },
+                selected_range: None,
+                focus: None,
+                display: sample_display_range(),
+            },
             Vec::new(),
             Vec::new(),
         );
@@ -2269,9 +2402,12 @@ mod tests {
         let state = SelectionState::observed(
             EPOCH,
             42,
-            Cursor { frame: 0, layer: 0 },
-            None,
-            None,
+            ObservedSelection {
+                cursor: Cursor { frame: 0, layer: 0 },
+                selected_range: None,
+                focus: None,
+                display: sample_display_range(),
+            },
             vec![SelectionField::Cursor],
             Vec::new(),
         );
@@ -2294,9 +2430,12 @@ mod tests {
             serde_json::to_string(&SelectionState::observed(
                 EPOCH,
                 42,
-                Cursor { frame: 0, layer: 0 },
-                Some(FrameRange { start: 0, end: 1 }),
-                Some(sample_summary()),
+                ObservedSelection {
+                    cursor: Cursor { frame: 0, layer: 0 },
+                    selected_range: Some(FrameRange { start: 0, end: 1 }),
+                    focus: Some(sample_summary()),
+                    display: sample_display_range(),
+                },
                 vec![SelectionField::Focus],
                 Vec::new(),
             ))
@@ -2383,6 +2522,7 @@ mod tests {
                 cursor: None,
                 selected_range: None,
                 focus: Some(FocusChange::Set { object }),
+                display: None,
                 expected_project_epoch: EPOCH.to_string(),
             }
             .validate(),

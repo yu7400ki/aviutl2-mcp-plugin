@@ -957,6 +957,15 @@ impl SceneEditor for CachingEditor<'_> {
         self.inner.set_cursor(ticket, layer, frame)
     }
 
+    fn set_display_start(
+        &self,
+        ticket: crate::edit::precondition::MutationTicket<'_>,
+        layer: usize,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.inner.set_display_start(ticket, layer, frame)
+    }
+
     fn set_select_range(
         &self,
         ticket: crate::edit::precondition::MutationTicket<'_>,

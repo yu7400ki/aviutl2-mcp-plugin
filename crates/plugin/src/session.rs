@@ -2913,9 +2913,17 @@ mod edit_tests {
             Ok(SelectionState::observed(
                 EPOCH,
                 1,
-                aviutl2_mcp_core::Cursor { frame: 0, layer: 0 },
-                None,
-                None,
+                aviutl2_mcp_core::ObservedSelection {
+                    cursor: aviutl2_mcp_core::Cursor { frame: 0, layer: 0 },
+                    selected_range: None,
+                    focus: None,
+                    display: aviutl2_mcp_core::DisplayRange {
+                        frame_start: 0,
+                        layer_start: 0,
+                        frame_num: 0,
+                        layer_num: 0,
+                    },
+                },
                 vec![SelectionField::Cursor],
                 Vec::new(),
             ))

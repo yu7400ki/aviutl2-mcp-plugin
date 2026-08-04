@@ -29,11 +29,12 @@ use crate::read::host::{EditState, HostEffect, HostLayer, HostObjectPlacement};
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchOperation, BatchOutcome, CreateObjectParams,
     CreateObjectSectionParams, Cursor, DeleteEffectParams, DeleteObjectParams,
-    DeleteObjectSectionParams, EditOutcome, EffectInfo, EffectType, FocusChange, FrameRange,
-    ItemWriteError, LayerInfo, LayerStateOutcome, MoveObjectParams, MoveObjectSectionParams,
-    ObjectSectionsOutcome, ObjectSelector, ObjectSource, ObjectSummary, RangeChange, SectionRange,
-    SelectionField, SelectionState, SetEffectEnabledParams, SetLayerStateParams,
-    SetObjectItemParams, SetObjectNameParams, SetSelectionParams, prepare_item_write,
+    DeleteObjectSectionParams, DisplayRange, DisplayStart, EditOutcome, EffectInfo, EffectType,
+    FocusChange, FrameRange, ItemWriteError, LayerInfo, LayerStateOutcome, MoveObjectParams,
+    MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSelector, ObjectSource, ObjectSummary,
+    ObservedSelection, RangeChange, SectionRange, SelectionField, SelectionState,
+    SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
+    SetSelectionParams, prepare_item_write,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -1130,7 +1131,13 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
         // あり、フォーカスは区間の処理が終わってから適用されるため、区間内では
         // 観測できない。観測が編集と原子的でないことは応答で伝える。
         let observed = guard(|| self.host.observed_selection())?;
-        Ok(selection_state(epoch, revision, observed, outcome))
+        Ok(selection_state(
+            epoch,
+            revision,
+            observed,
+            outcome,
+            params.display.as_ref(),
+        ))
     }
 
     fn apply_batch(&self, params: &ApplyBatchParams) -> Result<BatchOutcome, EditError> {
@@ -1176,15 +1183,15 @@ pub(crate) fn attribute<T>(
 
 /// 適用を試みた結果。
 ///
-/// 要求された項目は必ず `applied` か `not_applied` のどちらかに現れる。
+/// 要求された項目は必ず `applied` か `requested` の差分のどちらかに現れる。
 struct SelectionOutcome {
-    /// 実際に適用できた項目。
+    /// 変更を要求された項目。応答での並び順を決める。
+    requested: Vec<SelectionField>,
+    /// 変更 API の呼び出しが成功した項目。
     applied: Vec<SelectionField>,
-    /// 要求されたが適用できなかった項目。
-    not_applied: Vec<SelectionField>,
 }
 
-/// カーソル・選択範囲・フォーカスを固定の順序で適用する。
+/// カーソル・選択範囲・表示開始位置・フォーカスを固定の順序で適用する。
 ///
 /// 順序を固定するのは、途中で失敗したときの状態を一意にするためである。
 /// フォーカスはどのみち区間の処理の最後に適用されるため、この順序は SDK の
@@ -1231,6 +1238,19 @@ fn apply_selection(
             }
         }
     }
+    if let Some(display) = &params.display {
+        requested.push(SelectionField::Display);
+        let layer = index(display.layer);
+        let frame = index(display.frame);
+        if failure.is_none() {
+            match permit.issue(boundary, |ticket| {
+                editor.set_display_start(ticket, layer, frame)
+            }) {
+                Ok(()) => applied.push(SelectionField::Display),
+                Err(error) => failure = Some(error),
+            }
+        }
+    }
     if let Some(change) = &params.focus {
         requested.push(SelectionField::Focus);
         let target = match change {
@@ -1251,38 +1271,57 @@ fn apply_selection(
             "選択状態の一部を適用できませんでした"
         );
     }
-    let not_applied = requested
-        .into_iter()
-        .filter(|field| !applied.contains(field))
-        .collect();
-    SelectionOutcome {
-        applied,
-        not_applied,
-    }
+    SelectionOutcome { requested, applied }
+}
+
+/// 表示開始位置が要求どおりに反映されたか。
+///
+/// 見るのは開始位置だけである。表示フレーム数・表示レイヤー数は厳密な値では
+/// ないと編集情報の側が断っており、成否の判定に使えない。
+fn display_start_applied(observed: &DisplayRange, requested: &DisplayStart) -> bool {
+    observed.frame_start == index(requested.frame) && observed.layer_start == index(requested.layer)
 }
 
 /// 観測した選択状態から応答を組み立てる。
+///
+/// 表示開始位置はホストが設定できる範囲へ調整するため、変更 API が成功しても
+/// 要求値が入るとは限らない。観測した値と食い違えば適用できなかった側へ移す。
 fn selection_state(
     epoch: String,
     revision: u64,
     observed: HostSelection,
     outcome: SelectionOutcome,
+    display: Option<&DisplayStart>,
 ) -> SelectionState {
     let focus = observed
         .focus
         .as_ref()
         .map(|object| object_summary(&epoch, observed.scene_id, object));
+    let mut applied = outcome.applied;
+    if let Some(requested) = display
+        && !display_start_applied(&observed.display, requested)
+    {
+        applied.retain(|field| *field != SelectionField::Display);
+    }
+    let not_applied = outcome
+        .requested
+        .into_iter()
+        .filter(|field| !applied.contains(field))
+        .collect();
     SelectionState::observed(
         epoch,
         revision,
-        Cursor {
-            frame: observed.cursor.frame,
-            layer: observed.cursor.layer,
+        ObservedSelection {
+            cursor: Cursor {
+                frame: observed.cursor.frame,
+                layer: observed.cursor.layer,
+            },
+            selected_range: observed.selected_range,
+            focus,
+            display: observed.display,
         },
-        observed.selected_range,
-        focus,
-        outcome.applied,
-        outcome.not_applied,
+        applied,
+        not_applied,
     )
 }
 

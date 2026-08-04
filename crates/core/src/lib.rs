@@ -67,10 +67,10 @@ pub use descriptor::{
 pub use digest::{SHA256_HEX_LEN, SHA256_PREFIX, format_sha256};
 pub use edit::{
     AddEffectParams, CreateObjectParams, CreateObjectSectionParams, CursorPosition,
-    DeleteEffectParams, DeleteObjectParams, DeleteObjectSectionParams, Destination, EditInputError,
-    EditOutcome, FocusChange, LayerNameChange, LayerStateOutcome, MoveObjectParams,
-    MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSource, Placement, RangeChange,
-    SelectionField, SelectionState, SetEffectEnabledParams, SetLayerStateParams,
+    DeleteEffectParams, DeleteObjectParams, DeleteObjectSectionParams, Destination, DisplayStart,
+    EditInputError, EditOutcome, FocusChange, LayerNameChange, LayerStateOutcome, MoveObjectParams,
+    MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSource, ObservedSelection, Placement,
+    RangeChange, SelectionField, SelectionState, SetEffectEnabledParams, SetLayerStateParams,
     SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
 };
 pub use edit_info::{Cursor, DisplayRange, EditInfo, Extent, FrameRange, SceneInfo, SceneRef};

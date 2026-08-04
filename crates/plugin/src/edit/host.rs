@@ -17,7 +17,9 @@ use crate::edit::error::EditError;
 use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
 use crate::read::host::{EditState, HostEditInfo, HostObject, SceneReader};
-use aviutl2_mcp_core::{AvailableEffect, AvailableEffectItem, Cursor, FrameRange, SectionRange};
+use aviutl2_mcp_core::{
+    AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, FrameRange, SectionRange,
+};
 
 /// 編集区間の内側で対象オブジェクトを指す内部識別子。
 ///
@@ -60,6 +62,8 @@ pub struct HostSelection {
     pub selected_range: Option<FrameRange>,
     /// フォーカス対象。未選択は `None`。
     pub focus: Option<HostObject>,
+    /// レイヤー編集の表示範囲。
+    pub display: DisplayRange,
 }
 
 /// 編集区間の内側で行える操作。
@@ -286,6 +290,14 @@ pub trait SceneEditor {
 
     /// 編集カーソルの位置を設定する。ホストが範囲外の値をクランプする。
     fn set_cursor(
+        &self,
+        ticket: MutationTicket<'_>,
+        layer: usize,
+        frame: usize,
+    ) -> Result<(), EditError>;
+
+    /// レイヤー編集の表示開始位置を設定する。ホストが設定できる範囲へ調整する。
+    fn set_display_start(
         &self,
         ticket: MutationTicket<'_>,
         layer: usize,

@@ -65,9 +65,9 @@ use aviutl2_mcp_server::api::ListInstancesResponse;
 use aviutl2_mcp_server::discovery::default_registry_dir;
 use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, CreateObjectInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
-    DestinationInput, FocusChangeInput, ItemValueInput, LayerNameChangeInput, MoveObjectInput,
-    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetLayerStateInput,
-    SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
+    DestinationInput, DisplayStartInput, FocusChangeInput, ItemValueInput, LayerNameChangeInput,
+    MoveObjectInput, ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput,
+    SetLayerStateInput, SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::{
     AvailableEffectsPageInput, EffectSelectorInput, GetObjectInput, InstanceInput,
@@ -1044,6 +1044,7 @@ impl Harness {
                     cursor: change.cursor,
                     selected_range: change.selected_range,
                     focus: change.focus,
+                    display: change.display,
                     expected_project_epoch,
                 })));
         self.decode(result)
@@ -1088,6 +1089,7 @@ struct SelectionChange {
     cursor: Option<CursorPositionInput>,
     selected_range: Option<RangeChangeInput>,
     focus: Option<FocusChangeInput>,
+    display: Option<DisplayStartInput>,
 }
 
 /// ページ応答のうち本ターゲットが用いる部分。
@@ -5821,6 +5823,10 @@ fn check_set_selection(
                 focus: Some(FocusChangeInput::Set {
                     object: object_selector_input(&object.selector),
                 }),
+                display: Some(DisplayStartInput {
+                    layer: context.target.layer as u32,
+                    frame: context.target.frame as u32,
+                }),
             },
             expected,
         ),
@@ -5881,6 +5887,10 @@ fn check_set_selection(
             }),
             selected_range: Some(RangeChangeInput::Clear {}),
             focus: Some(FocusChangeInput::Clear {}),
+            display: Some(DisplayStartInput {
+                layer: info.display.layer_start as u32,
+                frame: info.display.frame_start as u32,
+            }),
         },
         expected,
     );
