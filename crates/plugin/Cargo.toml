@@ -30,7 +30,7 @@ proptest = "1.6.0"
 [target.'cfg(windows)'.dependencies]
 aviutl2 = "0.41.0"
 aviutl2-mcp-win = { workspace = true }
-win32-ui = { git = "https://github.com/yu7400ki/win32-ui.git", rev = "353ef3ea52b2d0492700c4609d8a0871e72d908d" }
+win32-ui = { git = "https://github.com/yu7400ki/win32-ui.git", rev = "5822f65d03a1aeca7871e4960176402aa27b45c7" }
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",

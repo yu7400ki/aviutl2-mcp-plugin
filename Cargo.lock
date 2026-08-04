@@ -1640,7 +1640,7 @@ dependencies = [
 [[package]]
 name = "win32-ui"
 version = "0.1.0"
-source = "git+https://github.com/yu7400ki/win32-ui.git?rev=353ef3ea52b2d0492700c4609d8a0871e72d908d#353ef3ea52b2d0492700c4609d8a0871e72d908d"
+source = "git+https://github.com/yu7400ki/win32-ui.git?rev=5822f65d03a1aeca7871e4960176402aa27b45c7#5822f65d03a1aeca7871e4960176402aa27b45c7"
 dependencies = [
  "taffy",
  "windows",
