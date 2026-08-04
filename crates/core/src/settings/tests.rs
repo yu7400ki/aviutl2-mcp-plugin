@@ -31,7 +31,8 @@ fn an_empty_file_yields_every_default() {
         "既定値の解決で不整合が出ました: {issues:?}"
     );
     assert_eq!(settings, Settings::default());
-    assert_eq!(settings.log_level(), DEFAULT_LOG_LEVEL);
+    assert_eq!(settings.log_level(), None);
+    assert_eq!(settings.effective_log_level(), default_log_level());
     assert_eq!(settings.budgets().percent(), DEFAULT_BUDGET_SCALE_PERCENT);
     assert!(settings.disabled_tools().is_empty());
 }
@@ -72,7 +73,7 @@ fn every_field_round_trips_through_the_document() {
 
     let (settings, issues) = reparsed.resolve(&Settings::default());
     assert!(issues.is_empty(), "{issues:?}");
-    assert_eq!(settings.log_level(), "debug");
+    assert_eq!(settings.log_level(), Some("debug"));
     assert_eq!(settings.budgets().percent(), 200);
     assert_eq!(settings.artifact_ttl(), Duration::from_secs(900));
     assert_eq!(settings.artifact_max_count(), 8);
@@ -88,7 +89,7 @@ fn unknown_top_level_fields_are_ignored_and_preserved() {
     let mut parsed = document(text);
     let (settings, issues) = parsed.resolve(&Settings::default());
     assert!(issues.is_empty(), "{issues:?}");
-    assert_eq!(settings.log_level(), "warn");
+    assert_eq!(settings.log_level(), Some("warn"));
 
     // 書き戻しても未知の項目は残る。書き手が読み手より新しい build であり得る。
     parsed.apply(&SettingsChange {
@@ -206,7 +207,8 @@ fn a_field_with_the_wrong_type_falls_back_alone() {
     }"#;
     let (settings, issues) = resolve(text);
 
-    assert_eq!(settings.log_level(), DEFAULT_LOG_LEVEL);
+    assert_eq!(settings.log_level(), None);
+    assert_eq!(settings.effective_log_level(), default_log_level());
     assert_eq!(settings.budgets().percent(), DEFAULT_BUDGET_SCALE_PERCENT);
     assert_eq!(
         settings.artifact_ttl(),
@@ -234,10 +236,50 @@ fn a_group_with_the_wrong_type_falls_back_without_taking_the_rest() {
         Duration::from_secs(DEFAULT_ARTIFACT_TTL_SECONDS)
     );
     assert_eq!(settings.session_stale_after(), Duration::from_secs(1200));
-    assert!(
-        issues.iter().any(|issue| issue.field == "artifact"
-            && matches!(issue.reason, SettingsIssueReason::TypeMismatch)),
-        "{issues:?}"
+    // 群の型違いは群につき 1 回だけ記録する。項目の数だけ積むと、同じ 1 行が
+    // 3 回 WARN に並ぶ。
+    assert_eq!(
+        issues,
+        vec![SettingsIssue {
+            field: "artifact".to_string(),
+            reason: SettingsIssueReason::TypeMismatch,
+        }],
+        "群の型違いが 1 回だけ記録されていません"
+    );
+}
+
+#[test]
+fn an_absent_log_level_is_distinguishable_from_a_written_one() {
+    // 未記載のときに何を採るかはビルドで変わる。「書かれていない」と
+    // 「`info` と書かれている」を区別できなければ、その選び分けができない。
+    let (absent, _) = resolve("{}");
+    assert_eq!(absent.log_level(), None);
+    assert_eq!(absent.effective_log_level(), default_log_level());
+
+    let (written, _) = resolve(r#"{"log_level":"info"}"#);
+    assert_eq!(written.log_level(), Some("info"));
+    assert_eq!(written.effective_log_level(), "info");
+
+    // 既定値は 1 つのままである。選び分けているのは未記載のときだけ。
+    assert!(matches!(
+        default_log_level(),
+        DEFAULT_LOG_LEVEL | DEVELOPMENT_LOG_LEVEL
+    ));
+    assert_ne!(absent, written, "未記載と明示が同じ設定になりました");
+}
+
+#[test]
+fn an_empty_log_level_is_reported_and_falls_back() {
+    let (settings, issues) = resolve(r#"{"log_level":"   "}"#);
+
+    assert_eq!(settings.log_level(), None);
+    assert_eq!(settings.effective_log_level(), default_log_level());
+    assert_eq!(
+        issues,
+        vec![SettingsIssue {
+            field: "log_level".to_string(),
+            reason: SettingsIssueReason::Unparsable,
+        }]
     );
 }
 
@@ -293,24 +335,39 @@ fn fixed_limits_written_into_the_file_have_no_effect() {
 }
 
 #[test]
-fn a_budget_scale_that_breaks_an_inequality_keeps_the_previous_value() {
-    // 丸めた倍率が不等式を破ったときは、その項目だけを捨てて直前の値を保つ。
-    // 実装が拒否の経路を持つことを、倍率 0 を土台にした直接の解決で確かめる。
+fn a_budget_scale_below_the_floor_is_clamped_before_the_inequality_check() {
+    // **丸めが先に効くため、不等式の検査へ届くのは範囲内の倍率だけである。**
+    // 10〜400 のいずれも不等式を満たすことは `budget.rs` の全数検査が示して
+    // おり、したがって「破れたら直前の値を維持する」経路は製品の入力からは
+    // 到達しない。到達させるには定数そのものを動かす必要がある。
+    //
+    // ここで確かめるのは、範囲外の倍率が拒否ではなく丸めとして扱われること
+    // である。直前の値への差し戻しは起きない。
     let previous = Settings {
         budgets: crate::budget::ScaledBudgets::checked(200).unwrap(),
         ..Settings::default()
     };
-    let broken = SettingsDocument {
+    let below = SettingsDocument {
         fields: Map::from_iter([(FIELD_BUDGET_SCALE_PERCENT.to_string(), Value::from(0))]),
     };
-    // 0 は下限へ丸められるため、丸めの後は不等式を満たす。丸めの記録だけが残る。
-    let (settings, issues) = broken.resolve(&previous);
+
+    let (settings, issues) = below.resolve(&previous);
+
     assert_eq!(settings.budgets().percent(), MIN_BUDGET_SCALE_PERCENT);
-    assert!(
-        issues
-            .iter()
-            .any(|issue| matches!(issue.reason, SettingsIssueReason::Clamped { .. })),
-        "{issues:?}"
+    assert_ne!(
+        settings.budgets(),
+        previous.budgets(),
+        "丸めるべき値が直前の値へ差し戻されました"
+    );
+    assert_eq!(
+        issues,
+        vec![SettingsIssue {
+            field: "budget_scale_percent".to_string(),
+            reason: SettingsIssueReason::Clamped {
+                requested: 0,
+                applied: u64::from(MIN_BUDGET_SCALE_PERCENT),
+            },
+        }]
     );
 }
 
@@ -344,7 +401,7 @@ fn an_unchanged_stamp_does_not_reparse() {
         assert!(matches!(reader.refresh(), SettingsRefresh::Unchanged));
     }
     assert_eq!(reader.loads(), 1, "印が同じなのに読み直しました");
-    assert_eq!(reader.settings().log_level(), "debug");
+    assert_eq!(reader.settings().log_level(), Some("debug"));
 
     let _ = std::fs::remove_file(&path);
 }
@@ -367,7 +424,7 @@ fn a_replaced_file_is_seen_on_the_next_refresh() {
     std::fs::rename(&replacement, &path).unwrap();
 
     assert!(matches!(reader.refresh(), SettingsRefresh::Reloaded(_)));
-    assert_eq!(reader.settings().log_level(), "trace");
+    assert_eq!(reader.settings().log_level(), Some("trace"));
     assert_eq!(reader.settings().artifact_max_count(), 3);
 
     let _ = std::fs::remove_file(&path);
@@ -393,7 +450,7 @@ fn several_writes_between_refreshes_apply_once_as_the_last_state() {
         loads + 1,
         "書き込みの回数だけ読み直しました"
     );
-    assert_eq!(reader.settings().log_level(), "trace");
+    assert_eq!(reader.settings().log_level(), Some("trace"));
 
     let _ = std::fs::remove_file(&path);
 }
@@ -410,7 +467,7 @@ fn a_corrupt_file_keeps_the_previous_snapshot() {
 
     assert!(matches!(refresh, SettingsRefresh::Failed(_)), "{refresh:?}");
     assert_eq!(
-        reader.settings().log_level(),
+        reader.settings().log_level().unwrap_or_default(),
         "debug",
         "破損で直前の設定が失われました"
     );
@@ -446,7 +503,7 @@ fn adopting_a_document_takes_effect_without_reading_the_file_again() {
     std::fs::write(&path, written.to_json()).unwrap();
     reader.adopt(&written);
 
-    assert_eq!(reader.settings().log_level(), "trace");
+    assert_eq!(reader.settings().log_level(), Some("trace"));
     // 直後の契機では読み直さない。反映は既に済んでいる。
     assert!(matches!(reader.refresh(), SettingsRefresh::Unchanged));
 

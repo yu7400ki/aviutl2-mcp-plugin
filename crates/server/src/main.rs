@@ -17,12 +17,12 @@ use std::process::ExitCode;
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && args[1] == "list-instances" {
-        init_logging(aviutl2_mcp_core::settings::DEFAULT_LOG_LEVEL);
+        init_logging(&aviutl2_mcp_core::settings::Settings::default());
         return run_list_instances_cli();
     }
 
     let Some(registry_dir) = registry_dir() else {
-        init_logging(aviutl2_mcp_core::settings::DEFAULT_LOG_LEVEL);
+        init_logging(&aviutl2_mcp_core::settings::Settings::default());
         tracing::error!("registry ディレクトリを決定できませんでした");
         return ExitCode::FAILURE;
     };
@@ -32,7 +32,7 @@ async fn main() -> ExitCode {
     let location = settings_location(&base_dir_for_registry(&registry_dir));
     let mut reader = SettingsReader::new(location.path);
     let refresh = reader.refresh();
-    init_logging(reader.settings().log_level());
+    init_logging(&reader.settings());
     match refresh {
         SettingsRefresh::Reloaded(issues) => {
             for issue in &issues {

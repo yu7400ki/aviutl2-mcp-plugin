@@ -15,6 +15,14 @@ pub mod settings;
 mod test_support;
 pub mod win_io;
 
+use aviutl2_mcp_core::settings::Settings;
+use std::sync::OnceLock;
+use tracing::warn;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::reload;
+use tracing_subscriber::util::SubscriberInitExt;
+
 /// 既定のログレベル。
 ///
 /// operation・correlation_id・所要時間・結果コードの記録は運用上の要求であり、
@@ -37,44 +45,88 @@ const DEFAULT_LOG_FILTER: &str = aviutl2_mcp_core::settings::DEFAULT_LOG_LEVEL;
 /// 場面でそれを有効にするよう案内され、塞いだ経路がそのまま開き直されてしまう。
 const EXTERNAL_LOG_CEILINGS: &[&str] = &["rmcp=warn"];
 
+/// 稼働中の subscriber のレベルを差し替える口。
+///
+/// subscriber はプロセスに 1 つしか無いため、口も 1 つで足りる。
+/// [`init_logging`] を呼んでいない場合（試験など）は空のままであり、
+/// [`apply_log_level`] は何もしない。
+static LOG_RELOAD: OnceLock<Box<dyn Fn(EnvFilter) + Send + Sync>> = OnceLock::new();
+
 /// ログを stderr へ構造化出力するよう初期化する。
 ///
-/// レベルは `RUST_LOG` 環境変数、引数の `log_level`、[`DEFAULT_LOG_FILTER`] の
+/// レベルは `RUST_LOG` 環境変数、設定の `log_level`、[`DEFAULT_LOG_FILTER`] の
 /// 順に採る。**環境変数を先に見るのは、設定ファイルごと読めない状況を診断する
 /// 経路を残すためである。** `LOG_FORMAT=json` で JSON 出力を選ぶ。いずれの
 /// 場合も [`EXTERNAL_LOG_CEILINGS`] は適用される。
 ///
-/// **レベルはプロセスの寿命の間ずっと固定である。** subscriber は一度しか
-/// 立てられず、設定を変えたときに効くのは次回の起動からになる。
-pub fn init_logging(log_level: &str) {
-    let format = std::env::var("LOG_FORMAT").unwrap_or_default();
-    let json_mode = format.eq_ignore_ascii_case("json");
+/// **レベルは稼働中に差し替えられる。** filter を `reload::Layer` の下に置き、
+/// 設定が変わったら [`apply_log_level`] が差し替える。挟まるのは読み取りロック
+/// 1 回であり、**他の 8 項目と同じく「保存すれば効く」形になる。**
+pub fn init_logging(settings: &Settings) {
+    let (filter, rejected) = build_filter(settings.effective_log_level());
+    let (layer, handle) = reload::Layer::new(filter);
+    let _ = LOG_RELOAD.set(Box::new(move |filter| {
+        if let Err(e) = handle.reload(filter) {
+            warn!(error = %e, "ログレベルを差し替えられませんでした");
+        }
+    }));
 
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(env_filter(log_level))
+    let format = std::env::var("LOG_FORMAT").unwrap_or_default();
+    let registry = tracing_subscriber::registry().with(layer);
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_ansi(false);
-
-    if json_mode {
-        builder.json().init();
+    if format.eq_ignore_ascii_case("json") {
+        registry.with(fmt_layer.json()).init();
     } else {
-        builder.init();
+        registry.with(fmt_layer).init();
+    }
+
+    report_rejected_log_level(rejected);
+}
+
+/// 設定のログレベルを稼働中の subscriber へ反映する。
+///
+/// [`init_logging`] を呼んでいない場合は何もしない。
+pub fn apply_log_level(settings: &Settings) {
+    let Some(reload) = LOG_RELOAD.get() else {
+        return;
+    };
+    let (filter, rejected) = build_filter(settings.effective_log_level());
+    report_rejected_log_level(rejected);
+    reload(filter);
+}
+
+/// 解釈できなかったログレベルの指定を記録する。
+fn report_rejected_log_level(rejected: Option<String>) {
+    if let Some(rejected) = rejected {
+        warn!("ログレベル {rejected} を解釈できないため {DEFAULT_LOG_FILTER} を用います");
     }
 }
 
 /// `RUST_LOG` を読み、未設定・不正なら与えられたレベルへ落とす。
 ///
+/// 戻り値の 2 つ目は、**解釈できなかったために既定へ戻した指定**である。
+/// `EnvFilter::new` は解釈に失敗しても値を返す lossy な口であり、そのまま使うと
+/// 記録が `error` 以下へ落ちたことを誰も知らせない。
+///
 /// 読み取った内容に [`EXTERNAL_LOG_CEILINGS`] を重ねる。同じ対象への指定は
 /// 後から足したものが優先されるため、`RUST_LOG` が何を指定していても上限は残る。
-fn env_filter(log_level: &str) -> tracing_subscriber::EnvFilter {
-    let mut filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::try_new(log_level)
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER))
-    });
+fn build_filter(log_level: &str) -> (EnvFilter, Option<String>) {
+    let (mut filter, rejected) = match EnvFilter::try_from_default_env() {
+        Ok(filter) => (filter, None),
+        Err(_) => match EnvFilter::try_new(log_level) {
+            Ok(filter) => (filter, None),
+            Err(_) => (
+                EnvFilter::new(DEFAULT_LOG_FILTER),
+                Some(log_level.to_string()),
+            ),
+        },
+    };
     for ceiling in EXTERNAL_LOG_CEILINGS {
         filter = filter.add_directive(parse_ceiling(ceiling));
     }
-    filter
+    (filter, rejected)
 }
 
 /// レベル上限の指定を directive へ解釈する。

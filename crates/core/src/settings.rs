@@ -59,7 +59,26 @@ const FIELD_DRAIN_TIMEOUT_MS: &str = "drain_timeout_ms";
 const FIELD_STALE_AFTER_SECONDS: &str = "stale_after_seconds";
 
 /// 既定のログレベル。`RUST_LOG` と同じ書式で解釈する。
+///
+/// operation・correlation_id・所要時間・結果コードの記録は運用上の要求であり、
+/// 何も設定しない利用者でも失われない水準を選ぶ。
 pub const DEFAULT_LOG_LEVEL: &str = "info";
+
+/// 開発ビルドで、設定に記載が無いときに用いるログレベル。
+pub const DEVELOPMENT_LOG_LEVEL: &str = "debug";
+
+/// 設定にログレベルの記載が無いときに用いる値。
+///
+/// **既定値が 2 つあるのではない。** 選び分けているのは「未記載のときにどれを
+/// 採るか」だけであり、plugin と server はこの 1 つの規則を共有する。開発
+/// ビルドで詳しく記録するのは、不具合の再現がその場で行われるためである。
+pub fn default_log_level() -> &'static str {
+    if cfg!(debug_assertions) {
+        DEVELOPMENT_LOG_LEVEL
+    } else {
+        DEFAULT_LOG_LEVEL
+    }
+}
 
 /// 予算倍率の既定値（百分率）。
 pub const DEFAULT_BUDGET_SCALE_PERCENT: u32 = 100;
@@ -215,7 +234,7 @@ impl std::fmt::Display for SettingsIssue {
 /// あり、プロセスごとに違う値を持たせると静的にも動的にも保てない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
-    log_level: String,
+    log_level: Option<String>,
     budgets: ScaledBudgets,
     disabled_tools: BTreeSet<String>,
     artifact_ttl: Duration,
@@ -229,7 +248,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            log_level: DEFAULT_LOG_LEVEL.to_string(),
+            log_level: None,
             budgets: ScaledBudgets::unscaled(),
             disabled_tools: BTreeSet::new(),
             artifact_ttl: Duration::from_secs(DEFAULT_ARTIFACT_TTL_SECONDS),
@@ -243,9 +262,24 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// ログレベル（`RUST_LOG` と同じ書式）。
-    pub fn log_level(&self) -> &str {
-        &self.log_level
+    /// 設定ファイルに書かれていたログレベル（`RUST_LOG` と同じ書式）。
+    ///
+    /// **未記載は `None` である。** 「書かれていない」と「`info` と書かれて
+    /// いる」を区別できる形にしてあるのは、未記載のときに何を選ぶかが
+    /// ビルドによって変わるためである（[`Settings::effective_log_level`]）。
+    pub fn log_level(&self) -> Option<&str> {
+        self.log_level.as_deref()
+    }
+
+    /// 実際に用いるログレベル。
+    ///
+    /// 未記載なら [`default_log_level`] を選ぶ。**既定値は 1 つのままであり、
+    /// 選び分けているのは「未記載のときにどれを採るか」だけである。**
+    pub fn effective_log_level(&self) -> &str {
+        match self.log_level.as_deref() {
+            Some(level) => level,
+            None => default_log_level(),
+        }
     }
 
     /// 倍率を適用した期限配分の一式。
@@ -434,6 +468,11 @@ impl SettingsDocument {
     /// 範囲外は境界へ丸め、型が違う項目は既定値へ戻す。**予算倍率だけは
     /// `previous` を使う** — 丸めた倍率が不等式を破る場合、その項目を捨てて
     /// 直前の値（起動時なら既定）を維持するためである。
+    ///
+    /// **その差し戻しは、現在の定数の下では製品の入力から到達しない。** 丸めが
+    /// 先に効くため検査へ届くのは 10〜400 の倍率だけであり、その全数が不等式を
+    /// 満たすことを [`crate::budget`] の全数検査が示している。**定数を動かした
+    /// ときに初めて発動する経路であり、そのときは全数検査が先に落ちる。**
     pub fn resolve(&self, previous: &Settings) -> (Settings, Vec<SettingsIssue>) {
         let mut issues = Vec::new();
 
@@ -585,23 +624,29 @@ impl SettingsDocument {
         }
     }
 
-    fn log_level(&self, issues: &mut Vec<SettingsIssue>) -> String {
+    /// ログレベルを取り出す。
+    ///
+    /// **書式の妥当性はここでは判定しない。** `RUST_LOG` の書式を解釈するのは
+    /// 記録の層であり、`crates/core` はそれに依存しない。解釈できない指定を
+    /// 既定へ戻すのは読み手の責務である（[`Settings::effective_log_level`] を
+    /// 通した後に判定する）。ここで見るのは型と、空でないことだけである。
+    fn log_level(&self, issues: &mut Vec<SettingsIssue>) -> Option<String> {
         match self.fields.get(FIELD_LOG_LEVEL) {
-            None | Some(Value::Null) => DEFAULT_LOG_LEVEL.to_string(),
-            Some(Value::String(value)) if !value.trim().is_empty() => value.clone(),
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
             Some(Value::String(_)) => {
                 issues.push(SettingsIssue {
                     field: FIELD_LOG_LEVEL.to_string(),
                     reason: SettingsIssueReason::Unparsable,
                 });
-                DEFAULT_LOG_LEVEL.to_string()
+                None
             }
             Some(_) => {
                 issues.push(SettingsIssue {
                     field: FIELD_LOG_LEVEL.to_string(),
                     reason: SettingsIssueReason::TypeMismatch,
                 });
-                DEFAULT_LOG_LEVEL.to_string()
+                None
             }
         }
     }
@@ -628,10 +673,15 @@ impl SettingsDocument {
                 None | Some(Value::Null) => None,
                 Some(Value::Object(object)) => object.get(field),
                 Some(_) => {
-                    issues.push(SettingsIssue {
+                    // 群の型違いは群につき 1 回だけ記録する。**同じ群の項目を
+                    // 引くたびに積むと、同じ 1 行が項目の数だけ WARN に並ぶ。**
+                    let issue = SettingsIssue {
                         field: group.to_string(),
                         reason: SettingsIssueReason::TypeMismatch,
-                    });
+                    };
+                    if !issues.contains(&issue) {
+                        issues.push(issue);
+                    }
                     return default;
                 }
             },

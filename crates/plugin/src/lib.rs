@@ -66,35 +66,102 @@ const LOG_ENV: &str = "AVIUTL2_MCP_LOG";
 /// 既に global subscriber が設定済みの場合も何もせず戻る。
 ///
 /// level は `AVIUTL2_MCP_LOG` 環境変数（`RUST_LOG` と同じ書式）、共有設定の
-/// `log_level`、ビルド既定の順に採る。**環境変数を先に見るのは、設定ファイル
-/// ごと読めない状況を診断する経路を残すためである。**
+/// `log_level`、ビルドごとの既定の順に採る。**環境変数を先に見るのは、設定
+/// ファイルごと読めない状況を診断する経路を残すためである。**
 ///
-/// **level はプロセスの寿命の間ずっと固定である。** subscriber は一度しか
-/// 立てられず、差し替えの層を持つと出力経路が 1 段増える。設定を変えたときに
-/// 効くのは次回の起動からになる。
+/// **level は稼働中に差し替えられる。** filter を `reload::Layer` の下に置き、
+/// 設定が変わったら [`apply_log_level`] が差し替える。挟まるのは読み取りロック
+/// 1 回であり、**他の項目と同じく「保存すれば効く」形になる。**
 #[cfg(windows)]
 fn init_tracing() {
-    use aviutl2::tracing_subscriber::EnvFilter;
+    use aviutl2::tracing_subscriber::layer::SubscriberExt;
+    use aviutl2::tracing_subscriber::util::SubscriberInitExt;
+    use aviutl2::tracing_subscriber::{fmt, reload};
 
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
-        // 記録の準備より先に設定を読む。生じた不整合は subscriber が立って
+        // 記録の準備より先に設定を読む。生じたことは subscriber が立って
         // から流す。読めなくても既定値で続行する。
-        let issues = settings::initialize();
-        let configured = settings::current().log_level().to_string();
-        let filter =
-            EnvFilter::try_from_env(LOG_ENV).unwrap_or_else(|_| EnvFilter::new(&configured));
+        let report = settings::initialize();
+        let (filter, rejected) = log_filter(&settings::current());
+        let (layer, handle) = reload::Layer::new(filter);
+        let _ = LOG_RELOAD.set(Box::new(move |filter| {
+            if let Err(e) = handle.reload(filter) {
+                tracing::warn!("ログレベルを差し替えられませんでした: {e}");
+            }
+        }));
 
         // 他所で global subscriber が設定済みの場合は上書きせず、そのまま続行する。
-        let _ = aviutl2::tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_ansi(false)
-            .event_format(aviutl2::logger::AviUtl2Formatter)
-            .with_writer(aviutl2::logger::AviUtl2LogWriter)
+        let _ = aviutl2::tracing_subscriber::registry()
+            .with(layer)
+            .with(
+                fmt::layer()
+                    .with_ansi(false)
+                    .event_format(aviutl2::logger::AviUtl2Formatter)
+                    .with_writer(aviutl2::logger::AviUtl2LogWriter),
+            )
             .try_init();
 
-        settings::report_issues(&issues);
+        report_rejected_log_level(rejected);
+        settings::report_startup(&report);
     });
+}
+
+/// 稼働中の subscriber のレベルを差し替える口。
+///
+/// subscriber はプロセスに 1 つしか無いため、口も 1 つで足りる。
+/// [`init_tracing`] を通っていない場合（試験など）は空のままであり、
+/// [`apply_log_level`] は何もしない。
+#[cfg(windows)]
+#[allow(clippy::type_complexity)]
+static LOG_RELOAD: std::sync::OnceLock<
+    Box<dyn Fn(aviutl2::tracing_subscriber::EnvFilter) + Send + Sync>,
+> = std::sync::OnceLock::new();
+
+/// 設定のログレベルを稼働中の subscriber へ反映する。
+#[cfg(windows)]
+pub fn apply_log_level(settings: &aviutl2_mcp_core::settings::Settings) {
+    let Some(reload) = LOG_RELOAD.get() else {
+        return;
+    };
+    let (filter, rejected) = log_filter(settings);
+    report_rejected_log_level(rejected);
+    reload(filter);
+}
+
+/// 設定のログレベルから filter を組み立てる。
+///
+/// 戻り値の 2 つ目は、**解釈できなかったために既定へ戻した指定**である。
+/// `EnvFilter::new` は解釈に失敗しても値を返す lossy な口であり、そのまま使うと
+/// 記録が `error` 以下へ落ちたことを誰も知らせない——運用上の記録（operation・
+/// correlation_id・所要時間・結果コード）がまとめて消える。
+#[cfg(windows)]
+fn log_filter(
+    settings: &aviutl2_mcp_core::settings::Settings,
+) -> (aviutl2::tracing_subscriber::EnvFilter, Option<String>) {
+    use aviutl2::tracing_subscriber::EnvFilter;
+    use aviutl2_mcp_core::settings::DEFAULT_LOG_LEVEL;
+
+    let configured = settings.effective_log_level();
+    match EnvFilter::try_from_env(LOG_ENV) {
+        Ok(filter) => (filter, None),
+        Err(_) => match EnvFilter::try_new(configured) {
+            Ok(filter) => (filter, None),
+            Err(_) => (
+                EnvFilter::new(DEFAULT_LOG_LEVEL),
+                Some(configured.to_string()),
+            ),
+        },
+    }
+}
+
+/// 解釈できなかったログレベルの指定を記録する。
+#[cfg(windows)]
+fn report_rejected_log_level(rejected: Option<String>) {
+    if let Some(rejected) = rejected {
+        let default = aviutl2_mcp_core::settings::DEFAULT_LOG_LEVEL;
+        tracing::warn!("ログレベル {rejected} を解釈できないため {default} を用います");
+    }
 }
 
 #[cfg(windows)]
@@ -959,6 +1026,67 @@ mod tests {
             std::panic::catch_unwind(|| panic!("捕捉されるべき panic")).is_err()
         });
         assert!(caught, "panic が捕捉されませんでした");
+    }
+
+    /// 解釈できないログレベルが記録を消さないことを確かめる。
+    ///
+    /// `EnvFilter::new` は解釈に失敗しても値を返す lossy な口である。そのまま
+    /// 使うと記録が `error` 以下へ落ち、`info` の運用ログ（operation・
+    /// correlation_id・所要時間・結果コード）がまとめて消える。しかもそれを
+    /// 告げる WARN 自体も出ない。
+    #[test]
+    fn an_unparsable_log_level_falls_back_to_the_default_and_is_reported() {
+        use aviutl2::tracing_subscriber::filter::LevelFilter;
+        use aviutl2_mcp_core::settings::{DEFAULT_LOG_LEVEL, Settings, SettingsDocument};
+
+        let broken = SettingsDocument::parse(r#"{"log_level":"!!!"}"#)
+            .unwrap()
+            .resolve(&Settings::default())
+            .0;
+        assert_eq!(broken.effective_log_level(), "!!!");
+
+        let (filter, rejected) = log_filter(&broken);
+
+        assert_eq!(
+            rejected.as_deref(),
+            Some("!!!"),
+            "解釈できない指定が記録されていません"
+        );
+        assert_eq!(
+            filter.max_level_hint(),
+            aviutl2::tracing_subscriber::EnvFilter::new(DEFAULT_LOG_LEVEL).max_level_hint(),
+            "解釈できない指定で記録の水準が落ちました"
+        );
+        assert!(
+            filter.max_level_hint() > Some(LevelFilter::ERROR),
+            "運用ログが残らない水準へ落ちました"
+        );
+
+        // 解釈できる指定は素通しし、記録もしない。
+        let sane = SettingsDocument::parse(r#"{"log_level":"warn"}"#)
+            .unwrap()
+            .resolve(&Settings::default())
+            .0;
+        assert_eq!(log_filter(&sane).1, None);
+    }
+
+    /// 起動時に設定が壊れていても登録は止めないが、理由は捨てない。
+    #[test]
+    fn a_startup_failure_is_kept_for_the_log() {
+        use aviutl2_mcp_core::settings::SettingsReadError;
+
+        let report = settings::StartupReport {
+            issues: Vec::new(),
+            failure: Some(SettingsReadError::Parse(
+                aviutl2_mcp_core::settings::SettingsParseError::NotAnObject,
+            )),
+        };
+        let logs = capture_logs(|| settings::report_startup(&report));
+
+        assert!(
+            logs.contains("WARN") && logs.contains("設定を読み込めませんでした"),
+            "起動時の破損が記録されていません: {logs}"
+        );
     }
 
     #[test]

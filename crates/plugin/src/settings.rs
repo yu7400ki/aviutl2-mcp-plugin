@@ -28,8 +28,8 @@
 use crate::atomic_file::write_protected_atomic;
 use anyhow::{Context, Result, anyhow};
 use aviutl2_mcp_core::settings::{
-    Settings, SettingsChange, SettingsDocument, SettingsIssue, SettingsReader, SettingsRefresh,
-    settings_path,
+    Settings, SettingsChange, SettingsDocument, SettingsIssue, SettingsReadError, SettingsReader,
+    SettingsRefresh, settings_path,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
@@ -96,24 +96,54 @@ pub fn current() -> Arc<Settings> {
     state().settings()
 }
 
+/// 起動時の読み込みで生じたこと。
+///
+/// **記録の準備が整う前に読むため、その場では流せない。** subscriber を立てて
+/// から [`report_startup`] へ渡す。ログレベルが設定から決まる以上、読むのが先に
+/// なるのは避けられない。
+#[derive(Debug, Default)]
+pub struct StartupReport {
+    /// 丸めた項目・既定へ戻した項目。
+    pub issues: Vec<SettingsIssue>,
+    /// 読み込みそのものが失敗した理由。
+    pub failure: Option<SettingsReadError>,
+}
+
 /// 起動時に設定を読み込む。
 ///
-/// **失敗しても呼び出し元を止めない。** 生じた不整合を返すので、記録の準備が
-/// できてから [`report_issues`] へ渡す。
-pub fn initialize() -> Vec<SettingsIssue> {
+/// **失敗しても呼び出し元を止めない。** 設定が読めないことは、インスタンスを
+/// 登録しない理由にならない。ただし**理由は捨てない**——起動時に壊れていた
+/// ことを運用者が知る機会はここしか無い。
+pub fn initialize() -> StartupReport {
     let path = match path() {
         Ok(path) => path,
-        Err(_) => return Vec::new(),
+        Err(_) => return StartupReport::default(),
     };
     let mut state = state();
     let reader = state
         .reader
         .get_or_insert_with(|| SettingsReader::new(path));
     match reader.refresh() {
-        SettingsRefresh::Reloaded(issues) => issues,
-        SettingsRefresh::Unchanged => Vec::new(),
-        SettingsRefresh::Failed(_) => Vec::new(),
+        SettingsRefresh::Reloaded(issues) => StartupReport {
+            issues,
+            failure: None,
+        },
+        SettingsRefresh::Unchanged => StartupReport::default(),
+        SettingsRefresh::Failed(e) => StartupReport {
+            issues: Vec::new(),
+            failure: Some(e),
+        },
     }
+}
+
+/// 起動時の読み込みで生じたことを記録する。
+///
+/// subscriber を立ててから呼ぶ。
+pub fn report_startup(report: &StartupReport) {
+    if let Some(failure) = &report.failure {
+        tracing::warn!("設定を読み込めませんでした。既定値で続行します: {failure}");
+    }
+    report_issues(&report.issues);
 }
 
 /// 要求 1 件の処理を始めるときに呼ぶ。
@@ -128,8 +158,10 @@ pub fn refresh() {
     match reader.refresh() {
         SettingsRefresh::Unchanged => {}
         SettingsRefresh::Reloaded(issues) => {
+            let settings = reader.settings();
             drop(state);
             report_issues(&issues);
+            crate::apply_log_level(&settings);
         }
         SettingsRefresh::Failed(e) => {
             drop(state);
@@ -145,14 +177,16 @@ pub fn refresh() {
 pub fn save(change: &SettingsChange) -> Result<()> {
     let path = path()?;
     let document = save_to(&path, change)?;
-    let issues = {
+    let (issues, settings) = {
         let mut state = state();
         let reader = state
             .reader
             .get_or_insert_with(|| SettingsReader::new(path));
-        reader.adopt(&document)
+        let issues = reader.adopt(&document);
+        (issues, reader.settings())
     };
     report_issues(&issues);
+    crate::apply_log_level(&settings);
     Ok(())
 }
 
@@ -204,10 +238,17 @@ pub(crate) fn save_to(path: &Path, change: &SettingsChange) -> Result<SettingsDo
 ///
 /// `Drop` で必ず解放する。保持したまま panic した場合、Windows は待機側へ
 /// `WAIT_ABANDONED` を返す——その場合も所有権は移るため、後続の保存は止まらない。
-struct SettingsMutex(HANDLE);
+struct SettingsMutex(MutexObject);
 
-impl SettingsMutex {
-    fn acquire(timeout: Duration) -> Result<Self> {
+/// 名前付き mutex のハンドルそのもの。
+///
+/// **所有と獲得を分ける。** ハンドルは作った時点で閉じる責任が生じるが、
+/// 所有権は獲得に成功して初めて生じる。1 つの型に畳むと、獲得に失敗した経路でも
+/// `ReleaseMutex` を呼ぶ形になり、意図を読み違えやすい。
+struct MutexObject(HANDLE);
+
+impl MutexObject {
+    fn create() -> Result<Self> {
         let name: Vec<u16> = SETTINGS_MUTEX_NAME
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -215,13 +256,31 @@ impl SettingsMutex {
         // SAFETY: `name` は NUL 終端しており、呼び出しの間だけ参照される。
         let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
             .context("設定の名前付き mutex を作成できませんでした")?;
-        let guard = Self(handle);
+        Ok(Self(handle))
+    }
+}
 
+impl Drop for MutexObject {
+    fn drop(&mut self) {
+        // SAFETY: 本型のみが所有しており、ここでのみ閉じられる。
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+impl SettingsMutex {
+    /// 名前付き mutex を獲得する。
+    ///
+    /// 獲得できた場合にだけ所有を表す値を返す。放棄された mutex
+    /// （`WAIT_ABANDONED`）も所有権は移るため、後続の保存は止まらない。
+    fn acquire(timeout: Duration) -> Result<Self> {
+        let object = MutexObject::create()?;
         let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
-        // SAFETY: `handle` は直前に作成した有効なハンドルである。
-        let wait = unsafe { WaitForSingleObject(handle, millis) };
+        // SAFETY: `object` は直前に作成した有効なハンドルを所有している。
+        let wait = unsafe { WaitForSingleObject(object.0, millis) };
         if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
-            Ok(guard)
+            Ok(Self(object))
         } else {
             Err(anyhow!("設定の名前付き mutex を獲得できませんでした"))
         }
@@ -229,11 +288,11 @@ impl SettingsMutex {
 }
 
 impl Drop for SettingsMutex {
+    /// 獲得した所有権を返す。ハンドルは [`MutexObject`] が閉じる。
     fn drop(&mut self) {
-        // SAFETY: 保持しているのは自スレッドが獲得したハンドルである。
+        // SAFETY: 保持しているのは自スレッドが獲得した所有権である。
         unsafe {
-            let _ = ReleaseMutex(self.0);
-            let _ = CloseHandle(self.0);
+            let _ = ReleaseMutex((self.0).0);
         }
     }
 }
@@ -306,7 +365,7 @@ mod tests {
         .unwrap();
 
         let (settings, _) = document.resolve(&Settings::default());
-        assert_eq!(settings.log_level(), "debug");
+        assert_eq!(settings.log_level(), Some("debug"));
         assert_eq!(settings.artifact_ttl(), Duration::from_secs(1200));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -331,7 +390,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let document = SettingsDocument::parse(&text).unwrap();
         let (settings, _) = document.resolve(&Settings::default());
-        assert_eq!(settings.log_level(), "trace");
+        assert_eq!(settings.log_level(), Some("trace"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
