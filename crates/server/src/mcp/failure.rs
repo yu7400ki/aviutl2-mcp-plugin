@@ -140,7 +140,8 @@ pub fn structured(error: &ErrorObject) -> Value {
 /// `retry_requires` は `none` である。同じ要求の再送でも対象の読み直しでも
 /// 解消しないが、**別の operation を挟めば解ける**。その手順を機械可読な分類へ
 /// 押し込むと値が増えるたびに要求元の分岐が増えるため、案内は text が担う。
-const LAYER_LOCKED_GUIDANCE: &str = "対象のレイヤーがロックされています。aviutl2_set_layer_state でロックを解除してから再実行してください";
+const LAYER_LOCKED_GUIDANCE: &str =
+    "対象のレイヤーがロックされています。set_layer_state でロックを解除してから再実行してください";
 
 /// 対象の現在の姿を返した失敗へ添える案内。
 const CURRENT_OBJECT_GUIDANCE: &str = "details.current_object に対象の現在の値が入っています。読み直さずにそのまま次の要求の selector として使えます";
@@ -270,10 +271,10 @@ fn is_sensitive_key(key: &str) -> bool {
 fn describe_resolve_error(error: &ResolveInstanceError) -> &'static str {
     match error {
         ResolveInstanceError::NotRegistered => {
-            "指定された instance_id のインスタンスは登録されていません。aviutl2_list_instances で現在のインスタンスを取得してください"
+            "指定された instance_id のインスタンスは登録されていません。list_instances で現在のインスタンスを取得してください"
         }
         ResolveInstanceError::Excluded(_) => {
-            "指定されたインスタンスの生存確認に失敗しました。aviutl2_list_instances で一覧を取り直してください"
+            "指定されたインスタンスの生存確認に失敗しました。list_instances で一覧を取り直してください"
         }
         ResolveInstanceError::Rejected(_) => "インスタンスが要求を受け付けられませんでした",
     }
@@ -288,9 +289,7 @@ fn describe_pipe_error(error: &PipeClientError) -> &'static str {
             "インスタンスのプロトコルバージョンが互換ではありません"
         }
         PipeClientError::Remote(_) => "インスタンスがエラーを返しました",
-        _ => {
-            "インスタンスとの通信に失敗しました。aviutl2_list_instances で一覧を取り直してください"
-        }
+        _ => "インスタンスとの通信に失敗しました。list_instances で一覧を取り直してください",
     }
 }
 
@@ -604,7 +603,7 @@ mod tests {
                 "retry_requires": "none",
             }));
         let text = text(&error);
-        assert!(text.contains("aviutl2_set_layer_state"), "{text}");
+        assert!(text.contains("set_layer_state"), "{text}");
         assert!(text.contains("ロックを解除"), "{text}");
     }
 
@@ -624,7 +623,7 @@ mod tests {
     #[test]
     fn failures_without_a_next_step_are_not_given_one() {
         let text = text(&invalid_argument("limit が範囲外です"));
-        assert!(!text.contains("aviutl2_set_layer_state"), "{text}");
+        assert!(!text.contains("set_layer_state"), "{text}");
         assert!(!text.contains("details.current_object"), "{text}");
         assert!(!text.contains("operations["), "{text}");
         assert!(!text.contains("巻き戻し"), "{text}");

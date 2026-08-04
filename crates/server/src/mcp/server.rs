@@ -5,7 +5,7 @@
 //! インスタンス解決から要求送信・切断までを 1 つのブロッキングタスクへ閉じ込め、
 //! 非同期タスク間で接続が移動しないようにする。
 
-use crate::api::{ListInstancesResponse, aviutl2_list_instances};
+use crate::api::{ListInstancesResponse, list_instances};
 use crate::artifact::{Artifact, ArtifactStore, ArtifactStoreError, base_dir_for_registry};
 use crate::discovery::{DiscoveryConfig, list_registered_instances, resolve_instance};
 use crate::mcp::edit_input::{
@@ -295,7 +295,7 @@ impl AviUtl2McpServer {
 
     /// 保管庫を持たないサーバーを作る。
     ///
-    /// **`aviutl2_render_frame` は使えない。** 呼ぶと成果物を保管できないため
+    /// **`render_frame` は使えない。** 呼ぶと成果物を保管できないため
     /// `internal_error` になる（接続先へは要求を送らない）。成果物 resource も
     /// 1 件も並ばない。
     ///
@@ -513,7 +513,7 @@ impl AviUtl2McpServer {
     /// その回の一覧から一時的に外れることがある。期待した instance_id が
     /// 見つからない場合は取り直す。
     #[tool(
-        name = "aviutl2_list_instances",
+        name = "list_instances",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -524,13 +524,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::list_instances()
         )
     )]
-    pub async fn aviutl2_list_instances(
+    pub async fn list_instances(
         &self,
         Parameters(input): Parameters<ListInstancesInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        self.run("aviutl2_list_instances", move || {
-            let response = list_instances(&registry_dir, input)?;
+        self.run("list_instances", move || {
+            let response = collect_instances(&registry_dir, input)?;
             Ok(ToolSuccess {
                 text: describe::instances(&response),
                 structured: to_structured(&response)?,
@@ -542,7 +542,7 @@ impl AviUtl2McpServer {
     /// 現在の編集情報（シーン・カーソル・表示範囲・選択範囲・revision）を取得する。
     /// frame 番号と layer 番号はいずれも 0 始まりである。
     #[tool(
-        name = "aviutl2_get_edit_info",
+        name = "get_edit_info",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -553,13 +553,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::edit_info()
         )
     )]
-    pub async fn aviutl2_get_edit_info(
+    pub async fn get_edit_info(
         &self,
         Parameters(input): Parameters<InstanceInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_get_edit_info", move || {
+        self.run("get_edit_info", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let result: EditInfo = request_operation(
                 &registry_dir,
@@ -579,7 +579,7 @@ impl AviUtl2McpServer {
     /// 現在シーンの情報と取得時点の project_revision を取得する。
     /// frame 番号と layer 番号はいずれも 0 始まりである。
     #[tool(
-        name = "aviutl2_get_current_scene",
+        name = "get_current_scene",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -590,13 +590,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::current_scene()
         )
     )]
-    pub async fn aviutl2_get_current_scene(
+    pub async fn get_current_scene(
         &self,
         Parameters(input): Parameters<InstanceInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_get_current_scene", move || {
+        self.run("get_current_scene", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let result: GetCurrentSceneResult = request_operation(
                 &registry_dir,
@@ -618,7 +618,7 @@ impl AviUtl2McpServer {
     /// offset と limit（1〜200、既定 50）でページを指定し、
     /// 2 ページ目以降は先頭ページが返した snapshot_revision を添える。
     #[tool(
-        name = "aviutl2_list_layers",
+        name = "list_layers",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -629,13 +629,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::list_layers()
         )
     )]
-    pub async fn aviutl2_list_layers(
+    pub async fn list_layers(
         &self,
         Parameters(input): Parameters<ListLayersInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_list_layers", move || {
+        self.run("list_layers", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: ListLayersResult = request_operation(
@@ -655,11 +655,11 @@ impl AviUtl2McpServer {
 
     /// 現在シーンのオブジェクトを列挙する。
     /// frame 番号と layer 番号はいずれも 0 始まりである。
-    /// 各要素の selector は aviutl2_get_object へそのまま渡せる。
+    /// 各要素の selector は get_object へそのまま渡せる。
     /// offset と limit（1〜200、既定 50）でページを指定し、
     /// 2 ページ目以降は先頭ページが返した snapshot_revision を添える。
     #[tool(
-        name = "aviutl2_list_objects",
+        name = "list_objects",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -670,13 +670,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::list_objects()
         )
     )]
-    pub async fn aviutl2_list_objects(
+    pub async fn list_objects(
         &self,
         Parameters(input): Parameters<ListObjectsInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_list_objects", move || {
+        self.run("list_objects", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: ListObjectsResult = request_operation(
@@ -696,11 +696,11 @@ impl AviUtl2McpServer {
 
     /// オブジェクトの詳細（alias・中間点区間・effect・revision）を取得する。
     /// frame 番号と layer 番号はいずれも 0 始まりである。
-    /// selector には aviutl2_list_objects が返した値をそのまま指定する。
+    /// selector には list_objects が返した値をそのまま指定する。
     /// effect の locked は出力項目（標準描画等）については実態を反映せず、
     /// 常に false になる。ロックは入力項目と出力項目をまとめた単位で掛かる。
     #[tool(
-        name = "aviutl2_get_object",
+        name = "get_object",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -711,13 +711,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::object_detail()
         )
     )]
-    pub async fn aviutl2_get_object(
+    pub async fn get_object(
         &self,
         Parameters(input): Parameters<GetObjectInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_get_object", move || {
+        self.run("get_object", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: ObjectDetail = request_operation(
@@ -741,7 +741,7 @@ impl AviUtl2McpServer {
     /// snapshot_revision は受理するがページ間の照合には用いない。
     /// effect カタログは登録済みプラグインの集合であり、プロジェクトの revision に連動しないためである。
     #[tool(
-        name = "aviutl2_list_available_effects",
+        name = "list_available_effects",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -752,13 +752,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::list_available_effects()
         )
     )]
-    pub async fn aviutl2_list_available_effects(
+    pub async fn list_available_effects(
         &self,
         Parameters(input): Parameters<ListAvailableEffectsInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_list_available_effects", move || {
+        self.run("list_available_effects", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: ListAvailableEffectsResult = request_operation(
@@ -792,12 +792,12 @@ impl AviUtl2McpServer {
     /// precondition_failed（destination_occupied）となるため通常は防がれるが、
     /// ホストが挿入位置を自動調整した場合はすり抜け得る。
     /// 配置先のレイヤーがロックされている場合は precondition_failed（layer_locked）と
-    /// なる。aviutl2_set_layer_state でロックを解除してから再実行する。
+    /// なる。set_layer_state でロックを解除してから再実行する。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
-        name = "aviutl2_create_object",
+        name = "create_object",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -808,13 +808,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::create_object()
         )
     )]
-    pub async fn aviutl2_create_object(
+    pub async fn create_object(
         &self,
         Parameters(input): Parameters<CreateObjectInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_create_object", move || {
+        self.run("create_object", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: EditOutcome = request_operation(
@@ -844,7 +844,7 @@ impl AviUtl2McpServer {
     /// 応答が返す selector が実際の配置であり、配置を確かめるには応答の値を見る。
     /// 宛先に既存オブジェクトがある場合は precondition_failed となる。
     /// 移動元または移動先のレイヤーがロックされている場合は
-    /// precondition_failed（layer_locked）となる。aviutl2_set_layer_state で
+    /// precondition_failed（layer_locked）となる。set_layer_state で
     /// ロックを解除してから再実行する。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
@@ -852,7 +852,7 @@ impl AviUtl2McpServer {
     /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
-        name = "aviutl2_move_object",
+        name = "move_object",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -863,13 +863,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::move_object()
         )
     )]
-    pub async fn aviutl2_move_object(
+    pub async fn move_object(
         &self,
         Parameters(input): Parameters<MoveObjectInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_move_object", move || {
+        self.run("move_object", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: EditOutcome = request_operation(
@@ -901,7 +901,7 @@ impl AviUtl2McpServer {
     /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
-        name = "aviutl2_set_object_name",
+        name = "set_object_name",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -912,13 +912,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::set_object_name()
         )
     )]
-    pub async fn aviutl2_set_object_name(
+    pub async fn set_object_name(
         &self,
         Parameters(input): Parameters<SetObjectNameInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_set_object_name", move || {
+        self.run("set_object_name", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: EditOutcome = request_operation(
@@ -943,19 +943,19 @@ impl AviUtl2McpServer {
     /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
     /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
     /// selector の project_epoch が拒否する。
-    /// selector には aviutl2_get_object が返した effect の selector をそのまま指定する。
+    /// selector には get_object が返した effect の selector をそのまま指定する。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// effect の設定を変えるとそのオブジェクトの fingerprint も変わるため、変更前の
     /// selector で続けて編集すると precondition_failed となる。
     /// 書き込みを公開していない設定項目種別があり、その場合は unsupported_operation
-    /// となる。種別は aviutl2_get_object の item_type で確認できる。
+    /// となる。種別は get_object の item_type で確認できる。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     /// 対象が変化していた場合の precondition_failed では、details.current_object に
     /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
-        name = "aviutl2_set_object_item",
+        name = "set_object_item",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -966,13 +966,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::set_object_item()
         )
     )]
-    pub async fn aviutl2_set_object_item(
+    pub async fn set_object_item(
         &self,
         Parameters(input): Parameters<SetObjectItemInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_set_object_item", move || {
+        self.run("set_object_item", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: EditOutcome = request_operation(
@@ -991,7 +991,7 @@ impl AviUtl2McpServer {
     }
 
     /// オブジェクトへ effect を付与する。
-    /// effect_name には aviutl2_list_available_effects が返す名前を指定する。
+    /// effect_name には list_available_effects が返す名前を指定する。
     /// 登録されていない名前は unsupported_operation となる。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
@@ -1010,7 +1010,7 @@ impl AviUtl2McpServer {
     /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
-        name = "aviutl2_add_effect",
+        name = "add_effect",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1021,13 +1021,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::add_effect()
         )
     )]
-    pub async fn aviutl2_add_effect(
+    pub async fn add_effect(
         &self,
         Parameters(input): Parameters<AddEffectInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_add_effect", move || {
+        self.run("add_effect", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: EditOutcome = request_operation(
@@ -1052,7 +1052,7 @@ impl AviUtl2McpServer {
     /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
     /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
     /// selector の project_epoch が拒否する。
-    /// selector には aviutl2_get_object が返した effect の selector をそのまま指定する。
+    /// selector には get_object が返した effect の selector をそのまま指定する。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// effect の状態を変えるとそのオブジェクトの fingerprint も変わるため、変更前の
     /// selector で続けて編集すると precondition_failed となる。
@@ -1062,7 +1062,7 @@ impl AviUtl2McpServer {
     /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
-        name = "aviutl2_set_effect_enabled",
+        name = "set_effect_enabled",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1073,13 +1073,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::set_effect_enabled()
         )
     )]
-    pub async fn aviutl2_set_effect_enabled(
+    pub async fn set_effect_enabled(
         &self,
         Parameters(input): Parameters<SetEffectEnabledInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_set_effect_enabled", move || {
+        self.run("set_effect_enabled", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: EditOutcome = request_operation(
@@ -1104,7 +1104,7 @@ impl AviUtl2McpServer {
     /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
     /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
     /// selector の project_epoch が拒否する。
-    /// selector には aviutl2_get_object が返した effect の selector をそのまま指定する。
+    /// selector には get_object が返した effect の selector をそのまま指定する。
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// effect を削除するとそのオブジェクトの fingerprint も変わるため、変更前の
     /// selector で続けて編集すると precondition_failed となる。
@@ -1114,7 +1114,7 @@ impl AviUtl2McpServer {
     /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
-        name = "aviutl2_delete_effect",
+        name = "delete_effect",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1125,13 +1125,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::delete_effect()
         )
     )]
-    pub async fn aviutl2_delete_effect(
+    pub async fn delete_effect(
         &self,
         Parameters(input): Parameters<DeleteEffectInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_delete_effect", move || {
+        self.run("delete_effect", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: EditOutcome = request_operation(
@@ -1160,14 +1160,14 @@ impl AviUtl2McpServer {
     /// 返した selector をそのまま次の編集へ渡せるが、削除した対象の selector は
     /// 以後どの編集にも使えない。
     /// 対象のレイヤーがロックされている場合は precondition_failed（layer_locked）と
-    /// なる。aviutl2_set_layer_state でロックを解除してから再実行する。
+    /// なる。set_layer_state でロックを解除してから再実行する。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     /// 対象が変化していた場合の precondition_failed では、details.current_object に
     /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
-        name = "aviutl2_delete_object",
+        name = "delete_object",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1178,13 +1178,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::delete_object()
         )
     )]
-    pub async fn aviutl2_delete_object(
+    pub async fn delete_object(
         &self,
         Parameters(input): Parameters<DeleteObjectInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_delete_object", move || {
+        self.run("delete_object", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: EditOutcome = request_operation(
@@ -1217,14 +1217,14 @@ impl AviUtl2McpServer {
     /// 検出できない。応答が返す layer には変更後に読み直した実際の状態が入るので、
     /// 意図どおりかはその値で確認する。
     /// レイヤーのロックが止めるのはオブジェクトの削除と時間軸上の移動であり、MCP では
-    /// aviutl2_move_object と aviutl2_delete_object と aviutl2_create_object が
+    /// move_object と delete_object と create_object が
     /// precondition_failed（layer_locked）になる。設定値の変更や effect の増減は止めない。
     /// この tool 自身はロックの影響を受けない。ロックされたレイヤーでもロックを外せる。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
-        name = "aviutl2_set_layer_state",
+        name = "set_layer_state",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1235,13 +1235,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::set_layer_state()
         )
     )]
-    pub async fn aviutl2_set_layer_state(
+    pub async fn set_layer_state(
         &self,
         Parameters(input): Parameters<SetLayerStateInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_set_layer_state", move || {
+        self.run("set_layer_state", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: LayerStateOutcome = request_operation(
@@ -1283,7 +1283,7 @@ impl AviUtl2McpServer {
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     #[tool(
-        name = "aviutl2_set_selection",
+        name = "set_selection",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1294,13 +1294,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::set_selection()
         )
     )]
-    pub async fn aviutl2_set_selection(
+    pub async fn set_selection(
         &self,
         Parameters(input): Parameters<SetSelectionInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_set_selection", move || {
+        self.run("set_selection", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: SelectionState = request_operation(
@@ -1350,12 +1350,12 @@ impl AviUtl2McpServer {
     /// 壊れている件数を過大に見積もり得る。
     /// ロックされたレイヤーが妨げるのは move_object だけであり、
     /// precondition_failed（layer_locked）となる。設定値の変更はロックされた
-    /// レイヤー上でも通る。解除は aviutl2_set_layer_state で行う。
+    /// レイヤー上でも通る。解除は set_layer_state で行う。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     /// 大きなプロジェクトでは適用中に AviUtl2 の UI が数秒止まり得る。
     #[tool(
-        name = "aviutl2_apply_batch",
+        name = "apply_batch",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1366,13 +1366,13 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::apply_batch()
         )
     )]
-    pub async fn aviutl2_apply_batch(
+    pub async fn apply_batch(
         &self,
         Parameters(input): Parameters<ApplyBatchInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
-        self.run("aviutl2_apply_batch", move || {
+        self.run("apply_batch", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let result: BatchOutcome = request_operation(
@@ -1393,7 +1393,7 @@ impl AviUtl2McpServer {
     /// 現在シーンの 1 フレームを描画し、成果物を resource として返す。
     /// frame 番号は 0 始まりであり UI の表示とは異なる。
     /// 描画できるのは現在シーンだけである。expected_scene_id には
-    /// aviutl2_get_edit_info などが返した scene_id をそのまま指定する。
+    /// get_edit_info などが返した scene_id をそのまま指定する。
     /// 結果は画像そのものではなく resource URI で返る。内容は resources/read で
     /// 取得する。
     /// 成果物は既定で 10 分後に失効し、失効後の resources/read は not_found となる。
@@ -1408,7 +1408,7 @@ impl AviUtl2McpServer {
     /// timeout は描画されなかったことを意味する。プロジェクトは変更されていない
     /// ため、そのまま再送してよい。
     #[tool(
-        name = "aviutl2_render_frame",
+        name = "render_frame",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1419,14 +1419,14 @@ impl AviUtl2McpServer {
             crate::mcp::output_schema::render_frame()
         )
     )]
-    pub async fn aviutl2_render_frame(
+    pub async fn render_frame(
         &self,
         Parameters(input): Parameters<RenderFrameInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
         let artifacts = self.artifacts.clone();
-        self.run("aviutl2_render_frame", move || {
+        self.run("render_frame", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
             let artifacts = artifacts
@@ -1478,7 +1478,7 @@ impl ServerHandler for AviUtl2McpServer {
         );
         info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
-            "AviUtl2 の編集内容を読み取り、変更する。aviutl2_list_instances 以外の tool は instance_id が必須である。frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。変更する tool は対象を selector で指し、応答が返した値をそのまま送り返す。selector を持たない aviutl2_create_object と aviutl2_set_selection では、応答が返した project_epoch を expected_project_epoch に必ず指定する。"
+            "AviUtl2 の編集内容を読み取り、変更する。list_instances 以外の tool は instance_id が必須である。frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。変更する tool は対象を selector で指し、応答が返した値をそのまま送り返す。selector を持たない create_object と set_selection では、応答が返した project_epoch を expected_project_epoch に必ず指定する。"
                 .to_string(),
         );
         info
@@ -1633,7 +1633,7 @@ impl ServerHandler for AviUtl2McpServer {
             .run_resource("resources/read", move || {
                 let value = match target {
                     ResourceTarget::Instances => {
-                        let response = list_instances(
+                        let response = collect_instances(
                             &registry_dir,
                             ListInstancesInput {
                                 offset: 0,
@@ -1803,7 +1803,7 @@ fn resource_text(value: &Value) -> Result<String, ErrorObject> {
 /// インスタンス一覧を、resource の上限に収まる件数まで絞って値にする。
 ///
 /// 落とした分は `has_more` / `next_offset` が示すため、続きは
-/// `aviutl2_list_instances` のページ指定で取得できる。
+/// `list_instances` のページ指定で取得できる。
 fn fitted_instances_value(mut response: ListInstancesResponse) -> Result<Value, ErrorObject> {
     loop {
         let value = to_structured(&response)?;
@@ -1870,12 +1870,12 @@ fn parse_resource_uri(uri: &str) -> Option<ResourceTarget> {
 }
 
 /// 発見した全インスタンスを列挙する。
-fn list_instances(
+fn collect_instances(
     registry_dir: &Path,
     input: ListInstancesInput,
 ) -> Result<ListInstancesResponse, ErrorObject> {
     let page = input.to_page_request()?;
-    aviutl2_list_instances(
+    list_instances(
         registry_dir,
         crate::api::ListInstancesRequest {
             offset: page.offset,
@@ -2083,38 +2083,38 @@ mod tests {
 
     /// frame / layer を入出力に持ち、0 始まりであることの明記が要る tool。
     ///
-    /// `aviutl2_list_available_effects` は effect カタログだけを扱い frame も
+    /// `list_available_effects` は effect カタログだけを扱い frame も
     /// layer も現れないため、ここには含めない。
     const ZERO_BASED_TOOLS: &[&str] = &[
-        "aviutl2_list_instances",
-        "aviutl2_get_edit_info",
-        "aviutl2_get_current_scene",
-        "aviutl2_list_layers",
-        "aviutl2_list_objects",
-        "aviutl2_get_object",
-        "aviutl2_create_object",
-        "aviutl2_move_object",
-        "aviutl2_set_object_name",
-        "aviutl2_set_object_item",
-        "aviutl2_add_effect",
-        "aviutl2_set_effect_enabled",
-        "aviutl2_delete_effect",
-        "aviutl2_delete_object",
-        "aviutl2_set_layer_state",
-        "aviutl2_set_selection",
-        "aviutl2_apply_batch",
-        "aviutl2_render_frame",
+        "list_instances",
+        "get_edit_info",
+        "get_current_scene",
+        "list_layers",
+        "list_objects",
+        "get_object",
+        "create_object",
+        "move_object",
+        "set_object_name",
+        "set_object_item",
+        "add_effect",
+        "set_effect_enabled",
+        "delete_effect",
+        "delete_object",
+        "set_layer_state",
+        "set_selection",
+        "apply_batch",
+        "render_frame",
     ];
 
     /// 読み取り専用の tool。
     const READ_TOOLS: &[&str] = &[
-        "aviutl2_list_instances",
-        "aviutl2_get_edit_info",
-        "aviutl2_get_current_scene",
-        "aviutl2_list_layers",
-        "aviutl2_list_objects",
-        "aviutl2_get_object",
-        "aviutl2_list_available_effects",
+        "list_instances",
+        "get_edit_info",
+        "get_current_scene",
+        "list_layers",
+        "list_objects",
+        "get_object",
+        "list_available_effects",
     ];
 
     /// 編集 tool と、宣言する annotation。
@@ -2126,25 +2126,25 @@ mod tests {
     /// 宛先の重複確認と対象の fingerprint により通常は防がれるが、annotation は
     /// 「再送が安全である」と主張しない側へ倒す。
     const EDIT_TOOL_ANNOTATIONS: &[(&str, bool, bool)] = &[
-        ("aviutl2_create_object", false, false),
-        ("aviutl2_move_object", false, true),
-        ("aviutl2_set_object_name", false, true),
-        ("aviutl2_set_object_item", false, true),
-        ("aviutl2_add_effect", false, false),
-        ("aviutl2_set_effect_enabled", false, true),
-        ("aviutl2_delete_effect", true, true),
-        ("aviutl2_delete_object", true, true),
+        ("create_object", false, false),
+        ("move_object", false, true),
+        ("set_object_name", false, true),
+        ("set_object_item", false, true),
+        ("add_effect", false, false),
+        ("set_effect_enabled", false, true),
+        ("delete_effect", true, true),
+        ("delete_object", true, true),
         // 表示を切ってもロックを掛けても内容は失われず、同じ tool で戻せる。
         // 同じ状態を 2 度設定しても追加の変更を起こさない。
-        ("aviutl2_set_layer_state", false, true),
-        ("aviutl2_set_selection", false, true),
+        ("set_layer_state", false, true),
+        ("set_selection", false, true),
     ];
 
     /// 一括適用の tool 名。
-    const APPLY_BATCH: &str = "aviutl2_apply_batch";
+    const APPLY_BATCH: &str = "apply_batch";
 
     /// 描画の tool 名。
-    const RENDER_FRAME: &str = "aviutl2_render_frame";
+    const RENDER_FRAME: &str = "render_frame";
 
     /// 一括適用と描画の tool、および宣言する annotation。
     ///
@@ -2185,24 +2185,16 @@ mod tests {
     /// tool が説明の共通検査から黙って外れる。
     fn follows_the_edit_conventions(name: &str) -> bool {
         match name {
-            "aviutl2_create_object"
-            | "aviutl2_move_object"
-            | "aviutl2_set_object_name"
-            | "aviutl2_set_object_item"
-            | "aviutl2_add_effect"
-            | "aviutl2_set_effect_enabled"
-            | "aviutl2_delete_effect"
-            | "aviutl2_delete_object"
-            | "aviutl2_set_layer_state"
-            | "aviutl2_set_selection"
-            | APPLY_BATCH => true,
-            "aviutl2_list_instances"
-            | "aviutl2_get_edit_info"
-            | "aviutl2_get_current_scene"
-            | "aviutl2_list_layers"
-            | "aviutl2_list_objects"
-            | "aviutl2_get_object"
-            | "aviutl2_list_available_effects"
+            "create_object" | "move_object" | "set_object_name" | "set_object_item"
+            | "add_effect" | "set_effect_enabled" | "delete_effect" | "delete_object"
+            | "set_layer_state" | "set_selection" | APPLY_BATCH => true,
+            "list_instances"
+            | "get_edit_info"
+            | "get_current_scene"
+            | "list_layers"
+            | "list_objects"
+            | "get_object"
+            | "list_available_effects"
             | RENDER_FRAME => false,
             other => panic!("{other} が編集の説明規約に従うかが定義されていません"),
         }
@@ -2310,30 +2302,28 @@ mod tests {
 
     #[test]
     fn a_disabled_tool_is_neither_listed_nor_accepted() {
-        let server = server_with(r#"{"disabled_tools":["aviutl2_delete_object"]}"#);
-        assert!(!visible_names(&server).contains("aviutl2_delete_object"));
-        assert!(!server.accepts_tool_call("aviutl2_delete_object"));
+        let server = server_with(r#"{"disabled_tools":["delete_object"]}"#);
+        assert!(!visible_names(&server).contains("delete_object"));
+        assert!(!server.accepts_tool_call("delete_object"));
         // 巻き添えにしない。
-        assert!(server.accepts_tool_call("aviutl2_delete_effect"));
+        assert!(server.accepts_tool_call("delete_effect"));
     }
 
     #[test]
     fn the_always_enabled_tool_survives_being_disabled() {
-        let server =
-            server_with(r#"{"disabled_tools":["aviutl2_list_instances","aviutl2_render_frame"]}"#);
+        let server = server_with(r#"{"disabled_tools":["list_instances","render_frame"]}"#);
         let visible = visible_names(&server);
         assert!(visible.contains(aviutl2_mcp_core::tool::ALWAYS_ENABLED_TOOL));
         assert!(server.accepts_tool_call(aviutl2_mcp_core::tool::ALWAYS_ENABLED_TOOL));
-        assert!(!visible.contains("aviutl2_render_frame"));
+        assert!(!visible.contains("render_frame"));
     }
 
     #[test]
     fn what_is_listed_is_exactly_what_is_accepted() {
         // 掲載と受付が同じ判定を読むことを、全 tool について固定する。片方だけを
         // 絞る実装になると、掲載していない tool の call が通る。
-        let server = server_with(
-            r#"{"disabled_tools":["aviutl2_delete_object","aviutl2_apply_batch","aviutl2_list_instances"]}"#,
-        );
+        let server =
+            server_with(r#"{"disabled_tools":["delete_object","apply_batch","list_instances"]}"#);
         let visible = visible_names(&server);
         for tool in tools() {
             assert_eq!(
@@ -2350,14 +2340,14 @@ mod tests {
     fn an_unknown_tool_name_is_not_treated_as_disabled() {
         // 未知の名前は「無効化されている」ではなく「登録されていない」である。
         // 判定を反転させると、未知の tool が tool_disabled を名乗る。
-        let server = server_with(r#"{"disabled_tools":["aviutl2_delete_object"]}"#);
+        let server = server_with(r#"{"disabled_tools":["delete_object"]}"#);
         assert!(server.accepts_tool_call("aviutl2_future_tool"));
     }
 
     #[test]
     fn a_disabled_tool_is_rejected_with_the_documented_code() {
-        let server = server_with(r#"{"disabled_tools":["aviutl2_delete_object"]}"#);
-        let result = server.reject_disabled_tool("aviutl2_delete_object");
+        let server = server_with(r#"{"disabled_tools":["delete_object"]}"#);
+        let result = server.reject_disabled_tool("delete_object");
         assert_eq!(result.is_error, Some(true));
         let structured = result
             .structured_content
@@ -2443,25 +2433,25 @@ mod tests {
     fn expected_output_schema(name: &str) -> Value {
         use crate::mcp::output_schema as schema;
         match name {
-            "aviutl2_list_instances" => schema::list_instances(),
-            "aviutl2_get_edit_info" => schema::edit_info(),
-            "aviutl2_get_current_scene" => schema::current_scene(),
-            "aviutl2_list_layers" => schema::list_layers(),
-            "aviutl2_list_objects" => schema::list_objects(),
-            "aviutl2_get_object" => schema::object_detail(),
-            "aviutl2_list_available_effects" => schema::list_available_effects(),
-            "aviutl2_create_object" => schema::create_object(),
-            "aviutl2_move_object" => schema::move_object(),
-            "aviutl2_set_object_name" => schema::set_object_name(),
-            "aviutl2_set_object_item" => schema::set_object_item(),
-            "aviutl2_add_effect" => schema::add_effect(),
-            "aviutl2_set_effect_enabled" => schema::set_effect_enabled(),
-            "aviutl2_delete_effect" => schema::delete_effect(),
-            "aviutl2_delete_object" => schema::delete_object(),
-            "aviutl2_set_layer_state" => schema::set_layer_state(),
-            "aviutl2_set_selection" => schema::set_selection(),
-            "aviutl2_apply_batch" => schema::apply_batch(),
-            "aviutl2_render_frame" => schema::render_frame(),
+            "list_instances" => schema::list_instances(),
+            "get_edit_info" => schema::edit_info(),
+            "get_current_scene" => schema::current_scene(),
+            "list_layers" => schema::list_layers(),
+            "list_objects" => schema::list_objects(),
+            "get_object" => schema::object_detail(),
+            "list_available_effects" => schema::list_available_effects(),
+            "create_object" => schema::create_object(),
+            "move_object" => schema::move_object(),
+            "set_object_name" => schema::set_object_name(),
+            "set_object_item" => schema::set_object_item(),
+            "add_effect" => schema::add_effect(),
+            "set_effect_enabled" => schema::set_effect_enabled(),
+            "delete_effect" => schema::delete_effect(),
+            "delete_object" => schema::delete_object(),
+            "set_layer_state" => schema::set_layer_state(),
+            "set_selection" => schema::set_selection(),
+            "apply_batch" => schema::apply_batch(),
+            "render_frame" => schema::render_frame(),
             other => panic!("{other} の outputSchema が定義されていません"),
         }
     }
@@ -2515,11 +2505,8 @@ mod tests {
     ///
     /// 対象を指す selector を持たないため、これがプロジェクト境界を照合する
     /// 材料になる。
-    const TOOLS_CARRYING_AN_EXPECTED_EPOCH: &[&str] = &[
-        "aviutl2_create_object",
-        "aviutl2_set_layer_state",
-        "aviutl2_set_selection",
-    ];
+    const TOOLS_CARRYING_AN_EXPECTED_EPOCH: &[&str] =
+        &["create_object", "set_layer_state", "set_selection"];
 
     #[test]
     fn edit_tool_descriptions_state_what_costs_the_caller_if_assumed_wrong() {
@@ -2589,14 +2576,14 @@ mod tests {
         // fingerprint である。防ぐ仕組みを取り違えて案内すると、呼び出し側は
         // 効かない対策を信じて再送する。
         assert!(
-            description_of("aviutl2_create_object").contains("destination_occupied"),
-            "aviutl2_create_object の説明が宛先重複の確認に触れていません"
+            description_of("create_object").contains("destination_occupied"),
+            "create_object の説明が宛先重複の確認に触れていません"
         );
         assert!(
-            description_of("aviutl2_add_effect").contains("fingerprint が変わるため"),
-            "aviutl2_add_effect の説明が fingerprint の変化に触れていません"
+            description_of("add_effect").contains("fingerprint が変わるため"),
+            "add_effect の説明が fingerprint の変化に触れていません"
         );
-        for name in ["aviutl2_create_object", "aviutl2_add_effect"] {
+        for name in ["create_object", "add_effect"] {
             assert!(
                 !description_of(name).contains("同じ expected での再送"),
                 "{name} の説明が expected による重複防止を主張しています"
@@ -2610,7 +2597,7 @@ mod tests {
     /// 呼び出し側が組み立てた次の要求は別の場所を指す。どちらの側に属するかを
     /// 表で固定するので、tool を足したときに素通りしない。
     const TOOLS_WHOSE_RESPONSE_CARRIES_THE_ACTUAL_PLACEMENT: &[&str] =
-        &["aviutl2_create_object", "aviutl2_move_object"];
+        &["create_object", "move_object"];
 
     #[test]
     fn tools_that_can_land_elsewhere_say_the_response_carries_the_actual_placement() {
@@ -2650,17 +2637,10 @@ mod tests {
     /// tool ごとに 1 か所へ置き、tool を足したときに素通りしないようにする。
     fn undo_statement(name: &str) -> UndoStatement {
         match name {
-            "aviutl2_create_object"
-            | "aviutl2_move_object"
-            | "aviutl2_set_object_name"
-            | "aviutl2_set_object_item"
-            | "aviutl2_add_effect"
-            | "aviutl2_set_effect_enabled"
-            | "aviutl2_delete_effect"
-            | "aviutl2_delete_object"
-            | "aviutl2_set_layer_state"
-            | "aviutl2_apply_batch" => UndoStatement::OneUnit,
-            "aviutl2_set_selection" => UndoStatement::NoUnitAndJumpsBack,
+            "create_object" | "move_object" | "set_object_name" | "set_object_item"
+            | "add_effect" | "set_effect_enabled" | "delete_effect" | "delete_object"
+            | "set_layer_state" | "apply_batch" => UndoStatement::OneUnit,
+            "set_selection" => UndoStatement::NoUnitAndJumpsBack,
             other => panic!("{other} の取り消しの説明が定義されていません"),
         }
     }
@@ -2699,28 +2679,25 @@ mod tests {
     fn edit_tool_descriptions_state_the_operation_specific_hazards() {
         let hazards: &[(&str, &[&str])] = &[
             (
-                "aviutl2_create_object",
+                "create_object",
                 &["全てが作成され", "自動調整", "重複して作成"],
             ),
-            ("aviutl2_add_effect", &["fingerprint", "重複して付与"]),
+            ("add_effect", &["fingerprint", "重複して付与"]),
             (
-                "aviutl2_set_object_item",
+                "set_object_item",
                 &["fingerprint", "公開していない設定項目種別", "item_type"],
             ),
-            ("aviutl2_set_effect_enabled", &["fingerprint", "出力 item"]),
-            ("aviutl2_delete_effect", &["fingerprint", "not_found"]),
-            ("aviutl2_delete_object", &["not_found"]),
+            ("set_effect_enabled", &["fingerprint", "出力 item"]),
+            ("delete_effect", &["fingerprint", "not_found"]),
+            ("delete_object", &["not_found"]),
+            ("set_selection", &["原子的", "クランプ", "全てを省略"]),
             (
-                "aviutl2_set_selection",
-                &["原子的", "クランプ", "全てを省略"],
-            ),
-            (
-                "aviutl2_set_layer_state",
+                "set_layer_state",
                 &[
                     "fingerprint",
                     "全てを省略した要求は受け付けない",
                     "この tool 自身はロックの影響を受けない",
-                    "aviutl2_move_object",
+                    "move_object",
                     "reset",
                 ],
             ),
@@ -2753,19 +2730,19 @@ mod tests {
     /// 移動であり、対象を 1 か所へ置いて tool を足したときに素通りしないようにする。
     fn layer_lock_statement(name: &str) -> LayerLockStatement {
         match name {
-            "aviutl2_create_object"
-            | "aviutl2_move_object"
-            | "aviutl2_delete_object"
+            "create_object"
+            | "move_object"
+            | "delete_object"
             // 一括適用が止まるのは move_object を含む場合だけだが、止まり方も
             // 解き方も同じであるため、案内する側に属する。
-            | "aviutl2_apply_batch" => LayerLockStatement::StoppedAndNamesTheWayOut,
-            "aviutl2_set_layer_state" => LayerLockStatement::DescribesTheScope,
-            "aviutl2_set_object_name"
-            | "aviutl2_set_object_item"
-            | "aviutl2_add_effect"
-            | "aviutl2_set_effect_enabled"
-            | "aviutl2_delete_effect"
-            | "aviutl2_set_selection" => LayerLockStatement::Silent,
+            | "apply_batch" => LayerLockStatement::StoppedAndNamesTheWayOut,
+            "set_layer_state" => LayerLockStatement::DescribesTheScope,
+            "set_object_name"
+            | "set_object_item"
+            | "add_effect"
+            | "set_effect_enabled"
+            | "delete_effect"
+            | "set_selection" => LayerLockStatement::Silent,
             other => panic!("{other} のレイヤーロックの説明が定義されていません"),
         }
     }
@@ -2783,7 +2760,7 @@ mod tests {
                         "{name} の説明がロックによる拒否を述べていません"
                     );
                     assert!(
-                        description.contains("aviutl2_set_layer_state"),
+                        description.contains("set_layer_state"),
                         "{name} の説明がロックの解除手段を示していません"
                     );
                 }
@@ -2809,17 +2786,11 @@ mod tests {
     /// 新しい tool が「触れない」側の既定へ黙って落ちる。**
     fn returns_a_current_object(name: &str) -> bool {
         match name {
-            "aviutl2_move_object"
-            | "aviutl2_set_object_name"
-            | "aviutl2_set_object_item"
-            | "aviutl2_add_effect"
-            | "aviutl2_set_effect_enabled"
-            | "aviutl2_delete_effect"
-            | "aviutl2_delete_object"
-            | "aviutl2_set_selection" => true,
+            "move_object" | "set_object_name" | "set_object_item" | "add_effect"
+            | "set_effect_enabled" | "delete_effect" | "delete_object" | "set_selection" => true,
             // 一括適用は 100 件のうちどれが落ちたかを併せて示す必要があるため、
             // 別のキー（failed_object）で返す。
-            "aviutl2_create_object" | "aviutl2_set_layer_state" | "aviutl2_apply_batch" => false,
+            "create_object" | "set_layer_state" | "apply_batch" => false,
             other => panic!("{other} が現在の姿を返すかが定義されていません"),
         }
     }
@@ -2886,7 +2857,7 @@ mod tests {
             // 描けるのは現在シーンだけである。
             "現在シーンだけ",
             "expected_scene_id",
-            "aviutl2_get_edit_info",
+            "get_edit_info",
             // 画像は応答に埋めない。
             "resource URI で返る",
             "resources/read",
@@ -3016,7 +2987,7 @@ mod tests {
                 .and_then(|v| v.as_array())
                 .map(|items| items.contains(&serde_json::json!("instance_id")))
                 .unwrap_or(false);
-            if tool.name == "aviutl2_list_instances" {
+            if tool.name == "list_instances" {
                 assert!(!required, "一覧取得は instance_id を要求しない");
             } else {
                 assert!(required, "{} は instance_id を必須にする", tool.name);
@@ -3130,7 +3101,7 @@ mod tests {
         // router は tool 本体を呼ばずに結果を組み立てるため、そのままでは
         // code / retryable / correlation_id が欠ける。
         let result = normalize_tool_result(
-            "aviutl2_list_layers",
+            "list_layers",
             router_argument_error("failed to deserialize parameters: unknown field `future`"),
         );
 
@@ -3160,7 +3131,7 @@ mod tests {
         // 引数の復元に失敗した理由には受け取った値がそのまま現れる。編集 tool の
         // 引数は alias・パス・設定値であり、応答へ反響させない。
         let result = normalize_tool_result(
-            "aviutl2_create_object",
+            "create_object",
             router_argument_error(concat!(
                 r#"failed to deserialize parameters: invalid type: string "C:\Users\tester\secret.mp4","#,
                 " expected u32 at line 1 column 40",
@@ -3191,7 +3162,7 @@ mod tests {
     fn argument_decoding_failure_keeps_the_field_name() {
         // フィールド名はバッククォートで囲まれるため、値を伏せても残る。
         let result = normalize_tool_result(
-            "aviutl2_set_object_item",
+            "set_object_item",
             router_argument_error("failed to deserialize parameters: missing field `selector`"),
         );
         assert!(
@@ -3220,7 +3191,7 @@ mod tests {
         // 巨大な key を送られても text は上限に収まらなければならない。
         let key = "k".repeat(100_000);
         let result = normalize_tool_result(
-            "aviutl2_list_instances",
+            "list_instances",
             router_argument_error(format!(
                 "failed to deserialize parameters: unknown field `{key}`, expected `offset` or `limit`"
             )),

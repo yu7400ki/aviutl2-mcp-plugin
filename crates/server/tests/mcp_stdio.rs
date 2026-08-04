@@ -257,27 +257,27 @@ fn sample_edit_info() -> EditInfo {
 /// 未知の tool は落とす。tool を足したときに annotation の検査から漏れないようにする。
 fn expected_annotations(name: &str) -> (bool, bool, bool) {
     match name {
-        "aviutl2_list_instances"
-        | "aviutl2_get_edit_info"
-        | "aviutl2_get_current_scene"
-        | "aviutl2_list_layers"
-        | "aviutl2_list_objects"
-        | "aviutl2_get_object"
-        | "aviutl2_list_available_effects"
+        "list_instances"
+        | "get_edit_info"
+        | "get_current_scene"
+        | "list_layers"
+        | "list_objects"
+        | "get_object"
+        | "list_available_effects"
         // 描画はプロジェクトを変更せず、同じ要求は同じ絵を返す。
-        | "aviutl2_render_frame" => (true, false, true),
+        | "render_frame" => (true, false, true),
         // 作成系は再送で重複し得るため冪等と名乗らない。一括適用も、冪等かどうかが
         // 中身に依存する以上、安全である側を主張しない。
-        "aviutl2_create_object" | "aviutl2_add_effect" | "aviutl2_apply_batch" => {
+        "create_object" | "add_effect" | "apply_batch" => {
             (false, false, false)
         }
-        "aviutl2_delete_object" | "aviutl2_delete_effect" => (false, true, true),
-        "aviutl2_move_object"
-        | "aviutl2_set_object_name"
-        | "aviutl2_set_object_item"
-        | "aviutl2_set_effect_enabled"
-        | "aviutl2_set_layer_state"
-        | "aviutl2_set_selection" => (false, false, true),
+        "delete_object" | "delete_effect" => (false, true, true),
+        "move_object"
+        | "set_object_name"
+        | "set_object_item"
+        | "set_effect_enabled"
+        | "set_layer_state"
+        | "set_selection" => (false, false, true),
         other => panic!("{other} の annotation が定義されていません"),
     }
 }
@@ -293,7 +293,7 @@ fn stdout_carries_only_mcp_messages() {
         "jsonrpc": "2.0",
         "id": 3,
         "method": "tools/call",
-        "params": { "name": "aviutl2_list_instances", "arguments": {} },
+        "params": { "name": "list_instances", "arguments": {} },
     }));
 
     let session = run_session(&registry_dir, &requests);
@@ -358,7 +358,7 @@ fn tool_call_outcome_is_logged_without_rust_log() {
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
-        "params": { "name": "aviutl2_list_instances", "arguments": {} },
+        "params": { "name": "list_instances", "arguments": {} },
     }));
 
     let session = run_session_with_log(&registry_dir, &requests, None);
@@ -370,12 +370,7 @@ fn tool_call_outcome_is_logged_without_rust_log() {
         .lines()
         .find(|line| line.contains("tool call succeeded"))
         .unwrap_or_else(|| panic!("tool call の結果が記録されていません: {}", session.stderr));
-    for field in [
-        "aviutl2_list_instances",
-        "correlation_id",
-        "duration_ms",
-        "result",
-    ] {
+    for field in ["list_instances", "correlation_id", "duration_ms", "result"] {
         assert!(logged.contains(field), "{field} がありません: {logged}");
     }
 
@@ -407,7 +402,7 @@ fn effect_catalog_paging_is_not_declared_as_revision_checked() {
     // effect カタログはプロジェクトの revision に連動しないため照合されない。
     // 照合されるかのように案内すると、返らない precondition_failed をもって
     // 「ページ間の一貫性が検証された」と読まれてしまう。
-    let effects = listed_tool(&listed, "aviutl2_list_available_effects");
+    let effects = listed_tool(&listed, "list_available_effects");
     let description = effects["description"].as_str().expect("説明がある");
     assert!(
         !description.contains("先頭ページが返した snapshot_revision を添える"),
@@ -434,7 +429,7 @@ fn effect_catalog_paging_is_not_declared_as_revision_checked() {
     );
 
     // 照合する列挙 tool の宣言はそのまま残す。
-    for name in ["aviutl2_list_layers", "aviutl2_list_objects"] {
+    for name in ["list_layers", "list_objects"] {
         let tool = listed_tool(&listed, name);
         let description = tool["description"].as_str().expect("説明がある");
         assert!(
@@ -472,7 +467,7 @@ fn rejected_tool_calls_do_not_pollute_stdout() {
         "id": 3,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_list_layers",
+            "name": "list_layers",
             "arguments": {
                 "instance_id": instance_id,
                 "expected_scene_id": 0,
@@ -485,7 +480,7 @@ fn rejected_tool_calls_do_not_pollute_stdout() {
         "id": 4,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_list_layers",
+            "name": "list_layers",
             "arguments": {
                 "instance_id": instance_id,
                 "expected_scene_id": 0,
@@ -498,7 +493,7 @@ fn rejected_tool_calls_do_not_pollute_stdout() {
         "id": 5,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_list_layers",
+            "name": "list_layers",
             "arguments": {
                 "instance_id": instance_id,
                 "expected_scene_id": "文字列",
@@ -514,7 +509,7 @@ fn rejected_tool_calls_do_not_pollute_stdout() {
         "id": 6,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_list_instances",
+            "name": "list_instances",
             "arguments": Value::Object(huge_arguments),
         },
     }));
@@ -565,7 +560,7 @@ fn rejected_tool_calls_do_not_pollute_stdout() {
         .lines()
         .filter(|line| line.contains("tool call rejected before dispatch"))
         .collect();
-    for tool in ["aviutl2_list_layers", "aviutl2_list_instances"] {
+    for tool in ["list_layers", "list_instances"] {
         let line = logged
             .iter()
             .find(|line| line.contains(tool))
@@ -600,7 +595,7 @@ fn rejected_edit_tool_calls_take_the_same_path() {
         "id": 2,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_delete_object",
+            "name": "delete_object",
             "arguments": {
                 "instance_id": instance_id,
                 "selector": {},
@@ -614,7 +609,7 @@ fn rejected_edit_tool_calls_take_the_same_path() {
         "id": 3,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_create_object",
+            "name": "create_object",
             "arguments": {
                 "instance_id": instance_id,
                 "source": { "type": "object_alias", "alias": "[vo]" },
@@ -628,7 +623,7 @@ fn rejected_edit_tool_calls_take_the_same_path() {
         "id": 4,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_set_selection",
+            "name": "set_selection",
             "arguments": {
                 "instance_id": instance_id,
                 "expected_scene_id": 0,
@@ -642,7 +637,7 @@ fn rejected_edit_tool_calls_take_the_same_path() {
         "id": 5,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_create_object",
+            "name": "create_object",
             "arguments": {
                 "instance_id": instance_id,
                 "source": { "type": "object_alias", "alias": "[vo]" },
@@ -1146,7 +1141,7 @@ fn instance_listing_and_tool_call_survive_overlapping() {
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "aviutl2_get_edit_info",
+                "name": "get_edit_info",
                 "arguments": { "instance_id": mock.instance_id().to_string() },
             },
         }),
@@ -1210,7 +1205,7 @@ fn instance_listing_and_tool_call_survive_overlapping() {
         "id": 3,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_get_edit_info",
+            "name": "get_edit_info",
             "arguments": { "instance_id": mock.instance_id().to_string() },
         },
     }));
@@ -1278,7 +1273,7 @@ fn edit_tool_call_and_resource_read_survive_overlapping() {
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "aviutl2_delete_object",
+                "name": "delete_object",
                 "arguments": {
                     "instance_id": mock.instance_id().to_string(),
                     "selector": {
@@ -1378,7 +1373,7 @@ fn tool_call_over_stdio_reaches_the_instance() {
         "id": 2,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_get_edit_info",
+            "name": "get_edit_info",
             "arguments": { "instance_id": mock.instance_id().to_string() },
         },
     }));
@@ -1431,7 +1426,7 @@ fn logs_expose_neither_full_identifiers_nor_absolute_paths() {
         "id": 2,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_get_edit_info",
+            "name": "get_edit_info",
             "arguments": { "instance_id": instance_id },
         },
     }));
@@ -1486,7 +1481,7 @@ fn verbose_logging_does_not_leak_full_identifiers_from_any_crate() {
         "id": 2,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_get_edit_info",
+            "name": "get_edit_info",
             "arguments": { "instance_id": instance_id },
         },
     }));
@@ -1588,7 +1583,7 @@ fn render_request(id: u64, instance_id: &str) -> Value {
         "id": id,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_render_frame",
+            "name": "render_frame",
             "arguments": {
                 "instance_id": instance_id,
                 "expected_scene_id": 3,
@@ -1647,7 +1642,7 @@ fn a_rendered_artifact_is_listed_and_read_back_as_a_blob() {
         "id": 2,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_render_frame",
+            "name": "render_frame",
             "arguments": {
                 "instance_id": instance_id,
                 "expected_scene_id": 3,
@@ -1820,7 +1815,7 @@ fn the_first_tools_list_reflects_the_settings_on_disk() {
     let registry_dir = temp_registry_dir();
     write_settings(
         &registry_dir,
-        r#"{"disabled_tools":["aviutl2_delete_object","aviutl2_list_instances"]}"#,
+        r#"{"disabled_tools":["delete_object","list_instances"]}"#,
     );
 
     let mut requests = initialize_requests();
@@ -1836,12 +1831,12 @@ fn the_first_tools_list_reflects_the_settings_on_disk() {
 
     let names = listed_tool_names(&session.response(2));
     assert!(
-        !names.contains(&"aviutl2_delete_object".to_string()),
+        !names.contains(&"delete_object".to_string()),
         "無効化した tool が掲載されています: {names:?}"
     );
     // 常時有効な tool は指定に含まれていても外れない。
     assert!(
-        names.contains(&"aviutl2_list_instances".to_string()),
+        names.contains(&"list_instances".to_string()),
         "常時有効な tool が外れました: {names:?}"
     );
     assert_eq!(tool_list_changed_count(&session), 0, "{}", session.stdout);
@@ -1887,10 +1882,7 @@ fn a_disabled_tool_call_never_reaches_the_instance() {
         OperationResponses::from([("get_edit_info".to_string(), ok_result(edit_info))]),
     );
     mock.write_descriptor(&registry_dir);
-    write_settings(
-        &registry_dir,
-        r#"{"disabled_tools":["aviutl2_delete_object"]}"#,
-    );
+    write_settings(&registry_dir, r#"{"disabled_tools":["delete_object"]}"#);
     std::thread::sleep(MOCK_STARTUP_GRACE);
 
     let instance_id = mock.instance_id().to_string();
@@ -1900,7 +1892,7 @@ fn a_disabled_tool_call_never_reaches_the_instance() {
         "id": 2,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_delete_object",
+            "name": "delete_object",
             "arguments": {
                 "instance_id": instance_id,
                 // 引数は妥当である。拒否の理由を「引数を解釈できない」に
@@ -1963,10 +1955,7 @@ fn an_enabled_tool_still_reaches_the_instance_while_another_is_disabled() {
         OperationResponses::from([("get_edit_info".to_string(), ok_result(edit_info))]),
     );
     mock.write_descriptor(&registry_dir);
-    write_settings(
-        &registry_dir,
-        r#"{"disabled_tools":["aviutl2_delete_object"]}"#,
-    );
+    write_settings(&registry_dir, r#"{"disabled_tools":["delete_object"]}"#);
     std::thread::sleep(MOCK_STARTUP_GRACE);
 
     let mut requests = initialize_requests();
@@ -1975,7 +1964,7 @@ fn an_enabled_tool_still_reaches_the_instance_while_another_is_disabled() {
         "id": 2,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_get_edit_info",
+            "name": "get_edit_info",
             "arguments": { "instance_id": mock.instance_id().to_string() },
         },
     }));
@@ -2000,7 +1989,7 @@ fn disabling_a_tool_does_not_relax_the_checks_of_the_others() {
     let registry_dir = temp_registry_dir();
     write_settings(
         &registry_dir,
-        r#"{"disabled_tools":["aviutl2_delete_object","aviutl2_apply_batch"]}"#,
+        r#"{"disabled_tools":["delete_object","apply_batch"]}"#,
     );
     let unknown = InstanceId::new_v4().to_string();
 
@@ -2009,14 +1998,14 @@ fn disabling_a_tool_does_not_relax_the_checks_of_the_others() {
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
-        "params": { "name": "aviutl2_get_edit_info", "arguments": {} },
+        "params": { "name": "get_edit_info", "arguments": {} },
     }));
     requests.push(json!({
         "jsonrpc": "2.0",
         "id": 3,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_get_edit_info",
+            "name": "get_edit_info",
             "arguments": { "instance_id": unknown },
         },
     }));
@@ -2027,7 +2016,7 @@ fn disabling_a_tool_does_not_relax_the_checks_of_the_others() {
         "id": 4,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_create_object",
+            "name": "create_object",
             "arguments": {
                 "instance_id": unknown,
                 "expected_project_epoch": "78be92d1-c8c9-44c6-ae52-387548971468",
@@ -2080,7 +2069,7 @@ fn tools_list_changed_arrives_only_when_the_enabled_set_changes() {
     // 公開する集合を変える。
     write_settings(
         &registry_dir,
-        r#"{"log_level":"warn","disabled_tools":["aviutl2_delete_object"]}"#,
+        r#"{"log_level":"warn","disabled_tools":["delete_object"]}"#,
     );
     std::thread::sleep(SETTINGS_DELIVERY);
     server.send(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }));
@@ -2090,10 +2079,7 @@ fn tools_list_changed_arrives_only_when_the_enabled_set_changes() {
     let before = listed_tool_names(&session.response(2));
     let after = listed_tool_names(&session.response(3));
     assert_eq!(before.len(), 19, "{before:?}");
-    assert!(
-        !after.contains(&"aviutl2_delete_object".to_string()),
-        "{after:?}"
-    );
+    assert!(!after.contains(&"delete_object".to_string()), "{after:?}");
     assert_eq!(
         tool_list_changed_count(&session),
         1,
@@ -2152,7 +2138,7 @@ fn a_running_call_is_not_cancelled_when_its_tool_is_disabled() {
             "id": id,
             "method": "tools/call",
             "params": {
-                "name": "aviutl2_get_edit_info",
+                "name": "get_edit_info",
                 "arguments": { "instance_id": mock.instance_id().to_string() },
             },
         })
@@ -2169,10 +2155,7 @@ fn a_running_call_is_not_cancelled_when_its_tool_is_disabled() {
     // 実行を始めさせてから無効化する。応答を待つのは無効化が届いた後である。
     server.send(&call(2));
     std::thread::sleep(IN_FLIGHT_GRACE);
-    write_settings(
-        &registry_dir,
-        r#"{"disabled_tools":["aviutl2_get_edit_info"]}"#,
-    );
+    write_settings(&registry_dir, r#"{"disabled_tools":["get_edit_info"]}"#);
     std::thread::sleep(SETTINGS_DELIVERY);
     server.read_until(&[json!(2)]);
 
@@ -2215,10 +2198,7 @@ fn disabling_a_tool_does_not_bypass_the_identity_checks_of_the_others() {
         OperationResponses::from([("delete_object".to_string(), err_result(mismatch))]),
     );
     mock.write_descriptor(&registry_dir);
-    write_settings(
-        &registry_dir,
-        r#"{"disabled_tools":["aviutl2_apply_batch"]}"#,
-    );
+    write_settings(&registry_dir, r#"{"disabled_tools":["apply_batch"]}"#);
     std::thread::sleep(MOCK_STARTUP_GRACE);
 
     let instance_id = mock.instance_id().to_string();
@@ -2240,7 +2220,7 @@ fn disabling_a_tool_does_not_bypass_the_identity_checks_of_the_others() {
         "id": 2,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_delete_object",
+            "name": "delete_object",
             "arguments": {
                 "instance_id": instance_id,
                 "selector": selector("not-a-fingerprint"),
@@ -2253,7 +2233,7 @@ fn disabling_a_tool_does_not_bypass_the_identity_checks_of_the_others() {
         "id": 3,
         "method": "tools/call",
         "params": {
-            "name": "aviutl2_delete_object",
+            "name": "delete_object",
             "arguments": {
                 "instance_id": instance_id,
                 "selector": selector(
@@ -2287,10 +2267,7 @@ fn a_disabled_tool_answers_a_task_request_the_same_way_an_enabled_one_does() {
     // **公開していない tool をそこで「無い」ことにすると検証が飛ばされ、同じ
     // 要求が tool によって違う失敗になる。** 定義を引く口は公開の判定を通さない。
     let registry_dir = temp_registry_dir();
-    write_settings(
-        &registry_dir,
-        r#"{"disabled_tools":["aviutl2_delete_object"]}"#,
-    );
+    write_settings(&registry_dir, r#"{"disabled_tools":["delete_object"]}"#);
 
     let as_task = |id: u64, name: &str| {
         json!({
@@ -2302,8 +2279,8 @@ fn a_disabled_tool_answers_a_task_request_the_same_way_an_enabled_one_does() {
     };
 
     let mut requests = initialize_requests();
-    requests.push(as_task(2, "aviutl2_delete_object"));
-    requests.push(as_task(3, "aviutl2_get_edit_info"));
+    requests.push(as_task(2, "delete_object"));
+    requests.push(as_task(3, "get_edit_info"));
 
     let session = run_session(&registry_dir, &requests);
     let disabled = &session.response(2)["error"];

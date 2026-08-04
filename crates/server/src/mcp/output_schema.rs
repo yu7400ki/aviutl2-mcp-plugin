@@ -18,7 +18,7 @@ pub fn as_tool_schema(schema: Value) -> Arc<JsonObject> {
     Arc::new(object)
 }
 
-/// `aviutl2_list_instances` の出力。
+/// `list_instances` の出力。
 pub fn list_instances() -> Value {
     object(&[
         ("instances", array(instance_info())),
@@ -30,7 +30,7 @@ pub fn list_instances() -> Value {
     ])
 }
 
-/// `aviutl2_get_edit_info` の出力。
+/// `get_edit_info` の出力。
 pub fn edit_info() -> Value {
     object(&[
         ("scene", scene_info()),
@@ -44,22 +44,22 @@ pub fn edit_info() -> Value {
     ])
 }
 
-/// `aviutl2_get_current_scene` の出力。
+/// `get_current_scene` の出力。
 pub fn current_scene() -> Value {
     object(&[("scene", scene_info()), ("project_revision", unsigned())])
 }
 
-/// `aviutl2_list_layers` の出力。
+/// `list_layers` の出力。
 pub fn list_layers() -> Value {
     page_of(layer_info())
 }
 
-/// `aviutl2_list_objects` の出力。
+/// `list_objects` の出力。
 pub fn list_objects() -> Value {
     page_of(object_summary())
 }
 
-/// `aviutl2_get_object` の出力。
+/// `get_object` の出力。
 pub fn object_detail() -> Value {
     object(&[
         ("summary", object_summary()),
@@ -70,62 +70,62 @@ pub fn object_detail() -> Value {
     ])
 }
 
-/// `aviutl2_list_available_effects` の出力。
+/// `list_available_effects` の出力。
 pub fn list_available_effects() -> Value {
     page_of(available_effect())
 }
 
-/// `aviutl2_create_object` の出力。
+/// `create_object` の出力。
 ///
 /// `created` に作成された全件が入り、`object` はその先頭を指す。
 pub fn create_object() -> Value {
     edit_outcome(object_summary(), null(), array(object_summary()))
 }
 
-/// `aviutl2_move_object` の出力。
+/// `move_object` の出力。
 pub fn move_object() -> Value {
     edit_outcome(object_summary(), null(), nothing_created())
 }
 
-/// `aviutl2_set_object_name` の出力。
+/// `set_object_name` の出力。
 pub fn set_object_name() -> Value {
     edit_outcome(object_summary(), null(), nothing_created())
 }
 
-/// `aviutl2_delete_object` の出力。
+/// `delete_object` の出力。
 ///
 /// 対象は消えているため `object` は必ず null になる。
 pub fn delete_object() -> Value {
     edit_outcome(null(), null(), nothing_created())
 }
 
-/// `aviutl2_set_object_item` の出力。
+/// `set_object_item` の出力。
 ///
 /// `effect` には書き込み後に読み直した値が入る。
 pub fn set_object_item() -> Value {
     edit_outcome(object_summary(), effect_info(), nothing_created())
 }
 
-/// `aviutl2_add_effect` の出力。
+/// `add_effect` の出力。
 ///
 /// effect の付与はオブジェクトを作らないため `created` は空である。
 pub fn add_effect() -> Value {
     edit_outcome(object_summary(), effect_info(), nothing_created())
 }
 
-/// `aviutl2_set_effect_enabled` の出力。
+/// `set_effect_enabled` の出力。
 pub fn set_effect_enabled() -> Value {
     edit_outcome(object_summary(), effect_info(), nothing_created())
 }
 
-/// `aviutl2_delete_effect` の出力。
+/// `delete_effect` の出力。
 ///
 /// effect は消えているため `effect` は必ず null になる。
 pub fn delete_effect() -> Value {
     edit_outcome(object_summary(), null(), nothing_created())
 }
 
-/// `aviutl2_set_layer_state` の出力。
+/// `set_layer_state` の出力。
 ///
 /// `layer` には変更後に読み直した状態が入る。レイヤーは fingerprint を持たない
 /// ため、要求元はこの値で実際の状態を確かめる。
@@ -137,7 +137,7 @@ pub fn set_layer_state() -> Value {
     ])
 }
 
-/// `aviutl2_apply_batch` の出力。
+/// `apply_batch` の出力。
 ///
 /// `results` は入力と同じ位置で並ぶ。revision は要求全体で 1 つだけ持つ。
 pub fn apply_batch() -> Value {
@@ -161,7 +161,7 @@ fn batch_step_outcome() -> Value {
     ])
 }
 
-/// `aviutl2_render_frame` の出力。
+/// `render_frame` の出力。
 ///
 /// 接続先の result とは別の形である。引き渡しの識別子はここに現れない。
 pub fn render_frame() -> Value {
@@ -188,7 +188,7 @@ fn artifact_ref() -> Value {
     ])
 }
 
-/// `aviutl2_set_selection` の出力。
+/// `set_selection` の出力。
 pub fn set_selection() -> Value {
     object(&[
         ("project_epoch", string()),

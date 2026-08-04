@@ -205,7 +205,7 @@ async fn get_edit_info_tool_sends_get_edit_info_operation() {
 
     let result = harness
         .server
-        .aviutl2_get_edit_info(Parameters(InstanceInput {
+        .get_edit_info(Parameters(InstanceInput {
             instance_id: harness.instance_id(),
         }))
         .await;
@@ -236,7 +236,7 @@ async fn get_current_scene_tool_sends_get_current_scene_operation() {
 
     let result = harness
         .server
-        .aviutl2_get_current_scene(Parameters(InstanceInput {
+        .get_current_scene(Parameters(InstanceInput {
             instance_id: harness.instance_id(),
         }))
         .await;
@@ -265,7 +265,7 @@ async fn list_layers_tool_sends_flat_page_params() {
 
     let result = harness
         .server
-        .aviutl2_list_layers(Parameters(ListLayersInput {
+        .list_layers(Parameters(ListLayersInput {
             instance_id: harness.instance_id(),
             expected_scene_id: 3,
             page: page_input(5, 10, Some(42)),
@@ -298,7 +298,7 @@ async fn list_objects_tool_sends_filter_and_page() {
 
     let result = harness
         .server
-        .aviutl2_list_objects(Parameters(ListObjectsInput {
+        .list_objects(Parameters(ListObjectsInput {
             instance_id: harness.instance_id(),
             expected_scene_id: 3,
             filter: Some(ObjectFilterInput {
@@ -343,7 +343,7 @@ async fn get_object_tool_sends_selector() {
 
     let result = harness
         .server
-        .aviutl2_get_object(Parameters(GetObjectInput {
+        .get_object(Parameters(GetObjectInput {
             instance_id: harness.instance_id(),
             selector: selector_input(),
         }))
@@ -378,7 +378,7 @@ async fn list_available_effects_tool_sends_effect_type() {
 
     let result = harness
         .server
-        .aviutl2_list_available_effects(Parameters(ListAvailableEffectsInput {
+        .list_available_effects(Parameters(ListAvailableEffectsInput {
             instance_id: harness.instance_id(),
             effect_type: Some(aviutl2_mcp_server::mcp::input::EffectTypeInput::Filter),
             page: effects_page_input(0, 50, None),
@@ -406,7 +406,7 @@ async fn list_instances_tool_lists_live_mock() {
 
     let result = harness
         .server
-        .aviutl2_list_instances(Parameters(ListInstancesInput {
+        .list_instances(Parameters(ListInstancesInput {
             offset: 0,
             limit: 50,
         }))
@@ -428,7 +428,7 @@ async fn unknown_instance_id_becomes_instance_not_found() {
 
     let result = harness
         .server
-        .aviutl2_get_edit_info(Parameters(InstanceInput {
+        .get_edit_info(Parameters(InstanceInput {
             instance_id: InstanceId::new_v4().to_string(),
         }))
         .await;
@@ -464,7 +464,7 @@ async fn dead_instance_becomes_instance_stale() {
     let server =
         AviUtl2McpServer::without_artifact_store(registry_dir.clone(), CallLimits::default());
     let result = server
-        .aviutl2_get_edit_info(Parameters(InstanceInput {
+        .get_edit_info(Parameters(InstanceInput {
             instance_id: descriptor.instance_id.to_string(),
         }))
         .await;
@@ -484,7 +484,7 @@ async fn malformed_instance_id_becomes_invalid_argument() {
 
     let result = harness
         .server
-        .aviutl2_get_edit_info(Parameters(InstanceInput {
+        .get_edit_info(Parameters(InstanceInput {
             instance_id: "not-a-uuid".to_string(),
         }))
         .await;
@@ -503,7 +503,7 @@ async fn out_of_range_limit_becomes_invalid_argument() {
 
     let result = harness
         .server
-        .aviutl2_list_layers(Parameters(ListLayersInput {
+        .list_layers(Parameters(ListLayersInput {
             instance_id: harness.instance_id(),
             expected_scene_id: 0,
             page: page_input(0, 201, None),
@@ -526,7 +526,7 @@ async fn remote_error_is_returned_as_tool_error_with_retry_after() {
 
     let result = harness
         .server
-        .aviutl2_get_edit_info(Parameters(InstanceInput {
+        .get_edit_info(Parameters(InstanceInput {
             instance_id: harness.instance_id(),
         }))
         .await;
@@ -545,7 +545,7 @@ async fn unsupported_operation_from_instance_is_reported() {
 
     let result = harness
         .server
-        .aviutl2_get_object(Parameters(GetObjectInput {
+        .get_object(Parameters(GetObjectInput {
             instance_id: harness.instance_id(),
             selector: selector_input(),
         }))
@@ -561,7 +561,7 @@ async fn response_of_wrong_shape_is_rejected() {
 
     let result = harness
         .server
-        .aviutl2_get_edit_info(Parameters(InstanceInput {
+        .get_edit_info(Parameters(InstanceInput {
             instance_id: harness.instance_id(),
         }))
         .await;
@@ -578,7 +578,7 @@ async fn each_tool_call_uses_a_fresh_connection() {
     for _ in 0..3 {
         let result = harness
             .server
-            .aviutl2_get_edit_info(Parameters(InstanceInput {
+            .get_edit_info(Parameters(InstanceInput {
                 instance_id: harness.instance_id(),
             }))
             .await;
@@ -616,7 +616,7 @@ async fn read_that_outlasts_the_request_budget_becomes_timeout() {
 
     let result = harness
         .server
-        .aviutl2_get_edit_info(Parameters(InstanceInput {
+        .get_edit_info(Parameters(InstanceInput {
             instance_id: harness.instance_id(),
         }))
         .await;
@@ -637,7 +637,7 @@ async fn read_that_outlasts_the_request_budget_becomes_timeout() {
     );
 }
 
-/// 注入したエラーを `aviutl2_get_object` の tool result として受け取る。
+/// 注入したエラーを `get_object` の tool result として受け取る。
 async fn get_object_failure(error: ErrorObject) -> CallToolResult {
     let harness = Harness::start(OperationResponses::from([(
         "get_object".to_string(),
@@ -645,7 +645,7 @@ async fn get_object_failure(error: ErrorObject) -> CallToolResult {
     )]));
     harness
         .server
-        .aviutl2_get_object(Parameters(GetObjectInput {
+        .get_object(Parameters(GetObjectInput {
             instance_id: harness.instance_id(),
             selector: selector_input(),
         }))

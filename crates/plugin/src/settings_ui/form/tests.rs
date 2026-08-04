@@ -238,7 +238,7 @@ fn lowering_the_scale_keeps_the_fixed_handoff_floor() {
 fn the_form_reflects_the_current_settings() {
     let settings = settings_from(
         r#"{
-            "disabled_tools": ["aviutl2_delete_object"],
+            "disabled_tools": ["delete_object"],
             "log_level": "warn",
             "budget_scale_percent": 200,
             "artifact": { "ttl_seconds": 900, "max_count": 8, "max_total_bytes": 268435456 },
@@ -253,7 +253,7 @@ fn the_form_reflects_the_current_settings() {
     for tool in form.tools() {
         assert_eq!(
             tool.control().is_checked(),
-            tool.name() != "aviutl2_delete_object",
+            tool.name() != "delete_object",
             "{} の初期状態が設定と一致しません",
             tool.name()
         );
@@ -357,7 +357,7 @@ fn every_field_round_trips_through_the_change() {
 /// 既知のカタログ分だけを操作対象とし、未知分は書き戻しで残る。
 #[test]
 fn unknown_tool_names_survive_the_form() {
-    let json = r#"{"disabled_tools":["aviutl2_future_tool","aviutl2_delete_object"]}"#;
+    let json = r#"{"disabled_tools":["aviutl2_future_tool","delete_object"]}"#;
     let form = SettingsForm::new(&settings_from(json));
 
     assert!(
@@ -368,7 +368,7 @@ fn unknown_tool_names_survive_the_form() {
     );
     form.tools()
         .iter()
-        .find(|tool| tool.name() == "aviutl2_delete_object")
+        .find(|tool| tool.name() == "delete_object")
         .unwrap()
         .control()
         .set_checked(true);
@@ -376,7 +376,7 @@ fn unknown_tool_names_survive_the_form() {
     let (settings, document) = applied(json, &form.collect().unwrap());
 
     assert!(settings.disabled_tools().contains("aviutl2_future_tool"));
-    assert!(!settings.disabled_tools().contains("aviutl2_delete_object"));
+    assert!(!settings.disabled_tools().contains("delete_object"));
     assert!(document.to_json().contains("aviutl2_future_tool"));
 }
 

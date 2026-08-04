@@ -3,13 +3,14 @@
 //! 一覧を書き写さず、operation の一覧から導く。
 //!
 //! ```text
-//! tool 名 = "aviutl2_" + operation 名   （operation を持つもの）
-//!         + aviutl2_list_instances      （対応する operation を持たない 1 件）
+//! tool 名 = operation 名   （operation を持つもの）
+//!         + list_instances （対応する operation を持たない 1 件）
 //! ```
 //!
 //! 導出にすることで、operation を足したときに tool 名の一覧へ足し忘れる経路が
 //! 構造的に無くなる。[`KnownOperation`] の網羅性は
-//! [`crate::operation`] のテストが縛っている。
+//! [`crate::operation`] のテストが縛っている。写像は恒等であり、規則を
+//! 書き間違える余地が無い。
 //!
 //! # 名前だけを持つ
 //!
@@ -18,18 +19,12 @@
 
 use crate::operation::{EditOperation, KnownOperation, ReadOperation, RenderOperation};
 
-/// MCP tool 名の接頭辞。
-///
-/// 導出の材料であり、外へは出さない。**公開するのは導出の結果だけである**——
-/// 呼び出し側が接頭辞から名前を組み立て始めると、規則が 2 か所に散る。
-const TOOL_NAME_PREFIX: &str = "aviutl2_";
-
 /// 無効化できない tool。
 ///
 /// discovery と設定導線の入口であり、公開しなければ他の tool が必須で要求する
 /// `instance_id` を得る手段が無くなる。読み手はこの名前が公開しない指定に
 /// 含まれていても無視する。
-pub const ALWAYS_ENABLED_TOOL: &str = "aviutl2_list_instances";
+pub const ALWAYS_ENABLED_TOOL: &str = "list_instances";
 
 /// tool が属する族。
 ///
@@ -84,15 +79,10 @@ impl ToolFamily {
 
     /// 族に属する tool 名を並べる。
     pub fn tool_names(self) -> impl Iterator<Item = String> {
-        self.operations().into_iter().map(tool_name)
+        self.operations()
+            .into_iter()
+            .map(|operation| operation.as_str().to_string())
     }
-}
-
-/// operation に対応する tool の名前。
-///
-/// [`TOOL_NAME_PREFIX`] と同じ理由で外へは出さない。
-fn tool_name(operation: KnownOperation) -> String {
-    format!("{TOOL_NAME_PREFIX}{}", operation.as_str())
 }
 
 /// 個別に切り替えられる tool の名前を族の順に並べる。
@@ -117,13 +107,16 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn tool_names_are_the_prefix_joined_to_the_operation_name() {
+    fn tool_names_equal_the_operation_names() {
         for family in ToolFamily::ALL {
-            for operation in family.operations() {
+            let names: Vec<String> = family.tool_names().collect();
+            let operations = family.operations();
+            assert_eq!(names.len(), operations.len());
+            for (name, operation) in names.iter().zip(operations) {
                 assert_eq!(
-                    tool_name(operation),
-                    format!("aviutl2_{}", operation.as_str()),
-                    "{operation:?} の tool 名が規則から外れています"
+                    name,
+                    operation.as_str(),
+                    "{operation:?} の tool 名が operation 名と一致していません"
                 );
             }
         }
@@ -154,16 +147,6 @@ mod tests {
             names.len(),
             "tool 名が重複しています: {names:?}"
         );
-    }
-
-    #[test]
-    fn every_tool_name_carries_the_prefix() {
-        for name in all_tool_names() {
-            assert!(
-                name.starts_with(TOOL_NAME_PREFIX),
-                "{name} が接頭辞を持ちません"
-            );
-        }
     }
 
     /// [`ToolFamily::ALL`] が全 variant を含むことを固定する。

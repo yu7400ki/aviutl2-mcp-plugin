@@ -51,7 +51,7 @@ fn default_limit() -> u32 {
     DEFAULT_PAGE_LIMIT
 }
 
-/// `aviutl2_list_instances` の入力。
+/// `list_instances` の入力。
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListInstancesInput {
@@ -68,7 +68,7 @@ pub struct ListInstancesInput {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InstanceInput {
-    /// 対象インスタンスの ID。aviutl2_list_instances が返す値を指定する。
+    /// 対象インスタンスの ID。list_instances が返す値を指定する。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
     pub instance_id: String,
 }
@@ -144,7 +144,7 @@ fn build_page_request(
     Ok(request)
 }
 
-/// `aviutl2_list_layers` の入力。
+/// `list_layers` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListLayersInput {
@@ -158,7 +158,7 @@ pub struct ListLayersInput {
     pub page: PageInput,
 }
 
-/// `aviutl2_list_objects` の入力。
+/// `list_objects` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListObjectsInput {
@@ -187,14 +187,14 @@ pub struct ObjectFilterInput {
     pub layer_max: Option<u32>,
 }
 
-/// `aviutl2_get_object` の入力。
+/// `get_object` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetObjectInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
     pub instance_id: String,
-    /// 対象オブジェクトのセレクター。aviutl2_list_objects が返した値をそのまま指定する。
+    /// 対象オブジェクトのセレクター。list_objects が返した値をそのまま指定する。
     pub selector: ObjectSelectorInput,
 }
 
@@ -224,7 +224,7 @@ pub struct ObjectSelectorInput {
     pub fingerprint: String,
 }
 
-/// `aviutl2_list_available_effects` の入力。
+/// `list_available_effects` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListAvailableEffectsInput {
@@ -397,7 +397,7 @@ impl ObjectSelectorInput {
         });
         serde_json::from_value(value).map_err(|_| {
             invalid_argument(
-                "selector を解釈できません。aviutl2_list_objects が返した値をそのまま指定してください",
+                "selector を解釈できません。list_objects が返した値をそのまま指定してください",
             )
         })
     }

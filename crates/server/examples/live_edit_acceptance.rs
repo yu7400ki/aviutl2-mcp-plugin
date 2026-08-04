@@ -757,22 +757,19 @@ impl Harness {
     }
 
     fn list_instances(&self) -> Result<ListInstancesResponse, ErrorObject> {
-        let result = self
-            .runtime
-            .block_on(
-                self.server
-                    .aviutl2_list_instances(Parameters(ListInstancesInput {
-                        offset: 0,
-                        limit: PAGE_LIMIT,
-                    })),
-            );
+        let result =
+            self.runtime
+                .block_on(self.server.list_instances(Parameters(ListInstancesInput {
+                    offset: 0,
+                    limit: PAGE_LIMIT,
+                })));
         self.decode(result)
     }
 
     fn edit_info(&self, instance: &str) -> Result<EditInfo, ErrorObject> {
         let result = self
             .runtime
-            .block_on(self.server.aviutl2_get_edit_info(Parameters(InstanceInput {
+            .block_on(self.server.get_edit_info(Parameters(InstanceInput {
                 instance_id: instance.to_string(),
             })));
         self.decode(result)
@@ -782,17 +779,17 @@ impl Harness {
         let mut items = Vec::new();
         let mut offset = 0;
         for _ in 0..MAX_PAGES {
-            let result = self
-                .runtime
-                .block_on(self.server.aviutl2_list_layers(Parameters(ListLayersInput {
-                    instance_id: instance.to_string(),
-                    expected_scene_id: scene_id,
-                    page: PageInput {
-                        offset,
-                        limit: PAGE_LIMIT,
-                        snapshot_revision: None,
-                    },
-                })));
+            let result =
+                self.runtime
+                    .block_on(self.server.list_layers(Parameters(ListLayersInput {
+                        instance_id: instance.to_string(),
+                        expected_scene_id: scene_id,
+                        page: PageInput {
+                            offset,
+                            limit: PAGE_LIMIT,
+                            snapshot_revision: None,
+                        },
+                    })));
             let page: PagedLayers = self.decode(result)?;
             items.extend(page.items);
             match page.page.next_offset {
@@ -816,21 +813,18 @@ impl Harness {
         let mut items = Vec::new();
         let mut offset = 0;
         for _ in 0..MAX_PAGES {
-            let result = self
-                .runtime
-                .block_on(
-                    self.server
-                        .aviutl2_list_objects(Parameters(ListObjectsInput {
-                            instance_id: instance.to_string(),
-                            expected_scene_id: scene_id,
-                            filter,
-                            page: PageInput {
-                                offset,
-                                limit: PAGE_LIMIT,
-                                snapshot_revision: None,
-                            },
-                        })),
-                );
+            let result =
+                self.runtime
+                    .block_on(self.server.list_objects(Parameters(ListObjectsInput {
+                        instance_id: instance.to_string(),
+                        expected_scene_id: scene_id,
+                        filter,
+                        page: PageInput {
+                            offset,
+                            limit: PAGE_LIMIT,
+                            snapshot_revision: None,
+                        },
+                    })));
             let page: PagedObjects = self.decode(result)?;
             items.extend(page.items);
             match page.page.next_offset {
@@ -848,7 +842,7 @@ impl Harness {
     ) -> Result<ObjectDetail, ErrorObject> {
         let result = self
             .runtime
-            .block_on(self.server.aviutl2_get_object(Parameters(GetObjectInput {
+            .block_on(self.server.get_object(Parameters(GetObjectInput {
                 instance_id: instance.to_string(),
                 selector: object_selector_input(selector),
             })));
@@ -861,7 +855,7 @@ impl Harness {
         for _ in 0..MAX_PAGES {
             let result = self
                 .runtime
-                .block_on(self.server.aviutl2_list_available_effects(Parameters(
+                .block_on(self.server.list_available_effects(Parameters(
                     ListAvailableEffectsInput {
                         instance_id: instance.to_string(),
                         effect_type: None,
@@ -889,17 +883,14 @@ impl Harness {
         placement: PlacementInput,
         expected_project_epoch: String,
     ) -> Result<EditOutcome, ErrorObject> {
-        let result = self
-            .runtime
-            .block_on(
-                self.server
-                    .aviutl2_create_object(Parameters(CreateObjectInput {
-                        instance_id: instance.to_string(),
-                        source,
-                        placement,
-                        expected_project_epoch,
-                    })),
-            );
+        let result =
+            self.runtime
+                .block_on(self.server.create_object(Parameters(CreateObjectInput {
+                    instance_id: instance.to_string(),
+                    source,
+                    placement,
+                    expected_project_epoch,
+                })));
         self.decode(result)
     }
 
@@ -911,7 +902,7 @@ impl Harness {
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
-            .block_on(self.server.aviutl2_move_object(Parameters(MoveObjectInput {
+            .block_on(self.server.move_object(Parameters(MoveObjectInput {
                 instance_id: instance.to_string(),
                 selector: object_selector_input(selector),
                 destination,
@@ -927,14 +918,11 @@ impl Harness {
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
-            .block_on(
-                self.server
-                    .aviutl2_set_object_name(Parameters(SetObjectNameInput {
-                        instance_id: instance.to_string(),
-                        selector: object_selector_input(selector),
-                        name,
-                    })),
-            );
+            .block_on(self.server.set_object_name(Parameters(SetObjectNameInput {
+                instance_id: instance.to_string(),
+                selector: object_selector_input(selector),
+                name,
+            })));
         self.decode(result)
     }
 
@@ -947,15 +935,12 @@ impl Harness {
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
-            .block_on(
-                self.server
-                    .aviutl2_set_object_item(Parameters(SetObjectItemInput {
-                        instance_id: instance.to_string(),
-                        selector: effect_selector_input(selector),
-                        item: item.to_string(),
-                        value: item_value_input(value),
-                    })),
-            );
+            .block_on(self.server.set_object_item(Parameters(SetObjectItemInput {
+                instance_id: instance.to_string(),
+                selector: effect_selector_input(selector),
+                item: item.to_string(),
+                value: item_value_input(value),
+            })));
         self.decode(result)
     }
 
@@ -967,7 +952,7 @@ impl Harness {
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
-            .block_on(self.server.aviutl2_add_effect(Parameters(AddEffectInput {
+            .block_on(self.server.add_effect(Parameters(AddEffectInput {
                 instance_id: instance.to_string(),
                 object: object_selector_input(object),
                 effect_name: effect_name.to_string(),
@@ -981,15 +966,16 @@ impl Harness {
         selector: &EffectSelector,
         enabled: bool,
     ) -> Result<EditOutcome, ErrorObject> {
-        let result =
-            self.runtime
-                .block_on(self.server.aviutl2_set_effect_enabled(Parameters(
-                    SetEffectEnabledInput {
+        let result = self
+            .runtime
+            .block_on(
+                self.server
+                    .set_effect_enabled(Parameters(SetEffectEnabledInput {
                         instance_id: instance.to_string(),
                         selector: effect_selector_input(selector),
                         enabled,
-                    },
-                )));
+                    })),
+            );
         self.decode(result)
     }
 
@@ -998,15 +984,12 @@ impl Harness {
         instance: &str,
         selector: &EffectSelector,
     ) -> Result<EditOutcome, ErrorObject> {
-        let result = self
-            .runtime
-            .block_on(
-                self.server
-                    .aviutl2_delete_effect(Parameters(DeleteEffectInput {
-                        instance_id: instance.to_string(),
-                        selector: effect_selector_input(selector),
-                    })),
-            );
+        let result =
+            self.runtime
+                .block_on(self.server.delete_effect(Parameters(DeleteEffectInput {
+                    instance_id: instance.to_string(),
+                    selector: effect_selector_input(selector),
+                })));
         self.decode(result)
     }
 
@@ -1015,15 +998,12 @@ impl Harness {
         instance: &str,
         selector: &ObjectSelector,
     ) -> Result<EditOutcome, ErrorObject> {
-        let result = self
-            .runtime
-            .block_on(
-                self.server
-                    .aviutl2_delete_object(Parameters(DeleteObjectInput {
-                        instance_id: instance.to_string(),
-                        selector: object_selector_input(selector),
-                    })),
-            );
+        let result =
+            self.runtime
+                .block_on(self.server.delete_object(Parameters(DeleteObjectInput {
+                    instance_id: instance.to_string(),
+                    selector: object_selector_input(selector),
+                })));
         self.decode(result)
     }
 
@@ -1037,18 +1017,15 @@ impl Harness {
     ) -> Result<LayerStateOutcome, ErrorObject> {
         let result = self
             .runtime
-            .block_on(
-                self.server
-                    .aviutl2_set_layer_state(Parameters(SetLayerStateInput {
-                        instance_id: instance.to_string(),
-                        expected_scene_id: scene_id,
-                        layer: layer as u32,
-                        name: change.name,
-                        enabled: change.enabled,
-                        locked: change.locked,
-                        expected_project_epoch,
-                    })),
-            );
+            .block_on(self.server.set_layer_state(Parameters(SetLayerStateInput {
+                instance_id: instance.to_string(),
+                expected_scene_id: scene_id,
+                layer: layer as u32,
+                name: change.name,
+                enabled: change.enabled,
+                locked: change.locked,
+                expected_project_epoch,
+            })));
         self.decode(result)
     }
 
@@ -1059,24 +1036,21 @@ impl Harness {
         change: SelectionChange,
         expected_project_epoch: String,
     ) -> Result<SelectionState, ErrorObject> {
-        let result = self
-            .runtime
-            .block_on(
-                self.server
-                    .aviutl2_set_selection(Parameters(SetSelectionInput {
-                        instance_id: instance.to_string(),
-                        expected_scene_id: scene_id,
-                        cursor: change.cursor,
-                        selected_range: change.selected_range,
-                        focus: change.focus,
-                        expected_project_epoch,
-                    })),
-            );
+        let result =
+            self.runtime
+                .block_on(self.server.set_selection(Parameters(SetSelectionInput {
+                    instance_id: instance.to_string(),
+                    expected_scene_id: scene_id,
+                    cursor: change.cursor,
+                    selected_range: change.selected_range,
+                    focus: change.focus,
+                    expected_project_epoch,
+                })));
         self.decode(result)
     }
 }
 
-/// `aviutl2_set_layer_state` へ渡す変更内容。
+/// `set_layer_state` へ渡す変更内容。
 #[derive(Default)]
 struct LayerStateChange {
     name: Option<LayerNameChangeInput>,
@@ -1108,7 +1082,7 @@ impl LayerStateChange {
     }
 }
 
-/// `aviutl2_set_selection` へ渡す変更内容。
+/// `set_selection` へ渡す変更内容。
 #[derive(Default)]
 struct SelectionChange {
     cursor: Option<CursorPositionInput>,
@@ -2057,7 +2031,7 @@ fn section_fingerprint_premises(
         report,
         premise,
         "ロックの解除による行き止まりの解消",
-        "aviutl2_set_layer_state でロックを掛けた対象の移動が拒否され、同じ tool でロックを解除すると移動できる",
+        "set_layer_state でロックを掛けた対象の移動が拒否され、同じ tool でロックを解除すると移動できる",
         Mode::Auto,
         |report| check_layer_lock_release(harness, report, instance, context),
     );
@@ -2996,7 +2970,7 @@ fn cleanup_lock_scope(
 
 /// ロックによる行き止まりが MCP だけで解けることを確かめる。
 ///
-/// レイヤーをロックするのも解除するのも `aviutl2_set_layer_state` で行うため、
+/// レイヤーをロックするのも解除するのも `set_layer_state` で行うため、
 /// 実行者の操作を要しない。対象を一度レイヤーの外へ動かし、実行者へ取り消し
 /// 操作まで求めるため、どこで抜けても後始末が対象の位置とロック状態を戻す。
 fn check_layer_lock_release(
@@ -4069,7 +4043,7 @@ fn section_item_round_trip(
             report.skip(
                 "5.4",
                 "設定値の round-trip",
-                "aviutl2_get_object が返した値をそのまま書き戻せ、書き戻した後の読み取りが元の値と一致する",
+                "get_object が返した値をそのまま書き戻せ、書き戻した後の読み取りが元の値と一致する",
                 Mode::Auto,
                 reason,
             );
@@ -4310,7 +4284,8 @@ fn report_round_trip(report: &mut Report, results: &[TypeResult], added: &[Strin
             .filter(|result| result.item_type == *item_type)
             .collect();
         let title = format!("設定値の round-trip（{}）", item_type.kind_name());
-        let verified = "aviutl2_get_object が返した値をそのまま書き戻せ、書き戻した後の読み取りが元の値と一致する";
+        let verified =
+            "get_object が返した値をそのまま書き戻せ、書き戻した後の読み取りが元の値と一致する";
         if matching.is_empty() {
             report.skip(
                 "5.4",
@@ -6245,14 +6220,14 @@ fn section_layer_bounds(
     );
     let mut finding = match &probed {
         Ok(outcome) => format!(
-            "layer={far} へ既定と異なる locked=true を要求した aviutl2_set_layer_state が成功し、name={} enabled={} locked={} object_count={} を返した",
+            "layer={far} へ既定と異なる locked=true を要求した set_layer_state が成功し、name={} enabled={} locked={} object_count={} を返した",
             outcome.layer.name.as_deref().unwrap_or("（標準名）"),
             outcome.layer.enabled,
             outcome.layer.locked,
             outcome.layer.object_count,
         ),
         Err(error) => format!(
-            "layer={far} へ既定と異なる locked=true を要求した aviutl2_set_layer_state は {}",
+            "layer={far} へ既定と異なる locked=true を要求した set_layer_state は {}",
             describe_error(error)
         ),
     };
@@ -6577,7 +6552,7 @@ fn section_completion(
     report.record(
         "6.4",
         "対象 instance の編集",
-        "instance A の aviutl2_move_object が成功する",
+        "instance A の move_object が成功する",
         Mode::Auto,
         passed_with(format!(
             "layer={} frame={} へ移動した",
@@ -6656,7 +6631,7 @@ fn section_completion(
     report.record(
         "6.6",
         "別 instance の selector",
-        "instance A の selector を instance B の aviutl2_move_object へ渡すと precondition_failed（mismatch=project_epoch）で拒否され、instance B が変更されない",
+        "instance A の selector を instance B の move_object へ渡すと precondition_failed（mismatch=project_epoch）で拒否され、instance B が変更されない",
         Mode::Auto,
         outcome,
     );

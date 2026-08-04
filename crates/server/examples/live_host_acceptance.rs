@@ -26,9 +26,7 @@
 //! 本ターゲットは MCP server ではないため、対話用の出力は stdout へ書く。
 
 use aviutl2_mcp_core::{InstanceInfo, format_utc_timestamp, parse_utc_timestamp};
-use aviutl2_mcp_server::api::{
-    ListInstancesRequest, ListInstancesResponse, aviutl2_list_instances,
-};
+use aviutl2_mcp_server::api::{ListInstancesRequest, ListInstancesResponse, list_instances};
 use aviutl2_mcp_server::discovery::default_registry_dir;
 use std::collections::HashSet;
 use std::io::Write;
@@ -370,16 +368,16 @@ fn wait_for_instances(
     Ok(response)
 }
 
-/// `aviutl2_list_instances` を実行する。
+/// `list_instances` を実行する。
 fn list(registry_dir: &Path) -> Result<ListInstancesResponse, String> {
-    aviutl2_list_instances(
+    list_instances(
         registry_dir,
         ListInstancesRequest {
             offset: 0,
             limit: LIST_LIMIT,
         },
     )
-    .map_err(|e| format!("aviutl2_list_instances に失敗しました: {e}"))
+    .map_err(|e| format!("list_instances に失敗しました: {e}"))
 }
 
 /// registry ディレクトリ内の descriptor ファイル一覧を返す。

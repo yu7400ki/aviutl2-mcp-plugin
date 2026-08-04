@@ -30,7 +30,7 @@ const MAX_BATCH_LINES: usize = 10;
 /// 編集の応答に共通して添える次の操作の案内。
 const EDIT_NEXT_STEP: &str = "続けて編集する場合は structuredContent の selector をそのまま使えます。project_revision は要求には指定しません。前提条件が合わない場合は対象を読み直してください";
 
-/// `aviutl2_list_instances` の text content。
+/// `list_instances` の text content。
 pub fn instances(response: &ListInstancesResponse) -> String {
     let mut text = TextBuilder::new();
     text.push_line(format!(
@@ -79,7 +79,7 @@ fn instance_line(info: &InstanceInfo) -> String {
     )
 }
 
-/// `aviutl2_get_edit_info` の text content。
+/// `get_edit_info` の text content。
 pub fn edit_info(info: &EditInfo) -> String {
     let mut text = TextBuilder::new();
     text.push_line(format!(
@@ -111,7 +111,7 @@ pub fn edit_info(info: &EditInfo) -> String {
     text.finish()
 }
 
-/// `aviutl2_get_current_scene` の text content。
+/// `get_current_scene` の text content。
 pub fn current_scene(result: &GetCurrentSceneResult) -> String {
     let mut text = TextBuilder::new();
     text.push_line(format!(
@@ -126,12 +126,12 @@ pub fn current_scene(result: &GetCurrentSceneResult) -> String {
     ));
     text.push_line(format!("project_revision={}", result.project_revision));
     text.push_line(
-        "aviutl2_list_layers / aviutl2_list_objects には expected_scene_id にこの scene_id を指定します",
+        "list_layers / list_objects には expected_scene_id にこの scene_id を指定します",
     );
     text.finish()
 }
 
-/// `aviutl2_list_layers` の text content。
+/// `list_layers` の text content。
 pub fn layers(result: &ListLayersResult) -> String {
     let mut text = TextBuilder::new();
     text.push_line(format!("レイヤー {}", page_line(&result.page)));
@@ -149,7 +149,7 @@ pub fn layers(result: &ListLayersResult) -> String {
     text.finish()
 }
 
-/// `aviutl2_list_objects` の text content。
+/// `list_objects` の text content。
 pub fn objects(result: &ListObjectsResult) -> String {
     let mut text = TextBuilder::new();
     text.push_line(format!("オブジェクト {}", page_line(&result.page)));
@@ -163,12 +163,12 @@ pub fn objects(result: &ListObjectsResult) -> String {
         ));
     }
     text.push_line(
-        "frame / layer は 0 始まりです。詳細は aviutl2_get_object に structuredContent の selector をそのまま渡します",
+        "frame / layer は 0 始まりです。詳細は get_object に structuredContent の selector をそのまま渡します",
     );
     text.finish()
 }
 
-/// `aviutl2_get_object` の text content。
+/// `get_object` の text content。
 pub fn object_detail(detail: &ObjectDetail) -> String {
     let mut text = TextBuilder::new();
     let summary = &detail.summary;
@@ -199,7 +199,7 @@ pub fn object_detail(detail: &ObjectDetail) -> String {
     text.finish()
 }
 
-/// `aviutl2_list_available_effects` の text content。
+/// `list_available_effects` の text content。
 pub fn available_effects(result: &ListAvailableEffectsResult) -> String {
     let mut text = TextBuilder::new();
     text.push_line(format!(
@@ -220,7 +220,7 @@ pub fn available_effects(result: &ListAvailableEffectsResult) -> String {
     text.finish()
 }
 
-/// `aviutl2_create_object` の text content。
+/// `create_object` の text content。
 pub fn create_object(outcome: &EditOutcome) -> String {
     let mut text = TextBuilder::new();
     text.push_line(format!(
@@ -236,37 +236,37 @@ pub fn create_object(outcome: &EditOutcome) -> String {
     finish_edit(text, outcome.project_revision)
 }
 
-/// `aviutl2_move_object` の text content。
+/// `move_object` の text content。
 pub fn move_object(outcome: &EditOutcome) -> String {
     changed_object("移動しました", outcome)
 }
 
-/// `aviutl2_set_object_name` の text content。
+/// `set_object_name` の text content。
 pub fn set_object_name(outcome: &EditOutcome) -> String {
     changed_object("名前を変更しました", outcome)
 }
 
-/// `aviutl2_set_object_item` の text content。
+/// `set_object_item` の text content。
 pub fn set_object_item(outcome: &EditOutcome) -> String {
     changed_effect("設定項目を変更しました", outcome)
 }
 
-/// `aviutl2_add_effect` の text content。
+/// `add_effect` の text content。
 pub fn add_effect(outcome: &EditOutcome) -> String {
     changed_effect("effect を付与しました", outcome)
 }
 
-/// `aviutl2_set_effect_enabled` の text content。
+/// `set_effect_enabled` の text content。
 pub fn set_effect_enabled(outcome: &EditOutcome) -> String {
     changed_effect("effect の有効・無効を変更しました", outcome)
 }
 
-/// `aviutl2_delete_effect` の text content。
+/// `delete_effect` の text content。
 pub fn delete_effect(outcome: &EditOutcome) -> String {
     changed_object("effect を削除しました", outcome)
 }
 
-/// `aviutl2_delete_object` の text content。
+/// `delete_object` の text content。
 pub fn delete_object(outcome: &EditOutcome) -> String {
     let mut text = TextBuilder::new();
     text.push_line("オブジェクトを削除しました");
@@ -277,7 +277,7 @@ pub fn delete_object(outcome: &EditOutcome) -> String {
     text.finish()
 }
 
-/// `aviutl2_apply_batch` の text content。
+/// `apply_batch` の text content。
 ///
 /// 書き出すのは先頭 10 件までで、残りは件数だけを示す。
 pub fn apply_batch(outcome: &BatchOutcome) -> String {
@@ -319,7 +319,7 @@ fn batch_step_line(index: usize, step: &BatchStepOutcome) -> String {
     format!("- [{index}] {action} {}", object_line(&step.object))
 }
 
-/// `aviutl2_render_frame` の text content。
+/// `render_frame` の text content。
 ///
 /// **URI は載せる。** 識別子であり、画像の内容を漏らさない。引き渡しの識別子・
 /// 保存先のパス・画像そのものは載せない。
@@ -339,7 +339,7 @@ pub fn render_frame(output: &RenderFrameOutput) -> String {
     text.finish()
 }
 
-/// `aviutl2_set_layer_state` の text content。
+/// `set_layer_state` の text content。
 pub fn layer_state(outcome: &LayerStateOutcome) -> String {
     let layer = &outcome.layer;
     let mut text = TextBuilder::new();
@@ -357,7 +357,7 @@ pub fn layer_state(outcome: &LayerStateOutcome) -> String {
     text.finish()
 }
 
-/// `aviutl2_set_selection` の text content。
+/// `set_selection` の text content。
 pub fn selection_state(state: &SelectionState) -> String {
     let mut text = TextBuilder::new();
     text.push_line(format!(
@@ -384,7 +384,7 @@ pub fn selection_state(state: &SelectionState) -> String {
         "上の値はホストがクランプした結果であり、編集と同時に観測したものではありません。この変更は取り消し単位を作らず、取り消し操作はその前に行った編集を取り消します",
     );
     text.push_line(
-        "not_applied の項目は反映されていません。確かめるには aviutl2_get_edit_info で読み直してください",
+        "not_applied の項目は反映されていません。確かめるには get_edit_info で読み直してください",
     );
     text.finish()
 }
@@ -772,13 +772,13 @@ mod tests {
             project_revision: 42,
         });
         assert!(current_scene_text.contains("expected_scene_id"));
-        assert!(current_scene_text.contains("aviutl2_list_objects"));
+        assert!(current_scene_text.contains("list_objects"));
 
         let objects_text = objects(&ListObjectsResult {
             items: vec![summary.clone()],
             page: page(1, 1),
         });
-        assert!(objects_text.contains("aviutl2_get_object"));
+        assert!(objects_text.contains("get_object"));
         assert!(objects_text.contains("selector"));
 
         let object_detail_text = object_detail(&ObjectDetail {
@@ -885,19 +885,16 @@ mod tests {
             vec![SelectionField::SelectedRange, SelectionField::Focus],
         );
         vec![
-            ("aviutl2_create_object", create_object(&created)),
-            ("aviutl2_move_object", move_object(&object_changed)),
-            ("aviutl2_set_object_name", set_object_name(&object_changed)),
-            ("aviutl2_set_object_item", set_object_item(&effect_changed)),
-            ("aviutl2_add_effect", add_effect(&effect_changed)),
+            ("create_object", create_object(&created)),
+            ("move_object", move_object(&object_changed)),
+            ("set_object_name", set_object_name(&object_changed)),
+            ("set_object_item", set_object_item(&effect_changed)),
+            ("add_effect", add_effect(&effect_changed)),
+            ("set_effect_enabled", set_effect_enabled(&effect_changed)),
+            ("delete_effect", delete_effect(&object_changed)),
+            ("delete_object", delete_object(&deleted)),
             (
-                "aviutl2_set_effect_enabled",
-                set_effect_enabled(&effect_changed),
-            ),
-            ("aviutl2_delete_effect", delete_effect(&object_changed)),
-            ("aviutl2_delete_object", delete_object(&deleted)),
-            (
-                "aviutl2_set_layer_state",
+                "set_layer_state",
                 layer_state(&LayerStateOutcome {
                     project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
                     project_revision: 43,
@@ -910,8 +907,8 @@ mod tests {
                     },
                 }),
             ),
-            ("aviutl2_set_selection", selection_state(&selection)),
-            ("aviutl2_apply_batch", apply_batch(&sample_batch_outcome())),
+            ("set_selection", selection_state(&selection)),
+            ("apply_batch", apply_batch(&sample_batch_outcome())),
         ]
     }
 
@@ -1036,7 +1033,7 @@ mod tests {
     ///
     /// 削除では対象が消えており、レイヤーの状態変更ではそもそも対象が
     /// オブジェクトではない。
-    const TOOLS_WITHOUT_AN_OBJECT: &[&str] = &["aviutl2_delete_object", "aviutl2_set_layer_state"];
+    const TOOLS_WITHOUT_AN_OBJECT: &[&str] = &["delete_object", "set_layer_state"];
 
     #[test]
     fn edit_text_states_the_change_the_revision_and_the_next_step() {

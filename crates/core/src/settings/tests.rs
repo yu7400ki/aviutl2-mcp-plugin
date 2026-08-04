@@ -59,7 +59,7 @@ fn a_file_without_the_new_fields_still_reads_as_defaults() {
 fn every_field_round_trips_through_the_document() {
     let text = r#"{
         "schema_version": 1,
-        "disabled_tools": ["aviutl2_delete_object"],
+        "disabled_tools": ["delete_object"],
         "log_level": "debug",
         "budget_scale_percent": 200,
         "artifact": { "ttl_seconds": 900, "max_count": 8, "max_total_bytes": 268435456 },
@@ -103,10 +103,9 @@ fn unknown_top_level_fields_are_ignored_and_preserved() {
 
 #[test]
 fn unknown_tool_names_survive_a_change_to_a_different_tool() {
-    let mut parsed =
-        document(r#"{"disabled_tools":["aviutl2_future_tool","aviutl2_delete_object"]}"#);
+    let mut parsed = document(r#"{"disabled_tools":["aviutl2_future_tool","delete_object"]}"#);
     parsed.apply(&SettingsChange {
-        tools: BTreeMap::from([("aviutl2_delete_object".to_string(), true)]),
+        tools: BTreeMap::from([("delete_object".to_string(), true)]),
         ..SettingsChange::default()
     });
 
@@ -203,7 +202,7 @@ fn a_field_with_the_wrong_type_falls_back_alone() {
         "log_level": 3,
         "budget_scale_percent": "fast",
         "artifact": { "ttl_seconds": "long", "max_count": 4 },
-        "disabled_tools": "aviutl2_delete_object"
+        "disabled_tools": "delete_object"
     }"#;
     let (settings, issues) = resolve(text);
 
@@ -524,7 +523,7 @@ fn two_readers_of_the_same_file_reach_the_same_limits() {
             "handoff": { "ttl_seconds": 1 },
             "render": { "drain_timeout_ms": 999999 },
             "session": { "stale_after_seconds": 1 },
-            "disabled_tools": ["aviutl2_delete_object"]
+            "disabled_tools": ["delete_object"]
         }"#,
     );
 

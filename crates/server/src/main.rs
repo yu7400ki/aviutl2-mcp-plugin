@@ -1,5 +1,5 @@
 use aviutl2_mcp_core::settings::{SettingsReader, SettingsRefresh, settings_location};
-use aviutl2_mcp_server::api::{ListInstancesRequest, aviutl2_list_instances};
+use aviutl2_mcp_server::api::{ListInstancesRequest, list_instances};
 use aviutl2_mcp_server::artifact::base_dir_for_registry;
 use aviutl2_mcp_server::discovery::default_registry_dir;
 use aviutl2_mcp_server::init_logging;
@@ -99,7 +99,7 @@ fn registry_dir() -> Option<PathBuf> {
     }
 }
 
-/// テスト用 CLI: `aviutl2_list_instances` を実行し、結果を stderr に JSON で出力する。
+/// テスト用 CLI: `list_instances` を実行し、結果を stderr に JSON で出力する。
 ///
 /// stdout は MCP プロトコル専用として汚染しない。
 fn run_list_instances_cli() -> ExitCode {
@@ -113,7 +113,7 @@ fn run_list_instances_cli() -> ExitCode {
         limit: 50,
     };
 
-    match aviutl2_list_instances(&registry_dir, request) {
+    match list_instances(&registry_dir, request) {
         Ok(response) => {
             let json = serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".to_string());
             // テスト用出力は stderr へ。
@@ -121,7 +121,7 @@ fn run_list_instances_cli() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            tracing::error!(error = %e, "aviutl2_list_instances failed");
+            tracing::error!(error = %e, "list_instances failed");
             ExitCode::FAILURE
         }
     }

@@ -1,4 +1,4 @@
-//! `aviutl2_list_instances` の実装。
+//! `list_instances` の実装。
 //!
 //! MCP SDK 未使用。内部関数または CLI 経由で呼び出す。
 
@@ -12,7 +12,7 @@ use std::path::Path;
 /// 要求側も revision を指定できないため、この値が応答へ現れることはない。
 const NO_SNAPSHOT_REVISION: u64 = 0;
 
-/// `aviutl2_list_instances` 要求。
+/// `list_instances` 要求。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListInstancesRequest {
@@ -51,7 +51,7 @@ impl ListInstancesRequest {
     }
 }
 
-/// `aviutl2_list_instances` 応答。
+/// `list_instances` 応答。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListInstancesResponse {
     /// ページング後のインスタンス一覧。
@@ -68,7 +68,7 @@ pub struct ListInstancesResponse {
     pub next_offset: Option<u32>,
 }
 
-/// `aviutl2_list_instances` の失敗。
+/// `list_instances` の失敗。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ListInstancesError {
     /// offset/limit が範囲外。
@@ -93,11 +93,11 @@ impl ListInstancesError {
     }
 }
 
-/// `aviutl2_list_instances` を実行する。
+/// `list_instances` を実行する。
 ///
 /// `registry_dir` が存在しない場合はインスタンス 0 件として空の結果を返す。
 /// ディレクトリを列挙できない場合は 0 件と区別するためエラーを返す。
-pub fn aviutl2_list_instances(
+pub fn list_instances(
     registry_dir: &Path,
     request: ListInstancesRequest,
 ) -> Result<ListInstancesResponse, ListInstancesError> {
@@ -174,7 +174,7 @@ mod tests {
     fn empty_registry_returns_empty() {
         let dir = temp_registry_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        let response = aviutl2_list_instances(
+        let response = list_instances(
             &dir,
             ListInstancesRequest {
                 offset: 0,
@@ -231,7 +231,7 @@ mod tests {
         let dir = temp_registry_dir();
         std::fs::create_dir_all(&dir).unwrap();
         assert!(
-            aviutl2_list_instances(
+            list_instances(
                 &dir,
                 ListInstancesRequest {
                     offset: 0,
@@ -241,7 +241,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            aviutl2_list_instances(
+            list_instances(
                 &dir,
                 ListInstancesRequest {
                     offset: 0,
@@ -258,7 +258,7 @@ mod tests {
         let dir = temp_registry_dir();
         assert!(!dir.exists());
 
-        let response = aviutl2_list_instances(
+        let response = list_instances(
             &dir,
             ListInstancesRequest {
                 offset: 0,
@@ -279,7 +279,7 @@ mod tests {
         ));
         std::fs::write(&path, b"not a directory").unwrap();
 
-        let error = aviutl2_list_instances(
+        let error = list_instances(
             &path,
             ListInstancesRequest {
                 offset: 0,
@@ -306,7 +306,7 @@ mod tests {
         let dir = temp_registry_dir();
         std::fs::create_dir_all(&dir).unwrap();
 
-        let response = aviutl2_list_instances(
+        let response = list_instances(
             &dir,
             ListInstancesRequest {
                 offset: u32::MAX,
@@ -330,7 +330,7 @@ mod tests {
 
         for limit in [1, MAX_PAGE_LIMIT] {
             assert!(
-                aviutl2_list_instances(&dir, ListInstancesRequest { offset: 0, limit }).is_ok(),
+                list_instances(&dir, ListInstancesRequest { offset: 0, limit }).is_ok(),
                 "limit {limit} は許容される"
             );
         }
@@ -347,7 +347,7 @@ mod tests {
         let path = dir.join(format!("{}.json", id));
         std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
 
-        let response = aviutl2_list_instances(
+        let response = list_instances(
             &dir,
             ListInstancesRequest {
                 offset: 0,
@@ -369,7 +369,7 @@ mod tests {
         let path = dir.join(format!("{}.json", id));
         std::fs::write(&path, b"not json").unwrap();
 
-        let response = aviutl2_list_instances(
+        let response = list_instances(
             &dir,
             ListInstancesRequest {
                 offset: 0,

@@ -710,22 +710,19 @@ impl Harness {
     }
 
     fn list_instances(&self) -> Result<ListInstancesResponse, ErrorObject> {
-        let result = self
-            .runtime
-            .block_on(
-                self.server
-                    .aviutl2_list_instances(Parameters(ListInstancesInput {
-                        offset: 0,
-                        limit: PAGE_LIMIT,
-                    })),
-            );
+        let result =
+            self.runtime
+                .block_on(self.server.list_instances(Parameters(ListInstancesInput {
+                    offset: 0,
+                    limit: PAGE_LIMIT,
+                })));
         self.decode(result)
     }
 
     fn edit_info(&self, instance: &str) -> Result<EditInfo, ErrorObject> {
         let result = self
             .runtime
-            .block_on(self.server.aviutl2_get_edit_info(Parameters(InstanceInput {
+            .block_on(self.server.get_edit_info(Parameters(InstanceInput {
                 instance_id: instance.to_string(),
             })));
         self.decode(result)
@@ -735,17 +732,17 @@ impl Harness {
         let mut items = Vec::new();
         let mut offset = 0;
         for _ in 0..MAX_PAGES {
-            let result = self
-                .runtime
-                .block_on(self.server.aviutl2_list_layers(Parameters(ListLayersInput {
-                    instance_id: instance.to_string(),
-                    expected_scene_id: scene_id,
-                    page: PageInput {
-                        offset,
-                        limit: PAGE_LIMIT,
-                        snapshot_revision: None,
-                    },
-                })));
+            let result =
+                self.runtime
+                    .block_on(self.server.list_layers(Parameters(ListLayersInput {
+                        instance_id: instance.to_string(),
+                        expected_scene_id: scene_id,
+                        page: PageInput {
+                            offset,
+                            limit: PAGE_LIMIT,
+                            snapshot_revision: None,
+                        },
+                    })));
             let page: PagedLayers = self.decode(result)?;
             items.extend(page.items);
             match page.page.next_offset {
@@ -769,21 +766,18 @@ impl Harness {
         let mut items = Vec::new();
         let mut offset = 0;
         for _ in 0..MAX_PAGES {
-            let result = self
-                .runtime
-                .block_on(
-                    self.server
-                        .aviutl2_list_objects(Parameters(ListObjectsInput {
-                            instance_id: instance.to_string(),
-                            expected_scene_id: scene_id,
-                            filter,
-                            page: PageInput {
-                                offset,
-                                limit: PAGE_LIMIT,
-                                snapshot_revision: None,
-                            },
-                        })),
-                );
+            let result =
+                self.runtime
+                    .block_on(self.server.list_objects(Parameters(ListObjectsInput {
+                        instance_id: instance.to_string(),
+                        expected_scene_id: scene_id,
+                        filter,
+                        page: PageInput {
+                            offset,
+                            limit: PAGE_LIMIT,
+                            snapshot_revision: None,
+                        },
+                    })));
             let page: PagedObjects = self.decode(result)?;
             items.extend(page.items);
             match page.page.next_offset {
@@ -801,7 +795,7 @@ impl Harness {
     ) -> Result<ObjectDetail, ErrorObject> {
         let result = self
             .runtime
-            .block_on(self.server.aviutl2_get_object(Parameters(GetObjectInput {
+            .block_on(self.server.get_object(Parameters(GetObjectInput {
                 instance_id: instance.to_string(),
                 selector: object_selector_input(selector),
             })));
@@ -815,7 +809,7 @@ impl Harness {
     ) -> Result<BatchOutcome, ErrorObject> {
         let result = self
             .runtime
-            .block_on(self.server.aviutl2_apply_batch(Parameters(ApplyBatchInput {
+            .block_on(self.server.apply_batch(Parameters(ApplyBatchInput {
                 instance_id: instance.to_string(),
                 operations,
             })));
@@ -830,7 +824,7 @@ impl Harness {
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
-            .block_on(self.server.aviutl2_move_object(Parameters(MoveObjectInput {
+            .block_on(self.server.move_object(Parameters(MoveObjectInput {
                 instance_id: instance.to_string(),
                 selector: object_selector_input(selector),
                 destination: destination_input(destination),
@@ -847,15 +841,12 @@ impl Harness {
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
-            .block_on(
-                self.server
-                    .aviutl2_set_object_item(Parameters(SetObjectItemInput {
-                        instance_id: instance.to_string(),
-                        selector: effect_selector_input(selector),
-                        item: item.to_string(),
-                        value: item_value_input(value),
-                    })),
-            );
+            .block_on(self.server.set_object_item(Parameters(SetObjectItemInput {
+                instance_id: instance.to_string(),
+                selector: effect_selector_input(selector),
+                item: item.to_string(),
+                value: item_value_input(value),
+            })));
         self.decode(result)
     }
 
@@ -867,14 +858,11 @@ impl Harness {
     ) -> Result<EditOutcome, ErrorObject> {
         let result = self
             .runtime
-            .block_on(
-                self.server
-                    .aviutl2_set_object_name(Parameters(SetObjectNameInput {
-                        instance_id: instance.to_string(),
-                        selector: object_selector_input(selector),
-                        name,
-                    })),
-            );
+            .block_on(self.server.set_object_name(Parameters(SetObjectNameInput {
+                instance_id: instance.to_string(),
+                selector: object_selector_input(selector),
+                name,
+            })));
         self.decode(result)
     }
 
@@ -886,23 +874,20 @@ impl Harness {
         scene_id: i32,
         expected_project_epoch: String,
     ) -> Result<EditOutcome, ErrorObject> {
-        let result = self
-            .runtime
-            .block_on(
-                self.server
-                    .aviutl2_create_object(Parameters(CreateObjectInput {
-                        instance_id: instance.to_string(),
-                        source: ObjectSourceInput::ObjectAlias {
-                            alias: alias.to_string(),
-                        },
-                        placement: PlacementInput {
-                            scene_id,
-                            layer: at.layer as u32,
-                            frame: at.frame as u32,
-                        },
-                        expected_project_epoch,
-                    })),
-            );
+        let result =
+            self.runtime
+                .block_on(self.server.create_object(Parameters(CreateObjectInput {
+                    instance_id: instance.to_string(),
+                    source: ObjectSourceInput::ObjectAlias {
+                        alias: alias.to_string(),
+                    },
+                    placement: PlacementInput {
+                        scene_id,
+                        layer: at.layer as u32,
+                        frame: at.frame as u32,
+                    },
+                    expected_project_epoch,
+                })));
         self.decode(result)
     }
 
@@ -911,15 +896,12 @@ impl Harness {
         instance: &str,
         selector: &ObjectSelector,
     ) -> Result<EditOutcome, ErrorObject> {
-        let result = self
-            .runtime
-            .block_on(
-                self.server
-                    .aviutl2_delete_object(Parameters(DeleteObjectInput {
-                        instance_id: instance.to_string(),
-                        selector: object_selector_input(selector),
-                    })),
-            );
+        let result =
+            self.runtime
+                .block_on(self.server.delete_object(Parameters(DeleteObjectInput {
+                    instance_id: instance.to_string(),
+                    selector: object_selector_input(selector),
+                })));
         self.decode(result)
     }
 }

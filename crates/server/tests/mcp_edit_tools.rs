@@ -294,7 +294,7 @@ async fn create_object_tool_sends_create_object_operation() {
 
     let result = harness
         .server
-        .aviutl2_create_object(Parameters(CreateObjectInput {
+        .create_object(Parameters(CreateObjectInput {
             instance_id: harness.instance_id(),
             source: ObjectSourceInput::ObjectAlias {
                 alias: SECRET_ALIAS.to_string(),
@@ -333,7 +333,7 @@ async fn move_object_tool_sends_move_object_operation() {
 
     let result = harness
         .server
-        .aviutl2_move_object(Parameters(MoveObjectInput {
+        .move_object(Parameters(MoveObjectInput {
             instance_id: harness.instance_id(),
             selector: selector_input(),
             destination: DestinationInput {
@@ -364,7 +364,7 @@ async fn set_object_name_tool_sends_the_new_name() {
 
     let result = harness
         .server
-        .aviutl2_set_object_name(Parameters(SetObjectNameInput {
+        .set_object_name(Parameters(SetObjectNameInput {
             instance_id: harness.instance_id(),
             selector: selector_input(),
             name: Some("新しい名前".to_string()),
@@ -389,7 +389,7 @@ async fn set_object_name_tool_sends_null_to_restore_the_default_name() {
 
     let result = harness
         .server
-        .aviutl2_set_object_name(Parameters(SetObjectNameInput {
+        .set_object_name(Parameters(SetObjectNameInput {
             instance_id: harness.instance_id(),
             selector: selector_input(),
             name: None,
@@ -407,7 +407,7 @@ async fn set_object_item_tool_sends_the_effect_selector_and_value() {
 
     let result = harness
         .server
-        .aviutl2_set_object_item(Parameters(SetObjectItemInput {
+        .set_object_item(Parameters(SetObjectItemInput {
             instance_id: harness.instance_id(),
             selector: effect_selector_input(),
             item: "テキスト".to_string(),
@@ -441,7 +441,7 @@ async fn set_object_item_tool_forwards_the_choice_value_verbatim() {
 
     let result = harness
         .server
-        .aviutl2_set_object_item(Parameters(SetObjectItemInput {
+        .set_object_item(Parameters(SetObjectItemInput {
             instance_id: harness.instance_id(),
             selector: effect_selector_input(),
             item: "種類".to_string(),
@@ -465,7 +465,7 @@ async fn add_effect_tool_sends_the_effect_name() {
 
     let result = harness
         .server
-        .aviutl2_add_effect(Parameters(AddEffectInput {
+        .add_effect(Parameters(AddEffectInput {
             instance_id: harness.instance_id(),
             object: selector_input(),
             effect_name: "ぼかし".to_string(),
@@ -493,7 +493,7 @@ async fn set_effect_enabled_tool_sends_set_effect_enabled_operation() {
 
     let result = harness
         .server
-        .aviutl2_set_effect_enabled(Parameters(SetEffectEnabledInput {
+        .set_effect_enabled(Parameters(SetEffectEnabledInput {
             instance_id: harness.instance_id(),
             selector: effect_selector_input(),
             enabled: false,
@@ -519,7 +519,7 @@ async fn delete_effect_tool_sends_delete_effect_operation() {
 
     let result = harness
         .server
-        .aviutl2_delete_effect(Parameters(DeleteEffectInput {
+        .delete_effect(Parameters(DeleteEffectInput {
             instance_id: harness.instance_id(),
             selector: effect_selector_input(),
         }))
@@ -545,7 +545,7 @@ async fn delete_object_tool_sends_delete_object_operation() {
 
     let result = harness
         .server
-        .aviutl2_delete_object(Parameters(DeleteObjectInput {
+        .delete_object(Parameters(DeleteObjectInput {
             instance_id: harness.instance_id(),
             selector: selector_input(),
         }))
@@ -574,7 +574,7 @@ async fn set_selection_tool_sends_the_scene_guard_and_changes() {
 
     let result = harness
         .server
-        .aviutl2_set_selection(Parameters(SetSelectionInput {
+        .set_selection(Parameters(SetSelectionInput {
             instance_id: harness.instance_id(),
             expected_scene_id: SCENE_ID,
             cursor: Some(CursorPositionInput {
@@ -615,7 +615,7 @@ async fn set_layer_state_tool_sends_the_three_axes_and_the_scene_guard() {
 
     let result = harness
         .server
-        .aviutl2_set_layer_state(Parameters(SetLayerStateInput {
+        .set_layer_state(Parameters(SetLayerStateInput {
             instance_id: harness.instance_id(),
             expected_scene_id: SCENE_ID,
             layer: 2,
@@ -691,7 +691,7 @@ async fn edit_requests_carry_a_deadline_derived_from_the_edit_budget() {
     let before = Utc::now().timestamp_millis() as u64;
     let result = harness
         .server
-        .aviutl2_move_object(Parameters(MoveObjectInput {
+        .move_object(Parameters(MoveObjectInput {
             instance_id: harness.instance_id(),
             selector: selector_input(),
             destination: DestinationInput { layer: 5, frame: 0 },
@@ -717,7 +717,7 @@ async fn read_requests_keep_the_read_budget_after_the_edit_budget_was_added() {
     let before = Utc::now().timestamp_millis() as u64;
     let _ = harness
         .server
-        .aviutl2_get_current_scene(Parameters(aviutl2_mcp_server::mcp::input::InstanceInput {
+        .get_current_scene(Parameters(aviutl2_mcp_server::mcp::input::InstanceInput {
             instance_id: harness.instance_id(),
         }))
         .await;
@@ -732,7 +732,7 @@ async fn invalid_edit_input_is_rejected_before_any_ipc() {
 
     let result = harness
         .server
-        .aviutl2_create_object(Parameters(CreateObjectInput {
+        .create_object(Parameters(CreateObjectInput {
             instance_id: harness.instance_id(),
             source: ObjectSourceInput::MediaFile {
                 path: r"..\movie.mp4".to_string(),
@@ -777,7 +777,7 @@ async fn a_rejected_path_names_the_rule_it_broke() {
     for (path, reason) in cases {
         let result = harness
             .server
-            .aviutl2_create_object(Parameters(CreateObjectInput {
+            .create_object(Parameters(CreateObjectInput {
                 instance_id: harness.instance_id(),
                 source: ObjectSourceInput::MediaFile {
                     path: path.to_string(),
@@ -825,7 +825,7 @@ async fn a_rejected_item_value_names_the_rule_it_broke() {
     for (value, reason) in cases {
         let result = harness
             .server
-            .aviutl2_set_object_item(Parameters(SetObjectItemInput {
+            .set_object_item(Parameters(SetObjectItemInput {
                 instance_id: harness.instance_id(),
                 selector: effect_selector_input(),
                 item: "テキスト".to_string(),
@@ -850,7 +850,7 @@ async fn a_rejected_item_value_names_the_rule_it_broke() {
     // 指定は別に用意してあるため、空を「消す」意味へ黙って読み替えない。
     let result = harness
         .server
-        .aviutl2_set_layer_state(Parameters(SetLayerStateInput {
+        .set_layer_state(Parameters(SetLayerStateInput {
             instance_id: harness.instance_id(),
             expected_scene_id: SCENE_ID,
             layer: 2,
@@ -877,7 +877,7 @@ async fn a_batch_names_the_same_rule_as_the_same_edit_on_its_own() {
 
     let alone = harness
         .server
-        .aviutl2_set_object_item(Parameters(SetObjectItemInput {
+        .set_object_item(Parameters(SetObjectItemInput {
             instance_id: harness.instance_id(),
             selector: effect_selector_input(),
             item: "ファイル".to_string(),
@@ -889,7 +889,7 @@ async fn a_batch_names_the_same_rule_as_the_same_edit_on_its_own() {
 
     let batched = harness
         .server
-        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+        .apply_batch(Parameters(ApplyBatchInput {
             instance_id: harness.instance_id(),
             operations: vec![
                 move_operation(5),
@@ -918,7 +918,7 @@ async fn a_batch_names_the_same_rule_as_the_same_edit_on_its_own() {
     // 検証を書き分ける形へ戻っても気付けない。
     let folder = harness
         .server
-        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+        .apply_batch(Parameters(ApplyBatchInput {
             instance_id: harness.instance_id(),
             operations: vec![
                 move_operation(5),
@@ -950,7 +950,7 @@ async fn malformed_instance_id_never_reaches_an_edit_operation() {
 
     let result = harness
         .server
-        .aviutl2_set_selection(Parameters(SetSelectionInput {
+        .set_selection(Parameters(SetSelectionInput {
             instance_id: "not-a-uuid".to_string(),
             expected_scene_id: SCENE_ID,
             cursor: Some(CursorPositionInput { layer: 0, frame: 0 }),
@@ -984,7 +984,7 @@ async fn precondition_failure_reaches_the_tool_result_with_the_current_revision(
 
     let result = harness
         .server
-        .aviutl2_move_object(Parameters(MoveObjectInput {
+        .move_object(Parameters(MoveObjectInput {
             instance_id: harness.instance_id(),
             selector: selector_input(),
             destination: DestinationInput { layer: 5, frame: 0 },
@@ -1021,7 +1021,7 @@ async fn a_content_mismatch_delivers_the_current_object_whole() {
 
     let result = harness
         .server
-        .aviutl2_move_object(Parameters(MoveObjectInput {
+        .move_object(Parameters(MoveObjectInput {
             instance_id: harness.instance_id(),
             selector: selector_input(),
             destination: DestinationInput { layer: 5, frame: 0 },
@@ -1058,7 +1058,7 @@ async fn timeout_from_the_instance_keeps_the_change_applied_hint() {
 
     let result = harness
         .server
-        .aviutl2_add_effect(Parameters(AddEffectInput {
+        .add_effect(Parameters(AddEffectInput {
             instance_id: harness.instance_id(),
             object: selector_input(),
             effect_name: "ぼかし".to_string(),
@@ -1096,7 +1096,7 @@ async fn a_timeout_built_by_the_server_reports_an_unknown_change() {
 
     let result = harness
         .server
-        .aviutl2_create_object(Parameters(CreateObjectInput {
+        .create_object(Parameters(CreateObjectInput {
             instance_id: harness.instance_id(),
             source: ObjectSourceInput::ObjectAlias {
                 alias: "[vo]".to_string(),
@@ -1143,7 +1143,7 @@ async fn a_read_that_outlasts_its_budget_stays_silent_about_changes() {
 
     let result = harness
         .server
-        .aviutl2_get_current_scene(Parameters(aviutl2_mcp_server::mcp::input::InstanceInput {
+        .get_current_scene(Parameters(aviutl2_mcp_server::mcp::input::InstanceInput {
             instance_id: harness.instance_id(),
         }))
         .await;
@@ -1176,7 +1176,7 @@ async fn secrets_in_edit_failures_never_reach_the_tool_result() {
 
     let result = harness
         .server
-        .aviutl2_create_object(Parameters(CreateObjectInput {
+        .create_object(Parameters(CreateObjectInput {
             instance_id: harness.instance_id(),
             source: ObjectSourceInput::ObjectAlias {
                 alias: SECRET_ALIAS.to_string(),
@@ -1223,7 +1223,7 @@ async fn edit_text_never_echoes_the_alias_path_or_item_value_that_was_sent() {
 
     let result = harness
         .server
-        .aviutl2_set_object_item(Parameters(SetObjectItemInput {
+        .set_object_item(Parameters(SetObjectItemInput {
             instance_id: harness.instance_id(),
             selector: effect_selector_input(),
             item: "ファイル".to_string(),
@@ -1252,7 +1252,7 @@ async fn edit_tool_reports_an_unsupported_operation_from_the_instance() {
 
     let result = harness
         .server
-        .aviutl2_set_effect_enabled(Parameters(SetEffectEnabledInput {
+        .set_effect_enabled(Parameters(SetEffectEnabledInput {
             instance_id: harness.instance_id(),
             selector: effect_selector_input(),
             enabled: true,
@@ -1269,7 +1269,7 @@ async fn unknown_instance_id_never_reaches_an_edit_operation() {
 
     let result = harness
         .server
-        .aviutl2_delete_object(Parameters(DeleteObjectInput {
+        .delete_object(Parameters(DeleteObjectInput {
             instance_id: InstanceId::new_v4().to_string(),
             selector: selector_input(),
         }))
@@ -1328,7 +1328,7 @@ async fn apply_batch_tool_sends_the_operations_in_order() {
 
     let result = harness
         .server
-        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+        .apply_batch(Parameters(ApplyBatchInput {
             instance_id: harness.instance_id(),
             operations: vec![
                 move_operation(5),
@@ -1378,7 +1378,7 @@ async fn a_hundred_step_batch_stays_within_the_text_limit() {
 
     let result = harness
         .server
-        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+        .apply_batch(Parameters(ApplyBatchInput {
             instance_id: harness.instance_id(),
             operations: (0..100).map(distinct_move_operation).collect(),
         }))
@@ -1402,7 +1402,7 @@ async fn batch_text_never_echoes_aliases_values_or_paths() {
 
     let result = harness
         .server
-        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+        .apply_batch(Parameters(ApplyBatchInput {
             instance_id: harness.instance_id(),
             operations: vec![
                 move_operation(5),
@@ -1444,7 +1444,7 @@ async fn batch_requests_carry_a_deadline_derived_from_the_batch_budget() {
     let before = Utc::now().timestamp_millis() as u64;
     let result = harness
         .server
-        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+        .apply_batch(Parameters(ApplyBatchInput {
             instance_id: harness.instance_id(),
             operations: vec![move_operation(5)],
         }))
@@ -1461,7 +1461,7 @@ async fn invalid_batch_input_is_rejected_before_any_ipc_and_names_the_operation(
 
     let result = harness
         .server
-        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+        .apply_batch(Parameters(ApplyBatchInput {
             instance_id: harness.instance_id(),
             // 同じオブジェクトを 2 回動かす要求は、2 つ目の逆操作が 1 つ目の
             // 結果を指すため事前に組み立てられない。
@@ -1498,7 +1498,7 @@ async fn a_batch_that_could_not_be_rolled_back_reaches_the_caller_intact() {
 
     let result = harness
         .server
-        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+        .apply_batch(Parameters(ApplyBatchInput {
             instance_id: harness.instance_id(),
             operations: vec![move_operation(5)],
         }))

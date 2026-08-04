@@ -91,7 +91,7 @@ impl EffectSelectorInput {
         });
         serde_json::from_value(value).map_err(|_| {
             invalid_argument(
-                "selector を解釈できません。aviutl2_get_object が返した effect の selector をそのまま指定してください",
+                "selector を解釈できません。get_object が返した effect の selector をそのまま指定してください",
             )
         })
     }
@@ -346,7 +346,7 @@ impl ItemValueInput {
     }
 }
 
-/// `aviutl2_create_object` の入力。
+/// `create_object` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateObjectInput {
@@ -375,7 +375,7 @@ impl CreateObjectInput {
     }
 }
 
-/// `aviutl2_move_object` の入力。
+/// `move_object` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MoveObjectInput {
@@ -400,7 +400,7 @@ impl MoveObjectInput {
     }
 }
 
-/// `aviutl2_delete_object` の入力。
+/// `delete_object` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteObjectInput {
@@ -422,7 +422,7 @@ impl DeleteObjectInput {
     }
 }
 
-/// `aviutl2_set_object_name` の入力。
+/// `set_object_name` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetObjectNameInput {
@@ -449,7 +449,7 @@ impl SetObjectNameInput {
     }
 }
 
-/// `aviutl2_set_object_item` の入力。
+/// `set_object_item` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetObjectItemInput {
@@ -478,7 +478,7 @@ impl SetObjectItemInput {
     }
 }
 
-/// `aviutl2_add_effect` の入力。
+/// `add_effect` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddEffectInput {
@@ -487,7 +487,7 @@ pub struct AddEffectInput {
     pub instance_id: String,
     /// 付与先オブジェクトのセレクター。
     pub object: ObjectSelectorInput,
-    /// 付与する effect 名。aviutl2_list_available_effects が返す名前を指定する。
+    /// 付与する effect 名。list_available_effects が返す名前を指定する。
     #[schemars(length(max = MAX_NAME_CHARS))]
     pub effect_name: String,
 }
@@ -504,7 +504,7 @@ impl AddEffectInput {
     }
 }
 
-/// `aviutl2_delete_effect` の入力。
+/// `delete_effect` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteEffectInput {
@@ -526,7 +526,7 @@ impl DeleteEffectInput {
     }
 }
 
-/// `aviutl2_set_effect_enabled` の入力。
+/// `set_effect_enabled` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetEffectEnabledInput {
@@ -574,7 +574,7 @@ impl LayerNameChangeInput {
     }
 }
 
-/// `aviutl2_set_layer_state` の入力。
+/// `set_layer_state` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetLayerStateInput {
@@ -616,7 +616,7 @@ impl SetLayerStateInput {
     }
 }
 
-/// `aviutl2_set_selection` の入力。
+/// `set_selection` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetSelectionInput {
@@ -713,7 +713,7 @@ impl BatchOperationInput {
     }
 }
 
-/// `aviutl2_apply_batch` の入力。
+/// `apply_batch` の入力。
 ///
 /// 前提条件のフィールドを 1 つも持たない。全 sub-operation が selector を持つ
 /// ため、プロジェクト境界も現在シーンも対象の同一性も selector が運ぶ。

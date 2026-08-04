@@ -43,14 +43,14 @@ impl From<RenderFormatInput> for RenderFormat {
     }
 }
 
-/// `aviutl2_render_frame` の入力。
+/// `render_frame` の入力。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RenderFrameInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
     pub instance_id: String,
-    /// 現在シーンの一致確認に使うシーン ID。aviutl2_get_edit_info などが返した値を指定する。
+    /// 現在シーンの一致確認に使うシーン ID。get_edit_info などが返した値を指定する。
     pub expected_scene_id: i32,
     /// 0 始まりのフレーム番号。
     #[schemars(range(max = MAX_FRAME))]
@@ -110,7 +110,7 @@ impl ArtifactRef {
     }
 }
 
-/// `aviutl2_render_frame` の structuredContent。
+/// `render_frame` の structuredContent。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RenderFrameOutput {
     /// 描画時点のプロジェクトの epoch。

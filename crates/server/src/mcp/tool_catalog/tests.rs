@@ -89,16 +89,15 @@ fn wait_until(predicate: impl Fn() -> bool) -> bool {
 #[test]
 fn the_always_enabled_tool_survives_being_disabled() {
     // floor は判定の最終段で適用する。公開しない指定に含まれていても公開する。
-    let settings =
-        settings_from(r#"{"disabled_tools":["aviutl2_list_instances","aviutl2_delete_object"]}"#);
+    let settings = settings_from(r#"{"disabled_tools":["list_instances","delete_object"]}"#);
     let visibility = ToolVisibility::from_settings(&settings);
 
     assert!(visibility.allows(ALWAYS_ENABLED_TOOL));
-    assert!(!visibility.allows("aviutl2_delete_object"));
+    assert!(!visibility.allows("delete_object"));
 
     let visible = visibility.visible(catalog().iter().map(String::as_str));
     assert!(visible.contains(ALWAYS_ENABLED_TOOL));
-    assert!(!visible.contains("aviutl2_delete_object"));
+    assert!(!visible.contains("delete_object"));
 }
 
 #[test]
@@ -170,7 +169,7 @@ async fn the_watch_wakes_only_when_the_visible_set_changes() {
     );
 
     // 公開する集合を変える。
-    dir.replace_settings(r#"{"log_level":"debug","disabled_tools":["aviutl2_delete_object"]}"#);
+    dir.replace_settings(r#"{"log_level":"debug","disabled_tools":["delete_object"]}"#);
     assert!(
         wait_until(|| source.settings().disabled_tools().len() == 1),
         "無効化の指定が届きませんでした"
@@ -179,7 +178,7 @@ async fn the_watch_wakes_only_when_the_visible_set_changes() {
         wake_after_delivery(&mut watch).await,
         "集合の変化で起床しませんでした"
     );
-    assert!(!watch.visible().contains("aviutl2_delete_object"));
+    assert!(!watch.visible().contains("delete_object"));
 
     // 同じ変化で 2 度は起きない。
     assert!(stays_quiet(&mut watch).await);
@@ -195,7 +194,7 @@ async fn disabling_only_the_always_enabled_tool_is_not_a_change() {
     let source = watcher.source();
     let mut watch = ToolListWatch::new(&source, catalog());
 
-    dir.replace_settings(r#"{"log_level":"info","disabled_tools":["aviutl2_list_instances"]}"#);
+    dir.replace_settings(r#"{"log_level":"info","disabled_tools":["list_instances"]}"#);
     assert!(
         wait_until(|| source.settings().disabled_tools().len() == 1),
         "無効化の指定が届きませんでした"
@@ -236,7 +235,7 @@ async fn what_the_watch_consumed_does_not_change_what_the_visibility_reports() {
     let source = watcher.source();
     let mut watch = ToolListWatch::new(&source, catalog());
 
-    dir.replace_settings(r#"{"disabled_tools":["aviutl2_delete_effect"]}"#);
+    dir.replace_settings(r#"{"disabled_tools":["delete_effect"]}"#);
     assert!(
         wait_until(|| source.settings().disabled_tools().len() == 1),
         "無効化の指定が届きませんでした"
@@ -247,6 +246,6 @@ async fn what_the_watch_consumed_does_not_change_what_the_visibility_reports() {
     // 読み直して同じ結論に至る。
     let visible = ToolVisibility::from_settings(&source.settings())
         .visible(catalog().iter().map(String::as_str));
-    assert!(!visible.contains("aviutl2_delete_effect"));
+    assert!(!visible.contains("delete_effect"));
     assert_eq!(&visible, watch.visible());
 }

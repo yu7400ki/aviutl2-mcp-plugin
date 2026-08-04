@@ -408,7 +408,7 @@ mod tests {
         save_to(
             &path,
             &SettingsChange {
-                tools: BTreeMap::from([("aviutl2_delete_object".to_string(), false)]),
+                tools: BTreeMap::from([("delete_object".to_string(), false)]),
                 ..SettingsChange::default()
             },
         )
@@ -417,7 +417,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("future_field"), "{text}");
         assert!(text.contains("aviutl2_future_tool"), "{text}");
-        assert!(text.contains("aviutl2_delete_object"), "{text}");
+        assert!(text.contains("delete_object"), "{text}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -134,7 +134,7 @@ impl Harness {
 
     async fn render(&self) -> CallToolResult {
         self.server()
-            .aviutl2_render_frame(Parameters(RenderFrameInput {
+            .render_frame(Parameters(RenderFrameInput {
                 instance_id: self.instance_id(),
                 expected_scene_id: SCENE_ID,
                 frame: FRAME,
@@ -403,7 +403,7 @@ async fn invalid_render_input_is_rejected_before_any_ipc() {
 
     let result = harness
         .server()
-        .aviutl2_render_frame(Parameters(RenderFrameInput {
+        .render_frame(Parameters(RenderFrameInput {
             instance_id: harness.instance_id(),
             expected_scene_id: SCENE_ID,
             frame: i32::MAX as u32 + 1,
@@ -430,7 +430,7 @@ async fn a_server_without_a_store_never_asks_the_host_to_render() {
     );
 
     let result = server
-        .aviutl2_render_frame(Parameters(RenderFrameInput {
+        .render_frame(Parameters(RenderFrameInput {
             instance_id: harness.instance_id(),
             expected_scene_id: SCENE_ID,
             frame: FRAME,

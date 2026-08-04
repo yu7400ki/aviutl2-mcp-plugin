@@ -708,22 +708,19 @@ impl Harness {
     }
 
     fn list_instances(&self) -> Result<ListInstancesResponse, ErrorObject> {
-        let result = self
-            .runtime
-            .block_on(
-                self.server
-                    .aviutl2_list_instances(Parameters(ListInstancesInput {
-                        offset: 0,
-                        limit: PAGE_LIMIT,
-                    })),
-            );
+        let result =
+            self.runtime
+                .block_on(self.server.list_instances(Parameters(ListInstancesInput {
+                    offset: 0,
+                    limit: PAGE_LIMIT,
+                })));
         self.decode(result)
     }
 
     fn edit_info(&self, instance: &str) -> Result<EditInfo, ErrorObject> {
         let result = self
             .runtime
-            .block_on(self.server.aviutl2_get_edit_info(Parameters(InstanceInput {
+            .block_on(self.server.get_edit_info(Parameters(InstanceInput {
                 instance_id: instance.to_string(),
             })));
         self.decode(result)
@@ -736,15 +733,13 @@ impl Harness {
         frame: u32,
     ) -> Result<RenderResponse, ErrorObject> {
         let result =
-            self.runtime.block_on(
-                self.server
-                    .aviutl2_render_frame(Parameters(RenderFrameInput {
-                        instance_id: instance.to_string(),
-                        expected_scene_id: scene_id,
-                        frame,
-                        format: RenderFormatInput::Png,
-                    })),
-            );
+            self.runtime
+                .block_on(self.server.render_frame(Parameters(RenderFrameInput {
+                    instance_id: instance.to_string(),
+                    expected_scene_id: scene_id,
+                    frame,
+                    format: RenderFormatInput::Png,
+                })));
         let decoded = self.decode(result);
         self.tally.borrow_mut().record(&decoded);
         decoded
