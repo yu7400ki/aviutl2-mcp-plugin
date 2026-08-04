@@ -210,6 +210,7 @@ pub const REASON_VALUES: &[&str] = &[
     "frame_outside_object",
     "frame_too_large",
     "inverse_unavailable",
+    "item_not_evaluatable",
     "item_type_not_writable",
     "layer_locked",
     "media_not_supported",
@@ -222,6 +223,7 @@ pub const REASON_VALUES: &[&str] = &[
     "section_move_crosses_boundary",
     "target_missing",
     "too_long",
+    "track_value_unavailable",
     "unc_path",
 ];
 

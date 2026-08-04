@@ -12,7 +12,7 @@ use crate::edit::error::EditError;
 use crate::edit::host::{EffectSlot, ObjectSlot, SceneEditor};
 use crate::edit::precondition::Boundary;
 use crate::read::adapter::{
-    effect_fingerprint_inputs, resolve_selected_detail, resolve_selected_object,
+    effect_info_at, find_effect_position, resolve_selected_detail, resolve_selected_object,
 };
 use crate::read::host::HostEffect;
 use aviutl2_mcp_core::{EffectInfo, EffectSelector, ObjectSelector, ObjectSummary};
@@ -172,32 +172,4 @@ pub(crate) fn resolve_effect_of<'sec>(
         info,
         _section: PhantomData,
     })
-}
-
-/// effect 名と同名内の順序から、effect 列全体での位置を求める。
-///
-/// 同名内の順序は読み取り経路と同じ採番規則に従う。ずれると同名 effect の
-/// 別インスタンスを書き換える。
-pub(crate) fn find_effect_position(
-    effects: &[HostEffect],
-    effect_name: &str,
-    effect_index: usize,
-) -> Option<usize> {
-    effects
-        .iter()
-        .position(|effect| effect.name == effect_name && effect.index == effect_index)
-}
-
-/// effect 列の指定位置から effect の情報を組み立てる。
-///
-/// 材料には effect 列の絶対位置と総数が含まれるため、要素を単独では組み立て
-/// られない。読み取り経路と同じ入力の組み立てを共有する。
-pub(crate) fn effect_info_at(
-    object: &ObjectSelector,
-    effects: &[HostEffect],
-    position: usize,
-) -> Option<EffectInfo> {
-    effect_fingerprint_inputs(effects)
-        .nth(position)
-        .map(|input| EffectInfo::new(object.clone(), input))
 }

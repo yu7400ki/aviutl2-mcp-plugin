@@ -217,6 +217,57 @@ pub trait SceneReader {
         layer: usize,
         frame_start: usize,
     ) -> Result<HostObjectDetail, ReadError>;
+
+    /// トラックバー項目を、指定フレームで評価した値を返す。
+    ///
+    /// `effect_position` は [`Self::object_detail`] が返す effect 列での 0 始まり
+    /// の位置である。**フレームは小数部を保ったまま渡す。** 小数部はフレーム間の
+    /// 位置を指しており、丸めると中間点の間の値を問えなくなる。
+    ///
+    /// **実装の義務**: 戻り値は `frames` と同じ長さ・同じ順序にする。要求元は
+    /// 位置で対応付けるため、並びが崩れると別のフレームの値を読むことになる。
+    ///
+    /// 値を得られなかった場合は [`ReadError::TrackValueUnavailable`] を返す。
+    /// 項目の存在と種別、フレームの範囲は呼び出し側が確かめてからここへ来る。
+    fn effect_track_values(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        effect_position: usize,
+        item_name: &str,
+        frames: &[f64],
+    ) -> Result<Vec<FiniteF64>, ReadError>;
+
+    /// チェックボックス項目を、指定フレームで評価した値を返す。
+    ///
+    /// **フレームは整数である。** 区間ごとのチェックボックスはフレーム間の位置を
+    /// 持たない。
+    ///
+    /// 義務と失敗の扱いは [`Self::effect_track_values`] と同じである。
+    fn effect_check_values(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        effect_position: usize,
+        item_name: &str,
+        frames: &[usize],
+    ) -> Result<Vec<bool>, ReadError>;
+
+    /// トラックバーグループの所属アイテム名を返す。
+    ///
+    /// effect をハンドルではなく名前と同名内の位置で指す。この取得だけは
+    /// ハンドルを取る口が無い。
+    ///
+    /// **0 件は失敗ではない。** 指定したグループが無い場合の戻り値であり、
+    /// 呼び出しの失敗とは区別される。
+    fn track_group_item_names(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        effect_name: &str,
+        effect_index: usize,
+        group_name: &str,
+    ) -> Result<Vec<String>, ReadError>;
 }
 
 /// 編集ハンドルが提供する読み取り経路。

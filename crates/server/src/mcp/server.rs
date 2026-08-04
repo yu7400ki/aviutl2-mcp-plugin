@@ -15,8 +15,8 @@ use crate::mcp::edit_input::{
     SetObjectNameInput, SetSelectionInput,
 };
 use crate::mcp::input::{
-    GetObjectInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput, ListLayersInput,
-    ListObjectsInput, parse_instance_id,
+    GetEffectItemValuesInput, GetObjectInput, InstanceInput, ListAvailableEffectsInput,
+    ListInstancesInput, ListLayersInput, ListObjectsInput, parse_instance_id,
 };
 use crate::mcp::render::{RenderFrameInput, RenderFrameOutput};
 use crate::mcp::summary::{MAX_TEXT_CHARS, clamp_chars};
@@ -25,18 +25,18 @@ use crate::mcp::{describe, failure};
 use crate::redact;
 use crate::settings::SettingsSource;
 use aviutl2_mcp_core::{
-    BatchOutcome, EditInfo, EditOutcome, ErrorCode, ErrorObject, GetCurrentSceneParams,
-    GetCurrentSceneResult, GetEditInfoParams, InstanceId, LayerStateOutcome,
+    BatchOutcome, EditInfo, EditOutcome, EffectItemValues, ErrorCode, ErrorObject,
+    GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, InstanceId, LayerStateOutcome,
     ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, MAX_PAGE_LIMIT,
     OPERATION_ADD_EFFECT, OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT,
     OPERATION_CREATE_OBJECT_SECTION, OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT,
     OPERATION_DELETE_OBJECT_SECTION, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
-    OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS,
-    OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT, OPERATION_MOVE_OBJECT_SECTION,
-    OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_LAYER_STATE,
-    OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail,
-    ObjectSectionsOutcome, RenderFrameResult, RequestBudgetKind, ScaledBudgets, SelectionState,
-    request_budget_kind,
+    OPERATION_GET_EFFECT_ITEM_VALUES, OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS,
+    OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT,
+    OPERATION_MOVE_OBJECT_SECTION, OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED,
+    OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME,
+    OPERATION_SET_SELECTION, ObjectDetail, ObjectSectionsOutcome, RenderFrameResult,
+    RequestBudgetKind, ScaledBudgets, SelectionState, request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -773,6 +773,56 @@ impl AviUtl2McpServer {
             )?;
             Ok(ToolSuccess {
                 text: describe::available_effects(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// effect の設定項目を、指定したフレームで評価した値を取得する。
+    /// frames はシーンの絶対フレーム番号であり 0 始まりである。
+    /// get_object が返した frame_start / frame_end と同じ座標であり、
+    /// オブジェクトの範囲外を指定すると precondition_failed（frame_out_of_range）となる。
+    /// frames に小数を指定するとフレーム間の位置を指し、中間点・加減速・時間制御を
+    /// 含む補間後の値が返る。トラックバー項目は小数部をそのまま使い、
+    /// チェックボックス項目は整数部を使う。
+    /// items を省略すると effect のトラックバー項目とチェックボックス項目すべてが
+    /// 対象になり、上限を超えた分は打ち切られて truncated が true になる。
+    /// items に指定した名前が effect に無ければ not_found（target_missing）、
+    /// 名前はあるが評価できない種別なら unsupported_operation（item_not_evaluatable）となる。
+    /// トラックバーグループの count はグループのトラック数、item_names は所属アイテム名で
+    /// あり、両者の件数は一致しない場合がある。
+    /// 各項目の values は frames と同じ長さ・同じ順序で並ぶ。
+    #[tool(
+        name = "get_effect_item_values",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::effect_item_values()
+        )
+    )]
+    pub async fn get_effect_item_values(
+        &self,
+        Parameters(input): Parameters<GetEffectItemValuesInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits();
+        self.run("get_effect_item_values", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: EffectItemValues = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_GET_EFFECT_ITEM_VALUES,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::effect_item_values(&result),
                 structured: to_structured(&result)?,
             })
         })
@@ -2281,6 +2331,7 @@ mod tests {
         "list_layers",
         "list_objects",
         "get_object",
+        "get_effect_item_values",
         "create_object",
         "move_object",
         "set_object_name",
@@ -2307,6 +2358,7 @@ mod tests {
         "list_objects",
         "get_object",
         "list_available_effects",
+        "get_effect_item_values",
     ];
 
     /// 編集 tool と、宣言する annotation。
@@ -2404,6 +2456,7 @@ mod tests {
             | "list_objects"
             | "get_object"
             | "list_available_effects"
+            | "get_effect_item_values"
             | RENDER_FRAME => false,
             other => panic!("{other} が編集の説明規約に従うかが定義されていません"),
         }
@@ -2464,7 +2517,7 @@ mod tests {
         assert_eq!(names, expected);
         // 件数そのものも固定する。router と表の両方から同じ tool を落とすと、
         // 集合の一致だけでは検出できない。
-        assert_eq!(names.len(), 22, "公開する tool の数が変わりました");
+        assert_eq!(names.len(), 23, "公開する tool の数が変わりました");
     }
 
     /// 共有設定を与えたサーバー。
@@ -2649,6 +2702,7 @@ mod tests {
             "list_objects" => schema::list_objects(),
             "get_object" => schema::object_detail(),
             "list_available_effects" => schema::list_available_effects(),
+            "get_effect_item_values" => schema::effect_item_values(),
             "create_object" => schema::create_object(),
             "move_object" => schema::move_object(),
             "set_object_name" => schema::set_object_name(),

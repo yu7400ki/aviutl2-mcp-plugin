@@ -25,6 +25,15 @@ fn sdk(operation: &'static str) -> ReadError {
     ReadError::Sdk { operation }
 }
 
+/// 補間後の値が得られなかった失敗にする。
+///
+/// 値を取る 2 つの呼び出しは「対象が無い」も「呼び出しが失敗した」も同じ
+/// 失敗として返す。呼び出す前に対象の存在と種別とフレームの範囲を確かめて
+/// あるため、ここへ来た失敗は値そのものが得られなかったことを指す。
+fn unavailable(operation: &'static str) -> ReadError {
+    ReadError::TrackValueUnavailable { operation }
+}
+
 /// グローバルな編集ハンドルを介して SDK を呼ぶホスト。
 pub struct SdkReadHost;
 
@@ -186,6 +195,63 @@ impl SceneReader for SdkSceneReader<'_> {
             sections,
         })
     }
+
+    fn effect_track_values(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        effect_position: usize,
+        item_name: &str,
+        frames: &[f64],
+    ) -> Result<Vec<FiniteF64>, ReadError> {
+        let effect = self.locate_effect(layer, frame_start, effect_position)?;
+        let mut values = Vec::with_capacity(frames.len());
+        for frame in frames {
+            // 小数部はフレーム間の位置を指す。丸めずにそのまま渡す。
+            values.push(
+                self.section
+                    .get_effect_track_value(effect, item_name, *frame)
+                    .map_err(|_| unavailable("get_effect_track_value"))?,
+            );
+        }
+        finite_values(values, "get_effect_track_value")
+    }
+
+    fn effect_check_values(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        effect_position: usize,
+        item_name: &str,
+        frames: &[usize],
+    ) -> Result<Vec<bool>, ReadError> {
+        let effect = self.locate_effect(layer, frame_start, effect_position)?;
+        let mut values = Vec::with_capacity(frames.len());
+        for frame in frames {
+            values.push(
+                self.section
+                    .get_effect_check_value(effect, item_name, *frame)
+                    .map_err(|_| unavailable("get_effect_check_value"))?,
+            );
+        }
+        Ok(values)
+    }
+
+    fn track_group_item_names(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        effect_name: &str,
+        effect_index: usize,
+        group_name: &str,
+    ) -> Result<Vec<String>, ReadError> {
+        let object = self.locate_object(layer, frame_start)?;
+        // 0 件は「指定グループが無い」であって失敗ではない。ラッパーは件数の
+        // 問い合わせと名前の取得の 2 段を内側で済ませ、0 件を空の列として返す。
+        self.section
+            .get_object_track_group_names(object, effect_name, effect_index, group_name)
+            .map_err(|_| sdk("get_object_track_group_names"))
+    }
 }
 
 impl SdkSceneReader<'_> {
@@ -206,6 +272,24 @@ impl SdkSceneReader<'_> {
             .ok_or(ReadError::ObjectNotFound {
                 detected_by: "find_object",
             })
+    }
+
+    /// effect 列の位置で effect のハンドルを引く。
+    ///
+    /// ハンドルを取る口を使うため、effect 名へ同名内の順序を表すサフィックスを
+    /// 組み立てずに済む。
+    fn locate_effect(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        position: usize,
+    ) -> Result<EffectHandle, ReadError> {
+        let object = self.locate_object(layer, frame_start)?;
+        let handles = self
+            .section
+            .get_effects(object)
+            .map_err(|_| sdk("get_effect_list"))?;
+        handles.get(position).copied().ok_or(sdk("get_effect_list"))
     }
 
     /// ハンドルが指すオブジェクトの位置と名前を所有型へ写す。

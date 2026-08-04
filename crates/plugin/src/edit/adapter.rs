@@ -20,12 +20,11 @@ use crate::edit::precondition::{
     Boundary, EditKind, ExpectedEpoch, MutationPermit, MutationTicket, verify_boundary,
 };
 use crate::edit::resolve::{
-    ResolvedEffect, ResolvedObject, effect_info_at, resolve_effect, resolve_object,
-    resolve_object_with_effects,
+    ResolvedEffect, ResolvedObject, resolve_effect, resolve_object, resolve_object_with_effects,
 };
 use crate::project::ProjectState;
 use crate::read::ReadError;
-use crate::read::adapter::object_summary;
+use crate::read::adapter::{effect_info_at, object_summary};
 use crate::read::host::{EditState, HostEffect, HostLayer, HostObjectPlacement};
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchOperation, BatchOutcome, CreateObjectParams,

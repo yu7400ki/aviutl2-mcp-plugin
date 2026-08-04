@@ -835,6 +835,13 @@ mod tests {
         {
             Err(crate::read::ReadError::NotReady)
         }
+
+        fn get_effect_item_values(
+            &self,
+            _params: &aviutl2_mcp_core::GetEffectItemValuesParams,
+        ) -> Result<aviutl2_mcp_core::EffectItemValues, crate::read::ReadError> {
+            Err(crate::read::ReadError::NotReady)
+        }
     }
 
     fn stub_scene() -> aviutl2_mcp_core::SceneInfo {
@@ -949,6 +956,39 @@ mod tests {
             _layer: usize,
             _frame_start: usize,
         ) -> Result<crate::read::host::HostObjectDetail, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn effect_track_values(
+            &self,
+            _layer: usize,
+            _frame_start: usize,
+            _effect_position: usize,
+            _item_name: &str,
+            _frames: &[f64],
+        ) -> Result<Vec<aviutl2_mcp_core::FiniteF64>, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn effect_check_values(
+            &self,
+            _layer: usize,
+            _frame_start: usize,
+            _effect_position: usize,
+            _item_name: &str,
+            _frames: &[usize],
+        ) -> Result<Vec<bool>, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn track_group_item_names(
+            &self,
+            _layer: usize,
+            _frame_start: usize,
+            _effect_name: &str,
+            _effect_index: usize,
+            _group_name: &str,
+        ) -> Result<Vec<String>, crate::read::ReadError> {
             panic!("参照区間の内側で panic させます")
         }
     }
@@ -2022,6 +2062,13 @@ mod tests {
         ) -> Result<crate::read::Snapshot<aviutl2_mcp_core::AvailableEffect>, crate::read::ReadError>
         {
             StubReadAdapter.list_available_effects(effect_type)
+        }
+
+        fn get_effect_item_values(
+            &self,
+            params: &aviutl2_mcp_core::GetEffectItemValuesParams,
+        ) -> Result<aviutl2_mcp_core::EffectItemValues, crate::read::ReadError> {
+            StubReadAdapter.get_effect_item_values(params)
         }
     }
 

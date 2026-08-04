@@ -11,9 +11,10 @@ use crate::api::ListInstancesResponse;
 use crate::mcp::render::RenderFrameOutput;
 use crate::mcp::summary::{TextBuilder, clamp_chars};
 use aviutl2_mcp_core::{
-    BatchOutcome, BatchStepOutcome, EditInfo, EditOutcome, GetCurrentSceneResult, InstanceInfo,
-    LayerStateOutcome, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
-    ObjectDetail, ObjectSectionsOutcome, ObjectSummary, PageMeta, SelectionField, SelectionState,
+    BatchOutcome, BatchStepOutcome, EditInfo, EditOutcome, EffectItemValues, EvaluatedItem,
+    GetCurrentSceneResult, InstanceInfo, LayerStateOutcome, ListAvailableEffectsResult,
+    ListLayersResult, ListObjectsResult, ObjectDetail, ObjectSectionsOutcome, ObjectSummary,
+    PageMeta, SelectionField, SelectionState,
 };
 
 /// 名前をそのまま行に載せるときの最大文字数。
@@ -217,6 +218,41 @@ pub fn available_effects(result: &ListAvailableEffectsResult) -> String {
     text.push_line(
         "effect_type を指定すると種別で絞り込めます。設定項目の定義は structuredContent を参照してください",
     );
+    text.finish()
+}
+
+/// `get_effect_item_values` の text content。
+///
+/// **評価した値そのものは載せない。** 値は利用者の内容であり、完全な機械可読値は
+/// `structuredContent` が運ぶ。ここに書くのは何をどれだけ評価したかだけである。
+pub fn effect_item_values(values: &EffectItemValues) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(format!(
+        "{} 件のフレームで {} 件の設定項目を評価しました（frame は 0 始まりのシーン絶対フレーム番号）",
+        values.frames.len(),
+        values.items.len(),
+    ));
+    for item in &values.items {
+        text.push_line(match item {
+            EvaluatedItem::Track { name, group, .. } => format!(
+                "- {} track group={}",
+                clamp_chars(name, MAX_NAME_CHARS),
+                match group {
+                    Some(group) => clamp_chars(&group.name, MAX_NAME_CHARS),
+                    None => "なし".to_string(),
+                },
+            ),
+            EvaluatedItem::Check { name, .. } => {
+                format!("- {} check", clamp_chars(name, MAX_NAME_CHARS))
+            }
+        });
+    }
+    if values.truncated {
+        text.push_line(
+            "評価できる項目が上限を超えたため打ち切りました。items に項目名を指定すると対象を選べます",
+        );
+    }
+    text.push_line("評価した値は structuredContent を参照してください");
     text.finish()
 }
 

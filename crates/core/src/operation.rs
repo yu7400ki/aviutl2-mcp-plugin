@@ -6,9 +6,11 @@
 use crate::budget::RequestBudgetKind;
 use crate::edit_info::SceneInfo;
 use crate::effect::{AvailableEffect, EffectType};
+use crate::number::FiniteF64;
 use crate::object::{LayerInfo, ObjectSummary};
 use crate::page::{PageMeta, PageRequest};
-use crate::selector::ObjectSelector;
+use crate::selector::{EffectSelector, ObjectSelector};
+use crate::validation::{TextSyntaxError, validate_name};
 use serde::{Deserialize, Serialize};
 
 /// 現在の編集情報を取得する operation 名。
@@ -28,6 +30,9 @@ pub const OPERATION_GET_OBJECT: &str = "get_object";
 
 /// 利用可能な effect を列挙する operation 名。
 pub const OPERATION_LIST_AVAILABLE_EFFECTS: &str = "list_available_effects";
+
+/// effect の設定項目を任意フレームで評価する operation 名。
+pub const OPERATION_GET_EFFECT_ITEM_VALUES: &str = "get_effect_item_values";
 
 /// media file / alias からオブジェクトを作成する operation 名。
 pub const OPERATION_CREATE_OBJECT: &str = "create_object";
@@ -94,19 +99,22 @@ pub enum ReadOperation {
     GetObject,
     /// [`OPERATION_LIST_AVAILABLE_EFFECTS`]。
     ListAvailableEffects,
+    /// [`OPERATION_GET_EFFECT_ITEM_VALUES`]。
+    GetEffectItemValues,
 }
 
 impl ReadOperation {
     /// 全 variant。
     ///
     /// 要素数と内容は `read_operation_all_is_exhaustive` テストで固定する。
-    pub const ALL: [ReadOperation; 6] = [
+    pub const ALL: [ReadOperation; 7] = [
         ReadOperation::GetEditInfo,
         ReadOperation::GetCurrentScene,
         ReadOperation::ListLayers,
         ReadOperation::ListObjects,
         ReadOperation::GetObject,
         ReadOperation::ListAvailableEffects,
+        ReadOperation::GetEffectItemValues,
     ];
 
     /// operation 名の文字列表現を返す。
@@ -118,6 +126,7 @@ impl ReadOperation {
             ReadOperation::ListObjects => OPERATION_LIST_OBJECTS,
             ReadOperation::GetObject => OPERATION_GET_OBJECT,
             ReadOperation::ListAvailableEffects => OPERATION_LIST_AVAILABLE_EFFECTS,
+            ReadOperation::GetEffectItemValues => OPERATION_GET_EFFECT_ITEM_VALUES,
         }
     }
 
@@ -319,7 +328,8 @@ impl KnownOperation {
                 | ReadOperation::ListLayers
                 | ReadOperation::ListObjects
                 | ReadOperation::GetObject
-                | ReadOperation::ListAvailableEffects => RequestBudgetKind::Read,
+                | ReadOperation::ListAvailableEffects
+                | ReadOperation::GetEffectItemValues => RequestBudgetKind::Read,
             },
             KnownOperation::Edit(operation) => match operation {
                 EditOperation::CreateObject
@@ -438,6 +448,82 @@ pub struct ListAvailableEffectsParams {
     pub page: PageRequest,
 }
 
+/// 1 度の要求で評価できるフレームの最大件数。
+pub const MAX_EVALUATED_FRAMES: usize = 16;
+
+/// 1 度の要求で評価できる設定項目の最大件数。
+pub const MAX_EVALUATED_ITEMS: usize = 32;
+
+/// `get_effect_item_values` の params。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GetEffectItemValuesParams {
+    /// 評価対象の effect。
+    ///
+    /// 前提条件のフィールドを持たない。内側の [`ObjectSelector`] が
+    /// project epoch・シーン ID・fingerprint を運ぶ。
+    pub effect: EffectSelector,
+    /// 評価するフレーム番号。シーンの絶対フレームで 0 始まり。1 件以上
+    /// [`MAX_EVALUATED_FRAMES`] 件以下。
+    ///
+    /// トラックバー項目は小数部をそのまま使い、チェックボックス項目は整数部を
+    /// 使う。
+    pub frames: Vec<FiniteF64>,
+    /// 評価する設定項目名。省略時は effect のトラックバー項目とチェックボックス
+    /// 項目すべてを対象とする。明示するときは 1 件以上 [`MAX_EVALUATED_ITEMS`]
+    /// 件以下。
+    #[serde(default)]
+    pub items: Option<Vec<String>>,
+}
+
+impl GetEffectItemValuesParams {
+    /// 要求内容だけで決まる件数と項目名を検証する。
+    ///
+    /// 0 件のフレーム指定は「何を聞いているのか」が定まらないため受け付けない。
+    pub fn validate(&self) -> Result<(), EffectItemValuesInputError> {
+        if self.frames.is_empty() || self.frames.len() > MAX_EVALUATED_FRAMES {
+            return Err(EffectItemValuesInputError::FrameCountOutOfRange {
+                count: self.frames.len(),
+            });
+        }
+        let Some(items) = &self.items else {
+            return Ok(());
+        };
+        if items.is_empty() || items.len() > MAX_EVALUATED_ITEMS {
+            return Err(EffectItemValuesInputError::ItemCountOutOfRange { count: items.len() });
+        }
+        for name in items {
+            validate_name(name)
+                .map_err(|source| EffectItemValuesInputError::ItemName { source })?;
+        }
+        Ok(())
+    }
+}
+
+/// 補間後の値の要求内容の検証失敗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EffectItemValuesInputError {
+    /// フレームの件数が受け付ける範囲に無い。
+    #[error("frames は 1 件以上 {MAX_EVALUATED_FRAMES} 件以下である必要があります: {count} 件")]
+    FrameCountOutOfRange {
+        /// 指定された件数。
+        count: usize,
+    },
+    /// 設定項目の件数が受け付ける範囲に無い。
+    #[error("items は 1 件以上 {MAX_EVALUATED_ITEMS} 件以下である必要があります: {count} 件")]
+    ItemCountOutOfRange {
+        /// 指定された件数。
+        count: usize,
+    },
+    /// 設定項目名が名前の規則に反する。
+    #[error("設定項目名が不正です: {source}")]
+    ItemName {
+        /// 反した規則。
+        #[source]
+        source: TextSyntaxError,
+    },
+}
+
 /// `get_current_scene` の result。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GetCurrentSceneResult {
@@ -474,14 +560,68 @@ pub struct ListAvailableEffectsResult {
     pub page: PageMeta,
 }
 
+/// `get_effect_item_values` の result。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectItemValues {
+    /// 取得時点のプロジェクト revision。
+    pub project_revision: u64,
+    /// 評価したフレーム番号。要求した順序をそのまま保つ。
+    pub frames: Vec<FiniteF64>,
+    /// 評価した設定項目。
+    pub items: Vec<EvaluatedItem>,
+    /// 設定項目を [`MAX_EVALUATED_ITEMS`] で打ち切った場合に true。
+    pub truncated: bool,
+}
+
+/// 評価した設定項目 1 件。
+///
+/// 種別ごとに値の型が違うため、1 つの配列へ数値と真偽を混ぜず variant で分ける。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EvaluatedItem {
+    /// トラックバー項目。
+    Track {
+        /// 設定項目名。
+        name: String,
+        /// 評価した値。`frames` と同じ長さ・同じ順序。
+        values: Vec<FiniteF64>,
+        /// 所属するトラックバーグループ。属さない場合は null。
+        group: Option<TrackGroup>,
+    },
+    /// チェックボックス項目。
+    Check {
+        /// 設定項目名。
+        name: String,
+        /// `frames` の整数部で評価した値。`frames` と同じ長さ・同じ順序。
+        values: Vec<bool>,
+    },
+}
+
+/// トラックバーのグループ。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackGroup {
+    /// グループ名。
+    pub name: String,
+    /// グループ内での 0 始まりの位置。
+    pub index: usize,
+    /// グループのトラック数。
+    ///
+    /// [`item_names`](Self::item_names) の件数と一致するとは限らない。前者は
+    /// トラックバー情報が名乗るトラック数、後者は所属アイテム名の列挙結果で
+    /// あり、同じ数であるとはどこにも定められていない。一致を強制せず両方を返す。
+    pub count: usize,
+    /// 所属アイテム名。
+    pub item_names: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effect::{AvailableEffectItem, EffectFlags, EffectItemType};
+    use crate::effect::{AvailableEffectItem, EffectFlags, EffectItemType, EvaluatedItemKind};
     use crate::fingerprint::ObjectFingerprintInput;
-    use crate::number::FiniteF64;
     use crate::object::ObjectSummary;
     use crate::page::DEFAULT_PAGE_LIMIT;
+    use crate::validation::MAX_NAME_UTF16_UNITS;
 
     fn sample_object_summary() -> ObjectSummary {
         ObjectSummary::new(
@@ -520,6 +660,7 @@ mod tests {
         assert_eq!(OPERATION_LIST_OBJECTS, "list_objects");
         assert_eq!(OPERATION_GET_OBJECT, "get_object");
         assert_eq!(OPERATION_LIST_AVAILABLE_EFFECTS, "list_available_effects");
+        assert_eq!(OPERATION_GET_EFFECT_ITEM_VALUES, "get_effect_item_values");
     }
 
     #[test]
@@ -610,6 +751,10 @@ mod tests {
         assert_eq!(
             ReadOperation::ListAvailableEffects.as_str(),
             OPERATION_LIST_AVAILABLE_EFFECTS
+        );
+        assert_eq!(
+            ReadOperation::GetEffectItemValues.as_str(),
+            OPERATION_GET_EFFECT_ITEM_VALUES
         );
     }
 
@@ -713,7 +858,8 @@ mod tests {
                 | ReadOperation::ListLayers
                 | ReadOperation::ListObjects
                 | ReadOperation::GetObject
-                | ReadOperation::ListAvailableEffects => {}
+                | ReadOperation::ListAvailableEffects
+                | ReadOperation::GetEffectItemValues => {}
             }
             assert!(
                 ReadOperation::ALL.contains(&op),
@@ -727,7 +873,8 @@ mod tests {
         assert_listed(ReadOperation::ListObjects);
         assert_listed(ReadOperation::GetObject);
         assert_listed(ReadOperation::ListAvailableEffects);
-        assert_eq!(ReadOperation::ALL.len(), 6);
+        assert_listed(ReadOperation::GetEffectItemValues);
+        assert_eq!(ReadOperation::ALL.len(), 7);
     }
 
     /// [`RenderOperation::ALL`] が全 variant を含むことを固定する。
@@ -850,6 +997,200 @@ mod tests {
                 "{op:?}"
             );
             assert!(EditOperation::ALL.contains(&op));
+        }
+    }
+
+    #[test]
+    fn evaluating_item_values_is_an_ordinary_read() {
+        // 費用の形は 1 対象の解決と上限付きの値取得であり、既存の read と同じ桁
+        // である。新しい予算区分を作る理由が無い。
+        assert_eq!(
+            KnownOperation::Read(ReadOperation::GetEffectItemValues).budget_kind(),
+            RequestBudgetKind::Read
+        );
+        assert!(ReadOperation::ALL.contains(&ReadOperation::GetEffectItemValues));
+    }
+
+    fn sample_effect_selector() -> EffectSelector {
+        let object = sample_object_selector();
+        EffectSelector {
+            fingerprint: object.fingerprint.clone(),
+            object,
+            effect_name: "動画ファイル".to_string(),
+            effect_index: 0,
+        }
+    }
+
+    fn sample_item_values_params(frames: usize, items: Option<usize>) -> GetEffectItemValuesParams {
+        GetEffectItemValuesParams {
+            effect: sample_effect_selector(),
+            frames: (0..frames)
+                .map(|i| FiniteF64::try_new(i as f64).expect("有限値"))
+                .collect(),
+            items: items.map(|count| (0..count).map(|i| format!("項目{i}")).collect::<Vec<_>>()),
+        }
+    }
+
+    #[test]
+    fn get_effect_item_values_params_roundtrip() {
+        for items in [None, Some(1), Some(MAX_EVALUATED_ITEMS)] {
+            let params = sample_item_values_params(2, items);
+            let s = serde_json::to_string(&params).unwrap();
+            let restored: GetEffectItemValuesParams = serde_json::from_str(&s).unwrap();
+            assert_eq!(restored, params);
+        }
+    }
+
+    #[test]
+    fn get_effect_item_values_params_reject_unknown_field() {
+        let mut value = serde_json::to_value(sample_item_values_params(1, None)).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("future".to_string(), serde_json::json!(1));
+        assert!(serde_json::from_value::<GetEffectItemValuesParams>(value).is_err());
+    }
+
+    #[test]
+    fn get_effect_item_values_params_bound_the_frame_count() {
+        for count in [1, 2, MAX_EVALUATED_FRAMES] {
+            assert_eq!(
+                sample_item_values_params(count, None).validate(),
+                Ok(()),
+                "{count} 件のフレームが拒否されました"
+            );
+        }
+        for count in [0, MAX_EVALUATED_FRAMES + 1] {
+            assert_eq!(
+                sample_item_values_params(count, None).validate(),
+                Err(EffectItemValuesInputError::FrameCountOutOfRange { count }),
+                "{count} 件のフレームが受理されました"
+            );
+        }
+    }
+
+    #[test]
+    fn get_effect_item_values_params_bound_the_item_count() {
+        for count in [1, MAX_EVALUATED_ITEMS] {
+            assert_eq!(
+                sample_item_values_params(1, Some(count)).validate(),
+                Ok(()),
+                "{count} 件の項目が拒否されました"
+            );
+        }
+        for count in [0, MAX_EVALUATED_ITEMS + 1] {
+            assert_eq!(
+                sample_item_values_params(1, Some(count)).validate(),
+                Err(EffectItemValuesInputError::ItemCountOutOfRange { count }),
+                "{count} 件の項目が受理されました"
+            );
+        }
+    }
+
+    #[test]
+    fn get_effect_item_values_params_apply_the_shared_name_rule() {
+        // 項目名の規則は名前の検証を共有する。別の規則を書き起こすと、同じ名前が
+        // 経路によって受理されたり拒否されたりする。
+        for name in ["名\0前", &"あ".repeat(MAX_NAME_UTF16_UNITS + 1)] {
+            let params = GetEffectItemValuesParams {
+                items: Some(vec![name.to_string()]),
+                ..sample_item_values_params(1, None)
+            };
+            let error = params
+                .validate()
+                .expect_err("規則違反の名前が受理されました");
+            assert!(matches!(error, EffectItemValuesInputError::ItemName { .. }));
+        }
+    }
+
+    #[test]
+    fn effect_item_values_result_roundtrip() {
+        let result = EffectItemValues {
+            project_revision: 42,
+            frames: vec![
+                FiniteF64::try_new(120.0).unwrap(),
+                FiniteF64::try_new(120.5).unwrap(),
+            ],
+            items: vec![
+                EvaluatedItem::Track {
+                    name: "X".to_string(),
+                    values: vec![
+                        FiniteF64::try_new(0.0).unwrap(),
+                        FiniteF64::try_new(1.5).unwrap(),
+                    ],
+                    group: Some(TrackGroup {
+                        name: "座標".to_string(),
+                        index: 0,
+                        count: 3,
+                        item_names: vec!["X".to_string(), "Y".to_string()],
+                    }),
+                },
+                EvaluatedItem::Check {
+                    name: "反転".to_string(),
+                    values: vec![true, false],
+                },
+            ],
+            truncated: false,
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        let restored: EffectItemValues = serde_json::from_str(&s).unwrap();
+        assert_eq!(restored, result);
+    }
+
+    #[test]
+    fn evaluated_items_are_told_apart_by_a_tag() {
+        // 値の型が種別ごとに違うことを、判別子で読めるようにする。
+        let value = serde_json::to_value(EvaluatedItem::Check {
+            name: "反転".to_string(),
+            values: vec![true],
+        })
+        .unwrap();
+        assert_eq!(value["type"], serde_json::json!("check"));
+        let value = serde_json::to_value(EvaluatedItem::Track {
+            name: "X".to_string(),
+            values: Vec::new(),
+            group: None,
+        })
+        .unwrap();
+        assert_eq!(value["type"], serde_json::json!("track"));
+        assert_eq!(value["group"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn only_track_and_check_items_can_be_evaluated() {
+        assert_eq!(
+            EffectItemType::Integer.evaluated_kind(),
+            Some(EvaluatedItemKind::Track)
+        );
+        assert_eq!(
+            EffectItemType::Number.evaluated_kind(),
+            Some(EvaluatedItemKind::Track)
+        );
+        assert_eq!(
+            EffectItemType::Check.evaluated_kind(),
+            Some(EvaluatedItemKind::Check)
+        );
+        for item_type in [
+            EffectItemType::Text,
+            EffectItemType::String,
+            EffectItemType::File,
+            EffectItemType::Color,
+            EffectItemType::Select,
+            EffectItemType::Scene,
+            EffectItemType::Range,
+            EffectItemType::Combo,
+            EffectItemType::Mask,
+            EffectItemType::Font,
+            EffectItemType::Figure,
+            EffectItemType::Data,
+            EffectItemType::Folder,
+            EffectItemType::Unknown(99),
+        ] {
+            assert_eq!(
+                item_type.evaluated_kind(),
+                None,
+                "{item_type} が評価できる種別として扱われました"
+            );
         }
     }
 

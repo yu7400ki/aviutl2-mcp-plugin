@@ -18,8 +18,9 @@ pub mod sdk;
 
 use crate::project::ProjectState;
 use aviutl2_mcp_core::{
-    AvailableEffect, EditInfo, EffectType, LayerInfo, ObjectDetail, ObjectFilter, ObjectSelector,
-    ObjectSummary, PageError, PageMeta, PageRequest, SceneInfo,
+    AvailableEffect, EditInfo, EffectItemValues, EffectType, GetEffectItemValuesParams, LayerInfo,
+    ObjectDetail, ObjectFilter, ObjectSelector, ObjectSummary, PageError, PageMeta, PageRequest,
+    SceneInfo,
 };
 use std::sync::Arc;
 
@@ -122,6 +123,16 @@ pub trait ReadAdapter: Send + Sync {
         &self,
         effect_type: Option<&EffectType>,
     ) -> Result<Snapshot<AvailableEffect>, ReadError>;
+
+    /// effect の設定項目を、要求されたフレームで評価した値を返す。
+    ///
+    /// `params` は件数と項目名の検証済みのものだけを受け取る。いずれも要求内容
+    /// だけで決まり、読み取りを受け付けられるかにも期限にも依存しないため、
+    /// 要求の復号と同じ場所で判定して不正な要求はここへ届かせない。
+    fn get_effect_item_values(
+        &self,
+        params: &GetEffectItemValuesParams,
+    ) -> Result<EffectItemValues, ReadError>;
 }
 
 /// SDK を実際に呼び出す read adapter を作る。

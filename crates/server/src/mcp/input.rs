@@ -18,11 +18,13 @@
 //! - `selector` の各文字列長: [`ObjectSelectorInput::validate`]
 //! - `selector.fingerprint` の書式: [`ObjectSelectorInput::to_selector`]
 
+use crate::mcp::edit_input::EffectSelectorInput;
 use crate::mcp::failure::invalid_argument;
 use aviutl2_mcp_core::{
-    DEFAULT_PAGE_LIMIT, EffectType, ErrorObject, GetObjectParams, InstanceId,
-    ListAvailableEffectsParams, ListLayersParams, ListObjectsParams, MAX_PAGE_LIMIT, ObjectFilter,
-    ObjectSelector, PageRequest,
+    DEFAULT_PAGE_LIMIT, EffectType, ErrorObject, FiniteF64, GetEffectItemValuesParams,
+    GetObjectParams, InstanceId, ListAvailableEffectsParams, ListLayersParams, ListObjectsParams,
+    MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, MAX_PAGE_LIMIT, ObjectFilter, ObjectSelector,
+    PageRequest,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -237,6 +239,54 @@ pub struct ListAvailableEffectsInput {
     /// ページ指定。
     #[serde(flatten)]
     pub page: AvailableEffectsPageInput,
+}
+
+/// `get_effect_item_values` の入力。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetEffectItemValuesInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// 評価対象の effect のセレクター。get_object が返した effect の selector をそのまま指定する。
+    pub effect: EffectSelectorInput,
+    /// 評価するフレーム番号。シーンの絶対フレーム番号で 0 始まり。小数を指定するとフレーム間の位置を指す。
+    #[schemars(length(min = 1, max = MAX_FRAME_COUNT))]
+    pub frames: Vec<f64>,
+    /// 評価する設定項目名。省略すると effect のトラックバー項目とチェックボックス項目すべてが対象になる。
+    #[serde(default)]
+    #[schemars(length(min = 1, max = MAX_ITEM_COUNT))]
+    pub items: Option<Vec<String>>,
+}
+
+/// 1 度に評価できるフレームの最大件数。
+const MAX_FRAME_COUNT: u32 = MAX_EVALUATED_FRAMES as u32;
+
+/// 1 度に評価できる設定項目の最大件数。
+const MAX_ITEM_COUNT: u32 = MAX_EVALUATED_ITEMS as u32;
+
+impl GetEffectItemValuesInput {
+    /// IPC の params へ変換する。
+    ///
+    /// 件数と項目名の検証は core の実装を呼ぶ。要求元と実行側が同じ判定を
+    /// 共有し、宣言した制約を接続前に実際へ確かめる。
+    pub fn to_params(&self) -> Result<GetEffectItemValuesParams, ErrorObject> {
+        let mut frames = Vec::with_capacity(self.frames.len());
+        for frame in &self.frames {
+            frames.push(FiniteF64::try_new(*frame).ok_or_else(|| {
+                invalid_argument("frames には有限の数値を指定する必要があります")
+            })?);
+        }
+        let params = GetEffectItemValuesParams {
+            effect: self.effect.to_selector()?,
+            frames,
+            items: self.items.clone(),
+        };
+        params
+            .validate()
+            .map_err(|error| invalid_argument(error.to_string()))?;
+        Ok(params)
+    }
 }
 
 /// 絞り込みに指定できる effect の種別。

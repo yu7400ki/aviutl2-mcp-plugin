@@ -264,6 +264,7 @@ fn expected_annotations(name: &str) -> (bool, bool, bool) {
         | "list_objects"
         | "get_object"
         | "list_available_effects"
+        | "get_effect_item_values"
         // 描画はプロジェクトを変更せず、同じ要求は同じ絵を返す。
         | "render_frame" => (true, false, true),
         // 作成系は再送で重複し得るため冪等と名乗らない。一括適用も、冪等かどうかが
@@ -1860,7 +1861,7 @@ fn a_corrupt_settings_file_leaves_every_tool_listed() {
     requests.push(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let session = run_session(&registry_dir, &requests);
 
-    assert_eq!(listed_tool_names(&session.response(2)).len(), 22);
+    assert_eq!(listed_tool_names(&session.response(2)).len(), 23);
     assert!(
         session.stderr.contains("設定を読み込めませんでした"),
         "破損が記録されていません: {}",
@@ -2083,7 +2084,7 @@ fn tools_list_changed_arrives_only_when_the_enabled_set_changes() {
     let session = server.finish();
     let before = listed_tool_names(&session.response(2));
     let after = listed_tool_names(&session.response(3));
-    assert_eq!(before.len(), 22, "{before:?}");
+    assert_eq!(before.len(), 23, "{before:?}");
     assert!(!after.contains(&"delete_object".to_string()), "{after:?}");
     assert_eq!(
         tool_list_changed_count(&session),

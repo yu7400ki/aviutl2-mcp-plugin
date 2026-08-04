@@ -799,9 +799,104 @@ impl SceneReader for FakeSceneEditor<'_> {
             })?
             .detail())
     }
+
+    fn effect_track_values(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        effect_position: usize,
+        item_name: &str,
+        frames: &[f64],
+    ) -> Result<Vec<FiniteF64>, ReadError> {
+        // 設定値をどのフレームでも同じ値として返す。編集経路は補間の結果を
+        // 見ないため、値が読めることだけを満たす。
+        let value = match self
+            .item_at(layer, frame_start, effect_position, item_name)?
+            .value
+        {
+            ItemValue::Integer { value } => FiniteF64::try_new(value as f64),
+            ItemValue::Number { value } => Some(value),
+            _ => None,
+        }
+        .ok_or(ReadError::TrackValueUnavailable {
+            operation: "get_effect_track_value",
+        })?;
+        Ok(vec![value; frames.len()])
+    }
+
+    fn effect_check_values(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        effect_position: usize,
+        item_name: &str,
+        frames: &[usize],
+    ) -> Result<Vec<bool>, ReadError> {
+        let ItemValue::Bool { value } = self
+            .item_at(layer, frame_start, effect_position, item_name)?
+            .value
+        else {
+            return Err(ReadError::TrackValueUnavailable {
+                operation: "get_effect_check_value",
+            });
+        };
+        Ok(vec![value; frames.len()])
+    }
+
+    fn track_group_item_names(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        effect_name: &str,
+        effect_index: usize,
+        group_name: &str,
+    ) -> Result<Vec<String>, ReadError> {
+        let scene = self.host.scene.lock().unwrap();
+        let Some(object) = scene.find(layer, frame_start) else {
+            return Ok(Vec::new());
+        };
+        let Some(effect) = object
+            .effects
+            .iter()
+            .find(|effect| effect.name == effect_name && effect.index == effect_index)
+        else {
+            return Ok(Vec::new());
+        };
+        // グループが無ければ 0 件になる。失敗ではない。
+        Ok(effect
+            .items
+            .iter()
+            .filter(|item| {
+                item.track
+                    .as_ref()
+                    .and_then(|track| track.group_name.as_deref())
+                    == Some(group_name)
+            })
+            .map(|item| item.name.clone())
+            .collect())
+    }
 }
 
 impl FakeSceneEditor<'_> {
+    /// effect 列の位置と項目名で設定項目を引く。
+    fn item_at(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        effect_position: usize,
+        item_name: &str,
+    ) -> Result<EffectItem, ReadError> {
+        let scene = self.host.scene.lock().unwrap();
+        scene
+            .find(layer, frame_start)
+            .and_then(|object| object.effects.get(effect_position))
+            .and_then(|effect| effect.items.iter().find(|item| item.name == item_name))
+            .cloned()
+            .ok_or(ReadError::TrackValueUnavailable {
+                operation: "get_effect_track_value",
+            })
+    }
+
     /// 対象を読むたびに働く仕込みを適用する。
     ///
     /// 同一性の材料だけを読む経路と詳細を読む経路のどちらも通る。片方だけに

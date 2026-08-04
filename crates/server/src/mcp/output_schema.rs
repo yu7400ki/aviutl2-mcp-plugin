@@ -75,6 +75,47 @@ pub fn list_available_effects() -> Value {
     page_of(available_effect())
 }
 
+/// `get_effect_item_values` の出力。
+///
+/// `frames` は要求のエコーであり、`items` の各 `values` はこれと同じ長さ・同じ
+/// 順序で並ぶ。
+pub fn effect_item_values() -> Value {
+    object(&[
+        ("project_revision", unsigned()),
+        ("frames", array(number())),
+        ("items", array(evaluated_item())),
+        ("truncated", boolean()),
+    ])
+}
+
+/// 評価した設定項目。`type` を判別子とする union。
+///
+/// 値の型が種別ごとに違うため、1 つの配列へ数値と真偽を混ぜない。
+fn evaluated_item() -> Value {
+    json!({
+        "oneOf": [
+            tagged("track", &[
+                ("name", string()),
+                ("values", array(number())),
+                ("group", nullable(track_group())),
+            ]),
+            tagged("check", &[("name", string()), ("values", array(boolean()))]),
+        ]
+    })
+}
+
+/// トラックバーのグループ。
+///
+/// `count` と `item_names` の件数は一致するとは限らない。
+fn track_group() -> Value {
+    object(&[
+        ("name", string()),
+        ("index", unsigned()),
+        ("count", unsigned()),
+        ("item_names", array(string())),
+    ])
+}
+
 /// `create_object` の出力。
 ///
 /// `created` に作成された全件が入り、`object` はその先頭を指す。
@@ -560,11 +601,12 @@ mod tests {
     use crate::api::ListInstancesResponse;
     use aviutl2_mcp_core::{
         AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EditOutcome,
-        EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem, EffectItemType, EffectType,
-        Extent, FiniteF64, FrameRange, GetCurrentSceneResult, InstanceId, InstanceInfo,
-        InstanceProject, InstanceState, ItemValue, LayerInfo, ListAvailableEffectsResult,
-        ListLayersResult, ListObjectsResult, ObjectDetail, ObjectFingerprintInput, ObjectSummary,
-        PageMeta, SceneInfo, SceneRef, SectionRange, SelectionField, SelectionState, TrackInfo,
+        EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem, EffectItemType,
+        EffectItemValues, EffectType, EvaluatedItem, Extent, FiniteF64, FrameRange,
+        GetCurrentSceneResult, InstanceId, InstanceInfo, InstanceProject, InstanceState, ItemValue,
+        LayerInfo, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, ObjectDetail,
+        ObjectFingerprintInput, ObjectSummary, PageMeta, SceneInfo, SceneRef, SectionRange,
+        SelectionField, SelectionState, TrackGroup, TrackInfo,
     };
 
     /// 値が schema に適合するかを再帰的に検査する。
@@ -951,6 +993,48 @@ mod tests {
             page: sample_page_meta(),
         };
         assert_conforms(list_available_effects(), &to_value(&result));
+    }
+
+    #[test]
+    fn effect_item_values_schema_matches_dto() {
+        // グループを持つ項目と持たない項目、種別の違う項目をすべて含める。
+        // 片方だけを見ると、もう片方の分岐が DTO と食い違っても気付けない。
+        let result = EffectItemValues {
+            project_revision: 42,
+            frames: vec![
+                FiniteF64::try_new(120.0).expect("有限値"),
+                FiniteF64::try_new(120.5).expect("有限値"),
+            ],
+            items: vec![
+                EvaluatedItem::Track {
+                    name: "X".to_string(),
+                    values: vec![
+                        FiniteF64::try_new(0.0).expect("有限値"),
+                        FiniteF64::try_new(1.5).expect("有限値"),
+                    ],
+                    group: Some(TrackGroup {
+                        name: "座標".to_string(),
+                        index: 0,
+                        count: 3,
+                        item_names: vec!["X".to_string(), "Y".to_string()],
+                    }),
+                },
+                EvaluatedItem::Track {
+                    name: "拡大率".to_string(),
+                    values: vec![
+                        FiniteF64::try_new(100.0).expect("有限値"),
+                        FiniteF64::try_new(100.0).expect("有限値"),
+                    ],
+                    group: None,
+                },
+                EvaluatedItem::Check {
+                    name: "反転".to_string(),
+                    values: vec![true, false],
+                },
+            ],
+            truncated: true,
+        };
+        assert_conforms(effect_item_values(), &to_value(&result));
     }
 
     /// 応答へ載せる effect。全種別の設定項目を 1 つずつ含む。

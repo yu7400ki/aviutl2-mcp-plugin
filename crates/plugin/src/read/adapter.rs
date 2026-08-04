@@ -12,10 +12,12 @@ use crate::read::host::{
 use crate::read::{Page, ProjectStatus, ReadAdapter, Snapshot};
 use aviutl2_mcp_core::{
     AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFingerprintInput, EffectInfo,
-    EffectType, Extent, FiniteF64, FrameRange, LayerInfo, ObjectDetail, ObjectFilter,
-    ObjectFingerprintInput, ObjectSelector, ObjectSummary, PageError, PageRequest, SceneInfo,
-    take_page,
+    EffectItem, EffectItemValues, EffectSelector, EffectType, EvaluatedItem, EvaluatedItemKind,
+    Extent, FiniteF64, FrameRange, GetEffectItemValuesParams, LayerInfo, MAX_EVALUATED_ITEMS,
+    ObjectDetail, ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary, PageError,
+    PageRequest, SceneInfo, TrackGroup, take_page,
 };
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -294,6 +296,199 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
             snapshot_revision,
         })
     }
+
+    fn get_effect_item_values(
+        &self,
+        params: &GetEffectItemValuesParams,
+    ) -> Result<EffectItemValues, ReadError> {
+        self.ensure_readable()?;
+        let info = self.edit_info()?;
+        let selector = &params.effect;
+        ensure_scene(&info, selector.object.scene_id)?;
+
+        let epoch = self.project.epoch();
+        if epoch != selector.object.project_epoch {
+            return Err(ReadError::EpochMismatch);
+        }
+
+        let scene_id = info.scene_id;
+        let epoch = epoch.as_str();
+        let project = self.project.as_ref();
+        // フレームは種別ごとに違う形で渡す。トラックバーは小数部がフレーム間の
+        // 位置を指すためそのまま運び、チェックボックスは整数フレームしか取らない。
+        let track_frames: Vec<f64> = params.frames.iter().map(|frame| frame.get()).collect();
+        let check_frames: Vec<usize> = track_frames.iter().map(|frame| *frame as usize).collect();
+        let requested = params.items.as_deref();
+
+        self.read_section(move |scene| {
+            let revision = project.revision();
+            let (summary, detail) =
+                resolve_selected_detail(scene, epoch, scene_id, &selector.object)?;
+            let position = find_effect_position(
+                &detail.effects,
+                &selector.effect_name,
+                selector.effect_index,
+            )
+            .ok_or(ReadError::EffectNotFound)?;
+            let effect = effect_info_at(&summary.selector, &detail.effects, position).ok_or(
+                ReadError::Sdk {
+                    operation: "get_effect_list",
+                },
+            )?;
+            if effect.fingerprint != selector.fingerprint {
+                return Err(ReadError::EffectFingerprintMismatch);
+            }
+
+            // 呼び出す前に区別できる失敗をここで出し切る。ラッパーは呼び出しの
+            // 失敗と値が無いことを 1 つの失敗へ潰すため、通した後の失敗からは
+            // 何が起きたのかを名乗れない。
+            let targets = select_evaluated_items(&detail.effects[position].items, requested)?;
+            ensure_frames_within(&summary, &track_frames)?;
+
+            let mut group_names: HashMap<String, Vec<String>> = HashMap::new();
+            let mut items = Vec::with_capacity(targets.items.len());
+            for (item, kind) in targets.items {
+                items.push(match kind {
+                    EvaluatedItemKind::Track => EvaluatedItem::Track {
+                        values: scene.effect_track_values(
+                            summary.layer,
+                            summary.frame_start,
+                            position,
+                            &item.name,
+                            &track_frames,
+                        )?,
+                        group: track_group(scene, &summary, selector, item, &mut group_names)?,
+                        name: item.name.clone(),
+                    },
+                    EvaluatedItemKind::Check => EvaluatedItem::Check {
+                        values: scene.effect_check_values(
+                            summary.layer,
+                            summary.frame_start,
+                            position,
+                            &item.name,
+                            &check_frames,
+                        )?,
+                        name: item.name.clone(),
+                    },
+                });
+            }
+
+            Ok(EffectItemValues {
+                project_revision: revision,
+                frames: params.frames.clone(),
+                items,
+                truncated: targets.truncated,
+            })
+        })
+    }
+}
+
+/// 評価する設定項目の選び方の結果。
+struct EvaluationTargets<'a> {
+    /// 評価する項目と、その評価の種別。
+    items: Vec<(&'a EffectItem, EvaluatedItemKind)>,
+    /// 上限で打ち切ったか。
+    truncated: bool,
+}
+
+/// 評価する設定項目を、要求と effect の項目一覧から決める。
+///
+/// 名指しされた項目は、存在しないことと種別が違うことを別の失敗として返す。
+/// 前者は名前を直す要求であり、後者は別の項目を選ぶ要求であって、要求元が次に
+/// 取る行動が違う。
+///
+/// 省略された場合は評価できる項目すべてを対象とするが、件数は上限で打ち切る。
+/// 項目数が上限を超える effect はあり得るため、黙って落とさずに打ち切ったことを
+/// 伝える。
+fn select_evaluated_items<'a>(
+    items: &'a [EffectItem],
+    requested: Option<&[String]>,
+) -> Result<EvaluationTargets<'a>, ReadError> {
+    let Some(requested) = requested else {
+        let mut all: Vec<(&EffectItem, EvaluatedItemKind)> = items
+            .iter()
+            .filter_map(|item| Some((item, item.item_type.evaluated_kind()?)))
+            .collect();
+        let truncated = all.len() > MAX_EVALUATED_ITEMS;
+        all.truncate(MAX_EVALUATED_ITEMS);
+        return Ok(EvaluationTargets {
+            items: all,
+            truncated,
+        });
+    };
+
+    let mut selected = Vec::with_capacity(requested.len());
+    for name in requested {
+        let item = items
+            .iter()
+            .find(|item| item.name == *name)
+            .ok_or(ReadError::ItemNotFound)?;
+        let kind = item
+            .item_type
+            .evaluated_kind()
+            .ok_or(ReadError::ItemNotEvaluatable)?;
+        selected.push((item, kind));
+    }
+    Ok(EvaluationTargets {
+        items: selected,
+        truncated: false,
+    })
+}
+
+/// 要求されたフレームが対象オブジェクトの範囲に収まることを確かめる。
+///
+/// フレームはシーンの絶対フレーム番号である。オブジェクトの外を指す要求には
+/// 補間する対象そのものが無い。
+fn ensure_frames_within(summary: &ObjectSummary, frames: &[f64]) -> Result<(), ReadError> {
+    let start = summary.frame_start as f64;
+    let end = summary.frame_end as f64;
+    if frames.iter().all(|frame| *frame >= start && *frame <= end) {
+        Ok(())
+    } else {
+        Err(ReadError::FrameOutOfRange)
+    }
+}
+
+/// トラックバー項目が属するグループを組み立てる。
+///
+/// 所属アイテム名の取得はグループ名ごとに 1 度だけ行う。同じグループの項目を
+/// まとめて評価する要求で、同じ一覧を項目の数だけ引き直さない。
+///
+/// グループのトラック数と所属アイテム名の件数は一致するとは限らない。一致を
+/// 強制せず、両方をそのまま返して要求元に見せる。
+fn track_group(
+    scene: &dyn SceneReader,
+    summary: &ObjectSummary,
+    selector: &EffectSelector,
+    item: &EffectItem,
+    cache: &mut HashMap<String, Vec<String>>,
+) -> Result<Option<TrackGroup>, ReadError> {
+    let Some(track) = &item.track else {
+        return Ok(None);
+    };
+    let Some(name) = &track.group_name else {
+        return Ok(None);
+    };
+    let item_names = match cache.get(name) {
+        Some(cached) => cached.clone(),
+        None => {
+            let fetched = scene.track_group_item_names(
+                summary.layer,
+                summary.frame_start,
+                &selector.effect_name,
+                selector.effect_index,
+                name,
+            )?;
+            cache.insert(name.clone(), fetched.clone());
+            fetched
+        }
+    };
+    Ok(Some(TrackGroup {
+        name: name.clone(),
+        index: track.group_index,
+        count: track.group_num,
+        item_names,
+    }))
 }
 
 /// 列挙の途中で対象を読めなくなった失敗を、列挙そのものの失敗として畳む。
@@ -463,6 +658,34 @@ pub(crate) fn effect_fingerprint_inputs(
         })
 }
 
+/// effect 名と同名内の順序から、effect 列全体での位置を求める。
+///
+/// 同名内の順序は effect の一覧を組み立てた採番規則に従う。ずれると同名 effect の
+/// 別インスタンスを指す。読み取りと編集はこの 1 つの実装を共有する。
+pub(crate) fn find_effect_position(
+    effects: &[HostEffect],
+    effect_name: &str,
+    effect_index: usize,
+) -> Option<usize> {
+    effects
+        .iter()
+        .position(|effect| effect.name == effect_name && effect.index == effect_index)
+}
+
+/// effect 列の指定位置から effect の情報を組み立てる。
+///
+/// 材料には effect 列の絶対位置と総数が含まれるため、要素を単独では組み立て
+/// られない。fingerprint の入力の組み立てを読み取りと編集で共有する。
+pub(crate) fn effect_info_at(
+    object: &ObjectSelector,
+    effects: &[HostEffect],
+    position: usize,
+) -> Option<EffectInfo> {
+    effect_fingerprint_inputs(effects)
+        .nth(position)
+        .map(|input| EffectInfo::new(object.clone(), input))
+}
+
 /// オブジェクトの概要を組み立てる。
 ///
 /// fingerprint を算出するのはこの 1 か所だけである。
@@ -541,7 +764,7 @@ mod tests {
     use crate::test_support::{alias_with_effects, with_silent_panic_hook};
     use aviutl2_mcp_core::{
         AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
-        ItemValue, MAX_PAGE_LIMIT, SectionRange,
+        ItemValue, MAX_PAGE_LIMIT, SectionRange, TrackInfo,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -636,8 +859,43 @@ mod tests {
         /// 境界は非再入の Mutex で守られている。読み取りが区間を跨いでそれを
         /// 保持していれば、この更新で待ち合わせが解けなくなる。
         renew_boundary_on_enter: bool,
+        /// 値の取得が SDK 境界で受け取った引数の記録。
+        ///
+        /// 種別ごとにフレームの形が違うことを、境界で受け取った値そのもので
+        /// 確かめられる。
+        evaluations: Mutex<Vec<Evaluation>>,
+        /// 値の取得を失敗させる設定項目名。
+        ///
+        /// 事前確認をすべて通ったのに値が返らない状況を作る。
+        values_unavailable_for: Option<String>,
+        /// トラックバーグループごとの所属アイテム名。
+        ///
+        /// 一覧に無いグループ名は 0 件で返る。「指定グループが無い」は失敗では
+        /// ないというヘッダーの明記をそのまま写す。
+        group_item_names: Vec<(String, Vec<String>)>,
         project: Option<Arc<ProjectState>>,
         calls: Mutex<Vec<&'static str>>,
+    }
+
+    /// 値の取得が受け取った引数。
+    #[derive(Debug, Clone, PartialEq)]
+    enum Evaluation {
+        /// トラックバー。小数部を保ったフレームを受け取る。
+        Track { item: String, frames: Vec<f64> },
+        /// チェックボックス。整数フレームを受け取る。
+        Check { item: String, frames: Vec<usize> },
+    }
+
+    /// フレームから作るトラックバーの値。
+    ///
+    /// 値をフレームの単射な関数にしてある。並びが入れ替われば結果に現れる。
+    fn track_value_at(frame: f64) -> f64 {
+        frame * 10.0 + 1.0
+    }
+
+    /// フレームから作るチェックボックスの値。
+    fn check_value_at(frame: usize) -> bool {
+        frame.is_multiple_of(2)
     }
 
     impl FakeHost {
@@ -660,9 +918,16 @@ mod tests {
                 section_fails: false,
                 bump_on_enter: 0,
                 renew_boundary_on_enter: false,
+                evaluations: Mutex::new(Vec::new()),
+                values_unavailable_for: None,
+                group_item_names: Vec::new(),
                 project: None,
                 calls: Mutex::new(Vec::new()),
             }
+        }
+
+        fn evaluations(&self) -> Vec<Evaluation> {
+            self.evaluations.lock().unwrap().clone()
         }
 
         /// 準備前の呼び出しを、実際の SDK と同じ失敗モードで再現する。
@@ -864,6 +1129,85 @@ mod tests {
                 }],
             })
         }
+
+        fn effect_track_values(
+            &self,
+            layer: usize,
+            frame_start: usize,
+            effect_position: usize,
+            item_name: &str,
+            frames: &[f64],
+        ) -> Result<Vec<FiniteF64>, ReadError> {
+            self.host.record("effect_track_values");
+            self.locate_effect(layer, frame_start, effect_position)?;
+            self.host
+                .evaluations
+                .lock()
+                .unwrap()
+                .push(Evaluation::Track {
+                    item: item_name.to_string(),
+                    frames: frames.to_vec(),
+                });
+            if self.host.values_unavailable_for.as_deref() == Some(item_name) {
+                return Err(ReadError::TrackValueUnavailable {
+                    operation: "get_effect_track_value",
+                });
+            }
+            Ok(frames
+                .iter()
+                .map(|frame| FiniteF64::try_new(track_value_at(*frame)).expect("有限値"))
+                .collect())
+        }
+
+        fn effect_check_values(
+            &self,
+            layer: usize,
+            frame_start: usize,
+            effect_position: usize,
+            item_name: &str,
+            frames: &[usize],
+        ) -> Result<Vec<bool>, ReadError> {
+            self.host.record("effect_check_values");
+            self.locate_effect(layer, frame_start, effect_position)?;
+            self.host
+                .evaluations
+                .lock()
+                .unwrap()
+                .push(Evaluation::Check {
+                    item: item_name.to_string(),
+                    frames: frames.to_vec(),
+                });
+            if self.host.values_unavailable_for.as_deref() == Some(item_name) {
+                return Err(ReadError::TrackValueUnavailable {
+                    operation: "get_effect_check_value",
+                });
+            }
+            Ok(frames.iter().copied().map(check_value_at).collect())
+        }
+
+        fn track_group_item_names(
+            &self,
+            layer: usize,
+            frame_start: usize,
+            effect_name: &str,
+            effect_index: usize,
+            group_name: &str,
+        ) -> Result<Vec<String>, ReadError> {
+            self.host.record("track_group_item_names");
+            let object = self.find(layer, frame_start)?;
+            if find_effect_position(&object.effects, effect_name, effect_index).is_none() {
+                return Err(ReadError::Sdk {
+                    operation: "get_object_track_group_names",
+                });
+            }
+            Ok(self
+                .host
+                .group_item_names
+                .iter()
+                .find(|(name, _)| name == group_name)
+                .map(|(_, names)| names.clone())
+                .unwrap_or_default())
+        }
     }
 
     impl FakeScene<'_> {
@@ -890,6 +1234,23 @@ mod tests {
                 });
             }
             Ok(object)
+        }
+
+        /// effect 列の位置で effect を引く。
+        ///
+        /// 実際の SDK はハンドルを列から引き当てる。位置が列の外なら値は取れない。
+        fn locate_effect(
+            &self,
+            layer: usize,
+            frame_start: usize,
+            position: usize,
+        ) -> Result<&HostEffect, ReadError> {
+            self.find(layer, frame_start)?
+                .effects
+                .get(position)
+                .ok_or(ReadError::Sdk {
+                    operation: "get_effect_list",
+                })
         }
     }
 
@@ -1068,6 +1429,14 @@ mod tests {
                 .list_available_effects(None)
                 .err()
                 .map(|e| e.error_code()),
+            adapter
+                .get_effect_item_values(&item_values_params(
+                    sample_effect_selector(adapter),
+                    &[100.0],
+                    None,
+                ))
+                .err()
+                .map(|e| e.error_code()),
         ]
         .into_iter()
         .map(|code| code.expect("成功してしまいました"))
@@ -1081,6 +1450,471 @@ mod tests {
     fn sample_selector(adapter: &HostReadAdapter<FakeHost>) -> ObjectSelector {
         let object = fake_layers()[1].objects[0].clone();
         object_summary(&adapter.project.epoch(), 0, &object.identity).selector
+    }
+
+    /// ホストが保持するオブジェクトの配下 effect を指すセレクター。
+    ///
+    /// fingerprint は effect 列の位置と総数まで含めて算出されるため、列そのもの
+    /// から組み立てる。
+    fn effect_selector_of(
+        adapter: &HostReadAdapter<FakeHost>,
+        effect_name: &str,
+        effect_index: usize,
+    ) -> EffectSelector {
+        let object = adapter.host.layers[1].objects[0].clone();
+        let summary = object_summary(&adapter.project.epoch(), 0, &object.identity);
+        let position = find_effect_position(&object.effects, effect_name, effect_index)
+            .expect("effect が見つかりません");
+        effect_info_at(&summary.selector, &object.effects, position)
+            .expect("effect の情報を組み立てられません")
+            .selector
+    }
+
+    /// 既定のフェイクが持つ effect を指すセレクター。
+    fn sample_effect_selector(adapter: &HostReadAdapter<FakeHost>) -> EffectSelector {
+        effect_selector_of(adapter, "動画ファイル", 0)
+    }
+
+    /// 補間後の値の要求を組み立てる。
+    fn item_values_params(
+        effect: EffectSelector,
+        frames: &[f64],
+        items: Option<&[&str]>,
+    ) -> GetEffectItemValuesParams {
+        GetEffectItemValuesParams {
+            effect,
+            frames: frames
+                .iter()
+                .map(|frame| FiniteF64::try_new(*frame).expect("有限値"))
+                .collect(),
+            items: items.map(|names| names.iter().map(|name| name.to_string()).collect()),
+        }
+    }
+
+    /// トラックバーの設定項目を作る。
+    ///
+    /// `group` はグループ名・グループ内の位置・グループのトラック数の組である。
+    fn track_item(name: &str, group: Option<(&str, usize, usize)>) -> EffectItem {
+        EffectItem {
+            name: name.to_string(),
+            item_type: EffectItemType::Number,
+            value: ItemValue::Number {
+                value: FiniteF64::try_new(0.0).expect("有限値"),
+            },
+            track: Some(TrackInfo {
+                mode: "直線移動".to_string(),
+                params: Vec::new(),
+                accelerate: false,
+                decelerate: false,
+                twopoint: false,
+                timecontrol: false,
+                group_num: group.map(|(_, _, count)| count).unwrap_or(1),
+                group_index: group.map(|(_, index, _)| index).unwrap_or(0),
+                group_name: group.map(|(name, _, _)| name.to_string()),
+            }),
+        }
+    }
+
+    /// チェックボックスの設定項目を作る。
+    fn check_item(name: &str) -> EffectItem {
+        EffectItem {
+            name: name.to_string(),
+            item_type: EffectItemType::Check,
+            value: ItemValue::Bool { value: false },
+            track: None,
+        }
+    }
+
+    /// 任意フレームでの値を持たない設定項目を作る。
+    fn text_item(name: &str) -> EffectItem {
+        EffectItem {
+            name: name.to_string(),
+            item_type: EffectItemType::Text,
+            value: ItemValue::Text {
+                value: "字幕".to_string(),
+            },
+            track: None,
+        }
+    }
+
+    /// 評価できる項目と評価できない項目を混ぜた effect。
+    ///
+    /// X と Y は同じグループに属し、拡大率はどのグループにも属さない。
+    fn mixed_effect() -> HostEffect {
+        HostEffect {
+            name: "標準描画".to_string(),
+            index: 0,
+            enabled: true,
+            locked: false,
+            items: vec![
+                track_item("X", Some((TRACK_GROUP, 0, 3))),
+                track_item("Y", Some((TRACK_GROUP, 1, 3))),
+                track_item("拡大率", None),
+                check_item("反転"),
+                text_item("説明"),
+            ],
+        }
+    }
+
+    /// トラックバーグループの名前。
+    const TRACK_GROUP: &str = "座標";
+
+    /// 混ぜた effect を持つ対象と、そのグループの所属アイテム名を備えた adapter。
+    ///
+    /// グループのトラック数は 3 なのに所属アイテム名は 2 件である。両者が一致
+    /// しないことをフェイクの既定に据え、一致を前提にした実装がここで落ちる。
+    fn mixed_adapter() -> HostReadAdapter<FakeHost> {
+        adapter_with(|_| FakeHost {
+            group_item_names: vec![(
+                TRACK_GROUP.to_string(),
+                vec!["X".to_string(), "Y".to_string()],
+            )],
+            ..host_with_effects(vec![mixed_effect()])
+        })
+    }
+
+    /// 評価した項目の名前を並べる。
+    fn evaluated_names(values: &EffectItemValues) -> Vec<&str> {
+        values
+            .items
+            .iter()
+            .map(|item| match item {
+                EvaluatedItem::Track { name, .. } | EvaluatedItem::Check { name, .. } => {
+                    name.as_str()
+                }
+            })
+            .collect()
+    }
+
+    /// トラックバー項目として評価された値を取り出す。
+    fn track_values<'a>(values: &'a EffectItemValues, item_name: &str) -> &'a [FiniteF64] {
+        values
+            .items
+            .iter()
+            .find_map(|item| match item {
+                EvaluatedItem::Track { name, values, .. } if name == item_name => Some(&values[..]),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{item_name} がトラックバーとして返っていません"))
+    }
+
+    /// トラックバー項目のグループを取り出す。
+    fn group_of<'a>(values: &'a EffectItemValues, item_name: &str) -> Option<&'a TrackGroup> {
+        values
+            .items
+            .iter()
+            .find_map(|item| match item {
+                EvaluatedItem::Track { name, group, .. } if name == item_name => Some(group),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{item_name} がトラックバーとして返っていません"))
+            .as_ref()
+    }
+
+    #[test]
+    fn evaluated_values_follow_the_requested_frames_in_order() {
+        // 値は位置で対応付ける。並びが崩れると別のフレームの値を読むことになる。
+        let adapter = mixed_adapter();
+        let frames = [150.0, 120.5, 199.0];
+        let values = adapter
+            .get_effect_item_values(&item_values_params(
+                effect_selector_of(&adapter, "標準描画", 0),
+                &frames,
+                Some(&["X"]),
+            ))
+            .expect("評価できます");
+
+        assert_eq!(
+            values.frames.iter().map(FiniteF64::get).collect::<Vec<_>>(),
+            frames.to_vec(),
+            "要求したフレームがそのまま返っていません"
+        );
+        assert_eq!(
+            track_values(&values, "X")
+                .iter()
+                .map(FiniteF64::get)
+                .collect::<Vec<_>>(),
+            frames.map(track_value_at).to_vec(),
+            "値の並びが要求したフレームの並びと違います"
+        );
+    }
+
+    #[test]
+    fn a_fractional_frame_keeps_its_fraction_for_a_track_and_loses_it_for_a_check() {
+        // 小数部はフレーム間の位置を指す。トラックバーへ丸めて渡すと中間点の間を
+        // 問えなくなる。チェックボックスは整数フレームしか取らない。
+        let adapter = mixed_adapter();
+        adapter
+            .get_effect_item_values(&item_values_params(
+                effect_selector_of(&adapter, "標準描画", 0),
+                &[120.5, 130.75],
+                Some(&["X", "反転"]),
+            ))
+            .expect("評価できます");
+
+        assert_eq!(
+            adapter.host.evaluations(),
+            vec![
+                Evaluation::Track {
+                    item: "X".to_string(),
+                    frames: vec![120.5, 130.75],
+                },
+                Evaluation::Check {
+                    item: "反転".to_string(),
+                    frames: vec![120, 130],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missing_item_a_wrong_kind_and_a_refused_value_are_three_answers() {
+        // 名前が誤っている・種別が違う・値が返らないは、要求元が次に取る行動が
+        // それぞれ違う。畳むと切り分けられない。
+        let adapter = mixed_adapter();
+        let selector = effect_selector_of(&adapter, "標準描画", 0);
+        let missing = adapter
+            .get_effect_item_values(&item_values_params(
+                selector.clone(),
+                &[120.0],
+                Some(&["存在しない項目"]),
+            ))
+            .expect_err("存在しない項目名が受理されました");
+        let wrong_kind = adapter
+            .get_effect_item_values(&item_values_params(
+                selector.clone(),
+                &[120.0],
+                Some(&["説明"]),
+            ))
+            .expect_err("評価できない種別が受理されました");
+
+        let refusing = adapter_with(|_| FakeHost {
+            values_unavailable_for: Some("X".to_string()),
+            group_item_names: vec![(
+                TRACK_GROUP.to_string(),
+                vec!["X".to_string(), "Y".to_string()],
+            )],
+            ..host_with_effects(vec![mixed_effect()])
+        });
+        let refused = refusing
+            .get_effect_item_values(&item_values_params(
+                effect_selector_of(&refusing, "標準描画", 0),
+                &[120.0],
+                Some(&["X"]),
+            ))
+            .expect_err("値が返らないのに成功しました");
+
+        let answers: Vec<(ErrorCode, serde_json::Value)> = [&missing, &wrong_kind, &refused]
+            .into_iter()
+            .map(|error| (error.error_code(), error.details()["reason"].clone()))
+            .collect();
+        assert_eq!(
+            answers,
+            vec![
+                (ErrorCode::NotFound, serde_json::json!("target_missing")),
+                (
+                    ErrorCode::UnsupportedOperation,
+                    serde_json::json!("item_not_evaluatable")
+                ),
+                (
+                    ErrorCode::SdkError,
+                    serde_json::json!("track_value_unavailable")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn omitting_the_item_names_selects_every_evaluatable_item() {
+        // 評価できない種別は現れない。要求元が effect の項目名を知らなくても
+        // 「評価できるものを全部」と言えるようにする。
+        let adapter = mixed_adapter();
+        let values = adapter
+            .get_effect_item_values(&item_values_params(
+                effect_selector_of(&adapter, "標準描画", 0),
+                &[120.0],
+                None,
+            ))
+            .expect("評価できます");
+
+        assert_eq!(evaluated_names(&values), vec!["X", "Y", "拡大率", "反転"]);
+        assert!(!values.truncated);
+    }
+
+    #[test]
+    fn omitting_the_item_names_truncates_at_the_limit() {
+        // 項目数が上限を超える effect はあり得る。黙って落とさず、打ち切った
+        // ことを伝える。
+        for (count, expected, truncated) in [
+            (MAX_EVALUATED_ITEMS - 1, MAX_EVALUATED_ITEMS - 1, false),
+            (MAX_EVALUATED_ITEMS, MAX_EVALUATED_ITEMS, false),
+            (MAX_EVALUATED_ITEMS + 1, MAX_EVALUATED_ITEMS, true),
+        ] {
+            let effect = HostEffect {
+                items: (0..count)
+                    .map(|i| track_item(&format!("項目{i}"), None))
+                    .collect(),
+                ..mixed_effect()
+            };
+            let adapter = adapter_with(|_| host_with_effects(vec![effect]));
+            let values = adapter
+                .get_effect_item_values(&item_values_params(
+                    effect_selector_of(&adapter, "標準描画", 0),
+                    &[120.0],
+                    None,
+                ))
+                .expect("評価できます");
+
+            assert_eq!(values.items.len(), expected, "{count} 件の effect");
+            assert_eq!(values.truncated, truncated, "{count} 件の effect");
+        }
+    }
+
+    #[test]
+    fn a_group_is_returned_with_both_counts_even_when_they_disagree() {
+        // グループのトラック数と所属アイテム名の件数が同じであるとは定められて
+        // いない。一致を強制せず、両方を返して要求元に見せる。
+        let adapter = mixed_adapter();
+        let values = adapter
+            .get_effect_item_values(&item_values_params(
+                effect_selector_of(&adapter, "標準描画", 0),
+                &[120.0],
+                Some(&["X", "Y", "拡大率"]),
+            ))
+            .expect("件数が食い違っても失敗しません");
+
+        let group = group_of(&values, "X").expect("グループに属します");
+        assert_eq!(group.name, TRACK_GROUP);
+        assert_eq!(group.index, 0);
+        assert_eq!(group.count, 3);
+        assert_eq!(group.item_names, vec!["X".to_string(), "Y".to_string()]);
+        assert_ne!(group.count, group.item_names.len());
+        assert_eq!(group_of(&values, "Y").expect("グループに属します").index, 1);
+        assert_eq!(
+            group_of(&values, "拡大率"),
+            None,
+            "グループに属さない項目がグループを名乗りました"
+        );
+        assert_eq!(
+            adapter
+                .host
+                .calls()
+                .iter()
+                .filter(|call| **call == "track_group_item_names")
+                .count(),
+            1,
+            "同じグループの所属アイテム名を引き直しています"
+        );
+    }
+
+    #[test]
+    fn a_group_that_the_host_does_not_know_is_not_a_failure() {
+        // 所属アイテム名が 0 件で返るのは「指定グループが無い」であって失敗
+        // ではない。
+        let adapter = adapter_with(|_| host_with_effects(vec![mixed_effect()]));
+        let values = adapter
+            .get_effect_item_values(&item_values_params(
+                effect_selector_of(&adapter, "標準描画", 0),
+                &[120.0],
+                Some(&["X"]),
+            ))
+            .expect("0 件でも失敗しません");
+        assert!(
+            group_of(&values, "X")
+                .expect("グループに属します")
+                .item_names
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_frame_outside_the_object_is_a_precondition_failure() {
+        // フレームはシーンの絶対フレーム番号である。対象の外を指す要求には
+        // 補間する対象そのものが無い。
+        let adapter = mixed_adapter();
+        for frame in [99.0, 200.5, 300.0] {
+            let error = adapter
+                .get_effect_item_values(&item_values_params(
+                    effect_selector_of(&adapter, "標準描画", 0),
+                    &[120.0, frame],
+                    Some(&["X"]),
+                ))
+                .unwrap_err();
+            assert_eq!(
+                error.error_code(),
+                ErrorCode::PreconditionFailed,
+                "フレーム {frame}"
+            );
+            assert_eq!(error.details()["reason"], "frame_out_of_range");
+        }
+        assert!(
+            adapter.host.evaluations().is_empty(),
+            "範囲外のまま値を読みに行きました"
+        );
+        // 端は含む。オブジェクトが占めるフレームは開始から終了までである。
+        for frame in [100.0, 200.0] {
+            assert!(
+                adapter
+                    .get_effect_item_values(&item_values_params(
+                        effect_selector_of(&adapter, "標準描画", 0),
+                        &[frame],
+                        Some(&["X"]),
+                    ))
+                    .is_ok(),
+                "端のフレーム {frame} が拒否されました"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_effect_and_a_stale_effect_fingerprint_are_told_apart() {
+        let adapter = mixed_adapter();
+        let selector = effect_selector_of(&adapter, "標準描画", 0);
+
+        let unknown = adapter
+            .get_effect_item_values(&item_values_params(
+                EffectSelector {
+                    effect_name: "存在しない効果".to_string(),
+                    ..selector.clone()
+                },
+                &[120.0],
+                Some(&["X"]),
+            ))
+            .expect_err("存在しない effect が受理されました");
+        assert_eq!(unknown.error_code(), ErrorCode::NotFound);
+        assert_eq!(unknown.details()["reason"], "target_missing");
+
+        let stale = adapter
+            .get_effect_item_values(&item_values_params(
+                EffectSelector {
+                    fingerprint: sample_selector(&adapter).fingerprint,
+                    ..selector
+                },
+                &[120.0],
+                Some(&["X"]),
+            ))
+            .expect_err("古い fingerprint が受理されました");
+        assert_eq!(stale.error_code(), ErrorCode::PreconditionFailed);
+    }
+
+    #[test]
+    fn the_response_carries_neither_a_handle_nor_an_alias() {
+        // 値そのものは載せるが、対象を指す内部の値と alias は載せない。
+        let adapter = mixed_adapter();
+        let values = adapter
+            .get_effect_item_values(&item_values_params(
+                effect_selector_of(&adapter, "標準描画", 0),
+                &[120.0],
+                None,
+            ))
+            .expect("評価できます");
+        let json = serde_json::to_string(&values).expect("直列化できます");
+        for forbidden in ["alias", "handle", "selector", "0x"] {
+            assert!(
+                !json.contains(forbidden),
+                "{forbidden} が現れました: {json}"
+            );
+        }
     }
 
     #[test]

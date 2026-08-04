@@ -76,7 +76,7 @@ pub use edit::{
 pub use edit_info::{Cursor, DisplayRange, EditInfo, Extent, FrameRange, SceneInfo, SceneRef};
 pub use effect::{
     AvailableEffect, AvailableEffectItem, EffectFlags, EffectInfo, EffectItem, EffectItemType,
-    EffectType, TrackInfo,
+    EffectType, EvaluatedItemKind, TrackInfo,
 };
 pub use envelope::{
     PongProject, PongResult, RequestEnvelope, RequestKind, ResponseEnvelope, ResponseKind,
@@ -106,17 +106,19 @@ pub use json::{JsonStrictError, deserialize_json, parse_json};
 pub use number::FiniteF64;
 pub use object::{LayerInfo, ObjectDetail, ObjectSummary, SectionRange};
 pub use operation::{
-    EditOperation, GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams,
+    EditOperation, EffectItemValues, EffectItemValuesInputError, EvaluatedItem,
+    GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GetEffectItemValuesParams,
     GetObjectParams, KnownOperation, ListAvailableEffectsParams, ListAvailableEffectsResult,
-    ListLayersParams, ListLayersResult, ListObjectsParams, ListObjectsResult, OPERATION_ADD_EFFECT,
-    OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT, OPERATION_CREATE_OBJECT_SECTION,
-    OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT, OPERATION_DELETE_OBJECT_SECTION,
-    OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_OBJECT,
-    OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS,
-    OPERATION_MOVE_OBJECT, OPERATION_MOVE_OBJECT_SECTION, OPERATION_RENDER_FRAME,
-    OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
-    OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectFilter, ObjectFilterError,
-    ReadOperation, RenderOperation,
+    ListLayersParams, ListLayersResult, ListObjectsParams, ListObjectsResult, MAX_EVALUATED_FRAMES,
+    MAX_EVALUATED_ITEMS, OPERATION_ADD_EFFECT, OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT,
+    OPERATION_CREATE_OBJECT_SECTION, OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT,
+    OPERATION_DELETE_OBJECT_SECTION, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
+    OPERATION_GET_EFFECT_ITEM_VALUES, OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS,
+    OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT,
+    OPERATION_MOVE_OBJECT_SECTION, OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED,
+    OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME,
+    OPERATION_SET_SELECTION, ObjectFilter, ObjectFilterError, ReadOperation, RenderOperation,
+    TrackGroup,
 };
 pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
 pub use render::{

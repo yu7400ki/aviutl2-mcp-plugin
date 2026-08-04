@@ -34,11 +34,10 @@ use crate::edit::adapter::{
 use crate::edit::error::{EditError, RollbackOutcome, UnsupportedReason};
 use crate::edit::host::{ObjectPosition, SceneEditor};
 use crate::edit::precondition::{Boundary, MutationPermit};
-use crate::edit::resolve::{
-    ResolvedEffect, ResolvedObject, effect_info_at, resolve_effect, resolve_object,
-};
+use crate::edit::resolve::{ResolvedEffect, ResolvedObject, resolve_effect, resolve_object};
 use crate::project::ProjectState;
 use crate::read::ReadError;
+use crate::read::adapter::effect_info_at;
 use crate::read::host::{
     HostEditInfo, HostEffect, HostLayer, HostObject, HostObjectDetail, HostObjectPlacement,
     SceneReader,
@@ -690,6 +689,57 @@ impl SceneReader for CachingEditor<'_> {
             .borrow_mut()
             .insert((layer, frame_start), detail.clone());
         Ok(detail)
+    }
+
+    fn effect_track_values(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        effect_position: usize,
+        item_name: &str,
+        frames: &[f64],
+    ) -> Result<Vec<FiniteF64>, ReadError> {
+        self.inner.reader().effect_track_values(
+            layer,
+            frame_start,
+            effect_position,
+            item_name,
+            frames,
+        )
+    }
+
+    fn effect_check_values(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        effect_position: usize,
+        item_name: &str,
+        frames: &[usize],
+    ) -> Result<Vec<bool>, ReadError> {
+        self.inner.reader().effect_check_values(
+            layer,
+            frame_start,
+            effect_position,
+            item_name,
+            frames,
+        )
+    }
+
+    fn track_group_item_names(
+        &self,
+        layer: usize,
+        frame_start: usize,
+        effect_name: &str,
+        effect_index: usize,
+        group_name: &str,
+    ) -> Result<Vec<String>, ReadError> {
+        self.inner.reader().track_group_item_names(
+            layer,
+            frame_start,
+            effect_name,
+            effect_index,
+            group_name,
+        )
     }
 }
 

@@ -232,6 +232,19 @@ impl EffectType {
     }
 }
 
+/// 任意フレームでの値を評価できる設定項目の種別。
+///
+/// 種別ごとにフレームの取り方も値の型も違う。トラックバーは小数部でフレーム間の
+/// 位置を指せて値は数値であり、チェックボックスは整数フレームだけを取って値は
+/// 真偽である。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvaluatedItemKind {
+    /// トラックバー。
+    Track,
+    /// チェックボックス。
+    Check,
+}
+
 /// effect 設定項目の種別。
 ///
 /// 既知の種別は snake_case 文字列、未知の種別は
@@ -339,6 +352,31 @@ impl EffectItemType {
     /// 同じ表現になることはない。
     pub fn kind_name(&self) -> String {
         kind_name(self.name(), self.as_raw())
+    }
+
+    /// 任意フレームでの値を評価できる種別であれば、その評価の種別を返す。
+    ///
+    /// **`_` を使わない網羅 `match` である。** 種別を足したときに、評価できるか
+    /// を決めないまま既定へ落ちることがない。
+    pub fn evaluated_kind(&self) -> Option<EvaluatedItemKind> {
+        match self {
+            EffectItemType::Integer | EffectItemType::Number => Some(EvaluatedItemKind::Track),
+            EffectItemType::Check => Some(EvaluatedItemKind::Check),
+            EffectItemType::Text
+            | EffectItemType::String
+            | EffectItemType::File
+            | EffectItemType::Color
+            | EffectItemType::Select
+            | EffectItemType::Scene
+            | EffectItemType::Range
+            | EffectItemType::Combo
+            | EffectItemType::Mask
+            | EffectItemType::Font
+            | EffectItemType::Figure
+            | EffectItemType::Data
+            | EffectItemType::Folder
+            | EffectItemType::Unknown(_) => None,
+        }
     }
 
     fn from_name(name: &str) -> Option<Self> {

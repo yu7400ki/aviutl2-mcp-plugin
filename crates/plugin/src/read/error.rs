@@ -23,6 +23,18 @@ pub(crate) const EDIT_INFO_OPERATION: &str = "get_edit_info";
 /// 編集情報の値が受け渡せる範囲を超えていたことを表す名前。
 pub(crate) const REASON_EDIT_INFO_OUT_OF_RANGE: &str = "edit_info_out_of_range";
 
+/// 名指しした対象が存在しないことを表す名前。
+pub(crate) const REASON_TARGET_MISSING: &str = "target_missing";
+
+/// 設定項目が任意フレームでの評価に対応しないことを表す名前。
+pub(crate) const REASON_ITEM_NOT_EVALUATABLE: &str = "item_not_evaluatable";
+
+/// 要求されたフレームが対象の範囲外であることを表す名前。
+pub(crate) const REASON_FRAME_OUT_OF_RANGE: &str = "frame_out_of_range";
+
+/// 事前確認を通した要求に対して値が得られなかったことを表す名前。
+pub(crate) const REASON_TRACK_VALUE_UNAVAILABLE: &str = "track_value_unavailable";
+
 /// 読み取りの失敗。
 ///
 /// 補助情報には SDK のハンドル・生ポインタ・秘匿値を含めない。含めるのは
@@ -78,6 +90,39 @@ pub enum ReadError {
         /// 一致した候補の件数。
         candidate_count: usize,
     },
+    /// セレクターが指す effect が存在しない。
+    ///
+    /// 所属オブジェクトの照合は既に通っている。要求元は effect の一覧を読み
+    /// 直す必要がある。
+    #[error("セレクターに一致する effect がありません")]
+    EffectNotFound,
+    /// 解決した effect の fingerprint がセレクターの値と一致しない。
+    ///
+    /// 現在の姿を名乗らない。オブジェクトの概要は要求元が送ってきた値と同じで
+    /// あり、復帰の手掛かりを増やさない。
+    #[error("対象 effect の fingerprint が要求と一致しません")]
+    EffectFingerprintMismatch,
+    /// 要求された設定項目が effect の項目一覧に無い。
+    #[error("指定された設定項目が effect にありません")]
+    ItemNotFound,
+    /// 設定項目は在るが、任意フレームでの値を持つ種別ではない。
+    ///
+    /// 項目名が誤っている場合と区別する。名前は正しいのに種別が違う要求に対して
+    /// 要求元が取る行動は「別の項目を選ぶ」であり、「名前を直す」ではない。
+    #[error("指定された設定項目は任意フレームでの値を持ちません")]
+    ItemNotEvaluatable,
+    /// 要求されたフレームが対象オブジェクトの範囲外である。
+    #[error("要求されたフレームがオブジェクトの範囲外です")]
+    FrameOutOfRange,
+    /// 事前確認を通した要求に対して SDK が値を返さなかった。
+    ///
+    /// 項目の存在と種別、フレームの範囲はいずれも呼び出し前に確かめている。
+    /// それらを通った失敗に対して要求元が打てる手は無い。
+    #[error("補間後の値を取得できませんでした: {operation}")]
+    TrackValueUnavailable {
+        /// 値を返さなかった SDK 関数の名前。
+        operation: &'static str,
+    },
     /// SDK の呼び出しが失敗した。
     #[error("SDK の呼び出しに失敗しました: {operation}")]
     Sdk {
@@ -104,10 +149,17 @@ impl ReadError {
             ReadError::EditBlocked { .. } => ErrorCode::EditBlocked,
             ReadError::SceneMismatch { .. }
             | ReadError::EpochMismatch
-            | ReadError::FingerprintMismatch { .. } => ErrorCode::PreconditionFailed,
-            ReadError::ObjectNotFound { .. } => ErrorCode::NotFound,
+            | ReadError::FingerprintMismatch { .. }
+            | ReadError::EffectFingerprintMismatch
+            | ReadError::FrameOutOfRange => ErrorCode::PreconditionFailed,
+            ReadError::ObjectNotFound { .. }
+            | ReadError::EffectNotFound
+            | ReadError::ItemNotFound => ErrorCode::NotFound,
+            ReadError::ItemNotEvaluatable => ErrorCode::UnsupportedOperation,
             ReadError::AmbiguousObject { .. } => ErrorCode::AmbiguousSelector,
-            ReadError::Sdk { .. } | ReadError::EditInfoOutOfRange => ErrorCode::SdkError,
+            ReadError::Sdk { .. }
+            | ReadError::EditInfoOutOfRange
+            | ReadError::TrackValueUnavailable { .. } => ErrorCode::SdkError,
             ReadError::Panicked => ErrorCode::InternalError,
         }
     }
@@ -147,10 +199,22 @@ impl ReadError {
                 json!({ "current_object": current_object })
             }
             ReadError::ObjectNotFound { .. } => json!({}),
+            ReadError::EffectFingerprintMismatch => json!({}),
+            // 名指しした対象が存在しないことは、対象が effect でも設定項目でも
+            // 同じ事実である。同じ名前を名乗る。
+            ReadError::EffectNotFound | ReadError::ItemNotFound => {
+                json!({ "reason": REASON_TARGET_MISSING })
+            }
+            ReadError::ItemNotEvaluatable => json!({ "reason": REASON_ITEM_NOT_EVALUATABLE }),
+            ReadError::FrameOutOfRange => json!({ "reason": REASON_FRAME_OUT_OF_RANGE }),
             ReadError::AmbiguousObject { candidate_count } => {
                 json!({ "candidate_count": candidate_count })
             }
             ReadError::Sdk { operation } => json!({ "sdk_operation": operation }),
+            ReadError::TrackValueUnavailable { operation } => json!({
+                "sdk_operation": operation,
+                "reason": REASON_TRACK_VALUE_UNAVAILABLE,
+            }),
             ReadError::EditInfoOutOfRange => json!({
                 "sdk_operation": EDIT_INFO_OPERATION,
                 "reason": REASON_EDIT_INFO_OUT_OF_RANGE,
@@ -187,10 +251,18 @@ pub(crate) mod tests {
                 detected_by: "find_object",
             },
             ReadError::AmbiguousObject { candidate_count: 2 },
+            ReadError::EffectNotFound,
+            ReadError::EffectFingerprintMismatch,
+            ReadError::ItemNotFound,
+            ReadError::ItemNotEvaluatable,
+            ReadError::FrameOutOfRange,
             ReadError::Sdk {
                 operation: "get_object_alias",
             },
             ReadError::EditInfoOutOfRange,
+            ReadError::TrackValueUnavailable {
+                operation: "get_effect_track_value",
+            },
             ReadError::Panicked,
         ]
     }
@@ -208,8 +280,14 @@ pub(crate) mod tests {
             ReadError::FingerprintMismatch { .. } => "FingerprintMismatch",
             ReadError::ObjectNotFound { .. } => "ObjectNotFound",
             ReadError::AmbiguousObject { .. } => "AmbiguousObject",
+            ReadError::EffectNotFound => "EffectNotFound",
+            ReadError::EffectFingerprintMismatch => "EffectFingerprintMismatch",
+            ReadError::ItemNotFound => "ItemNotFound",
+            ReadError::ItemNotEvaluatable => "ItemNotEvaluatable",
+            ReadError::FrameOutOfRange => "FrameOutOfRange",
             ReadError::Sdk { .. } => "Sdk",
             ReadError::EditInfoOutOfRange => "EditInfoOutOfRange",
+            ReadError::TrackValueUnavailable { .. } => "TrackValueUnavailable",
             ReadError::Panicked => "Panicked",
         }
     }
@@ -224,8 +302,14 @@ pub(crate) mod tests {
             "FingerprintMismatch",
             "ObjectNotFound",
             "AmbiguousObject",
+            "EffectNotFound",
+            "EffectFingerprintMismatch",
+            "ItemNotFound",
+            "ItemNotEvaluatable",
+            "FrameOutOfRange",
             "Sdk",
             "EditInfoOutOfRange",
+            "TrackValueUnavailable",
             "Panicked",
         ];
         let covered: Vec<&str> = all_errors().iter().map(variant_name).collect();
@@ -282,12 +366,59 @@ pub(crate) mod tests {
                 ErrorCode::PreconditionFailed,
                 ErrorCode::NotFound,
                 ErrorCode::AmbiguousSelector,
+                ErrorCode::NotFound,
+                ErrorCode::PreconditionFailed,
+                ErrorCode::NotFound,
+                // 項目は在るが種別が違う。名前が誤っている場合と畳まない。
+                ErrorCode::UnsupportedOperation,
+                ErrorCode::PreconditionFailed,
                 ErrorCode::SdkError,
                 // 取得は成功したが値が範囲外だった。要求元に打つ手が無い点は
                 // 呼び出しの失敗と同じであり、コードは分けない。
                 ErrorCode::SdkError,
+                ErrorCode::SdkError,
                 ErrorCode::InternalError,
             ]
+        );
+    }
+
+    #[test]
+    fn the_three_failures_before_the_call_are_not_folded_together() {
+        // 項目名が誤っている・種別が違う・フレームが範囲外は、要求元が次に取る
+        // 行動がそれぞれ違う。1 つでも同じ応答になると切り分けられない。
+        let mapped: Vec<(ErrorCode, Value)> = [
+            ReadError::ItemNotFound,
+            ReadError::ItemNotEvaluatable,
+            ReadError::FrameOutOfRange,
+            ReadError::TrackValueUnavailable {
+                operation: "get_effect_track_value",
+            },
+        ]
+        .into_iter()
+        .map(|error| (error.error_code(), error.details()["reason"].clone()))
+        .collect();
+
+        assert_eq!(
+            mapped,
+            vec![
+                (ErrorCode::NotFound, json!(REASON_TARGET_MISSING)),
+                (
+                    ErrorCode::UnsupportedOperation,
+                    json!(REASON_ITEM_NOT_EVALUATABLE)
+                ),
+                (
+                    ErrorCode::PreconditionFailed,
+                    json!(REASON_FRAME_OUT_OF_RANGE)
+                ),
+                (ErrorCode::SdkError, json!(REASON_TRACK_VALUE_UNAVAILABLE)),
+            ]
+        );
+        let distinct: std::collections::BTreeSet<String> =
+            mapped.iter().map(|pair| format!("{pair:?}")).collect();
+        assert_eq!(
+            distinct.len(),
+            mapped.len(),
+            "同じ応答になった失敗があります"
         );
     }
 

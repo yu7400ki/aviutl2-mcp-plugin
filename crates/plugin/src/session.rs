@@ -18,16 +18,17 @@ use anyhow::{Context, Result};
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchInputError, ClientAuth, ClientHello,
     CreateObjectParams, CreateObjectSectionParams, DeleteEffectParams, DeleteObjectParams,
-    DeleteObjectSectionParams, EditInputError, EditOperation, ErrorCode, ErrorObject,
-    GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GetObjectParams, InstanceId,
-    InstanceState, KnownOperation, ListAvailableEffectsParams, ListAvailableEffectsResult,
-    ListLayersParams, ListLayersResult, ListObjectsParams, ListObjectsResult, MoveObjectParams,
-    MoveObjectSectionParams, Nonce, ObjectFilterError, PageError, PageRequest, PongProject,
-    PongResult, ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult,
-    RenderInputError, RenderOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind,
-    ResponseResult, ScaledBudgets, SetEffectEnabledParams, SetLayerStateParams,
-    SetObjectItemParams, SetObjectNameParams, SetSelectionParams, compute_client_mac,
-    compute_server_mac, deserialize_json, take_page, verify_mac,
+    DeleteObjectSectionParams, EditInputError, EditOperation, EffectItemValuesInputError,
+    ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams,
+    GetEffectItemValuesParams, GetObjectParams, InstanceId, InstanceState, KnownOperation,
+    ListAvailableEffectsParams, ListAvailableEffectsResult, ListLayersParams, ListLayersResult,
+    ListObjectsParams, ListObjectsResult, MoveObjectParams, MoveObjectSectionParams, Nonce,
+    ObjectFilterError, PageError, PageRequest, PongProject, PongResult, ProtocolVersion,
+    ReadOperation, RenderFrameParams, RenderFrameResult, RenderInputError, RenderOperation,
+    RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult, ScaledBudgets,
+    SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
+    SetSelectionParams, compute_client_mac, compute_server_mac, deserialize_json, take_page,
+    verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -851,6 +852,7 @@ enum ReadRequest {
     ListObjects(ListObjectsParams),
     GetObject(Box<GetObjectParams>),
     ListAvailableEffects(ListAvailableEffectsParams),
+    GetEffectItemValues(Box<GetEffectItemValuesParams>),
 }
 
 /// operation 別の params を復号し、要求内容だけで決まる検証を済ませる。
@@ -887,6 +889,11 @@ fn decode_request(operation: ReadOperation, params: &Value) -> Result<ReadReques
             let params: ListAvailableEffectsParams = decode_params(params)?;
             params.page.validate().map_err(page_error)?;
             ReadRequest::ListAvailableEffects(params)
+        }
+        ReadOperation::GetEffectItemValues => {
+            let params: GetEffectItemValuesParams = decode_params(params)?;
+            params.validate().map_err(item_values_error)?;
+            ReadRequest::GetEffectItemValues(Box::new(params))
         }
     })
 }
@@ -949,6 +956,11 @@ fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Valu
             .map_err(page_error)?;
             to_result(&ListAvailableEffectsResult { items, page })
         }
+        ReadRequest::GetEffectItemValues(params) => to_result(
+            &adapter
+                .get_effect_item_values(&params)
+                .map_err(read_error)?,
+        ),
     }
 }
 
@@ -1277,6 +1289,14 @@ fn filter_error(error: ObjectFilterError) -> ErrorObject {
     error_object(ErrorCode::InvalidArgument, error.to_string())
 }
 
+/// 補間後の値の要求内容の失敗を応答用のエラーへ変換する。
+///
+/// 見るのは件数と項目名の規則だけであり、どれも説明の文面で訂正できる。分岐に
+/// 使う名前は添えない。
+fn item_values_error(error: EffectItemValuesInputError) -> ErrorObject {
+    error_object(ErrorCode::InvalidArgument, error.to_string())
+}
+
 /// 送信済み応答が読み取られるのを待ってから接続を閉じるための待機。
 ///
 /// クライアント切断（EOF）か期限超過まで受信を続け、受け取ったフレームは
@@ -1419,7 +1439,8 @@ mod tests {
     use crate::read::{Page, Snapshot};
     use aviutl2_mcp_core::{
         AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
-        EffectItemType, EffectType, Extent, FiniteF64, FrameRange, LayerInfo, ObjectDetail,
+        EffectItemType, EffectItemValues, EffectSelector, EffectType, EvaluatedItem, Extent,
+        FiniteF64, FrameRange, LayerInfo, MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, ObjectDetail,
         ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary,
         SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, SceneInfo,
         SectionRange, TRANSPORT_HEADROOM,
@@ -1630,6 +1651,34 @@ mod tests {
                 snapshot_revision: REVISION,
             })
         }
+
+        fn get_effect_item_values(
+            &self,
+            params: &GetEffectItemValuesParams,
+        ) -> Result<EffectItemValues, ReadError> {
+            self.enter("get_effect_item_values")?;
+            Ok(EffectItemValues {
+                project_revision: REVISION,
+                frames: params.frames.clone(),
+                items: vec![EvaluatedItem::Track {
+                    name: "X".to_string(),
+                    values: params.frames.clone(),
+                    group: None,
+                }],
+                truncated: false,
+            })
+        }
+    }
+
+    /// レイヤー 1・フレーム 100 のオブジェクトが持つ effect を指すセレクター。
+    fn fake_effect_selector() -> EffectSelector {
+        let object = fake_object().selector;
+        EffectSelector {
+            fingerprint: object.fingerprint.clone(),
+            object,
+            effect_name: "動画ファイル".to_string(),
+            effect_index: 0,
+        }
     }
 
     fn ensure_scene(expected_scene_id: i32) -> Result<(), ReadError> {
@@ -1777,6 +1826,10 @@ mod tests {
                 json!({ "selector": fake_object().selector }),
             ),
             (ReadOperation::ListAvailableEffects, json!({})),
+            (
+                ReadOperation::GetEffectItemValues,
+                json!({ "effect": fake_effect_selector(), "frames": [100.0] }),
+            ),
         ]
     }
 
@@ -1793,6 +1846,7 @@ mod tests {
                 "list_available_effects",
                 ReadOperation::ListAvailableEffects,
             ),
+            ("get_effect_item_values", ReadOperation::GetEffectItemValues),
         ] {
             assert_eq!(
                 classify_operation(name).unwrap(),
@@ -1924,6 +1978,75 @@ mod tests {
             assert!(
                 adapter.calls().is_empty(),
                 "{operation:?} が未知フィールドのまま読み取りへ進みました"
+            );
+        }
+    }
+
+    #[test]
+    fn effect_item_values_bound_the_frame_and_item_counts_before_reading() {
+        // 件数は要求内容だけで決まる。読み取りへ進む前に落とす。
+        let selector = fake_effect_selector();
+        let over_frames: Vec<f64> = vec![100.0; MAX_EVALUATED_FRAMES + 1];
+        let over_items: Vec<String> = (0..=MAX_EVALUATED_ITEMS)
+            .map(|index| format!("項目{index}"))
+            .collect();
+        for params in [
+            json!({ "effect": selector, "frames": [] }),
+            json!({ "effect": selector, "frames": over_frames }),
+            json!({ "effect": selector, "frames": [100.0], "items": [] }),
+            json!({ "effect": selector, "frames": [100.0], "items": over_items }),
+        ] {
+            let adapter = FakeAdapter::new();
+            let error =
+                read(&adapter, ReadOperation::GetEffectItemValues, params.clone()).unwrap_err();
+            assert_eq!(
+                error.code,
+                ErrorCode::InvalidArgument,
+                "{params} が受理されました"
+            );
+            assert!(
+                adapter.calls().is_empty(),
+                "{params} が読み取りへ進みました"
+            );
+        }
+    }
+
+    #[test]
+    fn effect_item_values_accept_the_counts_at_the_bounds() {
+        let selector = fake_effect_selector();
+        let frames: Vec<f64> = vec![100.0; MAX_EVALUATED_FRAMES];
+        let items: Vec<String> = (0..MAX_EVALUATED_ITEMS)
+            .map(|index| format!("項目{index}"))
+            .collect();
+        let adapter = FakeAdapter::new();
+        let result = read(
+            &adapter,
+            ReadOperation::GetEffectItemValues,
+            json!({ "effect": selector, "frames": frames, "items": items }),
+        )
+        .expect("上限ちょうどが拒否されました");
+        assert_eq!(
+            result["frames"].as_array().unwrap().len(),
+            MAX_EVALUATED_FRAMES
+        );
+        assert_eq!(adapter.calls(), vec!["get_effect_item_values"]);
+    }
+
+    #[test]
+    fn the_effect_item_values_payload_carries_no_handle_or_alias() {
+        // 値そのものは載せるが、対象を指す内部の値と alias は載せない。
+        let adapter = FakeAdapter::new();
+        let result = read(
+            &adapter,
+            ReadOperation::GetEffectItemValues,
+            json!({ "effect": fake_effect_selector(), "frames": [100.0, 100.5] }),
+        )
+        .expect("評価できます");
+        let payload = result.to_string();
+        for forbidden in ["alias", "handle", "selector", "0x"] {
+            assert!(
+                !payload.contains(forbidden),
+                "{forbidden} が IPC 応答に現れました: {payload}"
             );
         }
     }
