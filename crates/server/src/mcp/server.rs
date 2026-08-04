@@ -21,6 +21,7 @@ use crate::mcp::render::{RenderFrameInput, RenderFrameOutput};
 use crate::mcp::summary::{MAX_TEXT_CHARS, clamp_chars};
 use crate::mcp::{describe, failure};
 use crate::redact;
+use crate::settings::SettingsSource;
 use aviutl2_mcp_core::{
     BatchOutcome, EditInfo, EditOutcome, ErrorCode, ErrorObject, GetCurrentSceneParams,
     GetCurrentSceneResult, GetEditInfoParams, InstanceId, LayerStateOutcome,
@@ -31,9 +32,7 @@ use aviutl2_mcp_core::{
     OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT, OPERATION_RENDER_FRAME,
     OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
     OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail, RenderFrameResult,
-    RequestBudgetKind, SERVER_ARTIFACT_INGEST_BUDGET, SERVER_BATCH_REQUEST_BUDGET,
-    SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET, SERVER_RENDER_REQUEST_BUDGET,
-    SERVER_RESOLVE_BUDGET, SelectionState, request_budget_kind,
+    RequestBudgetKind, ScaledBudgets, SelectionState, request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -73,7 +72,7 @@ const RESOURCE_MIME_TYPE: &str = "application/json";
 ///
 /// 要求フェーズの予算は operation の区分ごとに異なる。どれを使うかは
 /// [`ipc_request_budget`](CallLimits::ipc_request_budget) が operation 名から選ぶ。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallLimits {
     /// インスタンス解決（接続・handshake・ping）の期限。
     pub resolve: Duration,
@@ -95,13 +94,24 @@ pub struct CallLimits {
 
 impl Default for CallLimits {
     fn default() -> Self {
+        Self::from_budgets(ScaledBudgets::unscaled())
+    }
+}
+
+impl CallLimits {
+    /// 倍率を適用済みの予算一式から引く。
+    ///
+    /// **server 側で範囲を判定し直さない。** 倍率の採否は core が不等式ごと
+    /// 決めており、判定が 2 か所にあると plugin と server が同じファイルから
+    /// 別の結論を得る形ができる。
+    pub fn from_budgets(budgets: ScaledBudgets) -> Self {
         Self {
-            resolve: SERVER_RESOLVE_BUDGET,
-            request: SERVER_READ_REQUEST_BUDGET,
-            edit_request: SERVER_EDIT_REQUEST_BUDGET,
-            batch_request: SERVER_BATCH_REQUEST_BUDGET,
-            render_request: SERVER_RENDER_REQUEST_BUDGET,
-            artifact_ingest: SERVER_ARTIFACT_INGEST_BUDGET,
+            resolve: budgets.server_resolve(),
+            request: budgets.server_request_phase(RequestBudgetKind::Read),
+            edit_request: budgets.server_request_phase(RequestBudgetKind::Edit),
+            batch_request: budgets.server_request_phase(RequestBudgetKind::Batch),
+            render_request: budgets.server_request_phase(RequestBudgetKind::Render),
+            artifact_ingest: budgets.server_artifact_ingest(),
         }
     }
 }
@@ -183,15 +193,37 @@ pub struct AviUtl2McpServer {
     /// registry から導いた基底の下へディレクトリを作り、そこへ保護された DACL を
     /// 設定するため、**開くかどうかを利用側が決められる形にしてある。**
     artifacts: Option<Arc<ArtifactStore>>,
-    limits: CallLimits,
+    limits: LimitsSource,
     tool_router: ToolRouter<Self>,
+}
+
+/// 実行予算の出所。
+///
+/// 設定を持つ場合は tool call のたびに現在の snapshot から引く。設定を持たない
+/// 構築口は固定値を使う——予算を明示して振る舞いを観測する試験と実機受け入れの
+/// ためであり、**製品の経路では使わない。**
+#[derive(Clone)]
+enum LimitsSource {
+    /// 構築時に与えられた固定値。
+    Fixed(CallLimits),
+    /// 共有設定から引く。
+    Settings(Arc<SettingsSource>),
+}
+
+impl LimitsSource {
+    fn limits(&self) -> CallLimits {
+        match self {
+            Self::Fixed(limits) => *limits,
+            Self::Settings(source) => CallLimits::from_budgets(source.settings().budgets()),
+        }
+    }
 }
 
 impl std::fmt::Debug for AviUtl2McpServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AviUtl2McpServer")
             .field("registry_dir", &self.registry_dir)
-            .field("limits", &self.limits)
+            .field("limits", &self.limits())
             .field("artifacts", &self.artifacts.is_some())
             .finish_non_exhaustive()
     }
@@ -204,29 +236,28 @@ struct ToolSuccess {
 }
 
 impl AviUtl2McpServer {
-    /// registry ディレクトリを指定してサーバーを作る。
+    /// registry ディレクトリと設定の供給元を指定してサーバーを作る。
     ///
     /// 描画成果物の保管庫を開く。保管庫は registry と同じ基底の下に作られ、
     /// **このサーバーが破棄されるときにディレクトリごと消える**。成果物は
     /// このプロセスだけが読むものであり、プロセスの終了後に残す理由が無い。
-    pub fn new(registry_dir: PathBuf) -> Result<Self, ArtifactStoreError> {
-        Self::with_limits(registry_dir, CallLimits::default())
-    }
-
-    /// 実行予算を指定してサーバーを作る。保管庫は [`Self::new`] と同じく開く。
-    pub fn with_limits(
+    ///
+    /// 実行予算も保管庫の上限も、要求のたびに供給元の現在値から引く。
+    pub fn new(
         registry_dir: PathBuf,
-        limits: CallLimits,
+        settings: Arc<SettingsSource>,
     ) -> Result<Self, ArtifactStoreError> {
-        let store = ArtifactStore::open(base_dir_for_registry(&registry_dir))?;
-        Ok(Self::with_artifact_store(
-            registry_dir,
-            limits,
-            Arc::new(store),
-        ))
+        let store =
+            ArtifactStore::open(base_dir_for_registry(&registry_dir), Arc::clone(&settings))?;
+        Ok(Self {
+            artifacts: Some(Arc::new(store)),
+            ..Self::from_limits_source(registry_dir, LimitsSource::Settings(settings))
+        })
     }
 
-    /// 開いてある保管庫を渡してサーバーを作る。
+    /// 開いてある保管庫と固定の実行予算でサーバーを作る。
+    ///
+    /// 予算を明示して振る舞いを観測するための構築口である。
     pub fn with_artifact_store(
         registry_dir: PathBuf,
         limits: CallLimits,
@@ -248,12 +279,21 @@ impl AviUtl2McpServer {
     /// それを強いないための構築口である。描画を提供する場合は [`Self::new`] を
     /// 使う。
     pub fn without_artifact_store(registry_dir: PathBuf, limits: CallLimits) -> Self {
+        Self::from_limits_source(registry_dir, LimitsSource::Fixed(limits))
+    }
+
+    fn from_limits_source(registry_dir: PathBuf, limits: LimitsSource) -> Self {
         Self {
             registry_dir: Arc::new(registry_dir),
             artifacts: None,
             limits,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// tool call 1 回分の実行予算。
+    fn limits(&self) -> CallLimits {
+        self.limits.limits()
     }
 
     /// 登録済みの tool 定義を返す。
@@ -425,7 +465,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<InstanceInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_get_edit_info", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let result: EditInfo = request_operation(
@@ -462,7 +502,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<InstanceInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_get_current_scene", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let result: GetCurrentSceneResult = request_operation(
@@ -501,7 +541,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<ListLayersInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_list_layers", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -542,7 +582,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<ListObjectsInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_list_objects", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -583,7 +623,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<GetObjectInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_get_object", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -624,7 +664,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<ListAvailableEffectsInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_list_available_effects", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -680,7 +720,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<CreateObjectInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_create_object", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -735,7 +775,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<MoveObjectInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_move_object", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -784,7 +824,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<SetObjectNameInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_set_object_name", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -838,7 +878,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<SetObjectItemInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_set_object_item", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -893,7 +933,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<AddEffectInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_add_effect", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -945,7 +985,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<SetEffectEnabledInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_set_effect_enabled", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -997,7 +1037,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<DeleteEffectInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_delete_effect", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1050,7 +1090,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<DeleteObjectInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_delete_object", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1107,7 +1147,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<SetLayerStateInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_set_layer_state", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1166,7 +1206,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<SetSelectionInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_set_selection", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1238,7 +1278,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<ApplyBatchInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         self.run("aviutl2_apply_batch", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1291,7 +1331,7 @@ impl AviUtl2McpServer {
         Parameters(input): Parameters<RenderFrameInput>,
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         let artifacts = self.artifacts.clone();
         self.run("aviutl2_render_frame", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
@@ -1413,7 +1453,7 @@ impl ServerHandler for AviUtl2McpServer {
     ) -> Result<ReadResourceResult, McpError> {
         let uri = request.uri;
         let registry_dir = self.registry_dir();
-        let limits = self.limits;
+        let limits = self.limits();
         let artifacts = self.artifacts.clone();
 
         let target = parse_resource_uri(&uri)
@@ -2986,6 +3026,10 @@ mod tests {
     fn default_limits_come_from_the_shared_budget() {
         // 既定値を接続先と共有する配分から外すと、接続先が自身の上限まで使った
         // 段の途中で予算が尽き、応答しているインスタンスが期限超過になる。
+        use aviutl2_mcp_core::{
+            SERVER_ARTIFACT_INGEST_BUDGET, SERVER_BATCH_REQUEST_BUDGET, SERVER_EDIT_REQUEST_BUDGET,
+            SERVER_READ_REQUEST_BUDGET, SERVER_RENDER_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET,
+        };
         let limits = CallLimits::default();
         assert_eq!(limits.resolve, SERVER_RESOLVE_BUDGET);
         assert_eq!(limits.request, SERVER_READ_REQUEST_BUDGET);
@@ -3000,6 +3044,47 @@ mod tests {
     }
 
     #[test]
+    fn the_limits_follow_the_shared_settings_without_a_second_judgement() {
+        // 倍率の採否は core が不等式ごと決める。server 側で範囲を判定し直すと、
+        // plugin と server が同じファイルから別の結論を得る形ができる。
+        let settings = settings_with_scale(50);
+        let source = SettingsSource::fixed(settings.clone());
+        let server = AviUtl2McpServer::from_limits_source(
+            PathBuf::from("registry"),
+            LimitsSource::Settings(source),
+        );
+
+        let budgets = settings.budgets();
+        assert_eq!(server.limits(), CallLimits::from_budgets(budgets));
+        assert_eq!(
+            server.limits().render_request,
+            budgets.server_request_phase(RequestBudgetKind::Render)
+        );
+        assert_ne!(server.limits(), CallLimits::default());
+    }
+
+    /// 倍率を適用した設定を作る。
+    fn settings_with_scale(percent: u64) -> aviutl2_mcp_core::settings::Settings {
+        settings_from(&format!(r#"{{"budget_scale_percent":{percent}}}"#))
+    }
+
+    /// 成果物の保存時間を指定した設定を作る。
+    fn settings_with_artifact_ttl(ttl: Duration) -> aviutl2_mcp_core::settings::Settings {
+        settings_from(&format!(
+            r#"{{"artifact":{{"ttl_seconds":{}}}}}"#,
+            ttl.as_secs()
+        ))
+    }
+
+    /// 設定ファイルの内容から解決済みの設定を作る。
+    fn settings_from(text: &str) -> aviutl2_mcp_core::settings::Settings {
+        aviutl2_mcp_core::settings::SettingsDocument::parse(text)
+            .unwrap()
+            .resolve(&aviutl2_mcp_core::settings::Settings::default())
+            .0
+    }
+
+    #[test]
     fn call_limits_can_be_overridden() {
         let limits = CallLimits {
             resolve: Duration::from_millis(120),
@@ -3010,12 +3095,12 @@ mod tests {
             artifact_ingest: Duration::from_millis(130),
         };
         let server = AviUtl2McpServer::without_artifact_store(PathBuf::from("registry"), limits);
-        assert_eq!(server.limits.resolve, Duration::from_millis(120));
-        assert_eq!(server.limits.request, Duration::from_millis(340));
-        assert_eq!(server.limits.edit_request, Duration::from_millis(560));
-        assert_eq!(server.limits.batch_request, Duration::from_millis(780));
-        assert_eq!(server.limits.render_request, Duration::from_millis(910));
-        assert_eq!(server.limits.artifact_ingest, Duration::from_millis(130));
+        assert_eq!(server.limits().resolve, Duration::from_millis(120));
+        assert_eq!(server.limits().request, Duration::from_millis(340));
+        assert_eq!(server.limits().edit_request, Duration::from_millis(560));
+        assert_eq!(server.limits().batch_request, Duration::from_millis(780));
+        assert_eq!(server.limits().render_request, Duration::from_millis(910));
+        assert_eq!(server.limits().artifact_ingest, Duration::from_millis(130));
     }
 
     /// 区分ごとの取り違えが必ず落ちるよう、桁で離した予算。
@@ -3186,7 +3271,8 @@ mod tests {
                 uuid::Uuid::new_v4()
             ));
             let clock = Arc::new(FixedClock(std::sync::atomic::AtomicI64::new(0)));
-            let store = ArtifactStore::open_with(base_dir.clone(), ttl, clock.clone())
+            let settings = SettingsSource::fixed(settings_with_artifact_ttl(ttl));
+            let store = ArtifactStore::open_with(base_dir.clone(), settings, clock.clone())
                 .expect("保管庫を開ける");
             Self {
                 base_dir,

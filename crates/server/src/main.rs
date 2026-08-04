@@ -1,7 +1,10 @@
+use aviutl2_mcp_core::settings::{SettingsReader, SettingsRefresh, settings_path};
 use aviutl2_mcp_server::api::{ListInstancesRequest, aviutl2_list_instances};
+use aviutl2_mcp_server::artifact::base_dir_for_registry;
 use aviutl2_mcp_server::discovery::default_registry_dir;
 use aviutl2_mcp_server::init_logging;
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, REGISTRY_DIR_ENV};
+use aviutl2_mcp_server::settings::{SETTINGS_POLL_INTERVAL, SettingsWatcher};
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 use std::io::Write;
@@ -12,21 +15,42 @@ use std::process::ExitCode;
 /// tool call の同期処理は `spawn_blocking` の専用スレッドで走る。
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    init_logging();
-
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && args[1] == "list-instances" {
+        init_logging(aviutl2_mcp_core::settings::DEFAULT_LOG_LEVEL);
         return run_list_instances_cli();
     }
 
     let Some(registry_dir) = registry_dir() else {
+        init_logging(aviutl2_mcp_core::settings::DEFAULT_LOG_LEVEL);
         tracing::error!("registry ディレクトリを決定できませんでした");
         return ExitCode::FAILURE;
     };
 
+    // 設定は記録の準備より先に読む。ログレベルがそこから決まるためである。
+    // 解決で生じた不整合は subscriber が立ってから流す。
+    let mut reader = SettingsReader::new(settings_path(&base_dir_for_registry(&registry_dir)));
+    let refresh = reader.refresh();
+    init_logging(reader.settings().log_level());
+    match refresh {
+        SettingsRefresh::Reloaded(issues) => {
+            for issue in &issues {
+                tracing::warn!("設定を補正しました: {issue}");
+            }
+        }
+        SettingsRefresh::Unchanged => {}
+        SettingsRefresh::Failed(e) => {
+            tracing::warn!("設定を読み込めませんでした。既定値で続行します: {e}");
+        }
+    }
+
+    // MCP の受付を始める前に初期 snapshot を作る。以後の変更は 1 本の軽い
+    // スレッドが一定間隔で取り込む。
+    let watcher = SettingsWatcher::start(reader, SETTINGS_POLL_INTERVAL);
+
     // 描画成果物の保管庫は起動時に開く。保管庫はこのサービスが破棄されるときに
     // ディレクトリごと消えるため、寿命はプロセスの寿命と一致する。
-    let server = match AviUtl2McpServer::new(registry_dir) {
+    let server = match AviUtl2McpServer::new(registry_dir, watcher.source()) {
         Ok(server) => server,
         Err(e) => {
             tracing::error!(error = %e, "描画成果物の保管庫を開けませんでした");

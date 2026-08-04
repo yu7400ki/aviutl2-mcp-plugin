@@ -68,8 +68,7 @@ use aviutl2_mcp_core::{
 };
 use aviutl2_mcp_server::api::ListInstancesResponse;
 use aviutl2_mcp_server::artifact::{
-    ARTIFACT_MAX_COUNT, ARTIFACT_MAX_TOTAL_BYTES, ARTIFACT_MEDIA_TYPE, ARTIFACT_TTL, ArtifactStore,
-    base_dir_for_registry,
+    ARTIFACT_MEDIA_TYPE, ArtifactLimits, ArtifactStore, base_dir_for_registry,
 };
 use aviutl2_mcp_server::discovery::{DiscoveryConfig, default_registry_dir, resolve_instance};
 use aviutl2_mcp_server::mcp::input::{InstanceInput, ListInstancesInput, parse_instance_id};
@@ -77,6 +76,7 @@ use aviutl2_mcp_server::mcp::render::{RenderFormatInput, RenderFrameInput};
 use aviutl2_mcp_server::mcp::{
     ARTIFACTS_RESOURCE_URI_PREFIX, AviUtl2McpServer, CallLimits, REGISTRY_DIR_ENV,
 };
+use aviutl2_mcp_server::settings::SettingsSource;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use serde::de::DeserializeOwned;
@@ -175,8 +175,11 @@ fn run(report: &mut Report) -> Result<(), String> {
     println!("目視用の複製の置き場: {}", out_dir.display());
 
     let store = Arc::new(
-        ArtifactStore::open(base_dir.clone())
-            .map_err(|e| format!("描画成果物の保管庫を開けません: {e}"))?,
+        ArtifactStore::open(
+            base_dir.clone(),
+            SettingsSource::fixed(aviutl2_mcp_core::settings::Settings::default()),
+        )
+        .map_err(|e| format!("描画成果物の保管庫を開けません: {e}"))?,
     );
     let harness = Harness::new(
         registry_dir.clone(),
@@ -237,6 +240,11 @@ fn registry_dir() -> Result<PathBuf, String> {
     default_registry_dir().ok_or_else(|| {
         format!("registry ディレクトリを決定できません。{REGISTRY_DIR_ENV} を設定してください。")
     })
+}
+
+/// 保管庫の上限。既定の設定が定める値である。
+fn artifact_limits() -> ArtifactLimits {
+    ArtifactLimits::default()
 }
 
 /// 期限を短縮した実行予算を作る。
@@ -1562,8 +1570,8 @@ fn section_artifacts(
         format!(
             "総量の上限は {} MiB であり、件数の上限まで描いてもそこへ届かない。\
              届かせるには 1 枚あたり {} MiB を超える解像度が要り、それは 1 枚の上限に掛かる",
-            ARTIFACT_MAX_TOTAL_BYTES / (1024 * 1024),
-            ARTIFACT_MAX_TOTAL_BYTES / (1024 * 1024) / ARTIFACT_MAX_COUNT as u64
+            artifact_limits().max_total_bytes / (1024 * 1024),
+            artifact_limits().max_total_bytes / (1024 * 1024) / artifact_limits().max_count as u64
         ),
     );
 
@@ -1583,7 +1591,7 @@ fn section_artifacts(
             Mode::Auto,
             format!(
                 "保存時間は {} 秒であり、実時間で待つと実行が長くなる。{WAIT_FOR_EXPIRY_ENV} を設定すると待って確かめる",
-                ARTIFACT_TTL.as_secs()
+                artifact_limits().ttl.as_secs()
             ),
         ),
     }
@@ -1610,7 +1618,7 @@ fn section_artifacts(
 fn check_eviction(harness: &Harness, target: &Target, store: &Arc<ArtifactStore>) -> CheckResult {
     let frame = target.frames()[0];
     let mut oldest = None;
-    for round in 0..=ARTIFACT_MAX_COUNT {
+    for round in 0..=artifact_limits().max_count {
         let response = harness
             .render_frame(&target.id, target.scene_id, frame)
             .map_err(|error| {
@@ -1630,14 +1638,15 @@ fn check_eviction(harness: &Harness, target: &Target, store: &Arc<ArtifactStore>
         return Err("上限を超えて描いても最も古い成果物が残っています".to_string());
     }
     let held = store.len();
-    if held > ARTIFACT_MAX_COUNT {
+    let max_count = artifact_limits().max_count;
+    if held > max_count {
         return Err(format!(
-            "保持件数が上限 {ARTIFACT_MAX_COUNT} を超えて {held} 件あります"
+            "保持件数が上限 {max_count} を超えて {held} 件あります"
         ));
     }
     Ok(vec![format!(
         "{} 回描いた後の保持件数は {held} 件で、最初の成果物は引き当てられない",
-        ARTIFACT_MAX_COUNT + 1
+        artifact_limits().max_count + 1
     )])
 }
 
@@ -1652,7 +1661,7 @@ fn check_expiry(harness: &Harness, target: &Target, store: &Arc<ArtifactStore>) 
         return Err("描いた直後の成果物を引き当てられません".to_string());
     }
 
-    let wait = ARTIFACT_TTL + POLL_INTERVAL;
+    let wait = artifact_limits().ttl + POLL_INTERVAL;
     println!("保存時間が過ぎるまで {} 秒待ちます。", wait.as_secs());
     std::thread::sleep(wait);
 

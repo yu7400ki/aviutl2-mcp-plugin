@@ -715,8 +715,11 @@ impl Harness {
             .build()
             .map_err(|e| format!("ランタイムを作成できません: {e}"))?;
         Ok(Self {
-            server: AviUtl2McpServer::new(registry_dir)
-                .map_err(|e| format!("描画成果物の保管庫を開けません: {e}"))?,
+            server: AviUtl2McpServer::new(
+                registry_dir,
+                aviutl2_mcp_server::settings::SettingsSource::fixed(Default::default()),
+            )
+            .map_err(|e| format!("描画成果物の保管庫を開けません: {e}"))?,
             runtime,
             last_raw: RefCell::new(String::new()),
         })

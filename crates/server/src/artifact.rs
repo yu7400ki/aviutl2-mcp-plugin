@@ -13,6 +13,8 @@
 //! `artifact_id` をパスへ連結しないため、どのような文字列を与えても
 //! 「見つからない」で終わる。
 
+use crate::settings::SettingsSource;
+use aviutl2_mcp_core::settings::Settings;
 use aviutl2_mcp_core::{ARTIFACT_EXTENSION, ARTIFACT_MAX_BYTES, InstanceId, format_sha256};
 use aviutl2_mcp_win::create_protected_directory;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -28,22 +30,48 @@ use uuid::Uuid;
 
 pub use aviutl2_mcp_core::{ARTIFACT_MEDIA_TYPE, HandoffToken, HandoffTokenFormatError};
 
-/// artifact の有効期限。
-pub const ARTIFACT_TTL: Duration = Duration::from_secs(10 * 60);
-
-/// 同時に保持する artifact の件数の上限。
-pub const ARTIFACT_MAX_COUNT: usize = 16;
-
-/// 同時に保持する artifact の総量の上限。
-pub const ARTIFACT_MAX_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
-
-/// 起動時に他プロセスの残骸とみなす session ディレクトリの古さ。
+/// store が守る上限。
 ///
-/// 異常終了した server の store は次の起動まで残る。一方で、同時に稼働する
-/// 別の server の store を消してはならない。所有者の生存は
-/// [`SESSION_LOCK_FILE`] で判定し、この時間は判定が付かない場合に備えた
-/// 二重の余裕である。
-const SESSION_STALE_AFTER: Duration = Duration::from_secs(60 * 60);
+/// 出所は共有設定であり、範囲の判定は設定の解決手続きが済ませている。**store
+/// 側で判定し直さない。** 判定が 2 か所にあると、plugin と server が同じ
+/// ファイルから別の結論を得る形ができる。
+///
+/// 保存時間も件数も総量も、緩めたときに占めるのは利用者のディスクだけである。
+/// 総量の下限が 1 件分の上限を下回らないことは設定の側が保証する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactLimits {
+    /// artifact の有効期限。
+    pub ttl: Duration,
+    /// 同時に保持する artifact の件数の上限。
+    pub max_count: usize,
+    /// 同時に保持する artifact の総量の上限。
+    pub max_total_bytes: u64,
+    /// 他プロセスの残骸とみなす session ディレクトリの古さ。
+    ///
+    /// 異常終了した server の store は次の起動まで残る。一方で、同時に稼働する
+    /// 別の server の store を消してはならない。所有者の生存は
+    /// [`SESSION_LOCK_FILE`] で判定し、この時間は判定が付かない場合に備えた
+    /// 二重の余裕である。
+    pub session_stale_after: Duration,
+}
+
+impl ArtifactLimits {
+    /// 解決済みの設定から引く。
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            ttl: settings.artifact_ttl(),
+            max_count: settings.artifact_max_count(),
+            max_total_bytes: settings.artifact_max_total_bytes(),
+            session_stale_after: settings.session_stale_after(),
+        }
+    }
+}
+
+impl Default for ArtifactLimits {
+    fn default() -> Self {
+        Self::from_settings(&Settings::default())
+    }
+}
 
 /// session ディレクトリの所有者が生きていることを示すファイルの名前。
 ///
@@ -245,20 +273,27 @@ pub struct ArtifactStore {
     /// 掴んでいる間は他プロセスがこのディレクトリを消せない。取り直せる
     /// ようにするため、ハンドルは差し替え可能な形で持つ。
     lock: Mutex<Option<File>>,
-    /// 登録から失効までの時間。
-    ttl: Duration,
+    /// 上限の供給元。
+    ///
+    /// **要求のたびに現在の値を引く。** 設定は稼働中に差し替わり得るため、
+    /// 開いた時点の値を握り込むと、変更が次の起動まで効かない。
+    settings: Arc<SettingsSource>,
     clock: Arc<dyn ArtifactClock>,
     /// 登録済み artifact を `created_at` の昇順で保持する。
     ///
-    /// 件数は [`ARTIFACT_MAX_COUNT`] で縛られるため、引き当ては線形走査で足りる。
-    /// 順序を保つことで、上限超過時に落とす「最も古いもの」が先頭に定まる。
+    /// 件数は [`ArtifactLimits::max_count`] で縛られるため、引き当ては線形走査で
+    /// 足りる。順序を保つことで、上限超過時に落とす「最も古いもの」が先頭に
+    /// 定まる。
     entries: Mutex<Vec<Artifact>>,
 }
 
 impl ArtifactStore {
-    /// 既定の有効期限とシステム時刻で store を開く。
-    pub fn open(base_dir: PathBuf) -> Result<Self, ArtifactStoreError> {
-        Self::open_with(base_dir, ARTIFACT_TTL, Arc::new(SystemClock))
+    /// 設定の供給元とシステム時刻で store を開く。
+    pub fn open(
+        base_dir: PathBuf,
+        settings: Arc<SettingsSource>,
+    ) -> Result<Self, ArtifactStoreError> {
+        Self::open_with(base_dir, settings, Arc::new(SystemClock))
     }
 
     /// 有効期限と時刻の供給元を指定して store を開く。
@@ -266,15 +301,15 @@ impl ArtifactStore {
     /// `{base}\artifacts\{server_session_id}` を保護された DACL で作成し、
     /// [`SESSION_LOCK_FILE`] を掴んでから、同じ親にある放置された session
     /// ディレクトリを best effort で削除する。削除の対象は所有者が生きて
-    /// いないことを確かめられ、かつ [`SESSION_STALE_AFTER`] より古いものだけ
-    /// であり、稼働中の別 server の store には触れない。
+    /// いないことを確かめられ、かつ [`ArtifactLimits::session_stale_after`] より
+    /// 古いものだけであり、稼働中の別 server の store には触れない。
     ///
     /// 既に存在するディレクトリは検証にとどめる。想定と異なる DACL を持つ
     /// 場合は開けない。**DACL を保証できない場所へ利用者のプロジェクトの内容を
     /// 書き出すより、起動しないほうがよい。**
     pub(crate) fn open_with(
         base_dir: PathBuf,
-        ttl: Duration,
+        settings: Arc<SettingsSource>,
         clock: Arc<dyn ArtifactClock>,
     ) -> Result<Self, ArtifactStoreError> {
         // 基底も保護の対象に含める。ここが継承したままだと、その下を
@@ -297,16 +332,22 @@ impl ArtifactStore {
 
         // 自分のロックを掴んでから掃除する。順序が逆だと、掃除の最中に
         // 別 server から自分の store を放置扱いされる余地が残る。
-        sweep_stale_sessions(&artifacts_root, &session_dir, SESSION_STALE_AFTER);
+        let stale_after = ArtifactLimits::from_settings(&settings.settings()).session_stale_after;
+        sweep_stale_sessions(&artifacts_root, &session_dir, stale_after);
 
         Ok(Self {
             base_dir,
             session_dir,
             lock: Mutex::new(Some(lock)),
-            ttl,
+            settings,
             clock,
             entries: Mutex::new(Vec::new()),
         })
+    }
+
+    /// 現在の上限。
+    pub fn limits(&self) -> ArtifactLimits {
+        ArtifactLimits::from_settings(&self.settings.settings())
     }
 
     /// plugin が書いた handoff ファイルを引き取り、artifact として登録する。
@@ -471,7 +512,7 @@ impl ArtifactStore {
         let mut entries = self.lock_entries();
         // 期限切れを先に落とし、それでも上限を超えるなら古い順に落とす。
         self.sweep_expired(&mut entries);
-        make_room(&mut entries, artifact.byte_length);
+        make_room(&mut entries, artifact.byte_length, self.limits());
 
         debug!(
             artifact_id = %artifact.artifact_id,
@@ -539,8 +580,9 @@ impl ArtifactStore {
     /// 変換できない大きさは実装上あり得ないが、その場合も期限を無限にはせず
     /// 既定値へ落とす。
     fn expiry_delta(&self) -> TimeDelta {
-        TimeDelta::from_std(self.ttl).unwrap_or_else(|_| {
-            TimeDelta::from_std(ARTIFACT_TTL).expect("既定の有効期限は必ず変換できる")
+        TimeDelta::from_std(self.limits().ttl).unwrap_or_else(|_| {
+            TimeDelta::from_std(ArtifactLimits::default().ttl)
+                .expect("既定の有効期限は必ず変換できる")
         })
     }
 
@@ -576,8 +618,8 @@ impl Drop for ArtifactStore {
 /// 新規登録のために古い順で落とし、件数と総量の上限を満たす。
 ///
 /// 一覧は `created_at` の昇順であるため、先頭から落とすことが「古い順」になる。
-fn make_room(entries: &mut Vec<Artifact>, incoming: u64) {
-    while !entries.is_empty() && !fits(entries, incoming) {
+fn make_room(entries: &mut Vec<Artifact>, incoming: u64, limits: ArtifactLimits) {
+    while !entries.is_empty() && !fits(entries, incoming, limits) {
         let evicted = entries.remove(0);
         debug!(
             artifact_id = %evicted.artifact_id,
@@ -588,9 +630,9 @@ fn make_room(entries: &mut Vec<Artifact>, incoming: u64) {
 }
 
 /// `incoming` バイトの artifact を追加しても件数・総量の上限を超えないか。
-fn fits(entries: &[Artifact], incoming: u64) -> bool {
+fn fits(entries: &[Artifact], incoming: u64, limits: ArtifactLimits) -> bool {
     let total: u64 = entries.iter().map(|entry| entry.byte_length).sum();
-    entries.len() < ARTIFACT_MAX_COUNT && total.saturating_add(incoming) <= ARTIFACT_MAX_TOTAL_BYTES
+    entries.len() < limits.max_count && total.saturating_add(incoming) <= limits.max_total_bytes
 }
 
 /// ファイル全体を読み込む。

@@ -63,7 +63,11 @@ impl Harness {
         mock.write_descriptor(&registry_dir);
         std::thread::sleep(MOCK_STARTUP_GRACE);
         let store = Arc::new(
-            ArtifactStore::open(base_dir_for_registry(&registry_dir)).expect("保管庫を開ける"),
+            ArtifactStore::open(
+                base_dir_for_registry(&registry_dir),
+                aviutl2_mcp_server::settings::SettingsSource::fixed(Default::default()),
+            )
+            .expect("保管庫を開ける"),
         );
         Self {
             server: Some(AviUtl2McpServer::with_artifact_store(

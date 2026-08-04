@@ -29,6 +29,24 @@ fn temp_base_dir() -> PathBuf {
     std::env::temp_dir().join(format!("aviutl2-mcp-artifact-test-{}", Uuid::new_v4()))
 }
 
+/// 既定の設定を配る供給元。
+fn default_settings() -> Arc<SettingsSource> {
+    SettingsSource::fixed(Settings::default())
+}
+
+/// 既定の上限。store が設定から引く値と同じである。
+fn limits() -> ArtifactLimits {
+    ArtifactLimits::default()
+}
+
+/// 設定ファイルの内容から解決済みの設定を作る。
+fn settings_from(text: &str) -> Settings {
+    aviutl2_mcp_core::settings::SettingsDocument::parse(text)
+        .unwrap()
+        .resolve(&Settings::default())
+        .0
+}
+
 /// store と、その基底・時計を束ねた試験環境。
 struct Fixture {
     base_dir: PathBuf,
@@ -42,7 +60,7 @@ impl Fixture {
     fn new() -> Self {
         let base_dir = temp_base_dir();
         let clock = FixedClock::new();
-        let store = ArtifactStore::open_with(base_dir.clone(), ARTIFACT_TTL, clock.clone())
+        let store = ArtifactStore::open_with(base_dir.clone(), default_settings(), clock.clone())
             .expect("store を開けます");
         Self {
             base_dir,
@@ -393,13 +411,13 @@ fn ingest_ignores_the_handoff_files_of_other_instances() {
 fn the_oldest_artifact_is_dropped_when_the_count_limit_is_exceeded() {
     let fixture = Fixture::new();
     let mut ids = Vec::new();
-    for seed in 0..=ARTIFACT_MAX_COUNT {
+    for seed in 0..=limits().max_count {
         let artifact = fixture.ingest_valid(&token(seed as u8), format!("image {seed}").as_bytes());
         ids.push(artifact.artifact_id);
         fixture.clock.advance(1);
     }
 
-    assert_eq!(fixture.store().len(), ARTIFACT_MAX_COUNT);
+    assert_eq!(fixture.store().len(), limits().max_count);
     assert!(
         fixture.store().get(&ids[0]).is_none(),
         "最も古い artifact が落ちる"
@@ -431,15 +449,18 @@ fn eviction_respects_the_total_byte_limit() {
         path: PathBuf::new(),
     };
 
-    let quarter = ARTIFACT_MAX_TOTAL_BYTES / 4;
+    let quarter = limits().max_total_bytes / 4;
     let mut entries: Vec<_> = (0..4).map(|_| entry(quarter)).collect();
     let expected_survivors: Vec<_> = entries[1..]
         .iter()
         .map(|artifact| artifact.artifact_id.clone())
         .collect();
 
-    assert!(!fits(&entries, 1), "総量の上限を超える追加は許さない");
-    make_room(&mut entries, quarter);
+    assert!(
+        !fits(&entries, 1, limits()),
+        "総量の上限を超える追加は許さない"
+    );
+    make_room(&mut entries, quarter, limits());
     let survivors: Vec<_> = entries
         .iter()
         .map(|artifact| artifact.artifact_id.clone())
@@ -447,10 +468,13 @@ fn eviction_respects_the_total_byte_limit() {
     assert_eq!(survivors, expected_survivors, "古い順に落とす");
 
     // 件数に余裕があっても総量で落ちる。逆に総量に余裕があっても件数で落ちる。
-    let mut small: Vec<_> = (0..ARTIFACT_MAX_COUNT).map(|_| entry(1)).collect();
-    assert!(!fits(&small, 1), "件数の上限を超える追加は許さない");
-    make_room(&mut small, 1);
-    assert_eq!(small.len(), ARTIFACT_MAX_COUNT - 1);
+    let mut small: Vec<_> = (0..limits().max_count).map(|_| entry(1)).collect();
+    assert!(
+        !fits(&small, 1, limits()),
+        "件数の上限を超える追加は許さない"
+    );
+    make_room(&mut small, 1, limits());
+    assert_eq!(small.len(), limits().max_count - 1);
 }
 
 #[test]
@@ -458,7 +482,7 @@ fn an_expired_artifact_is_indistinguishable_from_an_unknown_one() {
     let fixture = Fixture::new();
     let artifact = fixture.ingest_valid(&token(0x88), b"rendered image");
 
-    fixture.clock.advance(ARTIFACT_TTL.as_secs() as i64);
+    fixture.clock.advance(limits().ttl.as_secs() as i64);
 
     // 期限切れと未知の識別子はどちらも同じ `Option` の `None` へ落ちる。
     // 引き当ての戻り値には理由を運ぶ余地が無く、両者を区別する型が存在しない。
@@ -479,7 +503,7 @@ fn an_expired_artifact_leaves_no_file_behind() {
     let path = artifact.path.clone();
     assert!(path.exists());
 
-    fixture.clock.advance(ARTIFACT_TTL.as_secs() as i64);
+    fixture.clock.advance(limits().ttl.as_secs() as i64);
     let _ = fixture.store().list();
     assert!(!path.exists(), "期限切れの実体は掃除で消える");
 }
@@ -489,7 +513,7 @@ fn an_artifact_survives_until_its_expiry() {
     let fixture = Fixture::new();
     let artifact = fixture.ingest_valid(&token(0xaa), b"rendered image");
 
-    fixture.clock.advance(ARTIFACT_TTL.as_secs() as i64 - 1);
+    fixture.clock.advance(limits().ttl.as_secs() as i64 - 1);
     assert!(
         fixture.store().get(&artifact.artifact_id).is_some(),
         "期限前は引き当てられる"
@@ -567,7 +591,8 @@ fn artifact_debug_output_carries_no_path() {
 fn dropping_the_store_removes_its_directory() {
     let base_dir = temp_base_dir();
     let session_dir = {
-        let store = ArtifactStore::open(base_dir.clone()).expect("store を開けます");
+        let store =
+            ArtifactStore::open(base_dir.clone(), default_settings()).expect("store を開けます");
         let session_dir = store.session_dir.clone();
         assert!(session_dir.is_dir());
         session_dir
@@ -593,7 +618,7 @@ fn an_unprotected_base_dir_stops_the_store_from_opening() {
     std::fs::create_dir_all(&base_dir).unwrap();
     let before = aviutl2_mcp_win::test_support::security_descriptor_bytes(&base_dir);
 
-    let opened = ArtifactStore::open_with(base_dir.clone(), ARTIFACT_TTL, FixedClock::new());
+    let opened = ArtifactStore::open_with(base_dir.clone(), default_settings(), FixedClock::new());
     let Err(error) = opened else {
         panic!("保護されていない基底で store を開けました");
     };
@@ -630,9 +655,13 @@ fn opening_the_store_removes_only_stale_sibling_sessions() {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(format!("leftover.{ARTIFACT_EXTENSION}")), b"x").unwrap();
     }
-    backdate(&stale, SESSION_STALE_AFTER + Duration::from_secs(60));
+    backdate(
+        &stale,
+        limits().session_stale_after + Duration::from_secs(60),
+    );
 
-    let store = ArtifactStore::open(base_dir.clone()).expect("store を開けます");
+    let store =
+        ArtifactStore::open(base_dir.clone(), default_settings()).expect("store を開けます");
     assert!(!stale.exists(), "十分古い session ディレクトリは削除される");
     assert!(
         fresh.exists(),
@@ -650,12 +679,14 @@ fn a_running_store_is_never_swept_however_old_it_looks() {
     // 成果物を作っていない稼働中の store は、いくらでも古く見える。時刻だけで
     // 判定すると、その store が別の server に消される。
     let base_dir = temp_base_dir();
-    let running = ArtifactStore::open(base_dir.clone()).expect("store を開けます");
+    let running =
+        ArtifactStore::open(base_dir.clone(), default_settings()).expect("store を開けます");
     let running_dir = running.session_dir.clone();
     let instance_id = InstanceId::new_v4();
-    backdate(&running_dir, SESSION_STALE_AFTER * 24);
+    backdate(&running_dir, limits().session_stale_after * 24);
 
-    let later = ArtifactStore::open(base_dir.clone()).expect("2 つ目の store を開けます");
+    let later = ArtifactStore::open(base_dir.clone(), default_settings())
+        .expect("2 つ目の store を開けます");
     assert!(
         running_dir.is_dir(),
         "稼働中の store は、どれだけ古く見えても削除されない"
@@ -680,7 +711,8 @@ fn a_running_store_is_never_swept_however_old_it_looks() {
 fn the_store_directory_of_a_running_server_cannot_be_removed() {
     // 掴んだままのロックファイルにより、削除そのものが OS に拒まれる。
     let base_dir = temp_base_dir();
-    let store = ArtifactStore::open(base_dir.clone()).expect("store を開けます");
+    let store =
+        ArtifactStore::open(base_dir.clone(), default_settings()).expect("store を開けます");
 
     assert!(
         std::fs::remove_dir_all(&store.session_dir).is_err(),
@@ -818,11 +850,11 @@ fn logs_carry_neither_paths_nor_tokens() {
     let base_dir = temp_base_dir();
     let clock = FixedClock::new();
     let instance_id = InstanceId::new_v4();
-    let tokens: Vec<String> = (0..=(ARTIFACT_MAX_COUNT as u8 + 1)).map(token).collect();
+    let tokens: Vec<String> = (0..=(limits().max_count as u8 + 1)).map(token).collect();
     let mut oversized = None;
 
     let logs = capture_logs(|| {
-        let store = ArtifactStore::open_with(base_dir.clone(), ARTIFACT_TTL, clock.clone())
+        let store = ArtifactStore::open_with(base_dir.clone(), default_settings(), clock.clone())
             .expect("store を開けます");
         let handoff_dir = base_dir.join(HANDOFF_DIR).join(instance_id.to_string());
         std::fs::create_dir_all(&handoff_dir).unwrap();
@@ -857,7 +889,7 @@ fn logs_carry_neither_paths_nor_tokens() {
         let _ = store.ingest(&instance_id, "not-a-token", 0, &sha256_of(b""));
 
         // 期限切れの掃除と、終了時の削除。
-        clock.advance(ARTIFACT_TTL.as_secs() as i64);
+        clock.advance(limits().ttl.as_secs() as i64);
         let _ = store.list();
         drop(store);
     });
@@ -924,4 +956,81 @@ fn backdate(path: &Path, age: Duration) {
     // スタック上の有効な読み出し元である。
     unsafe { SetFileTime(HANDLE(dir.as_raw_handle()), None, None, Some(&filetime)) }
         .expect("最終更新時刻を設定できます");
+}
+
+// ============================================================================
+// 設定との結び付き
+// ============================================================================
+
+#[test]
+fn the_store_limits_come_from_the_shared_settings() {
+    // 上限は設定の解決結果そのものである。**store 側に独自の範囲判定は無い。**
+    let settings = settings_from(
+        r#"{"artifact":{"ttl_seconds":900,"max_count":3,"max_total_bytes":268435456},
+            "session":{"stale_after_seconds":1200}}"#,
+    );
+    let base_dir = temp_base_dir();
+    let store = ArtifactStore::open(base_dir.clone(), SettingsSource::fixed(settings.clone()))
+        .expect("store を開けます");
+
+    assert_eq!(store.limits(), ArtifactLimits::from_settings(&settings));
+    assert_eq!(store.limits().ttl, Duration::from_secs(900));
+    assert_eq!(store.limits().max_count, 3);
+    assert_eq!(store.limits().max_total_bytes, 256 * 1024 * 1024);
+    assert_eq!(
+        store.limits().session_stale_after,
+        Duration::from_secs(1200)
+    );
+    assert_ne!(store.limits(), ArtifactLimits::default());
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(&base_dir);
+}
+
+#[test]
+fn a_configured_count_limit_actually_evicts() {
+    // 設定した件数の上限が実際に効く。読み込んだだけで使われていなければ
+    // ここで落ちる。
+    let settings = settings_from(r#"{"artifact":{"max_count":2}}"#);
+    let base_dir = temp_base_dir();
+    let clock = FixedClock::new();
+    let store = ArtifactStore::open_with(
+        base_dir.clone(),
+        SettingsSource::fixed(settings),
+        clock.clone(),
+    )
+    .expect("store を開けます");
+    let instance_id = InstanceId::new_v4();
+
+    let dir = base_dir.join(HANDOFF_DIR).join(instance_id.to_string());
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut ids = Vec::new();
+    for seed in 0..3u8 {
+        let value = token(seed);
+        let bytes = format!("image {seed}").into_bytes();
+        std::fs::write(dir.join(format!("{value}.{ARTIFACT_EXTENSION}")), &bytes).unwrap();
+        ids.push(
+            store
+                .ingest(&instance_id, &value, bytes.len() as u64, &sha256_of(&bytes))
+                .expect("引き取れます")
+                .artifact_id,
+        );
+        clock.advance(1);
+    }
+
+    assert_eq!(store.len(), 2, "設定した件数の上限が効いていません");
+    assert!(store.get(&ids[0]).is_none(), "最も古い成果物が残りました");
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(&base_dir);
+}
+
+#[test]
+fn a_total_byte_limit_below_a_single_artifact_cannot_be_configured() {
+    // 総量の下限は 1 件分の上限と連動する。下回ると、上限内の成果物が 1 件も
+    // 入らない store ができる。
+    let settings = settings_from(r#"{"artifact":{"max_total_bytes":1}}"#);
+    let limits = ArtifactLimits::from_settings(&settings);
+    assert_eq!(limits.max_total_bytes, ARTIFACT_MAX_BYTES);
+    assert!(fits(&[], ARTIFACT_MAX_BYTES, limits));
 }

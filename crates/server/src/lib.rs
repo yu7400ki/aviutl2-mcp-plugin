@@ -10,6 +10,7 @@ pub mod identity;
 pub mod mcp;
 pub mod pipe_client;
 pub mod redact;
+pub mod settings;
 pub mod win_io;
 
 /// 既定のログレベル。
@@ -17,7 +18,10 @@ pub mod win_io;
 /// operation・correlation_id・所要時間・結果コードの記録は運用上の要求であり、
 /// `RUST_LOG` を設定しない利用者でも失われないよう `info` を既定とする。
 /// `EnvFilter` の既定は `error` であるため、明示的に上書きする。
-const DEFAULT_LOG_FILTER: &str = "info";
+///
+/// 共有設定の `log_level` の既定と同じ値であり、設定を持たない呼び出し口が
+/// 使う。
+const DEFAULT_LOG_FILTER: &str = aviutl2_mcp_core::settings::DEFAULT_LOG_LEVEL;
 
 /// 要求・応答の本文をそのまま記録する外部 crate に課すレベル上限。
 ///
@@ -33,15 +37,19 @@ const EXTERNAL_LOG_CEILINGS: &[&str] = &["rmcp=warn"];
 
 /// ログを stderr へ構造化出力するよう初期化する。
 ///
-/// `RUST_LOG` 環境変数でレベルを、`LOG_FORMAT=json` で JSON 出力を制御する。
-/// `RUST_LOG` が未設定または解釈できない場合は [`DEFAULT_LOG_FILTER`] を用いる。
-/// いずれの場合も [`EXTERNAL_LOG_CEILINGS`] は適用される。
-pub fn init_logging() {
+/// レベルは `RUST_LOG` 環境変数、引数の `log_level`、[`DEFAULT_LOG_FILTER`] の
+/// 順に採る。**環境変数を先に見るのは、設定ファイルごと読めない状況を診断する
+/// 経路を残すためである。** `LOG_FORMAT=json` で JSON 出力を選ぶ。いずれの
+/// 場合も [`EXTERNAL_LOG_CEILINGS`] は適用される。
+///
+/// **レベルはプロセスの寿命の間ずっと固定である。** subscriber は一度しか
+/// 立てられず、設定を変えたときに効くのは次回の起動からになる。
+pub fn init_logging(log_level: &str) {
     let format = std::env::var("LOG_FORMAT").unwrap_or_default();
     let json_mode = format.eq_ignore_ascii_case("json");
 
     let builder = tracing_subscriber::fmt()
-        .with_env_filter(default_env_filter())
+        .with_env_filter(env_filter(log_level))
         .with_writer(std::io::stderr)
         .with_ansi(false);
 
@@ -52,13 +60,15 @@ pub fn init_logging() {
     }
 }
 
-/// `RUST_LOG` を読み、未設定・不正なら既定のレベルへ落とす。
+/// `RUST_LOG` を読み、未設定・不正なら与えられたレベルへ落とす。
 ///
 /// 読み取った内容に [`EXTERNAL_LOG_CEILINGS`] を重ねる。同じ対象への指定は
 /// 後から足したものが優先されるため、`RUST_LOG` が何を指定していても上限は残る。
-fn default_env_filter() -> tracing_subscriber::EnvFilter {
-    let mut filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER));
+fn env_filter(log_level: &str) -> tracing_subscriber::EnvFilter {
+    let mut filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::try_new(log_level)
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER))
+    });
     for ceiling in EXTERNAL_LOG_CEILINGS {
         filter = filter.add_directive(parse_ceiling(ceiling));
     }
