@@ -12,6 +12,7 @@ publish = false
 [workspace.dependencies]
 anyhow = "1.0.95"
 aviutl2-mcp-core = { path = "crates/core" }
+aviutl2-mcp-win = { path = "crates/win" }
 base64 = "0.23.0"
 chrono = { version = "0.4.39", features = ["serde"] }
 hmac = "0.13.0"

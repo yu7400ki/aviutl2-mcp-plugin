@@ -163,6 +163,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aviutl2-mcp-win"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "uuid",
+ "windows",
+]
+
+[[package]]
 name = "aviutl2-sys"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

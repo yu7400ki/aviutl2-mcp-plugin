@@ -1,0 +1,29 @@
+[package]
+name = "aviutl2-mcp-win"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AviUtl2 MCP Plugin 用の Windows 固有プリミティブ"
+publish = false
+
+[features]
+# 保護 DACL をテストから検証するための補助を公開する。
+# 製品コードからは使わない。
+test-support = []
+
+[dependencies]
+thiserror = { workspace = true }
+
+# Win32 API は Windows でのみ解決する。
+# 実装は全て `#[cfg(windows)]` 配下にあり、他プラットフォームでは参照されない。
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+uuid = { workspace = true }
