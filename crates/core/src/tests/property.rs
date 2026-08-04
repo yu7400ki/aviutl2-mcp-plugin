@@ -11,6 +11,9 @@ use crate::fingerprint::{
     EffectFingerprintInput, Fingerprint, ObjectFingerprintInput, effect_fingerprint,
     object_fingerprint,
 };
+use crate::handoff::{
+    HANDOFF_TOKEN_LEN, HandoffToken, HandoffTokenFormatError, handoff_dir, handoff_file,
+};
 use crate::handshake::{Mac, Nonce, compute_client_mac, compute_server_mac, verify_mac};
 use crate::identifier::{InstanceId, ProtocolVersion};
 use crate::item_value::{ItemValue, ItemWriteError, encode_item_value, validate_item_value};
@@ -22,6 +25,7 @@ use crate::validation::{MAX_PATH_UTF16_UNITS, PathSyntaxError, validate_path};
 use proptest::prelude::*;
 use proptest::string::string_regex;
 use proptest::test_runner::TestCaseError;
+use std::path::Path;
 
 // ============================================================================
 // json
@@ -863,5 +867,48 @@ fn batch_move_operation(layer: usize) -> BatchOperation {
             fingerprint: object_fingerprint(input),
         },
         destination: Destination { layer: 0, frame: 0 },
+    }
+}
+
+// ============================================================================
+// handoff
+// ============================================================================
+
+proptest! {
+    /// 任意の文字列は引き渡し用ファイルのパスの材料にならない。
+    ///
+    /// 構文検証を通らない値はパスを組み立てる関数へ渡せず、通った値も基底の
+    /// 下へ 3 要素を足すだけである。区切り文字や相対参照が場所を動かす余地が
+    /// 無いことを、任意の入力に対して固定する。
+    #[test]
+    fn an_arbitrary_string_never_builds_a_handoff_path(value in ".*") {
+        let base = Path::new("base");
+        let instance_id = InstanceId::from_bytes([0x11; 16]);
+        let Ok(token) = HandoffToken::parse(&value) else {
+            // 組み立てる材料が得られない。ここで止まる。
+            return Ok(());
+        };
+
+        prop_assert_eq!(token.as_str(), value.as_str());
+        prop_assert!(value.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        prop_assert_eq!(value.len(), HANDOFF_TOKEN_LEN);
+
+        let path = handoff_file(base, &instance_id, &token);
+        prop_assert!(path.starts_with(handoff_dir(base, &instance_id)));
+        prop_assert_eq!(path.components().count(), 4);
+    }
+
+    /// 十六進でない文字を混ぜた 32 文字は必ず拒否される。
+    #[test]
+    fn a_token_with_a_non_hex_character_is_rejected(
+        prefix in "[0-9a-f]{0,31}",
+        intruder in "[^0-9a-f]",
+    ) {
+        let mut value = prefix;
+        value.push_str(&intruder);
+        while value.chars().count() < HANDOFF_TOKEN_LEN {
+            value.push('0');
+        }
+        prop_assert_eq!(HandoffToken::parse(&value), Err(HandoffTokenFormatError));
     }
 }

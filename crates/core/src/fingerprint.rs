@@ -3,6 +3,7 @@
 //! 入力を曖昧さのない正準バイト列へ組み立て、SHA-256 ダイジェストを
 //! `"sha256:" + 64 桁小文字十六進` として表現する。
 
+use crate::digest::{SHA256_HEX_LEN, SHA256_PREFIX, format_sha256};
 use crate::effect::{EffectItem, TrackInfo};
 use crate::item_value::ItemValue;
 use crate::number::FiniteF64;
@@ -10,12 +11,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::str::FromStr;
-
-/// ダイジェストの前置文字列。
-const FINGERPRINT_PREFIX: &str = "sha256:";
-
-/// 十六進表現の桁数。
-const DIGEST_HEX_LEN: usize = 64;
 
 /// 対象の同一性検証に用いるダイジェスト。
 ///
@@ -73,22 +68,14 @@ impl<'de> Deserialize<'de> for Fingerprint {
 }
 
 /// 正準表現かどうかを判定する。
+///
+/// 前置と桁数はダイジェストの表現に共通のものを引く。**同じ形を用いることは、
+/// fingerprint と他のダイジェストを同じものとして扱うことではない。**
 fn is_canonical(value: &str) -> bool {
-    let Some(hex) = value.strip_prefix(FINGERPRINT_PREFIX) else {
+    let Some(hex) = value.strip_prefix(SHA256_PREFIX) else {
         return false;
     };
-    hex.len() == DIGEST_HEX_LEN && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-/// バイト列を小文字十六進へ変換する。
-fn to_hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(DIGITS[usize::from(byte >> 4)] as char);
-        out.push(DIGITS[usize::from(byte & 0x0f)] as char);
-    }
-    out
+    hex.len() == SHA256_HEX_LEN && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// fingerprint の算出方式。
@@ -187,10 +174,7 @@ impl FingerprintInput {
     fn finish(self) -> Fingerprint {
         let mut hasher = Sha256::new();
         hasher.update(&self.buffer);
-        Fingerprint(format!(
-            "{FINGERPRINT_PREFIX}{}",
-            to_hex(&hasher.finalize())
-        ))
+        Fingerprint(format_sha256(&hasher.finalize()))
     }
 }
 
@@ -717,6 +701,16 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn fingerprint_uses_the_shared_digest_form() {
+        let fingerprint = object_at(Some("立ち絵"), "alias");
+        assert!(fingerprint.as_str().starts_with(SHA256_PREFIX));
+        assert_eq!(
+            fingerprint.as_str().len(),
+            SHA256_PREFIX.len() + SHA256_HEX_LEN
+        );
+    }
+
     /// 方式だけを差し替えて object の材料を組み立て直す。
     fn object_digest_with(
         algorithm: Option<&str>,
@@ -796,10 +790,5 @@ mod tests {
             effect_digest_with(Some("sha256-alias-v1"), effect)
         );
         assert_ne!(effect_fingerprint(effect), effect_digest_with(None, effect));
-    }
-
-    #[test]
-    fn to_hex_is_lowercase_and_padded() {
-        assert_eq!(to_hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
     }
 }

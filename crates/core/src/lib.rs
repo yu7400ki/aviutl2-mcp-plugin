@@ -11,6 +11,8 @@
 //! - 一覧取得: ページ要求・応答メタと切り出し規則
 //! - read operation の名前と params / result、編集・render operation の名前
 //! - 一括適用と描画の params / result
+//! - 描画成果物の引き渡し: ディレクトリ名・拡張子・media type・識別子の構文と
+//!   パスの組み立て
 //! - IPC 1 往復の期限配分
 //!
 //! SDK や Windows API には依存しない。所有型のみを定義し、SDK からの変換は
@@ -19,6 +21,7 @@
 pub mod batch;
 pub mod budget;
 pub mod descriptor;
+pub mod digest;
 pub mod edit;
 pub mod edit_info;
 pub mod effect;
@@ -26,6 +29,7 @@ pub mod envelope;
 pub mod error;
 pub mod fingerprint;
 pub mod framing;
+pub mod handoff;
 pub mod handshake;
 pub mod identifier;
 pub mod item_value;
@@ -57,6 +61,7 @@ pub use budget::{
 pub use descriptor::{
     AuthSecret, DescriptorProject, InstanceDescriptor, InstanceInfo, InstanceProject,
 };
+pub use digest::{SHA256_HEX_LEN, SHA256_PREFIX, format_sha256};
 pub use edit::{
     AddEffectParams, CreateObjectParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
     Destination, EditInputError, EditOutcome, FocusChange, LayerNameChange, LayerStateOutcome,
@@ -80,6 +85,10 @@ pub use fingerprint::{
 };
 pub use framing::{
     DecoderState, FrameDecoder, FrameError, MAX_FRAME_SIZE, encode_frame, encode_length,
+};
+pub use handoff::{
+    ARTIFACT_EXTENSION, ARTIFACT_MEDIA_TYPE, HANDOFF_DIR, HANDOFF_TOKEN_LEN, HandoffToken,
+    HandoffTokenFormatError, TEMP_EXTENSION, handoff_dir, handoff_file, handoff_temp_file,
 };
 pub use handshake::{
     ClientAuth, ClientHello, Mac, Nonce, ServerAuth, compute_client_mac, compute_server_mac,
