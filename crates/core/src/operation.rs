@@ -1011,6 +1011,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn replacing_the_grid_bpm_is_an_ordinary_edit() {
+        // 費用は単一編集と同じ形である（1 回の変更 + 1 回の読み直し）。新しい
+        // 予算区分を作る理由が無い。
+        let op = EditOperation::SetGridBpm;
+        assert_eq!(
+            KnownOperation::Edit(op).budget_kind(),
+            RequestBudgetKind::Edit
+        );
+        assert!(EditOperation::ALL.contains(&op));
+        assert_eq!(
+            EditOperation::from_operation_name(OPERATION_SET_GRID_BPM),
+            Some(op)
+        );
+    }
+
     fn sample_effect_selector() -> EffectSelector {
         let object = sample_object_selector();
         EffectSelector {

@@ -5,17 +5,18 @@ mod support;
 use aviutl2_mcp_core::{
     AuthSecret, BatchOutcome, BatchStepOutcome, Cursor, DisplayRange, EditOutcome,
     EffectFingerprintInput, EffectInfo, EffectItem, EffectItemType, ErrorCode, ErrorObject,
-    FrameRange, InstanceId, InstanceState, ItemValue, LayerInfo, LayerStateOutcome,
-    ObjectFingerprintInput, ObjectSectionsOutcome, ObjectSelector, ObjectSummary,
-    ObservedSelection, RequestEnvelope, SectionRange, SelectionField, SelectionState,
+    FiniteF64, FrameRange, GridBpm, GridBpmOutcome, InstanceId, InstanceState, ItemValue,
+    LayerInfo, LayerStateOutcome, MAX_GRID_BPM_ENTRIES, ObjectFingerprintInput,
+    ObjectSectionsOutcome, ObjectSelector, ObjectSummary, ObservedSelection, RequestEnvelope,
+    SectionRange, SelectionField, SelectionState,
 };
 use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, ApplyBatchInput, BatchOperationInput, CreateObjectInput,
     CreateObjectSectionInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
-    DeleteObjectSectionInput, DestinationInput, DisplayStartInput, FocusChangeInput,
+    DeleteObjectSectionInput, DestinationInput, DisplayStartInput, FocusChangeInput, GridBpmInput,
     ItemValueInput, LayerNameChangeInput, MoveObjectInput, MoveObjectSectionInput,
-    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetLayerStateInput,
-    SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
+    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetGridBpmInput,
+    SetLayerStateInput, SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::{EffectSelectorInput, ObjectSelectorInput};
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
@@ -1732,6 +1733,221 @@ async fn a_display_start_request_carries_neither_the_alias_nor_a_handle() {
     let structured = structured(&result).to_string();
     let request = harness.only_request().params.to_string();
     assert!(text.contains("表示開始 frame=60 layer=1"), "text: {text}");
+    for forbidden in [SECRET_ALIAS, "[vo]", "_name=", "handle"] {
+        assert!(!text.contains(forbidden), "text: {text}");
+        assert!(!structured.contains(forbidden), "structured: {structured}");
+        assert!(!request.contains(forbidden), "params: {request}");
+    }
+}
+
+/// BPM グリッドの置き換えが返す応答。
+fn grid_bpm_outcome(entries: Vec<GridBpm>) -> Value {
+    serde_json::to_value(GridBpmOutcome {
+        project_epoch: EPOCH.to_string(),
+        project_revision: APPLIED_REVISION,
+        entries,
+    })
+    .expect("直列化できる")
+}
+
+/// BPM 情報 1 件の入力。
+fn grid_bpm_input(tempo: f64, beat: i64, start: f64, offset: f64) -> GridBpmInput {
+    GridBpmInput {
+        tempo,
+        beat,
+        start,
+        offset,
+    }
+}
+
+/// BPM 情報 1 件の DTO。
+fn grid_bpm_entry(tempo: f64, beat: i64, start: f64, offset: f64) -> GridBpm {
+    GridBpm {
+        tempo: FiniteF64::try_new(tempo).expect("有限値"),
+        beat,
+        start: FiniteF64::try_new(start).expect("有限値"),
+        offset: FiniteF64::try_new(offset).expect("有限値"),
+    }
+}
+
+/// BPM グリッドの置き換えを 1 度だけ呼ぶ。
+async fn call_set_grid_bpm(harness: &Harness, entries: Vec<GridBpmInput>) -> CallToolResult {
+    harness
+        .server
+        .set_grid_bpm(Parameters(SetGridBpmInput {
+            instance_id: harness.instance_id(),
+            expected_scene_id: SCENE_ID,
+            entries,
+            expected_project_epoch: EPOCH.to_string(),
+        }))
+        .await
+}
+
+#[tokio::test]
+async fn set_grid_bpm_tool_sends_set_grid_bpm_operation() {
+    let expected = grid_bpm_outcome(vec![grid_bpm_entry(120.0, 4, 0.0, 0.25)]);
+    let harness = Harness::start(responses("set_grid_bpm", expected.clone()));
+
+    let result = call_set_grid_bpm(
+        &harness,
+        vec![
+            grid_bpm_input(120.0, 4, 0.0, 0.25),
+            grid_bpm_input(90.0, 3, 12.5, 0.0),
+        ],
+    )
+    .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+
+    let request = harness.only_request();
+    assert_eq!(request.operation, "set_grid_bpm");
+    assert_eq!(
+        request.params,
+        json!({
+            "expected_scene_id": SCENE_ID,
+            "entries": [
+                { "tempo": 120.0, "beat": 4, "start": 0.0, "offset": 0.25 },
+                { "tempo": 90.0, "beat": 3, "start": 12.5, "offset": 0.0 },
+            ],
+            "expected_project_epoch": EPOCH,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn an_empty_grid_bpm_request_reaches_the_instance() {
+    // グリッドを消す指定である。server が先回りして拒むと手段が無くなる。
+    let expected = grid_bpm_outcome(Vec::new());
+    let harness = Harness::start(responses("set_grid_bpm", expected.clone()));
+
+    let result = call_set_grid_bpm(&harness, Vec::new()).await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(harness.only_request().params["entries"], json!([]));
+}
+
+#[tokio::test]
+async fn a_grid_bpm_request_at_the_limit_reaches_the_instance() {
+    let expected = grid_bpm_outcome(Vec::new());
+    let harness = Harness::start(responses("set_grid_bpm", expected));
+    let entries = (0..MAX_GRID_BPM_ENTRIES)
+        .map(|index| grid_bpm_input(120.0, 4, index as f64, 0.0))
+        .collect::<Vec<_>>();
+
+    let result = call_set_grid_bpm(&harness, entries).await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(
+        harness.only_request().params["entries"]
+            .as_array()
+            .expect("配列")
+            .len(),
+        MAX_GRID_BPM_ENTRIES
+    );
+}
+
+#[tokio::test]
+async fn a_grid_bpm_request_past_the_limit_never_reaches_the_instance() {
+    // schema の maxItems は宣言であり、要求がそれを満たすかを rmcp は検証しない。
+    // 宣言した制約は server 側で実際に確かめる。
+    let harness = Harness::start(responses("set_grid_bpm", grid_bpm_outcome(Vec::new())));
+    let entries = (0..=MAX_GRID_BPM_ENTRIES)
+        .map(|index| grid_bpm_input(120.0, 4, index as f64, 0.0))
+        .collect::<Vec<_>>();
+
+    let result = call_set_grid_bpm(&harness, entries).await;
+
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["code"], json!("invalid_argument"));
+    assert!(harness.requests().is_empty(), "IPC へ届きました");
+}
+
+#[tokio::test]
+async fn each_invalid_grid_bpm_request_names_its_own_reason_before_any_ipc() {
+    // 検証は core の純関数にあり、server も plugin も同じものを呼ぶ。ここで
+    // 確かめるのは、server の経路がその名前をそのまま要求元へ届けることである。
+    let cases: &[(&str, Vec<GridBpmInput>, &str)] = &[
+        (
+            "0 以下の tempo",
+            vec![grid_bpm_input(0.0, 4, 0.0, 0.0)],
+            "grid_bpm_out_of_range",
+        ),
+        (
+            "1 未満の beat",
+            vec![grid_bpm_input(120.0, 0, 0.0, 0.0)],
+            "grid_bpm_out_of_range",
+        ),
+        (
+            "負の start",
+            vec![grid_bpm_input(120.0, 4, -1.0, 0.0)],
+            "grid_bpm_out_of_range",
+        ),
+        (
+            "単精度で無限大になる tempo",
+            vec![grid_bpm_input(1.0e300, 4, 0.0, 0.0)],
+            "grid_bpm_out_of_range",
+        ),
+        (
+            "重複した start",
+            vec![
+                grid_bpm_input(120.0, 4, 5.0, 0.0),
+                grid_bpm_input(90.0, 3, 5.0, 0.0),
+            ],
+            "duplicate_target",
+        ),
+        (
+            "i32 に収まらない beat",
+            vec![grid_bpm_input(120.0, i64::from(i32::MAX) + 1, 0.0, 0.0)],
+            "argument_not_representable",
+        ),
+    ];
+    for (label, entries, reason) in cases {
+        let harness = Harness::start(responses("set_grid_bpm", grid_bpm_outcome(Vec::new())));
+        let result = call_set_grid_bpm(&harness, entries.clone()).await;
+
+        assert_eq!(result.is_error, Some(true), "{label}");
+        let structured = structured(&result);
+        assert_eq!(structured["code"], json!("invalid_argument"), "{label}");
+        assert_eq!(structured["details"]["reason"], json!(reason), "{label}");
+        assert!(harness.requests().is_empty(), "{label} が IPC へ届きました");
+    }
+}
+
+#[tokio::test]
+async fn a_descending_grid_bpm_request_reaches_the_instance() {
+    // 並べ替えはホストの仕事である。server が昇順を求めると、要求元は
+    // read-back の順序と要求の順序の食い違いを説明できなくなる。
+    let harness = Harness::start(responses("set_grid_bpm", grid_bpm_outcome(Vec::new())));
+
+    let result = call_set_grid_bpm(
+        &harness,
+        vec![
+            grid_bpm_input(120.0, 4, 30.0, 0.0),
+            grid_bpm_input(120.0, 4, 20.0, 0.0),
+            grid_bpm_input(120.0, 4, 10.0, 0.0),
+        ],
+    )
+    .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(
+        harness.only_request().params["entries"][0]["start"],
+        json!(30.0)
+    );
+}
+
+#[tokio::test]
+async fn a_grid_bpm_response_carries_no_handle_or_alias() {
+    let expected = grid_bpm_outcome(vec![grid_bpm_entry(120.0, 4, 0.0, 0.25)]);
+    let harness = Harness::start(responses("set_grid_bpm", expected));
+
+    let result = call_set_grid_bpm(&harness, vec![grid_bpm_input(120.0, 4, 0.0, 0.25)]).await;
+
+    let text = text_of(&result);
+    let structured = structured(&result).to_string();
+    let request = harness.only_request().params.to_string();
+    assert!(text.contains("1 件の一覧"), "text: {text}");
     for forbidden in [SECRET_ALIAS, "[vo]", "_name=", "handle"] {
         assert!(!text.contains(forbidden), "text: {text}");
         assert!(!structured.contains(forbidden), "structured: {structured}");

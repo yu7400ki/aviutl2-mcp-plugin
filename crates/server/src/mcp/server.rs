@@ -3392,10 +3392,14 @@ mod tests {
         // 入れる形も採らない。
         let schema = tool_named(APPLY_BATCH).input_schema.clone();
         let declared = Value::Object(schema.as_ref().clone()).to_string();
+        // BPM グリッドの置き換えは戻り値を持たず、成否を戻り値から知れない。
+        // read-back で確認できるが、選定の基準は「戻り値で成否が分かる」ことで
+        // あり例外を作らない。
         for name in [
             "create_object_section",
             "delete_object_section",
             "move_object_section",
+            "set_grid_bpm",
         ] {
             assert!(
                 !declared.contains(name),
@@ -3405,6 +3409,48 @@ mod tests {
         // 受け付ける 2 種は現れる。走査そのものが働いていることを併せて固定する。
         for name in ["move_object", "set_object_item"] {
             assert!(declared.contains(name), "{name} が入力 schema にありません");
+        }
+    }
+
+    #[test]
+    fn the_grid_bpm_input_schema_declares_the_limits_it_enforces() {
+        // 宣言した制約は server 側で実際に検証する。検証していない宣言を
+        // schema に残さない。検証の実体は core の validate である。
+        let tool = tool_named("set_grid_bpm");
+        let entries = tool.input_schema["properties"]["entries"].clone();
+        assert_eq!(
+            entries["maxItems"],
+            serde_json::json!(aviutl2_mcp_core::MAX_GRID_BPM_ENTRIES)
+        );
+        // 0 件はグリッドを消す指定である。下限を宣言すると手段が無くなる。
+        assert!(entries.get("minItems").is_none());
+        let beat = tool.input_schema["$defs"]["GridBpmInput"]["properties"]["beat"].clone();
+        assert_eq!(beat["minimum"], serde_json::json!(1));
+        assert_eq!(beat["maximum"], serde_json::json!(i32::MAX));
+    }
+
+    #[test]
+    fn the_grid_bpm_description_states_that_the_whole_list_is_replaced() {
+        // 部分更新だと読まれると、指定しなかった要素が消えたことに要求元は
+        // 気付けない。
+        let description = description_of("set_grid_bpm");
+        for keyword in [
+            "部分更新ではない",
+            "指定しなかった要素は消える",
+            "get_edit_info",
+            "置き換え前の一覧を保持していなければ",
+            "空配列",
+            "256 件",
+            "秒であり、フレーム番号ではない",
+            "昇順は求めない",
+            "duplicate_target",
+            "grid_bpm_out_of_range",
+            "change_not_applied",
+        ] {
+            assert!(
+                description.contains(keyword),
+                "set_grid_bpm の説明に {keyword} がありません"
+            );
         }
     }
 
