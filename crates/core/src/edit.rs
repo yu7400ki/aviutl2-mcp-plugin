@@ -775,6 +775,51 @@ pub enum EditInputError {
 }
 
 impl EditInputError {
+    /// 全 variant の代表値。
+    ///
+    /// [`EditInputError::reason`] が返し得る名前を数え上げるために用いる。
+    /// `const` にできないのは、包む失敗が所有文字列を含むためである。
+    /// 構文検証と設定値の検証を包む variant は、包む側の全種別を並べる。
+    pub fn all() -> Vec<EditInputError> {
+        let mut all = vec![
+            EditInputError::PositionOutOfRange {
+                field: FIELD_LAYER,
+                value: 0,
+                max: MAX_POSITION,
+            },
+            EditInputError::IndexOutOfRange {
+                field: FIELD_SELECTOR_LAYER,
+                value: 0,
+                max: MAX_POSITION as usize,
+            },
+            EditInputError::NoChangeRequested {
+                fields: &[FIELD_NAME, FIELD_ENABLED, FIELD_LOCKED],
+            },
+        ];
+        all.extend(
+            TextSyntaxError::ALL
+                .iter()
+                .map(|source| EditInputError::Text {
+                    field: FIELD_NAME,
+                    source: *source,
+                }),
+        );
+        all.extend(
+            PathSyntaxError::ALL
+                .iter()
+                .map(|source| EditInputError::Path {
+                    field: FIELD_PATH,
+                    source: *source,
+                }),
+        );
+        all.extend(
+            ItemWriteError::all()
+                .into_iter()
+                .map(EditInputError::ItemValue),
+        );
+        all
+    }
+
     /// 失敗の種別を表す機械可読な名前を返す。名前を持たない失敗では `None`。
     ///
     /// 名前は種別だけを表し、検証に落ちたパスも文字列も含まない。どのフィールド
@@ -867,6 +912,68 @@ mod tests {
     use serde_json::{Value, json};
 
     const EPOCH: &str = "78be92d1-c8c9-44c6-ae52-387548971468";
+
+    /// variant を表す名前を返す。
+    ///
+    /// 網羅 match で書く。variant を足すとここがコンパイルエラーになり、
+    /// すぐ下の一覧と [`EditInputError::all`] へ足す必要があることが分かる。
+    fn input_variant_name(error: &EditInputError) -> &'static str {
+        match error {
+            EditInputError::PositionOutOfRange { .. } => "PositionOutOfRange",
+            EditInputError::IndexOutOfRange { .. } => "IndexOutOfRange",
+            EditInputError::NoChangeRequested { .. } => "NoChangeRequested",
+            EditInputError::Text { .. } => "Text",
+            EditInputError::Path { .. } => "Path",
+            EditInputError::ItemValue(_) => "ItemValue",
+        }
+    }
+
+    #[test]
+    fn all_input_failures_cover_every_variant() {
+        const VARIANTS: &[&str] = &[
+            "PositionOutOfRange",
+            "IndexOutOfRange",
+            "NoChangeRequested",
+            "Text",
+            "Path",
+            "ItemValue",
+        ];
+        let covered: Vec<&str> = EditInputError::all()
+            .iter()
+            .map(input_variant_name)
+            .collect();
+        for variant in VARIANTS {
+            assert!(
+                covered.contains(variant),
+                "{variant} の代表値が一覧にありません"
+            );
+        }
+        for variant in &covered {
+            assert!(
+                VARIANTS.contains(variant),
+                "{variant} が網羅すべき variant の一覧にありません"
+            );
+        }
+    }
+
+    #[test]
+    fn all_input_failures_cover_every_reason() {
+        // 名前は包む側の種別で決まる。包む側に種別が増えたとき、一覧が
+        // 追随していなければここで落ちる。
+        let reasons: Vec<Option<&str>> = EditInputError::all()
+            .iter()
+            .map(EditInputError::reason)
+            .collect();
+        for source in TextSyntaxError::ALL {
+            assert!(reasons.contains(&Some(source.reason())), "{source}");
+        }
+        for source in PathSyntaxError::ALL {
+            assert!(reasons.contains(&Some(source.reason())), "{source}");
+        }
+        for source in ItemWriteError::all() {
+            assert!(reasons.contains(&source.reason()), "{source}");
+        }
+    }
 
     #[test]
     fn input_failures_carry_the_reason_of_the_syntax_error_they_wrap() {

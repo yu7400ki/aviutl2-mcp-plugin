@@ -1185,7 +1185,7 @@ fn with_details(mapped: ErrorObject, details: Option<Value>) -> ErrorObject {
 ///
 /// 失敗の説明にも補助情報にも、対象フィールド名と規則の上限だけが現れる。
 /// 設定値・alias・パスそのものは含まない。
-fn edit_input_error(error: EditInputError) -> ErrorObject {
+pub(crate) fn edit_input_error(error: EditInputError) -> ErrorObject {
     with_details(
         error_object(error.error_code(), error.to_string()),
         input_error_details(error.reason(), None),
@@ -1207,7 +1207,7 @@ fn edit_input_error(error: EditInputError) -> ErrorObject {
 ///
 /// 添えるのは 0 始まりの整数と失敗の種別名だけである。失敗の説明に現れるのは
 /// 対象フィールド名と規則の上限に限られ、設定値・alias・パスそのものは含まない。
-fn batch_input_error(error: BatchInputError) -> ErrorObject {
+pub(crate) fn batch_input_error(error: BatchInputError) -> ErrorObject {
     with_details(
         error_object(error.error_code(), error.to_string()),
         input_error_details(error.reason(), error.failed_index()),
@@ -2593,6 +2593,7 @@ mod tests {
 #[cfg(test)]
 mod edit_tests {
     use super::*;
+    use crate::edit::error::RollbackOutcome;
     use aviutl2_mcp_core::{
         EditOutcome, LayerInfo, LayerStateOutcome, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS,
         ObjectFingerprintInput, ObjectSummary, SERVER_BATCH_REQUEST_BUDGET, SelectionField,
@@ -3333,6 +3334,45 @@ mod edit_tests {
                 "{label} が落ちた sub-operation の位置を運びませんでした"
             );
         }
+    }
+
+    #[test]
+    fn both_duplicate_checks_name_the_same_fact() {
+        // 同じ状態を書き換える組は 2 層で検出する。手前の層は要求内容だけを
+        // 見て、奥の層は解決した結果を見る。**文字列として同一のセレクターを
+        // 並べた要求——最も素直な入力——は手前の層で落ちる。** ここで名前が
+        // 付かなければ、名前で分岐する要求元は稀な入力だけを拾う。
+        let move_op = json!({
+            "type": "move_object",
+            "selector": fake_summary().selector,
+            "destination": { "layer": 1, "frame": 300 },
+        });
+        let from_request = execute_edit(
+            &FakeEditAdapter::new(),
+            &InstanceState::Ready,
+            EditOperation::ApplyBatch,
+            &json!({ "operations": [move_op, move_op] }),
+            within(),
+        )
+        .unwrap_err();
+
+        // 奥の層が同じ事実を検出したときの応答。
+        let after_resolution = edit_error(EditError::Batch {
+            source: Box::new(EditError::DuplicateTarget),
+            failed_index: Some(1),
+            rollback: RollbackOutcome::NotAttempted,
+        });
+
+        assert_eq!(from_request.code, after_resolution.code);
+        assert_eq!(from_request.details["reason"], json!("duplicate_target"));
+        assert_eq!(
+            from_request.details["reason"], after_resolution.details["reason"],
+            "2 層の検査が同じ事実に別の名前を付けました"
+        );
+        assert_eq!(
+            from_request.details["failed_index"],
+            after_resolution.details["failed_index"]
+        );
     }
 
     #[test]

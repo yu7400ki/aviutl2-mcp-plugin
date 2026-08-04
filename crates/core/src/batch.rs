@@ -277,15 +277,52 @@ impl BatchInputError {
     /// 失敗の種別を表す機械可読な名前を返す。名前を持たない失敗では `None`。
     ///
     /// sub-operation の失敗は単独編集と同じ名前へ写す。同じ入力が経路によって
-    /// 違う名前で返ることを避ける。要求全体の誤りは単独編集に対応するものが
-    /// 無いため名前を持たない。
+    /// 違う名前で返ることを避ける。
+    ///
+    /// 同じ状態を書き換える組は 2 層で検出する。ここで見るのはセレクターの
+    /// 文字列としての同一性であり、解決した結果として同じ対象を指す組は
+    /// 対象を解決する層が見る。**同じ事実に対する 2 層の検査であるため、
+    /// 名乗る名前も同じにする。** 手前の層だけが名前を落とすと、最も素直な
+    /// 入力——文字列として同一のセレクターを並べたもの——がその名前で返らず、
+    /// 名前で分岐する要求元は稀な入力だけを拾うことになる。
+    ///
+    /// 件数とシーンの不揃いは要求全体の誤りであり、対応する名前を持たない。
     pub fn reason(&self) -> Option<&'static str> {
         match self {
             BatchInputError::Operation { source, .. } => source.reason(),
+            BatchInputError::DuplicateTarget { .. } => Some("duplicate_target"),
             BatchInputError::OperationCountOutOfRange { .. }
-            | BatchInputError::SceneIdMismatch { .. }
-            | BatchInputError::DuplicateTarget { .. } => None,
+            | BatchInputError::SceneIdMismatch { .. } => None,
         }
+    }
+
+    /// 全 variant の代表値。
+    ///
+    /// [`BatchInputError::reason`] が返し得る名前を数え上げるために用いる。
+    /// `const` にできないのは、包む失敗が所有文字列を含むためである。
+    /// sub-operation の失敗は、包む側の全種別を並べる。
+    pub fn all() -> Vec<BatchInputError> {
+        let mut all = vec![
+            BatchInputError::OperationCountOutOfRange {
+                count: 0,
+                max: MAX_BATCH_OPERATIONS,
+            },
+            BatchInputError::SceneIdMismatch {
+                index: 1,
+                expected: 0,
+                actual: 1,
+            },
+            BatchInputError::DuplicateTarget {
+                index: 1,
+                first_index: 0,
+            },
+        ];
+        all.extend(
+            EditInputError::all()
+                .into_iter()
+                .map(|source| BatchInputError::Operation { index: 0, source }),
+        );
+        all
     }
 
     /// 対応するエラーコードを返す。
@@ -366,8 +403,8 @@ mod tests {
 
     #[test]
     fn a_failure_of_the_request_as_a_whole_has_no_reason() {
-        // 件数・シーンの不揃い・重複は単独編集に対応するものが無い。名前を
-        // 与えると、要求元は存在しない種別の分岐を書くことになる。
+        // 件数とシーンの不揃いは要求全体の誤りであり、対応する名前が無い。
+        // 名前を与えると、要求元は存在しない種別の分岐を書くことになる。
         for error in [
             BatchInputError::OperationCountOutOfRange {
                 count: 0,
@@ -378,13 +415,77 @@ mod tests {
                 expected: 0,
                 actual: 1,
             },
-            BatchInputError::DuplicateTarget {
-                index: 1,
-                first_index: 0,
-            },
         ] {
             assert_eq!(error.reason(), None, "{error}");
         }
+    }
+
+    #[test]
+    fn the_plainest_duplicate_input_is_named() {
+        // 文字列として同一のセレクターを並べた要求は、対象を解決する前に
+        // ここで落ちる。**最も素直な入力**であり、ここで名前が付かなければ
+        // 名前で分岐する要求元は稀な入力だけを拾うことになる。
+        let error = params(vec![move_object(2), move_object(2)])
+            .validate()
+            .expect_err("重複が検出されます");
+        assert!(matches!(
+            error,
+            BatchInputError::DuplicateTarget { index: 1, .. }
+        ));
+        assert_eq!(error.reason(), Some("duplicate_target"));
+        assert_eq!(error.failed_index(), Some(1));
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+    }
+
+    /// variant を表す名前を返す。
+    ///
+    /// 網羅 match で書く。variant を足すとここがコンパイルエラーになり、
+    /// すぐ下の一覧と [`BatchInputError::all`] へ足す必要があることが分かる。
+    fn batch_variant_name(error: &BatchInputError) -> &'static str {
+        match error {
+            BatchInputError::OperationCountOutOfRange { .. } => "OperationCountOutOfRange",
+            BatchInputError::SceneIdMismatch { .. } => "SceneIdMismatch",
+            BatchInputError::DuplicateTarget { .. } => "DuplicateTarget",
+            BatchInputError::Operation { .. } => "Operation",
+        }
+    }
+
+    #[test]
+    fn all_batch_failures_cover_every_variant() {
+        const VARIANTS: &[&str] = &[
+            "OperationCountOutOfRange",
+            "SceneIdMismatch",
+            "DuplicateTarget",
+            "Operation",
+        ];
+        let covered: Vec<&str> = BatchInputError::all()
+            .iter()
+            .map(batch_variant_name)
+            .collect();
+        for variant in VARIANTS {
+            assert!(
+                covered.contains(variant),
+                "{variant} の代表値が一覧にありません"
+            );
+        }
+        for variant in &covered {
+            assert!(
+                VARIANTS.contains(variant),
+                "{variant} が網羅すべき variant の一覧にありません"
+            );
+        }
+    }
+
+    #[test]
+    fn all_batch_failures_cover_every_reason() {
+        let reasons: Vec<Option<&str>> = BatchInputError::all()
+            .iter()
+            .map(BatchInputError::reason)
+            .collect();
+        for source in EditInputError::all() {
+            assert!(reasons.contains(&source.reason()), "{source}");
+        }
+        assert!(reasons.contains(&Some("duplicate_target")));
     }
 
     const EPOCH: &str = "78be92d1-c8c9-44c6-ae52-387548971468";

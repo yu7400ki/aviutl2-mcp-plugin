@@ -9,8 +9,11 @@
 
 use crate::edit::error::{EditError, NotIssuedReason, UnsupportedReason};
 use crate::render::error::{BufferRule, RenderError};
+use crate::session::{batch_input_error, edit_input_error};
 use aviutl2_mcp_core::error::REASON_VALUES;
-use aviutl2_mcp_core::{ItemWriteError, PathSyntaxError, TextSyntaxError};
+use aviutl2_mcp_core::{
+    BatchInputError, EditInputError, ItemWriteError, PathSyntaxError, TextSyntaxError,
+};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -41,6 +44,7 @@ fn edit_failures() -> Vec<EditError> {
                 .iter()
                 .map(|source| EditError::ItemWrite(ItemWriteError::Text(*source))),
         )
+        .chain(ItemWriteError::all().into_iter().map(EditError::ItemWrite))
         .collect()
 }
 
@@ -80,6 +84,18 @@ fn produced_reasons() -> BTreeSet<String> {
         crate::read::error::tests::all_errors()
             .iter()
             .filter_map(|e| reason_of(&e.details())),
+    );
+    // 要求内容だけで決まる検証は実行口へ届く前に落ちるため、応答の組み立ても
+    // 別の経路を通る。名前が届いているかは、その経路そのものを通して見る。
+    reasons.extend(
+        EditInputError::all()
+            .into_iter()
+            .filter_map(|error| reason_of(&edit_input_error(error).details)),
+    );
+    reasons.extend(
+        BatchInputError::all()
+            .into_iter()
+            .filter_map(|error| reason_of(&batch_input_error(error).details)),
     );
     reasons
 }

@@ -139,6 +139,40 @@ pub enum ItemWriteError {
 }
 
 impl ItemWriteError {
+    /// 全 variant の代表値。
+    ///
+    /// [`ItemWriteError::reason`] が返し得る名前を数え上げるために用いる。
+    /// `const` にできないのは、値を持つ variant が所有文字列を含むためである。
+    /// 構文検証を包む variant は、包む側の全種別を並べる。
+    pub fn all() -> Vec<ItemWriteError> {
+        let mut all = vec![
+            ItemWriteError::UnknownValue,
+            ItemWriteError::ItemNotFound {
+                item: "範囲".to_string(),
+            },
+            ItemWriteError::ValueKindMismatch {
+                item_type: "integer".to_string(),
+                value_kind: "text",
+            },
+            ItemWriteError::UnsupportedItemType {
+                item_type: "figure".to_string(),
+            },
+        ];
+        all.extend(
+            TextSyntaxError::ALL
+                .iter()
+                .copied()
+                .map(ItemWriteError::Text),
+        );
+        all.extend(
+            PathSyntaxError::ALL
+                .iter()
+                .copied()
+                .map(ItemWriteError::Path),
+        );
+        all
+    }
+
     /// 失敗の種別を表す機械可読な名前を返す。名前を持たない失敗では `None`。
     ///
     /// 名前は種別だけを表し、書き込もうとした値・パス・設定項目名を含まない。
@@ -332,6 +366,65 @@ mod tests {
     use super::*;
     use crate::error::REASON_VALUES;
     use crate::validation::{MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS};
+
+    /// variant を表す名前を返す。
+    ///
+    /// 網羅 match で書く。variant を足すとここがコンパイルエラーになり、
+    /// すぐ下の一覧と [`ItemWriteError::all`] へ足す必要があることが分かる。
+    fn write_variant_name(error: &ItemWriteError) -> &'static str {
+        match error {
+            ItemWriteError::UnknownValue => "UnknownValue",
+            ItemWriteError::ItemNotFound { .. } => "ItemNotFound",
+            ItemWriteError::ValueKindMismatch { .. } => "ValueKindMismatch",
+            ItemWriteError::UnsupportedItemType { .. } => "UnsupportedItemType",
+            ItemWriteError::Text(_) => "Text",
+            ItemWriteError::Path(_) => "Path",
+        }
+    }
+
+    #[test]
+    fn all_write_failures_cover_every_variant() {
+        const VARIANTS: &[&str] = &[
+            "UnknownValue",
+            "ItemNotFound",
+            "ValueKindMismatch",
+            "UnsupportedItemType",
+            "Text",
+            "Path",
+        ];
+        let covered: Vec<&str> = ItemWriteError::all()
+            .iter()
+            .map(write_variant_name)
+            .collect();
+        for variant in VARIANTS {
+            assert!(
+                covered.contains(variant),
+                "{variant} の代表値が一覧にありません"
+            );
+        }
+        for variant in &covered {
+            assert!(
+                VARIANTS.contains(variant),
+                "{variant} が網羅すべき variant の一覧にありません"
+            );
+        }
+    }
+
+    #[test]
+    fn all_write_failures_cover_every_syntax_kind() {
+        // 名前は包む側の種別で決まる。variant を 1 つ挙げるだけでは、
+        // 包む側に種別が増えたときに一覧が追随しない。
+        let reasons: Vec<Option<&str>> = ItemWriteError::all()
+            .iter()
+            .map(ItemWriteError::reason)
+            .collect();
+        for source in TextSyntaxError::ALL {
+            assert!(reasons.contains(&Some(source.reason())), "{source}");
+        }
+        for source in PathSyntaxError::ALL {
+            assert!(reasons.contains(&Some(source.reason())), "{source}");
+        }
+    }
 
     #[test]
     fn write_failures_carry_the_reason_of_the_syntax_error_they_wrap() {
