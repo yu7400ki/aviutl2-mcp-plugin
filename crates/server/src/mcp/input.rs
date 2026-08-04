@@ -35,6 +35,10 @@ pub(crate) const UUID_PATTERN: &str =
 const UUID_GROUP_LENGTHS: [usize; 5] = [8, 4, 4, 4, 12];
 
 /// fingerprint が満たすべき書式。
+///
+/// 前置と桁数はダイジェストの表現に共通のものだが、`#[schemars(pattern(..))]`
+/// が定数式しか取らないため、ここでは書き下している。共有の定義との一致は
+/// 試験で突き合わせる。
 pub(crate) const FINGERPRINT_PATTERN: &str = r"^sha256:[0-9a-f]{64}$";
 
 /// オブジェクト名・レイヤー名に許す最大文字数。
@@ -412,7 +416,7 @@ impl ListAvailableEffectsInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::ErrorCode;
+    use aviutl2_mcp_core::{ErrorCode, SHA256_HEX_LEN, SHA256_PREFIX};
 
     const SAMPLE_ID: &str = "8df98c04-e7c2-4f98-b3ce-fc1c39d76414";
     const SAMPLE_FINGERPRINT: &str =
@@ -427,6 +431,20 @@ mod tests {
             "name": "立ち絵",
             "fingerprint": SAMPLE_FINGERPRINT,
         })
+    }
+
+    #[test]
+    fn the_fingerprint_pattern_agrees_with_the_shared_digest_form() {
+        // 書式を書き下している唯一の場所である。共有の定義を変えた人がここへ
+        // 辿り着けるよう、両者を突き合わせる。
+        assert!(
+            FINGERPRINT_PATTERN.starts_with(&format!("^{SHA256_PREFIX}")),
+            "{FINGERPRINT_PATTERN}"
+        );
+        assert!(
+            FINGERPRINT_PATTERN.contains(&format!("{{{SHA256_HEX_LEN}}}")),
+            "{FINGERPRINT_PATTERN}"
+        );
     }
 
     #[test]
