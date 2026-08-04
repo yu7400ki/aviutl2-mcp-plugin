@@ -917,7 +917,7 @@ mod tests {
             panic!("参照区間の内側で panic させます")
         }
 
-        fn grid_bpm(&self) -> Result<Vec<aviutl2_mcp_core::FiniteF64>, crate::read::ReadError> {
+        fn grid_bpm(&self) -> Result<Vec<aviutl2_mcp_core::GridBpm>, crate::read::ReadError> {
             Ok(Vec::new())
         }
 

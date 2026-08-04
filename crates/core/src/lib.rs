@@ -73,7 +73,9 @@ pub use edit::{
     RangeChange, SelectionField, SelectionState, SetEffectEnabledParams, SetLayerStateParams,
     SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
 };
-pub use edit_info::{Cursor, DisplayRange, EditInfo, Extent, FrameRange, SceneInfo, SceneRef};
+pub use edit_info::{
+    Cursor, DisplayRange, EditInfo, Extent, FrameRange, GridBpm, SceneInfo, SceneRef,
+};
 pub use effect::{
     AvailableEffect, AvailableEffectItem, EffectFlags, EffectInfo, EffectItem, EffectItemType,
     EffectType, EvaluatedItemKind, TrackInfo,

@@ -6,7 +6,7 @@
 //! 再解決するのは実装側の責務である。
 
 use crate::read::error::ReadError;
-use aviutl2_mcp_core::{AvailableEffect, EffectItem, FiniteF64, SectionRange};
+use aviutl2_mcp_core::{AvailableEffect, EffectItem, FiniteF64, GridBpm, SectionRange};
 use std::fmt;
 
 /// ホストの編集状態。
@@ -158,7 +158,10 @@ pub trait SceneReader {
     fn scene_name(&self) -> Option<String>;
 
     /// グリッドの BPM 一覧。
-    fn grid_bpm(&self) -> Result<Vec<FiniteF64>, ReadError>;
+    ///
+    /// 4 つのフィールドを揃えて返す。一部だけを返すと、読み取った一覧をそのまま
+    /// 書き戻す経路で残りが失われる。
+    fn grid_bpm(&self) -> Result<Vec<GridBpm>, ReadError>;
 
     /// レイヤーの属性。
     ///

@@ -308,6 +308,29 @@ proptest! {
 }
 
 // ============================================================================
+// BPM グリッド
+// ============================================================================
+
+proptest! {
+    #[test]
+    fn a_single_precision_value_survives_the_round_trip_through_the_dto(
+        bits in any::<u32>(),
+    ) {
+        // BPM 情報の tempo と offset は SDK では単精度である。DTO は倍精度で
+        // 運ぶため、往復で値が変わらないことが「読み取った一覧をそのまま
+        // 書き戻せる」ことの前提になる。
+        let value = f32::from_bits(bits);
+        prop_assume!(value.is_finite());
+
+        let carried = FiniteF64::try_new(f64::from(value)).expect("単精度の有限値は有限である");
+        let json = serde_json::to_string(&carried).expect("直列化できる");
+        let restored: FiniteF64 = serde_json::from_str(&json).expect("逆直列化できる");
+
+        prop_assert_eq!((restored.get() as f32).to_bits(), value.to_bits());
+    }
+}
+
+// ============================================================================
 // fingerprint
 // ============================================================================
 

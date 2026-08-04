@@ -19,11 +19,34 @@ pub struct EditInfo {
     /// 選択範囲。未選択は null。
     pub selected_range: Option<FrameRange>,
     /// グリッド BPM の一覧。
-    pub grid_bpm: Vec<FiniteF64>,
+    pub grid_bpm: Vec<GridBpm>,
     /// プロジェクトの epoch。
     pub project_epoch: String,
     /// プロジェクトの revision。
     pub project_revision: u64,
+}
+
+/// BPM グリッドの 1 件。
+///
+/// 読み取りと書き込みで同じ形を用いる。読み取った一覧をそのまま書き戻せることが
+/// この型の目的であり、一部のフィールドだけを運ぶ形にすると、差し替えたい要素
+/// 以外の値が書き戻しで失われる。
+///
+/// 未知フィールドを拒否しない。応答が返した値をそのまま送り返す往復型であり、
+/// 応答へ optional field が増えたときに往復が壊れる。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GridBpm {
+    /// テンポ。
+    pub tempo: FiniteF64,
+    /// 拍子。
+    ///
+    /// SDK は 32bit 符号付き整数で受け渡す。収まらない値を要求として受け取って
+    /// から拒否できるよう、DTO はより広い整数で持つ。
+    pub beat: i64,
+    /// 開始位置（秒）。
+    pub start: FiniteF64,
+    /// 拍子オフセット（秒）。
+    pub offset: FiniteF64,
 }
 
 /// シーンの詳細情報。
@@ -134,7 +157,12 @@ mod tests {
                 layer_num: 10,
             },
             selected_range: Some(FrameRange { start: 10, end: 20 }),
-            grid_bpm: vec![FiniteF64::try_new(120.0).unwrap()],
+            grid_bpm: vec![GridBpm {
+                tempo: FiniteF64::try_new(120.0).unwrap(),
+                beat: 4,
+                start: FiniteF64::try_new(0.0).unwrap(),
+                offset: FiniteF64::try_new(0.25).unwrap(),
+            }],
             project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
             project_revision: 42,
         }
@@ -157,6 +185,31 @@ mod tests {
             .insert("future".to_string(), serde_json::json!(1));
         let restored: EditInfo = serde_json::from_value(value).unwrap();
         assert_eq!(restored, sample_edit_info());
+    }
+
+    #[test]
+    fn grid_bpm_carries_four_fields() {
+        // tempo だけを運ぶ形へ戻すと、読み取った一覧をそのまま書き戻す経路で
+        // 残りの 3 つが失われる。
+        let value = serde_json::to_value(sample_edit_info()).unwrap();
+        let entry = &value["grid_bpm"][0];
+        assert_eq!(entry["tempo"], serde_json::json!(120.0));
+        assert_eq!(entry["beat"], serde_json::json!(4));
+        assert_eq!(entry["start"], serde_json::json!(0.0));
+        assert_eq!(entry["offset"], serde_json::json!(0.25));
+    }
+
+    #[test]
+    fn grid_bpm_allows_unknown_optional_fields() {
+        // 応答が返した値をそのまま送り返す往復型である。応答へ field が増えた
+        // ときに往復が壊れないよう、未知フィールドを拒否しない。
+        let mut value = serde_json::to_value(sample_edit_info().grid_bpm[0]).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("future".to_string(), serde_json::json!(1));
+        let restored: GridBpm = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, sample_edit_info().grid_bpm[0]);
     }
 
     #[test]

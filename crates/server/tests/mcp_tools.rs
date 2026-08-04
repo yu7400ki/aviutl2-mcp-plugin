@@ -6,7 +6,7 @@ use aviutl2_mcp_core::AuthSecret;
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
     EffectItemValues, EffectType, ErrorCode, ErrorObject, EvaluatedItem, Extent, FiniteF64,
-    FrameRange, GetCurrentSceneResult, InstanceId, InstanceState, LayerInfo,
+    FrameRange, GetCurrentSceneResult, GridBpm, InstanceId, InstanceState, LayerInfo,
     ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, ObjectDetail,
     ObjectFingerprintInput, ObjectSummary, PageMeta, RequestEnvelope, SceneInfo, SectionRange,
     TrackGroup,
@@ -148,7 +148,12 @@ fn sample_edit_info() -> EditInfo {
             layer_num: 10,
         },
         selected_range: Some(FrameRange { start: 0, end: 10 }),
-        grid_bpm: vec![FiniteF64::try_new(120.0).expect("有限値")],
+        grid_bpm: vec![GridBpm {
+            tempo: FiniteF64::try_new(120.0).expect("有限値"),
+            beat: 4,
+            start: FiniteF64::try_new(1.5).expect("有限値"),
+            offset: FiniteF64::try_new(0.25).expect("有限値"),
+        }],
         project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
         project_revision: 42,
     }

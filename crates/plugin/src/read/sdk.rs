@@ -15,7 +15,7 @@ use crate::read::host::{
 use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection};
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, EffectType,
-    FiniteF64, ItemValue, SectionRange,
+    FiniteF64, GridBpm, ItemValue, SectionRange,
 };
 use std::collections::HashMap;
 use std::ops::Range;
@@ -112,15 +112,12 @@ impl SceneReader for SdkSceneReader<'_> {
         self.section.get_scene_name().ok()
     }
 
-    fn grid_bpm(&self) -> Result<Vec<FiniteF64>, ReadError> {
+    fn grid_bpm(&self) -> Result<Vec<GridBpm>, ReadError> {
         let list = self
             .section
             .get_grid_bpm_list()
             .map_err(|_| sdk("get_grid_bpm_list"))?;
-        finite_values(
-            list.into_iter().map(|bpm| f64::from(bpm.tempo)),
-            "get_grid_bpm_list",
-        )
+        list.into_iter().map(grid_bpm).collect()
     }
 
     fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {
@@ -616,13 +613,30 @@ fn finite_values(
 ) -> Result<Vec<FiniteF64>, ReadError> {
     values
         .into_iter()
-        .map(|value| {
-            FiniteF64::try_new(value).ok_or_else(|| {
-                tracing::warn!("非有限の数値を受け取りました");
-                sdk(operation)
-            })
-        })
+        .map(|value| finite_value(value, operation))
         .collect()
+}
+
+/// 非有限の数値を失敗として拒む。
+fn finite_value(value: f64, operation: &'static str) -> Result<FiniteF64, ReadError> {
+    FiniteF64::try_new(value).ok_or_else(|| {
+        tracing::warn!("非有限の数値を受け取りました");
+        sdk(operation)
+    })
+}
+
+/// BPM 情報を所有型へ写す。
+///
+/// 4 つのフィールドを全て運ぶ。浮動小数点の 3 つは非有限値を拒む——一部だけを
+/// 検査すると、検査していないフィールドの非有限値が JSON で null へ落ちる。
+fn grid_bpm(info: aviutl2::generic::BpmInfo) -> Result<GridBpm, ReadError> {
+    const OPERATION: &str = "get_grid_bpm_list";
+    Ok(GridBpm {
+        tempo: finite_value(f64::from(info.tempo), OPERATION)?,
+        beat: i64::from(info.beat),
+        start: finite_value(info.start, OPERATION)?,
+        offset: finite_value(f64::from(info.offset), OPERATION)?,
+    })
 }
 
 /// トラックバーの移動情報を所有型へ写す。
@@ -998,6 +1012,71 @@ mod tests {
             vec![120.0, -0.5, 0.0]
         );
         assert!(finite_values([], "get_grid_bpm_list").unwrap().is_empty());
+    }
+
+    /// ホストが渡す BPM 情報の生の姿。
+    fn raw_bpm_info() -> aviutl2::generic::BpmInfo {
+        aviutl2::generic::BpmInfo {
+            tempo: 120.0,
+            beat: 4,
+            start: 1.5,
+            offset: 0.25,
+        }
+    }
+
+    #[test]
+    fn a_bpm_entry_carries_all_four_fields() {
+        // tempo だけを取ると、読み取った一覧をそのまま書き戻す経路で
+        // beat / start / offset が失われる。
+        let mapped = grid_bpm(raw_bpm_info()).expect("正常な BPM 情報です");
+        assert_eq!(mapped.tempo.get(), 120.0);
+        assert_eq!(mapped.beat, 4);
+        assert_eq!(mapped.start.get(), 1.5);
+        assert_eq!(mapped.offset.get(), 0.25);
+    }
+
+    #[test]
+    fn a_non_finite_bpm_field_fails_on_every_float() {
+        // 検査を 1 つのフィールドだけに掛けると、残りの非有限値が JSON で
+        // null へ落ちる。3 つの浮動小数点すべてを見る。
+        for (single, double) in [
+            (f32::NAN, f64::NAN),
+            (f32::INFINITY, f64::INFINITY),
+            (f32::NEG_INFINITY, f64::NEG_INFINITY),
+        ] {
+            let broken = [
+                (
+                    "tempo",
+                    aviutl2::generic::BpmInfo {
+                        tempo: single,
+                        ..raw_bpm_info()
+                    },
+                ),
+                (
+                    "start",
+                    aviutl2::generic::BpmInfo {
+                        start: double,
+                        ..raw_bpm_info()
+                    },
+                ),
+                (
+                    "offset",
+                    aviutl2::generic::BpmInfo {
+                        offset: single,
+                        ..raw_bpm_info()
+                    },
+                ),
+            ];
+            for (field, info) in broken {
+                let error = grid_bpm(info).expect_err("非有限値が受理されました");
+                assert_eq!(error.error_code(), ErrorCode::SdkError, "{field}");
+                assert_eq!(
+                    error.details()["sdk_operation"],
+                    "get_grid_bpm_list",
+                    "{field}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -38,7 +38,7 @@ pub fn edit_info() -> Value {
         ("extent", extent()),
         ("display", display_range()),
         ("selected_range", nullable(frame_range())),
-        ("grid_bpm", array(number())),
+        ("grid_bpm", array(grid_bpm())),
         ("project_epoch", string()),
         ("project_revision", unsigned()),
     ])
@@ -365,6 +365,19 @@ fn frame_range() -> Value {
     object(&[("start", unsigned()), ("end", unsigned())])
 }
 
+/// BPM グリッドの 1 件。
+///
+/// 読み取りと書き込みで同じ形である。`start` と `offset` は秒であり、フレーム
+/// 番号ではない。
+fn grid_bpm() -> Value {
+    object(&[
+        ("tempo", number()),
+        ("beat", integer()),
+        ("start", number()),
+        ("offset", number()),
+    ])
+}
+
 fn page_meta() -> Value {
     object(&[
         ("total_count", unsigned()),
@@ -604,10 +617,10 @@ mod tests {
         AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EditOutcome,
         EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem, EffectItemType,
         EffectItemValues, EffectType, EvaluatedItem, Extent, FiniteF64, FrameRange,
-        GetCurrentSceneResult, InstanceId, InstanceInfo, InstanceProject, InstanceState, ItemValue,
-        LayerInfo, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, ObjectDetail,
-        ObjectFingerprintInput, ObjectSummary, ObservedSelection, PageMeta, SceneInfo, SceneRef,
-        SectionRange, SelectionField, SelectionState, TrackGroup, TrackInfo,
+        GetCurrentSceneResult, GridBpm, InstanceId, InstanceInfo, InstanceProject, InstanceState,
+        ItemValue, LayerInfo, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
+        ObjectDetail, ObjectFingerprintInput, ObjectSummary, ObservedSelection, PageMeta,
+        SceneInfo, SceneRef, SectionRange, SelectionField, SelectionState, TrackGroup, TrackInfo,
     };
 
     /// 値が schema に適合するかを再帰的に検査する。
@@ -857,7 +870,12 @@ mod tests {
                 layer_num: 10,
             },
             selected_range: Some(FrameRange { start: 0, end: 10 }),
-            grid_bpm: vec![FiniteF64::try_new(120.0).expect("有限値")],
+            grid_bpm: vec![GridBpm {
+                tempo: FiniteF64::try_new(120.0).expect("有限値"),
+                beat: 4,
+                start: FiniteF64::try_new(1.5).expect("有限値"),
+                offset: FiniteF64::try_new(0.25).expect("有限値"),
+            }],
             project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
             project_revision: 42,
         }

@@ -44,7 +44,7 @@ use crate::read::host::{
 };
 use aviutl2_mcp_core::{
     AvailableEffectItem, BatchOperation, BatchOutcome, BatchStepOutcome, FiniteF64, FrameRange,
-    ItemWriteError, ObjectSelector, ObjectSummary, prepare_item_write,
+    GridBpm, ItemWriteError, ObjectSelector, ObjectSummary, prepare_item_write,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -633,7 +633,7 @@ impl SceneReader for CachingEditor<'_> {
         self.inner.reader().scene_name()
     }
 
-    fn grid_bpm(&self) -> Result<Vec<FiniteF64>, ReadError> {
+    fn grid_bpm(&self) -> Result<Vec<GridBpm>, ReadError> {
         self.inner.reader().grid_bpm()
     }
 

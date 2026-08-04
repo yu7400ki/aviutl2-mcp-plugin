@@ -22,7 +22,7 @@ use crate::read::host::{
 use crate::test_support::alias_with_effects;
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EffectFlags, EffectItem,
-    EffectItemType, EffectType, FiniteF64, FrameRange, ItemValue, SectionRange,
+    EffectItemType, EffectType, FiniteF64, FrameRange, GridBpm, ItemValue, SectionRange,
 };
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -235,6 +235,7 @@ pub(crate) struct FakeScene {
     pub(crate) selected_range: Option<FrameRange>,
     pub(crate) focus: Option<usize>,
     pub(crate) display: DisplayRange,
+    pub(crate) grid_bpm: Vec<GridBpm>,
 }
 
 impl FakeScene {
@@ -713,8 +714,8 @@ impl SceneReader for FakeSceneEditor<'_> {
         Some("Scene 1".to_string())
     }
 
-    fn grid_bpm(&self) -> Result<Vec<FiniteF64>, ReadError> {
-        Ok(vec![FiniteF64::try_new(120.0).unwrap()])
+    fn grid_bpm(&self) -> Result<Vec<GridBpm>, ReadError> {
+        Ok(self.host.scene.lock().unwrap().grid_bpm.clone())
     }
 
     fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {
@@ -1714,6 +1715,12 @@ pub(crate) fn fake_scene() -> FakeScene {
             frame_num: DISPLAY_FRAME_NUM,
             layer_num: DISPLAY_LAYER_NUM,
         },
+        grid_bpm: vec![GridBpm {
+            tempo: FiniteF64::try_new(120.0).unwrap(),
+            beat: 4,
+            start: FiniteF64::try_new(0.0).unwrap(),
+            offset: FiniteF64::try_new(0.0).unwrap(),
+        }],
     }
 }
 

@@ -7,7 +7,7 @@ mod support;
 
 use aviutl2_mcp_core::{
     AuthSecret, Cursor, DisplayRange, EditInfo, ErrorCode, ErrorObject, Extent, FiniteF64,
-    FrameRange, InstanceId, InstanceState, SceneInfo,
+    FrameRange, GridBpm, InstanceId, InstanceState, SceneInfo,
 };
 use aviutl2_mcp_server::mcp::summary::MAX_TEXT_CHARS;
 use serde_json::{Value, json};
@@ -246,7 +246,12 @@ fn sample_edit_info() -> EditInfo {
             layer_num: 10,
         },
         selected_range: Some(FrameRange { start: 0, end: 10 }),
-        grid_bpm: vec![FiniteF64::try_new(120.0).expect("有限値")],
+        grid_bpm: vec![GridBpm {
+            tempo: FiniteF64::try_new(120.0).expect("有限値"),
+            beat: 4,
+            start: FiniteF64::try_new(1.5).expect("有限値"),
+            offset: FiniteF64::try_new(0.25).expect("有限値"),
+        }],
         project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
         project_revision: 42,
     }
@@ -1053,7 +1058,12 @@ fn oversized_edit_info_resource_reports_truncation_as_readable_json() {
     let registry_dir = temp_registry_dir();
     let mut edit_info = sample_edit_info();
     edit_info.grid_bpm = (0..OVERSIZED_GRID_BPM)
-        .map(|index| FiniteF64::try_new(120.0 + index as f64).expect("有限値"))
+        .map(|index| GridBpm {
+            tempo: FiniteF64::try_new(120.0 + index as f64).expect("有限値"),
+            beat: 4,
+            start: FiniteF64::try_new(index as f64).expect("有限値"),
+            offset: FiniteF64::try_new(0.0).expect("有限値"),
+        })
         .collect();
     let mock = MockPipeServer::start_with_operations(
         InstanceId::new_v4(),

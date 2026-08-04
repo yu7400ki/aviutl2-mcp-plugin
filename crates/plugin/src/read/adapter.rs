@@ -802,7 +802,7 @@ mod tests {
     use crate::test_support::{alias_with_effects, with_silent_panic_hook};
     use aviutl2_mcp_core::{
         AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
-        ItemValue, MAX_PAGE_LIMIT, SectionRange, TrackInfo,
+        GridBpm, ItemValue, MAX_PAGE_LIMIT, SectionRange, TrackInfo,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -871,7 +871,7 @@ mod tests {
         /// 編集情報の取得を失敗させるしかた。
         edit_info_failure: Option<EditInfoFailure>,
         scene_name: Option<String>,
-        grid_bpm: Vec<FiniteF64>,
+        grid_bpm: Vec<GridBpm>,
         layers: Vec<FakeLayer>,
         catalog: Vec<AvailableEffect>,
         panic_at: Option<PanicPoint>,
@@ -954,7 +954,7 @@ mod tests {
                 info: fake_edit_info(),
                 edit_info_failure: None,
                 scene_name: Some("Scene 1".to_string()),
-                grid_bpm: vec![FiniteF64::try_new(120.0).unwrap()],
+                grid_bpm: vec![sample_grid_bpm()],
                 layers: fake_layers(),
                 catalog: fake_catalog(),
                 panic_at: None,
@@ -1080,7 +1080,7 @@ mod tests {
             self.host.scene_name.clone()
         }
 
-        fn grid_bpm(&self) -> Result<Vec<FiniteF64>, ReadError> {
+        fn grid_bpm(&self) -> Result<Vec<GridBpm>, ReadError> {
             Ok(self.host.grid_bpm.clone())
         }
 
@@ -1307,6 +1307,16 @@ mod tests {
                 .ok_or(ReadError::Sdk {
                     operation: "get_effect_list",
                 })
+        }
+    }
+
+    /// 4 つのフィールドが揃った BPM 情報。
+    fn sample_grid_bpm() -> GridBpm {
+        GridBpm {
+            tempo: FiniteF64::try_new(120.0).unwrap(),
+            beat: 4,
+            start: FiniteF64::try_new(1.5).unwrap(),
+            offset: FiniteF64::try_new(0.25).unwrap(),
         }
     }
 
@@ -2311,7 +2321,9 @@ mod tests {
             }
         );
         assert_eq!(info.selected_range, Some(FrameRange { start: 10, end: 20 }));
-        assert_eq!(info.grid_bpm.len(), 1);
+        // 一覧は 4 つのフィールドを揃えて返る。tempo だけを運ぶと、読み取った
+        // 一覧をそのまま書き戻す経路で残りの 3 つが失われる。
+        assert_eq!(info.grid_bpm, vec![sample_grid_bpm()]);
         assert_eq!(info.project_epoch, adapter.project.epoch());
     }
 
