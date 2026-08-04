@@ -207,6 +207,10 @@ pub struct AviUtl2McpServer {
 #[derive(Clone)]
 enum LimitsSource {
     /// 構築時に与えられた固定値。
+    ///
+    /// この腕を作れるのは試験と実機受け入れの構築口だけであり、それらは
+    /// `test-support` の下にある。**製品ビルドでは構築されない。**
+    #[cfg_attr(not(any(test, feature = "test-support")), expect(dead_code))]
     Fixed(CallLimits),
     /// 共有設定から引く。
     Settings(Arc<SettingsSource>),
@@ -275,7 +279,9 @@ impl AviUtl2McpServer {
 
     /// 開いてある保管庫と固定の実行予算でサーバーを作る。
     ///
-    /// 予算を明示して振る舞いを観測するための構築口である。
+    /// **予算を明示して振る舞いを観測するための構築口であり、製品の経路では
+    /// 使わない。** 既定では公開しないため、`.exe` にこの経路は無い。
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_artifact_store(
         registry_dir: PathBuf,
         limits: CallLimits,
@@ -296,6 +302,10 @@ impl AviUtl2McpServer {
     /// 保管庫は基底へ保護された DACL を書き込むため、描画を使わない利用者に
     /// それを強いないための構築口である。描画を提供する場合は [`Self::new`] を
     /// 使う。
+    ///
+    /// **予算を明示して振る舞いを観測するための構築口であり、製品の経路では
+    /// 使わない。** 既定では公開しないため、`.exe` にこの経路は無い。
+    #[cfg(any(test, feature = "test-support"))]
     pub fn without_artifact_store(registry_dir: PathBuf, limits: CallLimits) -> Self {
         Self::from_limits_source(registry_dir, LimitsSource::Fixed(limits))
     }

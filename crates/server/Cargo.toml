@@ -14,6 +14,15 @@ path = "src/lib.rs"
 name = "aviutl2-mcp-server"
 path = "src/main.rs"
 
+[features]
+# 実行予算を明示して振る舞いを観測するための構築口を公開する。
+# 製品コードからは使わない。既定では立てないため、`.exe` にはこの経路が無い。
+#
+# 同一 crate の統合試験と example もこの feature を要するため、それらは
+# `required-features` で括ってある。品質ゲートは `--all-features` で回すので、
+# 検査の対象からは外れない。
+test-support = []
+
 # 実機（AviUtl2 起動）を要する受け入れ確認。
 # example ターゲットは `cargo test` でビルドのみ行われ実行されないため、
 # `cargo test --workspace --all-features` がホストを起動することはない。
@@ -36,6 +45,7 @@ path = "examples/live_edit_acceptance.rs"
 [[example]]
 name = "live_batch_acceptance"
 path = "examples/live_batch_acceptance.rs"
+required-features = ["test-support"]
 
 # 描画の実機受け入れ確認。プロジェクトは書き換えないが、成果物をディスクへ書く。
 # 分離方式は上と同じ。
@@ -43,6 +53,23 @@ path = "examples/live_batch_acceptance.rs"
 [[example]]
 name = "live_render_acceptance"
 path = "examples/live_render_acceptance.rs"
+required-features = ["test-support"]
+
+# 統合試験のうち、実行予算を明示する構築口を使うもの。
+[[test]]
+name = "mcp_tools"
+path = "tests/mcp_tools.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "mcp_edit_tools"
+path = "tests/mcp_edit_tools.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "mcp_render_tools"
+path = "tests/mcp_render_tools.rs"
+required-features = ["test-support"]
 
 [dependencies]
 aviutl2-mcp-core = { workspace = true }
