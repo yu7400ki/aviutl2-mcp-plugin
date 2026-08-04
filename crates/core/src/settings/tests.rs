@@ -375,8 +375,8 @@ fn a_replaced_file_is_seen_on_the_next_refresh() {
 
 #[test]
 fn several_writes_between_refreshes_apply_once_as_the_last_state() {
-    // ポーリングの間隔がそのまま debounce になる。間隔内の複数回の書き込みは
-    // 最後の状態として 1 回だけ反映される。
+    // 契機と契機の間に何度書き込まれても、読み直しは 1 回であり、見えるのは
+    // 最後の状態である。debounce を持たなくても中間の状態は残らない。
     let path = temp_settings_path();
     write_settings(&path, r#"{"log_level":"debug"}"#);
     let mut reader = SettingsReader::new(path.clone());

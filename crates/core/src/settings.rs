@@ -700,7 +700,7 @@ pub enum SettingsRefresh {
 /// 解決の手続きはここに 1 つしか無い。
 ///
 /// 読み直しの契機は呼び出し元が決める。plugin は要求 1 件の処理を始めるときに、
-/// server は一定間隔のポーリングで [`SettingsReader::refresh`] を呼ぶ。
+/// server は変更の通知を受けたときに [`SettingsReader::refresh`] を呼ぶ。
 #[derive(Debug)]
 pub struct SettingsReader {
     path: PathBuf,
