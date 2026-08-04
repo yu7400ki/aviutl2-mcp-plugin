@@ -131,7 +131,7 @@ fn the_watch_reports_a_change_only_when_the_visible_set_changes() {
     // `tools/list` を取り直させる理由は無い。
     dir.replace_settings(r#"{"log_level":"debug"}"#);
     assert!(
-        wait_until(|| source.settings().log_level() == "debug"),
+        wait_until(|| source.settings().log_level() == Some("debug")),
         "設定の差し替えが届きませんでした"
     );
     assert!(
