@@ -28,7 +28,8 @@
 
 use crate::win_io::{EventHandle, OverlappedOp, WaitAnyOutcome, WinIoError, wait_any};
 use aviutl2_mcp_core::settings::{
-    SETTINGS_FILE_NAME, SETTINGS_READ_ATTEMPTS, Settings, SettingsReader, SettingsRefresh,
+    SETTINGS_FILE_NAME, SETTINGS_READ_ATTEMPTS, Settings, SettingsReadError, SettingsReader,
+    SettingsRefresh,
 };
 use aviutl2_mcp_win::create_protected_directory;
 use std::ffi::c_void;
@@ -70,6 +71,13 @@ const NOTIFY_FILTER: windows::Win32::Storage::FileSystem::FILE_NOTIFY_CHANGE =
             | FILE_NOTIFY_CHANGE_LAST_WRITE.0
             | FILE_NOTIFY_CHANGE_SIZE.0,
     );
+
+/// 一時的な読み取り失敗を試み直すまでの間隔。
+///
+/// 原子的置換が対象を差し替えている窓はミリ秒に満たない。**間隔を置かずに
+/// 試行回数を使い切ると、再試行がその窓をまたがず、何度呼んでも同じ瞬間を
+/// 見ることになる。**
+const SETTINGS_READ_RETRY_INTERVAL: Duration = Duration::from_millis(20);
 
 /// 既にシグナル状態の完了を取り出すときに与える猶予。
 ///
@@ -471,33 +479,64 @@ fn to_lower_ascii(unit: u16) -> u16 {
     }
 }
 
+/// 設定を読み直した結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReloadOutcome {
+    /// 更新時刻と大きさが前回と同じで、読み直していない。
+    Unchanged,
+    /// 読み直し、snapshot を差し替えた。
+    Applied,
+    /// 読み直したが、解決した値は前と同じであった。
+    Same,
+    /// 解析できなかった。直前の snapshot を維持した。
+    Corrupt,
+    /// 読み取れなかった。直前の snapshot を維持した。
+    Unreadable,
+}
+
 /// 設定を読み直し、値が変わっていれば snapshot を差し替える。
 ///
-/// 更新時刻と大きさが前回と同じなら何もしない。読み取りが一時的に失敗した
-/// 場合は有限回だけ試み、なお失敗すれば破損として直前の snapshot を維持する。
-/// **破損が、無効化していた tool を無言で再公開してはならない。**
-fn reload(reader: &mut SettingsReader, source: &SettingsSource) -> bool {
+/// 更新時刻と大きさが前回と同じなら何もしない。**破損が、無効化していた tool を
+/// 無言で再公開してはならない**ため、いずれの失敗でも直前の snapshot を維持する。
+///
+/// **失敗の 2 種類で扱いが違う。**
+///
+/// - **解析できない（破損）**: 再試行しない。内容は変わらないためである。加えて
+///   読み取り口は読めた時点で印を進めるため、**再試行すると 2 回目は
+///   [`SettingsRefresh::Unchanged`] になり、記録を残さないまま抜ける。**
+///   運用者が設定の破損を知る機会はここしか無い。
+/// - **読み取れない**: 原子的置換の最中に掴んだ場合であり、窓はごく短い。
+///   間隔を置いて有限回だけ試す。**間隔を置かずに数マイクロ秒で使い切ると、
+///   再試行が窓をまたがない。**
+fn reload(reader: &mut SettingsReader, source: &SettingsSource) -> ReloadOutcome {
     for attempt in 1..=SETTINGS_READ_ATTEMPTS {
         match reader.refresh() {
-            SettingsRefresh::Unchanged => return false,
+            SettingsRefresh::Unchanged => return ReloadOutcome::Unchanged,
             SettingsRefresh::Reloaded(issues) => {
                 for issue in &issues {
                     warn!("設定を補正しました: {issue}");
                 }
-                let changed = source.replace_if_changed(reader.settings());
-                if changed {
+                return if source.replace_if_changed(reader.settings()) {
                     debug!("設定を反映しました");
-                }
-                return changed;
+                    ReloadOutcome::Applied
+                } else {
+                    ReloadOutcome::Same
+                };
+            }
+            SettingsRefresh::Failed(e @ SettingsReadError::Parse(_)) => {
+                warn!("設定を解析できませんでした。直前の設定を維持します: {e}");
+                return ReloadOutcome::Corrupt;
             }
             SettingsRefresh::Failed(e) => {
                 if attempt == SETTINGS_READ_ATTEMPTS {
-                    warn!("設定を読み直せませんでした。直前の設定を維持します: {e}");
+                    warn!("設定を読み取れませんでした。直前の設定を維持します: {e}");
+                } else {
+                    std::thread::sleep(SETTINGS_READ_RETRY_INTERVAL);
                 }
             }
         }
     }
-    false
+    ReloadOutcome::Unreadable
 }
 
 #[cfg(test)]

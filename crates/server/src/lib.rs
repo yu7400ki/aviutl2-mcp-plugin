@@ -11,6 +11,8 @@ pub mod mcp;
 pub mod pipe_client;
 pub mod redact;
 pub mod settings;
+#[cfg(test)]
+mod test_support;
 pub mod win_io;
 
 /// 既定のログレベル。

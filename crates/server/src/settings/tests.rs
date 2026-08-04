@@ -1,6 +1,7 @@
 //! 設定の監視と snapshot の単体テスト。
 
 use super::*;
+use crate::test_support::capture_logs;
 use aviutl2_mcp_core::settings::MIN_ARTIFACT_TTL_SECONDS;
 use std::path::PathBuf;
 
@@ -275,6 +276,47 @@ fn out_of_range_values_are_clamped_before_they_reach_the_snapshot() {
 }
 
 #[test]
+fn a_corrupt_file_is_reported_instead_of_being_swallowed_by_a_retry() {
+    // **読み取り口は読めた時点で印を進める。** 破損を再試行すると 2 回目は
+    // `Unchanged` になり、記録を残す枝へ永久に到達しない。運用者が設定の破損を
+    // 知る機会はここしか無く、しかも設定画面で保存すると痕跡なく作り直される。
+    let dir = TempDir::new();
+    dir.replace_settings(r#"{"artifact":{"ttl_seconds":120}}"#);
+    let mut reader = reader_for(&dir);
+    let source = SettingsSource::fixed((*reader.settings()).clone());
+
+    dir.replace_settings("{ broken");
+    let (outcome, logs) = capture_logs(|| reload(&mut reader, &source));
+
+    assert_eq!(
+        outcome,
+        ReloadOutcome::Corrupt,
+        "破損が破損として報告されていません"
+    );
+    assert!(
+        logs.contains("WARN") && logs.contains("設定を解析できませんでした"),
+        "破損を告げる WARN が記録されていません: {logs}"
+    );
+    // last-known-good は維持される。
+    assert_eq!(source.settings().artifact_ttl(), Duration::from_secs(120));
+    assert_eq!(source.applied(), 0);
+}
+
+#[test]
+fn an_unchanged_file_is_neither_reported_nor_applied() {
+    // 破損の記録が「変わっていない」ときにまで出ては、記録の意味が薄れる。
+    let dir = TempDir::new();
+    dir.replace_settings(r#"{"log_level":"debug"}"#);
+    let mut reader = reader_for(&dir);
+    let source = SettingsSource::fixed((*reader.settings()).clone());
+
+    let (outcome, logs) = capture_logs(|| reload(&mut reader, &source));
+
+    assert_eq!(outcome, ReloadOutcome::Unchanged);
+    assert!(!logs.contains("WARN"), "余計な WARN が出ています: {logs}");
+}
+
+#[test]
 fn the_snapshot_is_replaced_only_when_the_value_changes() {
     // 同じ内容を書き直しても差し替えない。通知が重複しても、有効集合が実際に
     // 変わったときだけ下流へ伝わる根拠になる。
@@ -284,11 +326,19 @@ fn the_snapshot_is_replaced_only_when_the_value_changes() {
     let source = SettingsSource::fixed((*reader.settings()).clone());
 
     dir.replace_settings(r#"{"log_level":"debug"}"#);
-    assert!(!reload(&mut reader, &source), "同じ内容で差し替えました");
+    assert_eq!(
+        reload(&mut reader, &source),
+        ReloadOutcome::Same,
+        "同じ内容で差し替えました"
+    );
     assert_eq!(source.applied(), 0);
 
     dir.replace_settings(r#"{"log_level":"trace"}"#);
-    assert!(reload(&mut reader, &source), "変更が反映されませんでした");
+    assert_eq!(
+        reload(&mut reader, &source),
+        ReloadOutcome::Applied,
+        "変更が反映されませんでした"
+    );
     assert_eq!(source.applied(), 1);
     assert_eq!(source.settings().log_level(), "trace");
 }
