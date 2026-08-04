@@ -63,6 +63,18 @@ pub enum UnsupportedReason {
 }
 
 impl UnsupportedReason {
+    /// 全 variant。
+    ///
+    /// [`UnsupportedReason::as_str`] が返し得る名前を数え上げるために用いる。
+    pub const ALL: &'static [UnsupportedReason] = &[
+        UnsupportedReason::EffectNotRegistered,
+        UnsupportedReason::EffectStateImmutable,
+        UnsupportedReason::MediaNotSupported,
+        UnsupportedReason::ItemTypeNotWritable,
+        UnsupportedReason::ChangeNotApplied,
+        UnsupportedReason::InverseUnavailable,
+    ];
+
     /// 応答へ載せる機械可読な名前。
     pub fn as_str(self) -> &'static str {
         match self {
@@ -106,6 +118,14 @@ pub enum NotIssuedReason {
 }
 
 impl NotIssuedReason {
+    /// 全 variant。
+    ///
+    /// [`NotIssuedReason::as_str`] が返し得る名前を数え上げるために用いる。
+    pub const ALL: &'static [NotIssuedReason] = &[
+        NotIssuedReason::TargetMissing,
+        NotIssuedReason::ArgumentNotRepresentable,
+    ];
+
     /// 応答へ載せる機械可読な名前。
     pub fn as_str(self) -> &'static str {
         match self {
@@ -571,14 +591,14 @@ fn truncate(name: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::read::EditState;
     use crate::test_support::sample_object_summary;
     use aviutl2_mcp_core::{EffectItemType, PathSyntaxError, TextSyntaxError};
 
     /// 全 variant の代表値。新しい variant を足したらここへも足す。
-    fn all_errors() -> Vec<EditError> {
+    pub(crate) fn all_errors() -> Vec<EditError> {
         vec![
             EditError::Read(ReadError::NotReady),
             EditError::Read(ReadError::EditBlocked {

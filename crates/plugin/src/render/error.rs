@@ -44,6 +44,20 @@ pub enum BufferRule {
 }
 
 impl BufferRule {
+    /// 全 variant。
+    ///
+    /// [`BufferRule::as_str`] が返し得る名前を数え上げるために用いる。
+    pub const ALL: &'static [BufferRule] = &[
+        BufferRule::FrameMismatch,
+        BufferRule::DimensionOutOfRange,
+        BufferRule::EmptyDimension,
+        BufferRule::RowBytesOverflow,
+        BufferRule::PitchTooSmall,
+        BufferRule::EmptyBuffer,
+        BufferRule::BufferLengthMismatch,
+        BufferRule::FrameTooLarge,
+    ];
+
     /// 応答へ載せる機械可読な名前。
     ///
     /// 寸法にまつわる 3 つの規則は 1 つの名前へまとめる。要求元が取れる行動は
@@ -317,12 +331,12 @@ impl RenderError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::read::EditState;
 
     /// 全 variant の代表値。新しい variant を足したらここへも足す。
-    fn all_errors() -> Vec<RenderError> {
+    pub(crate) fn all_errors() -> Vec<RenderError> {
         vec![
             RenderError::Read(ReadError::NotReady),
             RenderError::Read(ReadError::EditBlocked {
@@ -377,32 +391,45 @@ mod tests {
         }
     }
 
-    /// 全 [`BufferRule`]。新しい規則を足したらここへも足す。
-    fn all_buffer_rules() -> Vec<BufferRule> {
-        let rules = vec![
-            BufferRule::FrameMismatch,
-            BufferRule::DimensionOutOfRange,
-            BufferRule::EmptyDimension,
-            BufferRule::RowBytesOverflow,
-            BufferRule::PitchTooSmall,
-            BufferRule::EmptyBuffer,
-            BufferRule::BufferLengthMismatch,
-            BufferRule::FrameTooLarge,
-        ];
-        for rule in &rules {
-            // 網羅 match。規則を足すとここがコンパイルエラーになる。
-            match rule {
-                BufferRule::FrameMismatch
-                | BufferRule::DimensionOutOfRange
-                | BufferRule::EmptyDimension
-                | BufferRule::RowBytesOverflow
-                | BufferRule::PitchTooSmall
-                | BufferRule::EmptyBuffer
-                | BufferRule::BufferLengthMismatch
-                | BufferRule::FrameTooLarge => {}
-            }
+    /// 規則を表す名前を返す。
+    ///
+    /// 網羅 match で書く。規則を足すとここがコンパイルエラーになり、すぐ下の
+    /// 一覧と [`BufferRule::ALL`] へ足す必要があることが分かる。
+    fn rule_name(rule: &BufferRule) -> &'static str {
+        match rule {
+            BufferRule::FrameMismatch => "FrameMismatch",
+            BufferRule::DimensionOutOfRange => "DimensionOutOfRange",
+            BufferRule::EmptyDimension => "EmptyDimension",
+            BufferRule::RowBytesOverflow => "RowBytesOverflow",
+            BufferRule::PitchTooSmall => "PitchTooSmall",
+            BufferRule::EmptyBuffer => "EmptyBuffer",
+            BufferRule::BufferLengthMismatch => "BufferLengthMismatch",
+            BufferRule::FrameTooLarge => "FrameTooLarge",
         }
-        rules
+    }
+
+    #[test]
+    fn all_buffer_rules_covers_every_rule() {
+        const RULES: &[&str] = &[
+            "FrameMismatch",
+            "DimensionOutOfRange",
+            "EmptyDimension",
+            "RowBytesOverflow",
+            "PitchTooSmall",
+            "EmptyBuffer",
+            "BufferLengthMismatch",
+            "FrameTooLarge",
+        ];
+        let covered: Vec<&str> = BufferRule::ALL.iter().map(rule_name).collect();
+        for rule in RULES {
+            assert!(covered.contains(rule), "{rule} の代表値が一覧にありません");
+        }
+        for rule in &covered {
+            assert!(
+                RULES.contains(rule),
+                "{rule} が網羅すべき規則の一覧にありません"
+            );
+        }
     }
 
     #[test]
@@ -515,7 +542,7 @@ mod tests {
 
     #[test]
     fn buffer_failures_name_the_rule_they_broke() {
-        for rule in all_buffer_rules() {
+        for rule in BufferRule::ALL.iter().copied() {
             let error = RenderError::InvalidBuffer { rule };
             assert_eq!(error.error_code(), ErrorCode::SdkError, "{error}");
             assert_eq!(error.details()["reason"], json!(rule.as_str()), "{error}");
@@ -607,7 +634,7 @@ mod tests {
             "sdk_operation",
             "retry_requires",
         ];
-        for rule in all_buffer_rules() {
+        for rule in BufferRule::ALL.iter().copied() {
             let error = RenderError::InvalidBuffer { rule };
             for key in error.details().as_object().unwrap().keys() {
                 assert!(

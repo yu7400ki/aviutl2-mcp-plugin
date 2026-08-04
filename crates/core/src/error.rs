@@ -173,6 +173,45 @@ impl fmt::Display for ErrorCode {
     }
 }
 
+/// `details.reason` に載せてよい機械可読名の全体。
+///
+/// 各エラー型の `reason()` が返す値は、すべてこの集合に属する。
+/// 集合はワイヤ契約であり、値を足すことは契約の変更である。
+///
+/// 一覧は昇順に並べ、同じ値を 2 度置かない。名前が指すのは失敗の種別であり、
+/// 同じ事実を表す失敗は種別が別でも同じ名前を名乗る。どのエラーコードで
+/// 返るかは名前とは独立に決まる。
+pub const REASON_VALUES: &[&str] = &[
+    "alternate_data_stream",
+    "argument_not_representable",
+    "buffer_length_mismatch",
+    "change_not_applied",
+    "contains_control",
+    "contains_nul",
+    "destination_occupied",
+    "device_namespace",
+    "dimension_out_of_range",
+    "duplicate_target",
+    "effect_not_registered",
+    "effect_state_immutable",
+    "empty",
+    "empty_buffer",
+    "empty_path",
+    "frame_mismatch",
+    "frame_out_of_range",
+    "frame_too_large",
+    "inverse_unavailable",
+    "item_type_not_writable",
+    "layer_locked",
+    "media_not_supported",
+    "not_absolute",
+    "path_too_long",
+    "pitch_too_small",
+    "target_missing",
+    "too_long",
+    "unc_path",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +238,35 @@ mod tests {
             let s = serde_json::to_string(&code).unwrap();
             let code2: ErrorCode = serde_json::from_str(&s).unwrap();
             assert_eq!(code, code2);
+        }
+    }
+
+    #[test]
+    fn reason_values_are_sorted_and_unique() {
+        // 昇順かつ一意であることを固定する。重複した名前は、片方を消しても
+        // 誰も落ちないまま残り続ける。
+        let mut sorted = REASON_VALUES.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(sorted, REASON_VALUES, "reason の一覧が昇順ではありません");
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            REASON_VALUES.len(),
+            "reason の一覧に重複があります"
+        );
+    }
+
+    #[test]
+    fn reason_values_are_machine_readable_names() {
+        // 応答で分岐に使う値であり、表示用の文言ではない。
+        for reason in REASON_VALUES {
+            assert!(!reason.is_empty());
+            assert!(
+                reason
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()),
+                "{reason} は小文字の snake_case ではありません"
+            );
         }
     }
 

@@ -141,12 +141,12 @@ impl ReadError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::test_support::sample_object_summary;
 
     /// 全 variant の代表値。新しい variant を足したらここへも足す。
-    fn all_errors() -> Vec<ReadError> {
+    pub(crate) fn all_errors() -> Vec<ReadError> {
         vec![
             ReadError::NotReady,
             ReadError::EditBlocked {

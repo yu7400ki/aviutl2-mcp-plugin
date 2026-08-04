@@ -59,6 +59,24 @@ pub enum TextSyntaxError {
 }
 
 impl TextSyntaxError {
+    /// 全 variant の代表値。
+    ///
+    /// [`TextSyntaxError::reason`] が返し得る名前を数え上げるために用いる。
+    /// 値を持つ variant には代表となる値を添えてあり、名前はその値に依存しない。
+    pub const ALL: &'static [TextSyntaxError] = &[
+        TextSyntaxError::Empty,
+        TextSyntaxError::ContainsNul,
+        TextSyntaxError::ContainsControl,
+        TextSyntaxError::TooLongUtf16 {
+            units: MAX_NAME_UTF16_UNITS + 1,
+            max: MAX_NAME_UTF16_UNITS,
+        },
+        TextSyntaxError::TooLongBytes {
+            bytes: MAX_ITEM_VALUE_BYTES + 1,
+            max: MAX_ITEM_VALUE_BYTES,
+        },
+    ];
+
     /// 失敗の種別を表す機械可読な名前を返す。
     ///
     /// 検証対象の文字列そのものを含まない。
@@ -104,6 +122,22 @@ pub enum PathSyntaxError {
 }
 
 impl PathSyntaxError {
+    /// 全 variant の代表値。
+    ///
+    /// [`PathSyntaxError::reason`] が返し得る名前を数え上げるために用いる。
+    /// 値を持つ variant には代表となる値を添えてあり、名前はその値に依存しない。
+    pub const ALL: &'static [PathSyntaxError] = &[
+        PathSyntaxError::Empty,
+        PathSyntaxError::ContainsNul,
+        PathSyntaxError::TooLong {
+            units: MAX_PATH_UTF16_UNITS + 1,
+        },
+        PathSyntaxError::DeviceNamespace,
+        PathSyntaxError::AlternateDataStream,
+        PathSyntaxError::NotAbsolute,
+        PathSyntaxError::UncPath,
+    ];
+
     /// 失敗の種別を表す機械可読な名前を返す。
     ///
     /// 名前は失敗の種別ごとに異なり、パスそのものを含まない。
@@ -341,6 +375,134 @@ fn limit_bytes(text: &str, max: usize) -> Result<(), TextSyntaxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::REASON_VALUES;
+
+    /// variant を表す名前を返す。
+    ///
+    /// 網羅 match で書く。variant を足すとここがコンパイルエラーになり、
+    /// すぐ下の一覧と [`TextSyntaxError::ALL`] へ足す必要があることが分かる。
+    fn text_variant_name(error: &TextSyntaxError) -> &'static str {
+        match error {
+            TextSyntaxError::Empty => "Empty",
+            TextSyntaxError::ContainsNul => "ContainsNul",
+            TextSyntaxError::ContainsControl => "ContainsControl",
+            TextSyntaxError::TooLongUtf16 { .. } => "TooLongUtf16",
+            TextSyntaxError::TooLongBytes { .. } => "TooLongBytes",
+        }
+    }
+
+    /// variant を表す名前を返す。網羅 match で書く理由は同上。
+    fn path_variant_name(error: &PathSyntaxError) -> &'static str {
+        match error {
+            PathSyntaxError::Empty => "Empty",
+            PathSyntaxError::ContainsNul => "ContainsNul",
+            PathSyntaxError::TooLong { .. } => "TooLong",
+            PathSyntaxError::DeviceNamespace => "DeviceNamespace",
+            PathSyntaxError::AlternateDataStream => "AlternateDataStream",
+            PathSyntaxError::NotAbsolute => "NotAbsolute",
+            PathSyntaxError::UncPath => "UncPath",
+        }
+    }
+
+    #[test]
+    fn text_syntax_all_covers_every_variant() {
+        const VARIANTS: &[&str] = &[
+            "Empty",
+            "ContainsNul",
+            "ContainsControl",
+            "TooLongUtf16",
+            "TooLongBytes",
+        ];
+        let covered: Vec<&str> = TextSyntaxError::ALL.iter().map(text_variant_name).collect();
+        for variant in VARIANTS {
+            assert!(
+                covered.contains(variant),
+                "{variant} の代表値が一覧にありません"
+            );
+        }
+        for variant in &covered {
+            assert!(
+                VARIANTS.contains(variant),
+                "{variant} が網羅すべき variant の一覧にありません"
+            );
+        }
+    }
+
+    #[test]
+    fn path_syntax_all_covers_every_variant() {
+        const VARIANTS: &[&str] = &[
+            "Empty",
+            "ContainsNul",
+            "TooLong",
+            "DeviceNamespace",
+            "AlternateDataStream",
+            "NotAbsolute",
+            "UncPath",
+        ];
+        let covered: Vec<&str> = PathSyntaxError::ALL.iter().map(path_variant_name).collect();
+        for variant in VARIANTS {
+            assert!(
+                covered.contains(variant),
+                "{variant} の代表値が一覧にありません"
+            );
+        }
+        for variant in &covered {
+            assert!(
+                VARIANTS.contains(variant),
+                "{variant} が網羅すべき variant の一覧にありません"
+            );
+        }
+    }
+
+    #[test]
+    fn syntax_reasons_belong_to_the_shared_value_set() {
+        // 一覧に無い名前は、誰にも気付かれないままワイヤへ出る。
+        for error in TextSyntaxError::ALL {
+            let reason = error.reason();
+            assert!(
+                REASON_VALUES.contains(&reason),
+                "{reason} が reason の値域にありません"
+            );
+        }
+        for error in PathSyntaxError::ALL {
+            let reason = error.reason();
+            assert!(
+                REASON_VALUES.contains(&reason),
+                "{reason} が reason の値域にありません"
+            );
+        }
+    }
+
+    #[test]
+    fn path_syntax_reasons_differ_by_variant() {
+        // 種別ごとに別の名前を返す。畳むと要求元は訂正のしかたを選べない。
+        let mut reasons: Vec<&str> = PathSyntaxError::ALL
+            .iter()
+            .map(PathSyntaxError::reason)
+            .collect();
+        let count = reasons.len();
+        reasons.sort_unstable();
+        reasons.dedup();
+        assert_eq!(reasons.len(), count, "パス検証の名前が重複しています");
+    }
+
+    #[test]
+    fn syntax_reasons_do_not_depend_on_the_inspected_value() {
+        // 名前は種別だけを表す。長さや位置が名前に混ざると、応答へ載せた
+        // 時点で検証対象の内容が漏れる。
+        assert_eq!(
+            PathSyntaxError::TooLong { units: 1 }.reason(),
+            PathSyntaxError::TooLong { units: 999_999 }.reason()
+        );
+        assert_eq!(
+            TextSyntaxError::TooLongUtf16 { units: 1, max: 0 }.reason(),
+            TextSyntaxError::TooLongBytes {
+                bytes: 999_999,
+                max: 0
+            }
+            .reason()
+        );
+    }
 
     #[test]
     fn limits_have_the_documented_units() {
