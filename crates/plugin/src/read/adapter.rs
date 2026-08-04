@@ -345,29 +345,51 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
             let targets = select_evaluated_items(&detail.effects[position].items, requested)?;
             ensure_frames_within(&summary, &track_frames)?;
 
+            // 種別ごとにまとめて評価する。対象の解決が項目数に比例しない。
+            let track_names = targets.names_of(EvaluatedItemKind::Track);
+            let check_names = targets.names_of(EvaluatedItemKind::Check);
+            let mut track_values = if track_names.is_empty() {
+                Vec::new()
+            } else {
+                scene.effect_track_values(
+                    summary.layer,
+                    summary.frame_start,
+                    position,
+                    &track_names,
+                    &track_frames,
+                )?
+            }
+            .into_iter();
+            let mut check_values = if check_names.is_empty() {
+                Vec::new()
+            } else {
+                scene.effect_check_values(
+                    summary.layer,
+                    summary.frame_start,
+                    position,
+                    &check_names,
+                    &check_frames,
+                )?
+            }
+            .into_iter();
+
             let mut group_names: HashMap<String, Vec<String>> = HashMap::new();
             let mut items = Vec::with_capacity(targets.items.len());
-            for (item, kind) in targets.items {
+            for (item, kind) in &targets.items {
                 items.push(match kind {
                     EvaluatedItemKind::Track => EvaluatedItem::Track {
-                        values: scene.effect_track_values(
-                            summary.layer,
-                            summary.frame_start,
-                            position,
-                            &item.name,
-                            &track_frames,
-                        )?,
+                        // 要求した項目の数だけ返ることは境界の義務である。
+                        // 足りないなら値は得られていない。
+                        values: track_values
+                            .next()
+                            .ok_or(unavailable("get_effect_track_value"))?,
                         group: track_group(scene, &summary, selector, item, &mut group_names)?,
                         name: item.name.clone(),
                     },
                     EvaluatedItemKind::Check => EvaluatedItem::Check {
-                        values: scene.effect_check_values(
-                            summary.layer,
-                            summary.frame_start,
-                            position,
-                            &item.name,
-                            &check_frames,
-                        )?,
+                        values: check_values
+                            .next()
+                            .ok_or(unavailable("get_effect_check_value"))?,
                         name: item.name.clone(),
                     },
                 });
@@ -383,12 +405,28 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
     }
 }
 
+/// 事前確認を通した要求に対して値が得られなかった失敗にする。
+fn unavailable(operation: &'static str) -> ReadError {
+    ReadError::TrackValueUnavailable { operation }
+}
+
 /// 評価する設定項目の選び方の結果。
 struct EvaluationTargets<'a> {
     /// 評価する項目と、その評価の種別。
     items: Vec<(&'a EffectItem, EvaluatedItemKind)>,
     /// 上限で打ち切ったか。
     truncated: bool,
+}
+
+impl EvaluationTargets<'_> {
+    /// 指定した種別の項目名を、要求した順序のまま並べる。
+    fn names_of(&self, kind: EvaluatedItemKind) -> Vec<&str> {
+        self.items
+            .iter()
+            .filter(|(_, item_kind)| *item_kind == kind)
+            .map(|(item, _)| item.name.as_str())
+            .collect()
+    }
 }
 
 /// 評価する設定項目を、要求と effect の項目一覧から決める。
@@ -878,12 +916,20 @@ mod tests {
     }
 
     /// 値の取得が受け取った引数。
+    ///
+    /// 種別ごとに 1 度だけ呼ばれる。項目ごとに呼び直していれば要素数で分かる。
     #[derive(Debug, Clone, PartialEq)]
     enum Evaluation {
         /// トラックバー。小数部を保ったフレームを受け取る。
-        Track { item: String, frames: Vec<f64> },
+        Track {
+            items: Vec<String>,
+            frames: Vec<f64>,
+        },
         /// チェックボックス。整数フレームを受け取る。
-        Check { item: String, frames: Vec<usize> },
+        Check {
+            items: Vec<String>,
+            frames: Vec<usize>,
+        },
     }
 
     /// フレームから作るトラックバーの値。
@@ -1135,9 +1181,9 @@ mod tests {
             layer: usize,
             frame_start: usize,
             effect_position: usize,
-            item_name: &str,
+            item_names: &[&str],
             frames: &[f64],
-        ) -> Result<Vec<FiniteF64>, ReadError> {
+        ) -> Result<Vec<Vec<FiniteF64>>, ReadError> {
             self.host.record("effect_track_values");
             self.locate_effect(layer, frame_start, effect_position)?;
             self.host
@@ -1145,18 +1191,23 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(Evaluation::Track {
-                    item: item_name.to_string(),
+                    items: item_names.iter().map(|name| name.to_string()).collect(),
                     frames: frames.to_vec(),
                 });
-            if self.host.values_unavailable_for.as_deref() == Some(item_name) {
-                return Err(ReadError::TrackValueUnavailable {
-                    operation: "get_effect_track_value",
-                });
-            }
-            Ok(frames
+            item_names
                 .iter()
-                .map(|frame| FiniteF64::try_new(track_value_at(*frame)).expect("有限値"))
-                .collect())
+                .map(|item_name| {
+                    if self.host.values_unavailable_for.as_deref() == Some(item_name) {
+                        return Err(ReadError::TrackValueUnavailable {
+                            operation: "get_effect_track_value",
+                        });
+                    }
+                    Ok(frames
+                        .iter()
+                        .map(|frame| FiniteF64::try_new(track_value_at(*frame)).expect("有限値"))
+                        .collect())
+                })
+                .collect()
         }
 
         fn effect_check_values(
@@ -1164,9 +1215,9 @@ mod tests {
             layer: usize,
             frame_start: usize,
             effect_position: usize,
-            item_name: &str,
+            item_names: &[&str],
             frames: &[usize],
-        ) -> Result<Vec<bool>, ReadError> {
+        ) -> Result<Vec<Vec<bool>>, ReadError> {
             self.host.record("effect_check_values");
             self.locate_effect(layer, frame_start, effect_position)?;
             self.host
@@ -1174,15 +1225,20 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(Evaluation::Check {
-                    item: item_name.to_string(),
+                    items: item_names.iter().map(|name| name.to_string()).collect(),
                     frames: frames.to_vec(),
                 });
-            if self.host.values_unavailable_for.as_deref() == Some(item_name) {
-                return Err(ReadError::TrackValueUnavailable {
-                    operation: "get_effect_check_value",
-                });
-            }
-            Ok(frames.iter().copied().map(check_value_at).collect())
+            item_names
+                .iter()
+                .map(|item_name| {
+                    if self.host.values_unavailable_for.as_deref() == Some(item_name) {
+                        return Err(ReadError::TrackValueUnavailable {
+                            operation: "get_effect_check_value",
+                        });
+                    }
+                    Ok(frames.iter().copied().map(check_value_at).collect())
+                })
+                .collect()
         }
 
         fn track_group_item_names(
@@ -1656,11 +1712,11 @@ mod tests {
             adapter.host.evaluations(),
             vec![
                 Evaluation::Track {
-                    item: "X".to_string(),
+                    items: vec!["X".to_string()],
                     frames: vec![120.5, 130.75],
                 },
                 Evaluation::Check {
-                    item: "反転".to_string(),
+                    items: vec!["反転".to_string()],
                     frames: vec![120, 130],
                 },
             ]
@@ -1668,12 +1724,53 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_item_a_wrong_kind_and_a_refused_value_are_three_answers() {
-        // 名前が誤っている・種別が違う・値が返らないは、要求元が次に取る行動が
-        // それぞれ違う。畳むと切り分けられない。
+    fn the_effect_is_resolved_once_per_kind_not_once_per_item() {
+        // 参照区間の内側ではハンドルが有効であり続ける。項目ごとに effect を
+        // 引き直すと、対象の解決が項目数に比例する。
+        let adapter = mixed_adapter();
+        adapter
+            .get_effect_item_values(&item_values_params(
+                effect_selector_of(&adapter, "標準描画", 0),
+                &[120.0],
+                Some(&["X", "Y", "拡大率", "反転"]),
+            ))
+            .expect("評価できます");
+
+        let evaluations = adapter.host.evaluations();
+        assert_eq!(evaluations.len(), 2, "{evaluations:?}");
+        assert_eq!(
+            evaluations[0],
+            Evaluation::Track {
+                items: vec!["X".to_string(), "Y".to_string(), "拡大率".to_string()],
+                frames: vec![120.0],
+            }
+        );
+        assert_eq!(
+            evaluations[1],
+            Evaluation::Check {
+                items: vec!["反転".to_string()],
+                frames: vec![120],
+            }
+        );
+    }
+
+    #[test]
+    fn a_missing_effect_a_missing_item_a_wrong_kind_and_a_refused_value_are_four_answers() {
+        // effect が無い・項目名が誤っている・種別が違う・値が返らないは、要求元が
+        // 次に取る行動がそれぞれ違う。畳むと切り分けられない。
         let adapter = mixed_adapter();
         let selector = effect_selector_of(&adapter, "標準描画", 0);
-        let missing = adapter
+        let missing_effect = adapter
+            .get_effect_item_values(&item_values_params(
+                EffectSelector {
+                    effect_name: "存在しない効果".to_string(),
+                    ..selector.clone()
+                },
+                &[120.0],
+                Some(&["X"]),
+            ))
+            .expect_err("存在しない effect が受理されました");
+        let missing_item = adapter
             .get_effect_item_values(&item_values_params(
                 selector.clone(),
                 &[120.0],
@@ -1704,14 +1801,16 @@ mod tests {
             ))
             .expect_err("値が返らないのに成功しました");
 
-        let answers: Vec<(ErrorCode, serde_json::Value)> = [&missing, &wrong_kind, &refused]
-            .into_iter()
-            .map(|error| (error.error_code(), error.details()["reason"].clone()))
-            .collect();
+        let answers: Vec<(ErrorCode, serde_json::Value)> =
+            [&missing_effect, &missing_item, &wrong_kind, &refused]
+                .into_iter()
+                .map(|error| (error.error_code(), error.details()["reason"].clone()))
+                .collect();
         assert_eq!(
             answers,
             vec![
                 (ErrorCode::NotFound, serde_json::json!("target_missing")),
+                (ErrorCode::NotFound, serde_json::json!("item_not_found")),
                 (
                     ErrorCode::UnsupportedOperation,
                     serde_json::json!("item_not_evaluatable")
@@ -1721,6 +1820,13 @@ mod tests {
                     serde_json::json!("track_value_unavailable")
                 ),
             ]
+        );
+        let distinct: std::collections::BTreeSet<String> =
+            answers.iter().map(|answer| format!("{answer:?}")).collect();
+        assert_eq!(
+            distinct.len(),
+            answers.len(),
+            "同じ応答になった失敗があります"
         );
     }
 

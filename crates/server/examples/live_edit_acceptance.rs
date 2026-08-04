@@ -65,14 +65,14 @@ use aviutl2_mcp_server::api::ListInstancesResponse;
 use aviutl2_mcp_server::discovery::default_registry_dir;
 use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, CreateObjectInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
-    DestinationInput, EffectSelectorInput, FocusChangeInput, ItemValueInput, LayerNameChangeInput,
-    MoveObjectInput, ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput,
-    SetLayerStateInput, SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
+    DestinationInput, FocusChangeInput, ItemValueInput, LayerNameChangeInput, MoveObjectInput,
+    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetLayerStateInput,
+    SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::{
-    AvailableEffectsPageInput, GetObjectInput, InstanceInput, ListAvailableEffectsInput,
-    ListInstancesInput, ListLayersInput, ListObjectsInput, ObjectFilterInput, ObjectSelectorInput,
-    PageInput,
+    AvailableEffectsPageInput, EffectSelectorInput, GetObjectInput, InstanceInput,
+    ListAvailableEffectsInput, ListInstancesInput, ListLayersInput, ListObjectsInput,
+    ObjectFilterInput, ObjectSelectorInput, PageInput,
 };
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, REGISTRY_DIR_ENV};
 use rmcp::handler::server::wrapper::Parameters;

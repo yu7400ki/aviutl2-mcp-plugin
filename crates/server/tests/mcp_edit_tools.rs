@@ -12,12 +12,12 @@ use aviutl2_mcp_core::{
 use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, ApplyBatchInput, BatchOperationInput, CreateObjectInput,
     CreateObjectSectionInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
-    DeleteObjectSectionInput, DestinationInput, EffectSelectorInput, FocusChangeInput,
-    ItemValueInput, LayerNameChangeInput, MoveObjectInput, MoveObjectSectionInput,
-    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetLayerStateInput,
+    DeleteObjectSectionInput, DestinationInput, FocusChangeInput, ItemValueInput,
+    LayerNameChangeInput, MoveObjectInput, MoveObjectSectionInput, ObjectSourceInput,
+    PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetLayerStateInput,
     SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
 };
-use aviutl2_mcp_server::mcp::input::ObjectSelectorInput;
+use aviutl2_mcp_server::mcp::input::{EffectSelectorInput, ObjectSelectorInput};
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
 use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;

@@ -11,11 +11,11 @@ use aviutl2_mcp_core::{
     ObjectFingerprintInput, ObjectSummary, PageMeta, RequestEnvelope, SceneInfo, SectionRange,
     TrackGroup,
 };
-use aviutl2_mcp_server::mcp::edit_input::EffectSelectorInput;
+
 use aviutl2_mcp_server::mcp::input::{
-    AvailableEffectsPageInput, GetEffectItemValuesInput, GetObjectInput, InstanceInput,
-    ListAvailableEffectsInput, ListInstancesInput, ListLayersInput, ListObjectsInput,
-    ObjectFilterInput, ObjectSelectorInput, PageInput,
+    AvailableEffectsPageInput, EffectSelectorInput, GetEffectItemValuesInput, GetObjectInput,
+    InstanceInput, ListAvailableEffectsInput, ListInstancesInput, ListLayersInput,
+    ListObjectsInput, ObjectFilterInput, ObjectSelectorInput, PageInput,
 };
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
 use rmcp::handler::server::wrapper::Parameters;

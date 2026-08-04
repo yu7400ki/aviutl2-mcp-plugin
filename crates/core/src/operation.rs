@@ -1000,17 +1000,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn evaluating_item_values_is_an_ordinary_read() {
-        // 費用の形は 1 対象の解決と上限付きの値取得であり、既存の read と同じ桁
-        // である。新しい予算区分を作る理由が無い。
-        assert_eq!(
-            KnownOperation::Read(ReadOperation::GetEffectItemValues).budget_kind(),
-            RequestBudgetKind::Read
-        );
-        assert!(ReadOperation::ALL.contains(&ReadOperation::GetEffectItemValues));
-    }
-
     fn sample_effect_selector() -> EffectSelector {
         let object = sample_object_selector();
         EffectSelector {

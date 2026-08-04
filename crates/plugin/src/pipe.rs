@@ -964,9 +964,9 @@ mod tests {
             _layer: usize,
             _frame_start: usize,
             _effect_position: usize,
-            _item_name: &str,
+            _item_names: &[&str],
             _frames: &[f64],
-        ) -> Result<Vec<aviutl2_mcp_core::FiniteF64>, crate::read::ReadError> {
+        ) -> Result<Vec<Vec<aviutl2_mcp_core::FiniteF64>>, crate::read::ReadError> {
             panic!("参照区間の内側で panic させます")
         }
 
@@ -975,9 +975,9 @@ mod tests {
             _layer: usize,
             _frame_start: usize,
             _effect_position: usize,
-            _item_name: &str,
+            _item_names: &[&str],
             _frames: &[usize],
-        ) -> Result<Vec<bool>, crate::read::ReadError> {
+        ) -> Result<Vec<Vec<bool>>, crate::read::ReadError> {
             panic!("参照区間の内側で panic させます")
         }
 

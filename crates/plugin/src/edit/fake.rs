@@ -805,23 +805,26 @@ impl SceneReader for FakeSceneEditor<'_> {
         layer: usize,
         frame_start: usize,
         effect_position: usize,
-        item_name: &str,
+        item_names: &[&str],
         frames: &[f64],
-    ) -> Result<Vec<FiniteF64>, ReadError> {
+    ) -> Result<Vec<Vec<FiniteF64>>, ReadError> {
         // 設定値をどのフレームでも同じ値として返す。編集経路は補間の結果を
         // 見ないため、値が読めることだけを満たす。
-        let value = match self
-            .item_at(layer, frame_start, effect_position, item_name)?
-            .value
-        {
-            ItemValue::Integer { value } => FiniteF64::try_new(value as f64),
-            ItemValue::Number { value } => Some(value),
-            _ => None,
+        const CALL: &str = "get_effect_track_value";
+        let mut items = Vec::with_capacity(item_names.len());
+        for item_name in item_names {
+            let value = match self
+                .item_at(layer, frame_start, effect_position, item_name, CALL)?
+                .value
+            {
+                ItemValue::Integer { value } => FiniteF64::try_new(value as f64),
+                ItemValue::Number { value } => Some(value),
+                _ => None,
+            }
+            .ok_or(ReadError::TrackValueUnavailable { operation: CALL })?;
+            items.push(vec![value; frames.len()]);
         }
-        .ok_or(ReadError::TrackValueUnavailable {
-            operation: "get_effect_track_value",
-        })?;
-        Ok(vec![value; frames.len()])
+        Ok(items)
     }
 
     fn effect_check_values(
@@ -829,20 +832,29 @@ impl SceneReader for FakeSceneEditor<'_> {
         layer: usize,
         frame_start: usize,
         effect_position: usize,
-        item_name: &str,
+        item_names: &[&str],
         frames: &[usize],
-    ) -> Result<Vec<bool>, ReadError> {
-        let ItemValue::Bool { value } = self
-            .item_at(layer, frame_start, effect_position, item_name)?
-            .value
-        else {
-            return Err(ReadError::TrackValueUnavailable {
-                operation: "get_effect_check_value",
-            });
-        };
-        Ok(vec![value; frames.len()])
+    ) -> Result<Vec<Vec<bool>>, ReadError> {
+        const CALL: &str = "get_effect_check_value";
+        let mut items = Vec::with_capacity(item_names.len());
+        for item_name in item_names {
+            let ItemValue::Bool { value } = self
+                .item_at(layer, frame_start, effect_position, item_name, CALL)?
+                .value
+            else {
+                return Err(ReadError::TrackValueUnavailable { operation: CALL });
+            };
+            items.push(vec![value; frames.len()]);
+        }
+        Ok(items)
     }
 
+    /// **所属を `TrackInfo.group_name` から導いている。実物は別の一覧を返す。**
+    ///
+    /// ホストの `get_object_track_group_names` は設定項目の移動情報とは別に
+    /// 保持された一覧であり、`TrackInfo.group_num` と件数が一致する保証も無い。
+    /// この実装は両者が必ず整合する状態しか作れないため、**食い違いを扱う経路の
+    /// 検証には使えない。** 読み取り経路のフェイクが両者を食い違わせている。
     fn track_group_item_names(
         &self,
         layer: usize,
@@ -879,12 +891,16 @@ impl SceneReader for FakeSceneEditor<'_> {
 
 impl FakeSceneEditor<'_> {
     /// effect 列の位置と項目名で設定項目を引く。
+    ///
+    /// `call` には呼び出し元の SDK 関数名を渡す。失敗の出所を伝える値であり、
+    /// 種別が違えば名乗る関数も違う。
     fn item_at(
         &self,
         layer: usize,
         frame_start: usize,
         effect_position: usize,
         item_name: &str,
+        call: &'static str,
     ) -> Result<EffectItem, ReadError> {
         let scene = self.host.scene.lock().unwrap();
         scene
@@ -892,9 +908,7 @@ impl FakeSceneEditor<'_> {
             .and_then(|object| object.effects.get(effect_position))
             .and_then(|effect| effect.items.iter().find(|item| item.name == item_name))
             .cloned()
-            .ok_or(ReadError::TrackValueUnavailable {
-                operation: "get_effect_track_value",
-            })
+            .ok_or(ReadError::TrackValueUnavailable { operation: call })
     }
 
     /// 対象を読むたびに働く仕込みを適用する。

@@ -575,7 +575,7 @@ mod tests {
         AvailableEffect, Cursor, EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem,
         EffectItemType, EffectType, FiniteF64, FrameRange, InstanceId, InstanceProject,
         InstanceState, ItemValue, LayerInfo, ObjectFingerprintInput, ObjectSummary, SceneInfo,
-        SectionRange,
+        SectionRange, TrackGroup,
     };
 
     /// 上限を必ず超える件数。要求上限を無視した応答でも打ち切られることを確かめる。
@@ -797,6 +797,29 @@ mod tests {
     }
 
     #[test]
+    fn effect_item_values_text_is_bounded_for_oversized_results() {
+        let items: Vec<EvaluatedItem> = (0..OVERSIZED_COUNT)
+            .map(|_| EvaluatedItem::Track {
+                name: long_name(),
+                values: Vec::new(),
+                group: Some(TrackGroup {
+                    name: long_name(),
+                    index: 0,
+                    count: 3,
+                    item_names: Vec::new(),
+                }),
+            })
+            .collect();
+        let values = EffectItemValues {
+            project_revision: 42,
+            frames: Vec::new(),
+            items,
+            truncated: true,
+        };
+        assert_truncated_within_limit(&effect_item_values(&values));
+    }
+
+    #[test]
     fn every_text_content_guides_the_next_step() {
         let scene = SceneInfo {
             id: 3,
@@ -849,6 +872,14 @@ mod tests {
         });
         assert!(available_effects_text.contains("effect_type"));
         assert!(available_effects_text.contains("structuredContent"));
+
+        let effect_item_values_text = effect_item_values(&EffectItemValues {
+            project_revision: 42,
+            frames: Vec::new(),
+            items: Vec::new(),
+            truncated: false,
+        });
+        assert!(effect_item_values_text.contains("structuredContent"));
     }
 
     /// 秘匿すべき内容を全て含む effect。

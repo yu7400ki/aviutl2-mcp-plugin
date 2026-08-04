@@ -201,20 +201,25 @@ impl SceneReader for SdkSceneReader<'_> {
         layer: usize,
         frame_start: usize,
         effect_position: usize,
-        item_name: &str,
+        item_names: &[&str],
         frames: &[f64],
-    ) -> Result<Vec<FiniteF64>, ReadError> {
+    ) -> Result<Vec<Vec<FiniteF64>>, ReadError> {
+        // ハンドルは参照区間の内側で有効であり続ける。項目ごとに引き直さない。
         let effect = self.locate_effect(layer, frame_start, effect_position)?;
-        let mut values = Vec::with_capacity(frames.len());
-        for frame in frames {
-            // 小数部はフレーム間の位置を指す。丸めずにそのまま渡す。
-            values.push(
-                self.section
-                    .get_effect_track_value(effect, item_name, *frame)
-                    .map_err(|_| unavailable("get_effect_track_value"))?,
-            );
+        let mut items = Vec::with_capacity(item_names.len());
+        for item_name in item_names {
+            let mut values = Vec::with_capacity(frames.len());
+            for frame in frames {
+                // 小数部はフレーム間の位置を指す。丸めずにそのまま渡す。
+                values.push(
+                    self.section
+                        .get_effect_track_value(effect, item_name, *frame)
+                        .map_err(|_| unavailable("get_effect_track_value"))?,
+                );
+            }
+            items.push(finite_values(values, "get_effect_track_value")?);
         }
-        finite_values(values, "get_effect_track_value")
+        Ok(items)
     }
 
     fn effect_check_values(
@@ -222,19 +227,23 @@ impl SceneReader for SdkSceneReader<'_> {
         layer: usize,
         frame_start: usize,
         effect_position: usize,
-        item_name: &str,
+        item_names: &[&str],
         frames: &[usize],
-    ) -> Result<Vec<bool>, ReadError> {
+    ) -> Result<Vec<Vec<bool>>, ReadError> {
         let effect = self.locate_effect(layer, frame_start, effect_position)?;
-        let mut values = Vec::with_capacity(frames.len());
-        for frame in frames {
-            values.push(
-                self.section
-                    .get_effect_check_value(effect, item_name, *frame)
-                    .map_err(|_| unavailable("get_effect_check_value"))?,
-            );
+        let mut items = Vec::with_capacity(item_names.len());
+        for item_name in item_names {
+            let mut values = Vec::with_capacity(frames.len());
+            for frame in frames {
+                values.push(
+                    self.section
+                        .get_effect_check_value(effect, item_name, *frame)
+                        .map_err(|_| unavailable("get_effect_check_value"))?,
+                );
+            }
+            items.push(values);
         }
-        Ok(values)
+        Ok(items)
     }
 
     fn track_group_item_names(

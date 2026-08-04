@@ -211,6 +211,7 @@ pub const REASON_VALUES: &[&str] = &[
     "frame_too_large",
     "inverse_unavailable",
     "item_not_evaluatable",
+    "item_not_found",
     "item_type_not_writable",
     "layer_locked",
     "media_not_supported",

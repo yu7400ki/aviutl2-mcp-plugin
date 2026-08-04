@@ -224,8 +224,12 @@ pub trait SceneReader {
     /// の位置である。**フレームは小数部を保ったまま渡す。** 小数部はフレーム間の
     /// 位置を指しており、丸めると中間点の間の値を問えなくなる。
     ///
-    /// **実装の義務**: 戻り値は `frames` と同じ長さ・同じ順序にする。要求元は
-    /// 位置で対応付けるため、並びが崩れると別のフレームの値を読むことになる。
+    /// **項目をまとめて受け取る。** 対象の解決は 1 度で済み、項目ごとに effect を
+    /// 引き直さない。
+    ///
+    /// **実装の義務**: 戻り値の外側は `item_names` と、内側は `frames` と、
+    /// それぞれ同じ長さ・同じ順序にする。要求元は位置で対応付けるため、並びが
+    /// 崩れると別の項目や別のフレームの値を読むことになる。
     ///
     /// 値を得られなかった場合は [`ReadError::TrackValueUnavailable`] を返す。
     /// 項目の存在と種別、フレームの範囲は呼び出し側が確かめてからここへ来る。
@@ -234,9 +238,9 @@ pub trait SceneReader {
         layer: usize,
         frame_start: usize,
         effect_position: usize,
-        item_name: &str,
+        item_names: &[&str],
         frames: &[f64],
-    ) -> Result<Vec<FiniteF64>, ReadError>;
+    ) -> Result<Vec<Vec<FiniteF64>>, ReadError>;
 
     /// チェックボックス項目を、指定フレームで評価した値を返す。
     ///
@@ -249,9 +253,9 @@ pub trait SceneReader {
         layer: usize,
         frame_start: usize,
         effect_position: usize,
-        item_name: &str,
+        item_names: &[&str],
         frames: &[usize],
-    ) -> Result<Vec<bool>, ReadError>;
+    ) -> Result<Vec<Vec<bool>>, ReadError>;
 
     /// トラックバーグループの所属アイテム名を返す。
     ///

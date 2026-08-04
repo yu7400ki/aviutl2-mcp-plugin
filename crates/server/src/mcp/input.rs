@@ -1,11 +1,14 @@
-//! read tool の入力型。
+//! read tool の入力型と、read / 編集が共有するセレクター。
 //!
 //! 未知フィールドを拒否し、文字列長・整数範囲を schema で制約する。
 //! ページ指定は IPC の params と同じ平坦な形（`offset` / `limit` /
 //! `snapshot_revision`）で受け取る。
 //!
-//! 例外は [`ObjectSelectorInput`] で、応答が返した値をそのまま送り返す双方向の
-//! 値であるため未知フィールドを拒否しない。
+//! 例外は [`ObjectSelectorInput`] と [`EffectSelectorInput`] で、応答が返した値を
+//! そのまま送り返す双方向の値であるため未知フィールドを拒否しない。**この 2 つは
+//! 編集 tool の入力型（[`crate::mcp::edit_input`]）も用いる。** 同じ値を読み取りの
+//! 応答から受け取って編集へ送り返す往復型であり、族ごとに別の型を持てば同じ値の
+//! 検証が 2 通りになる。
 //!
 //! schema の制約は宣言であり、要求がそれを満たすかどうかは検証されない。
 //! 宣言した制約は本モジュールで実際に検証し、違反を `invalid_argument` として
@@ -17,14 +20,15 @@
 //! - `instance_id` の長さと書式: [`parse_instance_id`]
 //! - `selector` の各文字列長: [`ObjectSelectorInput::validate`]
 //! - `selector.fingerprint` の書式: [`ObjectSelectorInput::to_selector`]
+//! - `effect` の各文字列長と fingerprint の書式: [`EffectSelectorInput::to_selector`]
+//! - `frames` / `items` の件数と項目名: [`GetEffectItemValuesInput::to_params`]
 
-use crate::mcp::edit_input::EffectSelectorInput;
-use crate::mcp::failure::invalid_argument;
+use crate::mcp::failure::{from_code, invalid_argument};
 use aviutl2_mcp_core::{
-    DEFAULT_PAGE_LIMIT, EffectType, ErrorObject, FiniteF64, GetEffectItemValuesParams,
-    GetObjectParams, InstanceId, ListAvailableEffectsParams, ListLayersParams, ListObjectsParams,
-    MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, MAX_PAGE_LIMIT, ObjectFilter, ObjectSelector,
-    PageRequest,
+    DEFAULT_PAGE_LIMIT, EffectSelector, EffectType, ErrorCode, ErrorObject, FiniteF64,
+    GetEffectItemValuesParams, GetObjectParams, InstanceId, ListAvailableEffectsParams,
+    ListLayersParams, ListObjectsParams, MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, MAX_PAGE_LIMIT,
+    ObjectFilter, ObjectSelector, PageRequest,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -239,6 +243,50 @@ pub struct ListAvailableEffectsInput {
     /// ページ指定。
     #[serde(flatten)]
     pub page: AvailableEffectsPageInput,
+}
+
+/// オブジェクト内の effect を再指定するセレクター。
+///
+/// [`ObjectSelectorInput`] と同じく往復型であり、未知フィールドを拒否しない。
+/// 内側の `object` も同じ扱いになる。fingerprint の算出方式は `object` だけが
+/// 持ち、ここには置かない。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EffectSelectorInput {
+    /// effect が属するオブジェクト。
+    pub object: ObjectSelectorInput,
+    /// effect 名。
+    #[schemars(length(max = MAX_NAME_CHARS))]
+    pub effect_name: String,
+    /// 同名 effect のうち何番目か。0 始まり。
+    pub effect_index: u32,
+    /// 同一性検証用の fingerprint。
+    #[schemars(pattern(FINGERPRINT_PATTERN))]
+    pub fingerprint: String,
+}
+
+impl EffectSelectorInput {
+    /// セレクターへ変換する。文字数と fingerprint の書式はここで検証される。
+    pub(crate) fn to_selector(&self) -> Result<EffectSelector, ErrorObject> {
+        let object = self.object.to_selector()?;
+        ensure_length("selector.effect_name", &self.effect_name, 0, MAX_NAME_CHARS)?;
+        let object = serde_json::to_value(&object).map_err(|_| {
+            from_code(
+                ErrorCode::InternalError,
+                "selector を組み立てられませんでした",
+            )
+        })?;
+        let value = serde_json::json!({
+            "object": object,
+            "effect_name": self.effect_name,
+            "effect_index": self.effect_index,
+            "fingerprint": self.fingerprint,
+        });
+        serde_json::from_value(value).map_err(|_| {
+            invalid_argument(
+                "selector を解釈できません。get_object が返した effect の selector をそのまま指定してください",
+            )
+        })
+    }
 }
 
 /// `get_effect_item_values` の入力。

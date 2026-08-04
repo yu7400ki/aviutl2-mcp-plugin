@@ -1,9 +1,11 @@
 //! 編集 tool の入力型。
 //!
-//! 往復型以外は未知フィールドを拒否する。[`ObjectSelectorInput`] /
-//! [`EffectSelectorInput`] / [`ItemValueInput`] は応答が返した値をそのまま
-//! 送り返す往復型であり、応答へ optional field が増えたときに往復が壊れる
-//! ため拒否しない。読み取りが返した値をそのまま書き戻せることは設定項目の
+//! **セレクターは読み取り側と共有する**（[`crate::mcp::input`]）。同じ値を
+//! 読み取りの応答から受け取って編集へ送り返すため、族ごとに別の型を持たない。
+//!
+//! 往復型以外は未知フィールドを拒否する。[`ItemValueInput`] は応答が返した値を
+//! そのまま送り返す往復型であり、応答へ optional field が増えたときに往復が
+//! 壊れるため拒否しない。読み取りが返した値をそのまま書き戻せることは設定項目の
 //! 契約であり、入口で拒否すると読める値が書けなくなる。
 //!
 //! schema の制約は宣言であり、要求がそれを満たすかどうかは検証されない。
@@ -12,7 +14,8 @@
 //!
 //! - `instance_id` の長さと書式: [`parse_instance_id`](crate::mcp::input::parse_instance_id)
 //! - selector の文字列長と fingerprint の書式:
-//!   [`ObjectSelectorInput::to_selector`] / [`EffectSelectorInput::to_selector`]
+//!   [`ObjectSelectorInput::to_selector`](crate::mcp::input::ObjectSelectorInput) /
+//!   [`EffectSelectorInput::to_selector`](crate::mcp::input::EffectSelectorInput)
 //! - `expected_project_epoch` の長さ: [`expected_project_epoch`]
 //! - `layer` / `frame` の範囲、名前・パス・alias・設定値の長さと文字種:
 //!   各 `to_params` が呼ぶ core の検証（要求元と実行側が同じ実装を共有する）
@@ -24,17 +27,17 @@
 
 use crate::mcp::failure::{from_code, invalid_argument};
 use crate::mcp::input::{
-    FINGERPRINT_PATTERN, MAX_EPOCH_CHARS, MAX_NAME_CHARS, ObjectSelectorInput, UUID_PATTERN,
+    EffectSelectorInput, MAX_EPOCH_CHARS, MAX_NAME_CHARS, ObjectSelectorInput, UUID_PATTERN,
     ensure_length,
 };
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchInputError, BatchOperation, CreateObjectParams,
     CreateObjectSectionParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
-    DeleteObjectSectionParams, Destination, EditInputError, EffectSelector, ErrorObject, FiniteF64,
-    FocusChange, ItemValue, LayerNameChange, MAX_ALIAS_BYTES, MAX_BATCH_OPERATIONS,
-    MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MoveObjectParams, MoveObjectSectionParams,
-    ObjectSource, Placement, RangeChange, SetEffectEnabledParams, SetLayerStateParams,
-    SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+    DeleteObjectSectionParams, Destination, EditInputError, ErrorObject, FiniteF64, FocusChange,
+    ItemValue, LayerNameChange, MAX_ALIAS_BYTES, MAX_BATCH_OPERATIONS, MAX_ITEM_VALUE_BYTES,
+    MAX_PATH_UTF16_UNITS, MoveObjectParams, MoveObjectSectionParams, ObjectSource, Placement,
+    RangeChange, SetEffectEnabledParams, SetLayerStateParams, SetObjectItemParams,
+    SetObjectNameParams, SetSelectionParams,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -59,50 +62,6 @@ const MAX_PATH_CHARS: u32 = MAX_PATH_UTF16_UNITS as u32;
 
 /// 設定項目の文字列値に許す最大文字数。
 const MAX_ITEM_VALUE_CHARS: u32 = MAX_ITEM_VALUE_BYTES as u32;
-
-/// オブジェクト内の effect を再指定するセレクター。
-///
-/// [`ObjectSelectorInput`] と同じく往復型であり、未知フィールドを拒否しない。
-/// 内側の `object` も同じ扱いになる。fingerprint の算出方式は `object` だけが
-/// 持ち、ここには置かない。
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct EffectSelectorInput {
-    /// effect が属するオブジェクト。
-    pub object: ObjectSelectorInput,
-    /// effect 名。
-    #[schemars(length(max = MAX_NAME_CHARS))]
-    pub effect_name: String,
-    /// 同名 effect のうち何番目か。0 始まり。
-    pub effect_index: u32,
-    /// 同一性検証用の fingerprint。
-    #[schemars(pattern(FINGERPRINT_PATTERN))]
-    pub fingerprint: String,
-}
-
-impl EffectSelectorInput {
-    /// セレクターへ変換する。文字数と fingerprint の書式はここで検証される。
-    pub(crate) fn to_selector(&self) -> Result<EffectSelector, ErrorObject> {
-        let object = self.object.to_selector()?;
-        ensure_length("selector.effect_name", &self.effect_name, 0, MAX_NAME_CHARS)?;
-        let object = serde_json::to_value(&object).map_err(|_| {
-            from_code(
-                aviutl2_mcp_core::ErrorCode::InternalError,
-                "selector を組み立てられませんでした",
-            )
-        })?;
-        let value = serde_json::json!({
-            "object": object,
-            "effect_name": self.effect_name,
-            "effect_index": self.effect_index,
-            "fingerprint": self.fingerprint,
-        });
-        serde_json::from_value(value).map_err(|_| {
-            invalid_argument(
-                "selector を解釈できません。get_object が返した effect の selector をそのまま指定してください",
-            )
-        })
-    }
-}
 
 /// 作成の配置先。
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]

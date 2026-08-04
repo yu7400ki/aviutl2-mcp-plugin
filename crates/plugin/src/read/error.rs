@@ -23,8 +23,15 @@ pub(crate) const EDIT_INFO_OPERATION: &str = "get_edit_info";
 /// 編集情報の値が受け渡せる範囲を超えていたことを表す名前。
 pub(crate) const REASON_EDIT_INFO_OUT_OF_RANGE: &str = "edit_info_out_of_range";
 
-/// 名指しした対象が存在しないことを表す名前。
+/// 要求が名指しした対象そのものが存在しないことを表す名前。
 pub(crate) const REASON_TARGET_MISSING: &str = "target_missing";
+
+/// 対象の中に、要求された設定項目が無いことを表す名前。
+///
+/// 対象そのものの不在（[`REASON_TARGET_MISSING`]）と分ける。**要求元が次に取る
+/// 行動が違う**——対象が無ければセレクターを取り直し、項目が無ければ項目名を
+/// 直す。
+pub(crate) const REASON_ITEM_NOT_FOUND: &str = "item_not_found";
 
 /// 設定項目が任意フレームでの評価に対応しないことを表す名前。
 pub(crate) const REASON_ITEM_NOT_EVALUATABLE: &str = "item_not_evaluatable";
@@ -103,6 +110,9 @@ pub enum ReadError {
     #[error("対象 effect の fingerprint が要求と一致しません")]
     EffectFingerprintMismatch,
     /// 要求された設定項目が effect の項目一覧に無い。
+    ///
+    /// effect そのものの不在と分ける。要求元が次に取る行動が違う——前者は
+    /// セレクターを取り直し、こちらは項目名を直す。
     #[error("指定された設定項目が effect にありません")]
     ItemNotFound,
     /// 設定項目は在るが、任意フレームでの値を持つ種別ではない。
@@ -200,11 +210,8 @@ impl ReadError {
             }
             ReadError::ObjectNotFound { .. } => json!({}),
             ReadError::EffectFingerprintMismatch => json!({}),
-            // 名指しした対象が存在しないことは、対象が effect でも設定項目でも
-            // 同じ事実である。同じ名前を名乗る。
-            ReadError::EffectNotFound | ReadError::ItemNotFound => {
-                json!({ "reason": REASON_TARGET_MISSING })
-            }
+            ReadError::EffectNotFound => json!({ "reason": REASON_TARGET_MISSING }),
+            ReadError::ItemNotFound => json!({ "reason": REASON_ITEM_NOT_FOUND }),
             ReadError::ItemNotEvaluatable => json!({ "reason": REASON_ITEM_NOT_EVALUATABLE }),
             ReadError::FrameOutOfRange => json!({ "reason": REASON_FRAME_OUT_OF_RANGE }),
             ReadError::AmbiguousObject { candidate_count } => {
@@ -383,10 +390,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_three_failures_before_the_call_are_not_folded_together() {
-        // 項目名が誤っている・種別が違う・フレームが範囲外は、要求元が次に取る
-        // 行動がそれぞれ違う。1 つでも同じ応答になると切り分けられない。
+    fn the_failures_of_evaluating_an_item_are_not_folded_together() {
+        // effect が無い・項目名が誤っている・種別が違う・フレームが範囲外・値が
+        // 返らないは、要求元が次に取る行動がそれぞれ違う。1 つでも同じ応答に
+        // なると切り分けられない。
         let mapped: Vec<(ErrorCode, Value)> = [
+            ReadError::EffectNotFound,
             ReadError::ItemNotFound,
             ReadError::ItemNotEvaluatable,
             ReadError::FrameOutOfRange,
@@ -402,6 +411,7 @@ pub(crate) mod tests {
             mapped,
             vec![
                 (ErrorCode::NotFound, json!(REASON_TARGET_MISSING)),
+                (ErrorCode::NotFound, json!(REASON_ITEM_NOT_FOUND)),
                 (
                     ErrorCode::UnsupportedOperation,
                     json!(REASON_ITEM_NOT_EVALUATABLE)

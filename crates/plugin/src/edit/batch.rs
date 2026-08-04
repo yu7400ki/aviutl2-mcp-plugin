@@ -696,14 +696,14 @@ impl SceneReader for CachingEditor<'_> {
         layer: usize,
         frame_start: usize,
         effect_position: usize,
-        item_name: &str,
+        item_names: &[&str],
         frames: &[f64],
-    ) -> Result<Vec<FiniteF64>, ReadError> {
+    ) -> Result<Vec<Vec<FiniteF64>>, ReadError> {
         self.inner.reader().effect_track_values(
             layer,
             frame_start,
             effect_position,
-            item_name,
+            item_names,
             frames,
         )
     }
@@ -713,14 +713,14 @@ impl SceneReader for CachingEditor<'_> {
         layer: usize,
         frame_start: usize,
         effect_position: usize,
-        item_name: &str,
+        item_names: &[&str],
         frames: &[usize],
-    ) -> Result<Vec<bool>, ReadError> {
+    ) -> Result<Vec<Vec<bool>>, ReadError> {
         self.inner.reader().effect_check_values(
             layer,
             frame_start,
             effect_position,
-            item_name,
+            item_names,
             frames,
         )
     }

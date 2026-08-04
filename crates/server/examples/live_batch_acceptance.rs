@@ -79,12 +79,12 @@ use aviutl2_mcp_server::api::ListInstancesResponse;
 use aviutl2_mcp_server::discovery::default_registry_dir;
 use aviutl2_mcp_server::mcp::edit_input::{
     ApplyBatchInput, BatchOperationInput, CreateObjectInput, DeleteObjectInput, DestinationInput,
-    EffectSelectorInput, ItemValueInput, MoveObjectInput, ObjectSourceInput, PlacementInput,
-    SetObjectItemInput, SetObjectNameInput,
+    ItemValueInput, MoveObjectInput, ObjectSourceInput, PlacementInput, SetObjectItemInput,
+    SetObjectNameInput,
 };
 use aviutl2_mcp_server::mcp::input::{
-    GetObjectInput, InstanceInput, ListInstancesInput, ListLayersInput, ListObjectsInput,
-    ObjectFilterInput, ObjectSelectorInput, PageInput,
+    EffectSelectorInput, GetObjectInput, InstanceInput, ListInstancesInput, ListLayersInput,
+    ListObjectsInput, ObjectFilterInput, ObjectSelectorInput, PageInput,
 };
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits, REGISTRY_DIR_ENV};
 use rmcp::handler::server::wrapper::Parameters;
