@@ -618,8 +618,8 @@ pub struct DeleteObjectSectionInput {
     pub selector: ObjectSelectorInput,
     /// 削除する中間点を開始位置に持つ区間の番号。1 以上。
     ///
-    /// 下限の宣言は [`CreateObjectSectionParams::validate`] と同じ core の検証が
-    /// 実際に確かめる。宣言だけがあって検証されない制約は残さない。
+    /// 宣言した下限は [`DeleteObjectSectionParams::validate`] が実際に確かめる。
+    /// 宣言だけがあって検証されない制約は残さない。
     #[schemars(range(min = MIN_SECTION, max = MAX_POSITION))]
     pub section: u32,
 }
@@ -646,6 +646,8 @@ pub struct MoveObjectSectionInput {
     /// 対象オブジェクトのセレクター。
     pub selector: ObjectSelectorInput,
     /// 移動する中間点を開始位置に持つ区間の番号。1 以上。
+    ///
+    /// 宣言した下限は [`MoveObjectSectionParams::validate`] が実際に確かめる。
     #[schemars(range(min = MIN_SECTION, max = MAX_POSITION))]
     pub section: u32,
     /// 移動先のフレーム番号。0 始まりのシーンの絶対フレーム番号。

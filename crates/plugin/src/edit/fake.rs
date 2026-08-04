@@ -77,7 +77,10 @@ pub(crate) enum Fault {
     ///
     /// 事前確認を通ったのに `false` が返る状況を作る。
     RejectSectionChange,
-    /// 中間点の区間を読み直せない。
+    /// 変更を発行した後で中間点の区間を読み直せない。
+    ///
+    /// 事前確認の読みには掛けない。掛けると変更を発行する前に落ち、read-back の
+    /// 検証にならない。
     SectionsUnreadable,
 }
 
@@ -1064,7 +1067,7 @@ impl SceneEditor for FakeSceneEditor<'_> {
 
     fn object_sections(&self, object: &ResolvedObject<'_>) -> Result<Vec<SectionRange>, EditError> {
         self.host.record(SECTION_RANGES);
-        if self.host.knobs().fault == Some(Fault::SectionsUnreadable) {
+        if self.host.knobs().fault == Some(Fault::SectionsUnreadable) && self.host.mutated() {
             return Err(EditError::Sdk {
                 operation: "get_object_section_frame",
             });

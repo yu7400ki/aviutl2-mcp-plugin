@@ -3354,7 +3354,20 @@ fn section_precondition_failures(harness: &Harness) -> Vec<(&'static str, EditEr
                     selector: selector(),
                     section: 4,
                 })
-                .expect_err("区間数以上の番号が受理されました"),
+                .expect_err("区間数以上の番号での削除が受理されました"),
+        ),
+        // 区間数との比較は削除と移動の双方に掛かる。移動だけが素通りすると、
+        // 番号が範囲外の要求が事前確認を抜けて SDK へ届く。
+        (
+            "section_index_out_of_range",
+            harness
+                .edit
+                .move_object_section(&MoveObjectSectionParams {
+                    selector: selector(),
+                    section: 4,
+                    frame: 190,
+                })
+                .expect_err("区間数以上の番号での移動が受理されました"),
         ),
         (
             "section_move_crosses_boundary",
@@ -3365,7 +3378,20 @@ fn section_precondition_failures(harness: &Harness) -> Vec<(&'static str, EditEr
                     section: 1,
                     frame: 150,
                 })
-                .expect_err("隣の中間点を越える移動が受理されました"),
+                .expect_err("後ろの中間点を越える移動が受理されました"),
+        ),
+        // 下限は 1 つ前の区間の開始フレーム「以下」を拒否する。等号を含めないと、
+        // 中間点をひとつ前の境界そのものへ重ねられる。
+        (
+            "section_move_crosses_boundary",
+            harness
+                .edit
+                .move_object_section(&MoveObjectSectionParams {
+                    selector: selector(),
+                    section: 1,
+                    frame: 100,
+                })
+                .expect_err("ひとつ前の区間の開始フレームへの移動が受理されました"),
         ),
     ]
 }
@@ -3384,11 +3410,105 @@ fn every_section_precondition_names_its_own_reason() {
 }
 
 #[test]
+fn the_section_precondition_cases_cover_every_reason() {
+    // 事前確認が名乗り得る 4 種を、どれか 1 つでも欠けたら落ちる形で固定する。
+    let harness = harness_with_sections();
+    let covered: std::collections::BTreeSet<&str> = section_precondition_failures(&harness)
+        .into_iter()
+        .map(|(reason, _)| reason)
+        .collect();
+    let expected: std::collections::BTreeSet<&str> = SectionPreconditionReason::ALL
+        .iter()
+        .map(|reason| reason.as_str())
+        .collect();
+    assert_eq!(covered, expected);
+}
+
+#[test]
 fn a_failed_section_precondition_leaves_the_project_untouched() {
     let harness = harness_with_sections();
     let failures = section_precondition_failures(&harness);
-    assert_eq!(failures.len(), 4, "事前確認の 4 種を網羅していません");
+    assert!(!failures.is_empty());
     harness.assert_untouched();
+}
+
+#[test]
+fn creating_at_the_end_frame_of_the_object_is_accepted() {
+    // 受け付ける範囲は閉区間である。終了フレームちょうどを外すと、最後の
+    // 1 フレームだけ中間点を置けない穴ができる。
+    let harness = harness_with_sections();
+    let outcome = harness
+        .edit
+        .create_object_section(&CreateObjectSectionParams {
+            selector: harness.selector(1, 100),
+            frame: 200,
+        })
+        .expect("終了フレームへの追加が拒否されました");
+    assert_eq!(outcome.sections.last().expect("区間がある").start, 200);
+
+    let error = harness
+        .edit
+        .create_object_section(&CreateObjectSectionParams {
+            selector: harness.selector(1, 100),
+            frame: 201,
+        })
+        .expect_err("終了フレームより後への追加が受理されました");
+    assert_eq!(error.details()["reason"], json!("frame_outside_object"));
+}
+
+#[test]
+fn creating_at_the_start_frame_of_the_object_reports_an_existing_boundary() {
+    // 開始フレームは範囲の内側であり、範囲外ではない。既に区間の開始位置で
+    // あることが理由であり、要求元が直すべき点が違う。
+    let harness = harness_with_sections();
+    let error = harness
+        .edit
+        .create_object_section(&CreateObjectSectionParams {
+            selector: harness.selector(1, 100),
+            frame: 100,
+        })
+        .expect_err("開始フレームへの追加が受理されました");
+    assert_eq!(error.details()["reason"], json!("section_boundary_exists"));
+
+    let error = harness
+        .edit
+        .create_object_section(&CreateObjectSectionParams {
+            selector: harness.selector(1, 100),
+            frame: 99,
+        })
+        .expect_err("開始フレームより前への追加が受理されました");
+    assert_eq!(error.details()["reason"], json!("frame_outside_object"));
+}
+
+#[test]
+fn a_section_that_cannot_be_reread_is_reported_as_a_change_that_went_through() {
+    // 変更は発行済みである。読み直せなかったことを「適用されなかった」として
+    // 返すと、要求元は入った変更を無かったものとして次の要求を組み立てる。
+    let harness = harness_with_sections();
+    let selector = harness.selector(1, 100);
+    harness.host.arm(|knobs| {
+        knobs.fault = Some(Fault::SectionsUnreadable);
+    });
+
+    let error = harness
+        .edit
+        .create_object_section(&CreateObjectSectionParams {
+            selector,
+            frame: 160,
+        })
+        .expect_err("読み直せないのに成功として返りました");
+
+    assert_eq!(error.error_code(), ErrorCode::SdkError);
+    assert_eq!(error.details()["mutation_issued"], json!(true));
+    assert_eq!(error.details()["current_project_revision"], json!(1));
+    assert_eq!(error.details()["retry_requires"], json!("refetch"));
+    // 事前確認は通っている。変更そのものはホストへ届いた。
+    assert!(harness.host.mutated());
+    assert_eq!(
+        harness.host.section_points(1, 100),
+        vec![120, 150, 160, 180]
+    );
+    assert_eq!(harness.project.revision(), 1);
 }
 
 #[test]

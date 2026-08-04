@@ -2893,10 +2893,17 @@ mod tests {
                         "{name} の説明が取り消し単位を作ると読めます"
                     );
                 }
-                UndoStatement::Silent => assert!(
-                    !description.contains("取り消し単位"),
-                    "{name} の説明が確かめていない取り消しの挙動を述べています"
-                ),
+                UndoStatement::Silent => {
+                    // 述べていないことを確かめるため、言い換えも塞ぐ。1 つの
+                    // 語だけを見ていると、別の言い回しで同じ保証が入り込む。
+                    for forbidden in ["取り消し単位", "取り消し", "元に戻", "Undo", "undo"]
+                    {
+                        assert!(
+                            !description.contains(forbidden),
+                            "{name} の説明が確かめていない取り消しの挙動に触れています: {forbidden}"
+                        );
+                    }
+                }
             }
         }
     }
@@ -3725,10 +3732,26 @@ mod tests {
         }
 
         for op in aviutl2_mcp_core::EditOperation::ALL {
+            use aviutl2_mcp_core::EditOperation as Edit;
             // 一括適用は編集の族に属するが、費用の主項が違うため別の予算を持つ。
+            //
+            // **`_` を使わない網羅 match である。** `_` で受けると、新しい編集
+            // operation が黙って編集予算へ落ち、「誤って分類した」を捕まえられない。
             let expected = match op {
-                aviutl2_mcp_core::EditOperation::ApplyBatch => limits.batch_request,
-                _ => limits.edit_request,
+                Edit::ApplyBatch => limits.batch_request,
+                Edit::CreateObject
+                | Edit::MoveObject
+                | Edit::DeleteObject
+                | Edit::SetObjectName
+                | Edit::SetObjectItem
+                | Edit::AddEffect
+                | Edit::DeleteEffect
+                | Edit::SetEffectEnabled
+                | Edit::SetLayerState
+                | Edit::SetSelection
+                | Edit::CreateObjectSection
+                | Edit::DeleteObjectSection
+                | Edit::MoveObjectSection => limits.edit_request,
             };
             assert_eq!(
                 limits.request_phase_budget(op.as_str()),

@@ -630,4 +630,49 @@ mod tests {
             "SDK の失敗が届かなかった扱いになりました"
         );
     }
+
+    #[test]
+    fn a_section_change_that_the_sdk_refused_is_told_apart_from_a_failure_before_the_call() {
+        // 中間点の 3 つは `bool` を返し、ラッパーは `false` を ApiCallFailed と
+        // して返す。事前確認を通ったうえでの `false` は要求元に直せる誤りでは
+        // ないため、他の SDK 失敗と混ぜず専用の名前で返す。
+        assert!(
+            matches!(
+                section_mutation_failure("create_object_section", &EditSectionError::ApiCallFailed),
+                EditError::SectionChangeRejected {
+                    operation: "create_object_section"
+                }
+            ),
+            "false が拒否として扱われませんでした"
+        );
+
+        // 届いていない失敗の分類は変わらない。プロジェクトは一切変わって
+        // いないため、拒否として扱うと発行したことになる。
+        assert!(
+            matches!(
+                section_mutation_failure(
+                    "delete_object_section",
+                    &EditSectionError::ObjectDoesNotExist
+                ),
+                EditError::NotIssued {
+                    reason: NotIssuedReason::TargetMissing
+                }
+            ),
+            "届かなかった失敗が拒否として扱われました"
+        );
+
+        let out_of_range = u8::try_from(300u32).expect_err("範囲外の変換");
+        assert!(
+            matches!(
+                section_mutation_failure(
+                    "move_object_section",
+                    &EditSectionError::ValueOutOfRange(out_of_range)
+                ),
+                EditError::NotIssued {
+                    reason: NotIssuedReason::ArgumentNotRepresentable
+                }
+            ),
+            "引数を写せない失敗が拒否として扱われました"
+        );
+    }
 }
