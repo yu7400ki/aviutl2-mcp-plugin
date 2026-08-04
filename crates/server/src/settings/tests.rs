@@ -75,12 +75,12 @@ fn the_watcher_detects_an_atomic_replace() {
     let watcher = SettingsWatcher::start(reader_for(&dir), ParentPolicy::Require)
         .expect("監視を開始できます");
     let source = watcher.source();
-    assert_eq!(source.settings().log_level(), "debug");
+    assert_eq!(source.settings().log_level(), Some("debug"));
 
     dir.replace_settings(r#"{"log_level":"trace"}"#);
 
     assert!(
-        wait_until(|| source.settings().log_level() == "trace"),
+        wait_until(|| source.settings().log_level() == Some("trace")),
         "原子的置換が検出されませんでした"
     );
 }
@@ -116,7 +116,7 @@ fn a_change_made_before_the_watch_was_registered_is_still_picked_up() {
     let dir = TempDir::new();
     dir.replace_settings(r#"{"log_level":"debug"}"#);
     let reader = reader_for(&dir);
-    assert_eq!(reader.settings().log_level(), "debug");
+    assert_eq!(reader.settings().log_level(), Some("debug"));
 
     dir.replace_settings(r#"{"log_level":"trace"}"#);
 
@@ -125,7 +125,7 @@ fn a_change_made_before_the_watch_was_registered_is_still_picked_up() {
     let source = watcher.source();
 
     assert!(
-        wait_until(|| source.settings().log_level() == "trace"),
+        wait_until(|| source.settings().log_level() == Some("trace")),
         "監視を始める前の変更が取り込まれませんでした"
     );
 }
@@ -162,12 +162,12 @@ fn consecutive_writes_settle_on_the_last_state() {
     }
 
     assert!(
-        wait_until(|| source.settings().log_level() == "trace"),
+        wait_until(|| source.settings().log_level() == Some("trace")),
         "最後の状態が反映されませんでした"
     );
     // 反映された後も中間の状態へ戻らない。
     std::thread::sleep(Duration::from_millis(200));
-    assert_eq!(source.settings().log_level(), "trace");
+    assert_eq!(source.settings().log_level(), Some("trace"));
 }
 
 #[test]
@@ -199,7 +199,7 @@ fn the_watcher_stops_when_it_is_dropped() {
     let watcher = SettingsWatcher::start(reader_for(&dir), ParentPolicy::Require)
         .expect("監視を開始できます");
     let source = watcher.source();
-    assert_eq!(source.settings().log_level(), "debug");
+    assert_eq!(source.settings().log_level(), Some("debug"));
 
     let started = Instant::now();
     drop(watcher);
@@ -213,7 +213,7 @@ fn the_watcher_stops_when_it_is_dropped() {
     // 停止後の変更は反映されない。監視スレッドが生き残っていればここで動く。
     dir.replace_settings(r#"{"log_level":"trace"}"#);
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(source.settings().log_level(), "debug");
+    assert_eq!(source.settings().log_level(), Some("debug"));
 }
 
 #[test]
@@ -316,6 +316,125 @@ fn an_unchanged_file_is_neither_reported_nor_applied() {
     assert!(!logs.contains("WARN"), "余計な WARN が出ています: {logs}");
 }
 
+// ============================================================================
+// 変化の押し出し
+// ============================================================================
+
+#[test]
+fn a_subscriber_is_woken_by_the_watch_thread_without_polling() {
+    // 監視スレッドは値が変わったことを知っている。待ち受ける口が無ければ、
+    // 下流は定期的に問い合わせるしかない——`ReadDirectoryChangesW` へ
+    // 切り替えて消したはずのポーリングが 1 段下流で復活する。
+    let dir = TempDir::new();
+    dir.replace_settings(r#"{"log_level":"debug"}"#);
+    let watcher = SettingsWatcher::start(reader_for(&dir), ParentPolicy::Require)
+        .expect("監視を開始できます");
+    let mut receiver = watcher.source().subscribe();
+    assert!(!receiver.has_changed().unwrap(), "最初から起床しています");
+
+    dir.replace_settings(r#"{"log_level":"trace"}"#);
+
+    // 問い合わせずに起床する。届いた値は最新のものである。
+    let woken = std::thread::spawn(move || {
+        let deadline = Instant::now() + OBSERVE_TIMEOUT;
+        while Instant::now() < deadline {
+            if receiver.has_changed().unwrap_or(false) {
+                return Some(receiver.borrow_and_update().clone());
+            }
+            std::thread::yield_now();
+        }
+        None
+    })
+    .join()
+    .expect("購読側のスレッドが panic しました");
+
+    let settings = woken.expect("購読側が起床しませんでした");
+    assert_eq!(settings.log_level(), Some("trace"));
+}
+
+#[test]
+fn a_write_that_changes_nothing_does_not_wake_a_subscriber() {
+    // 原子的置換は一時ファイルの作成と rename で複数の記録を生む。記録の数だけ
+    // 知らせると、変化していない通知が並ぶ。
+    let dir = TempDir::new();
+    dir.replace_settings(r#"{"log_level":"debug"}"#);
+    let mut reader = reader_for(&dir);
+    let source = SettingsSource::fixed((*reader.settings()).clone());
+    let receiver = source.subscribe();
+
+    dir.replace_settings(r#"{"log_level":"debug"}"#);
+    assert_eq!(reload(&mut reader, &source), ReloadOutcome::Same);
+    assert!(
+        !receiver.has_changed().unwrap(),
+        "値が変わっていないのに起床しました"
+    );
+
+    dir.replace_settings(r#"{"log_level":"trace"}"#);
+    assert_eq!(reload(&mut reader, &source), ReloadOutcome::Applied);
+    assert!(receiver.has_changed().unwrap(), "変化が届きませんでした");
+}
+
+#[test]
+fn the_watch_thread_keeps_running_without_any_subscriber() {
+    // 購読者が居ないことは通知の失敗ではない。失敗として扱うと、誰も聞いて
+    // いない間に監視が止まる。
+    let dir = TempDir::new();
+    dir.replace_settings(r#"{"log_level":"debug"}"#);
+    let watcher = SettingsWatcher::start(reader_for(&dir), ParentPolicy::Require)
+        .expect("監視を開始できます");
+    let source = watcher.source();
+
+    for level in ["warn", "error", "trace"] {
+        dir.replace_settings(&format!(r#"{{"log_level":"{level}"}}"#));
+        assert!(
+            wait_until(|| source.settings().log_level() == Some(level)),
+            "購読者が居ない状態で監視が止まりました（{level}）"
+        );
+    }
+}
+
+#[test]
+fn dropping_the_source_ends_the_subscription() {
+    // 供給元が消えたことを購読側が観測できなければ、待ち受けるタスクが
+    // 終われない。
+    let source = SettingsSource::fixed(Settings::default());
+    let receiver = source.subscribe();
+    assert!(receiver.has_changed().is_ok());
+
+    drop(source);
+
+    assert!(
+        receiver.has_changed().is_err(),
+        "供給元の消滅を観測できません"
+    );
+}
+
+#[test]
+fn the_watch_thread_sends_from_outside_a_runtime() {
+    // 監視スレッドは `std::thread` であり、非同期ランタイムの上に無い。
+    // 送出がランタイムを要求する形なら、ここで panic する。
+    let source = SettingsSource::fixed(Settings::default());
+    let receiver = source.subscribe();
+
+    let changed = std::thread::spawn({
+        let source = Arc::clone(&source);
+        move || source.replace_if_changed(Arc::new(settings_with_log_level("trace")))
+    })
+    .join()
+    .expect("ランタイム外からの送出で panic しました");
+
+    assert!(changed);
+    assert_eq!(receiver.borrow().log_level(), Some("trace"));
+}
+
+/// ログレベルだけを指定した設定を作る。
+fn settings_with_log_level(level: &str) -> Settings {
+    aviutl2_mcp_core::settings::SettingsDocument::parse(&format!(r#"{{"log_level":"{level}"}}"#))
+        .unwrap()
+        .resolve(&Settings::default())
+        .0
+}
+
 #[test]
 fn the_snapshot_is_replaced_only_when_the_value_changes() {
     // 同じ内容を書き直しても差し替えない。通知が重複しても、有効集合が実際に
@@ -340,7 +459,7 @@ fn the_snapshot_is_replaced_only_when_the_value_changes() {
         "変更が反映されませんでした"
     );
     assert_eq!(source.applied(), 1);
-    assert_eq!(source.settings().log_level(), "trace");
+    assert_eq!(source.settings().log_level(), Some("trace"));
 }
 
 // ============================================================================

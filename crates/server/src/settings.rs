@@ -36,10 +36,11 @@ use std::ffi::c_void;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
 use tracing::{debug, error, warn};
 use windows::Win32::Foundation::{CloseHandle, ERROR_NOTIFY_ENUM_DIR, GENERIC_READ, HANDLE};
 use windows::Win32::Storage::FileSystem::{
@@ -110,15 +111,28 @@ pub enum SettingsWatchError {
 
 /// 現在の設定を配る口。
 ///
-/// 反映は 1 回の `Arc` の差し替えで行う。`tools/list` の判定も call-time の
-/// 受付判定も同じ供給元を読むため、半適用の状態で食い違うことがない。
+/// 反映は 1 回の差し替えで行う。`tools/list` の判定も call-time の受付判定も
+/// 同じ供給元を読むため、半適用の状態で食い違うことがない。
+///
+/// # 変化は押し出す
+///
+/// 監視スレッドは**値が変わったことを知っている**。それを待ち受ける口が無いと、
+/// 下流は定期的に問い合わせるしかない——`ReadDirectoryChangesW` へ切り替えて
+/// 消したはずのポーリングが、1 段下流で復活する。[`SettingsSource::subscribe`]
+/// は最新の値だけを届ける。**連続した変更が畳まれることは、「有効集合が実際に
+/// 変化した場合だけ知らせる」という要件とそのまま噛み合う。**
 #[derive(Debug)]
 pub struct SettingsSource {
-    current: RwLock<Arc<Settings>>,
-    /// 差し替えた回数。
+    /// 現在の値と、変化の通知路を兼ねる。
     ///
-    /// **値が変わったときだけ増える。** 原子的置換が複数の記録を生んでも、
-    /// 読み直した内容が同じなら差し替えない。
+    /// 値の保持と通知を 1 つにすることで、「差し替えたが知らせ忘れた」形が
+    /// 作れなくなる。
+    changed: watch::Sender<Arc<Settings>>,
+    /// 値が変わった回数。
+    ///
+    /// **待ち受けるなら [`SettingsSource::subscribe`] を使う。** こちらは
+    /// 「前に見たときから変わったか」を非同期の文脈を持たずに数えたい呼び出し側
+    /// のための口であり、差し替えと同じ区間で進む。
     applied: AtomicU64,
 }
 
@@ -127,15 +141,29 @@ impl SettingsSource {
     ///
     /// 監視を持たない構築口であり、試験と、設定を必要としない利用側が使う。
     pub fn fixed(settings: Settings) -> Arc<Self> {
-        Arc::new(Self {
-            current: RwLock::new(Arc::new(settings)),
+        Arc::new(Self::new(Arc::new(settings)))
+    }
+
+    fn new(settings: Arc<Settings>) -> Self {
+        Self {
+            changed: watch::Sender::new(settings),
             applied: AtomicU64::new(0),
-        })
+        }
     }
 
     /// 現在の設定。
     pub fn settings(&self) -> Arc<Settings> {
-        Arc::clone(&self.current.read().unwrap_or_else(|e| e.into_inner()))
+        Arc::clone(&self.changed.borrow())
+    }
+
+    /// 設定が変わったことを待ち受ける。
+    ///
+    /// **最新の値だけが届く。** 待っている間に何度変わっても、起床したときに
+    /// 見えるのは最後の状態である。購読者が居なくても差し替えは進む。
+    ///
+    /// この口の供給元が drop されると、待ち受けは失敗を返して終わる。
+    pub fn subscribe(&self) -> watch::Receiver<Arc<Settings>> {
+        self.changed.subscribe()
     }
 
     /// 値が変わった回数。
@@ -143,15 +171,23 @@ impl SettingsSource {
         self.applied.load(Ordering::Acquire)
     }
 
-    /// 値が変わっていれば差し替える。変わったかどうかを返す。
+    /// 値が変わっていれば差し替え、購読者へ知らせる。変わったかどうかを返す。
+    ///
+    /// **同じ内容を読み直しても知らせない。** 原子的置換は一時ファイルの作成と
+    /// rename で複数の記録を生むため、記録の数だけ知らせると変化していない
+    /// 通知が並ぶ。
+    ///
+    /// 回数を進めるのは差し替えと同じ区間の内側である。**「差し替えたが数え
+    /// 忘れた」も「数えたが知らせ忘れた」も書けない。**
     fn replace_if_changed(&self, settings: Arc<Settings>) -> bool {
-        let mut current = self.current.write().unwrap_or_else(|e| e.into_inner());
-        if **current == *settings {
-            return false;
-        }
-        *current = settings;
-        self.applied.fetch_add(1, Ordering::AcqRel);
-        true
+        self.changed.send_if_modified(|current| {
+            if **current == *settings {
+                return false;
+            }
+            *current = settings;
+            self.applied.fetch_add(1, Ordering::AcqRel);
+            true
+        })
     }
 }
 
@@ -196,10 +232,7 @@ impl SettingsWatcher {
 
         let directory = DirectoryHandle::open(&parent)?;
         let stop = Arc::new(EventHandle::new_manual_reset()?);
-        let source = Arc::new(SettingsSource {
-            current: RwLock::new(reader.settings()),
-            applied: AtomicU64::new(0),
-        });
+        let source = Arc::new(SettingsSource::new(reader.settings()));
 
         let handle = std::thread::Builder::new()
             .name("aviutl2-mcp-settings".to_string())
@@ -516,7 +549,11 @@ fn reload(reader: &mut SettingsReader, source: &SettingsSource) -> ReloadOutcome
                 for issue in &issues {
                     warn!("設定を補正しました: {issue}");
                 }
-                return if source.replace_if_changed(reader.settings()) {
+                let settings = reader.settings();
+                return if source.replace_if_changed(Arc::clone(&settings)) {
+                    // 記録の層まで届けなければ、`log_level` だけが「保存しても
+                    // 効かない」項目になる。
+                    crate::apply_log_level(&settings);
                     debug!("設定を反映しました");
                     ReloadOutcome::Applied
                 } else {
