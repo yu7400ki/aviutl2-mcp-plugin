@@ -131,7 +131,6 @@ dependencies = [
  "chrono",
  "png",
  "proptest",
- "rand 0.10.2",
  "raw-window-handle",
  "serde",
  "serde_json",

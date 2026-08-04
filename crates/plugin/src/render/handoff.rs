@@ -24,9 +24,10 @@ use crate::registry::discovery_root;
 use crate::render::error::{ArtifactStage, RenderError};
 use crate::render::slot::RenderedFrame;
 use anyhow::{Context, Result};
-use aviutl2_mcp_core::{ARTIFACT_MAX_BYTES, InstanceId};
+use aviutl2_mcp_core::{
+    ARTIFACT_MAX_BYTES, InstanceId, format_sha256, handoff_dir, handoff_file, handoff_temp_file,
+};
 use aviutl2_mcp_win::{create_protected_directory, create_protected_file};
-use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
@@ -37,67 +38,16 @@ use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{FlushFileBuffers, MOVEFILE_WRITE_THROUGH, MoveFileExW};
 use windows::core::PCWSTR;
 
+pub use aviutl2_mcp_core::{ARTIFACT_MEDIA_TYPE, HandoffToken};
+
 /// 引き渡し用ファイルを掃除するまでの時間。
 ///
 /// 要求 1 件に与えられる時間より十分長く採る。引き取り中のファイルを消さない
 /// ための余裕である。
-pub const HANDOFF_TTL: Duration = Duration::from_secs(120);
-
-/// 基底の直下に置く引き渡し用ディレクトリの名前。
-const HANDOFF_DIR: &str = "render";
-
-/// 識別子の長さ（バイト）。
-const TOKEN_BYTES: usize = 16;
-
-/// 識別子の長さ（16 進表記の文字数）。
-const TOKEN_HEX_LEN: usize = TOKEN_BYTES * 2;
-
-/// 成果物の拡張子。
-const ARTIFACT_EXTENSION: &str = "png";
-
-/// 書き込み途中のファイルに付ける拡張子。
-const TEMP_EXTENSION: &str = "tmp";
-
-/// 成果物の MIME type。
-pub const ARTIFACT_MEDIA_TYPE: &str = "image/png";
-
-/// 引き渡し用ファイルの識別子。
 ///
-/// 小文字 16 進 32 文字。暗号論的に安全な乱数から作る。**推測できないことが
-/// 必要である。** 同じ利用者の別プロセスは信頼境界の内側にあるが、誤って別の
-/// 成果物を読む事故は境界と無関係に起きる。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HandoffToken(String);
-
-impl HandoffToken {
-    /// 新しい識別子を作る。
-    pub fn generate() -> Self {
-        let mut bytes = [0u8; TOKEN_BYTES];
-        rand::rng().fill_bytes(&mut bytes);
-        let mut hex = String::with_capacity(TOKEN_HEX_LEN);
-        for byte in bytes {
-            use std::fmt::Write as _;
-            let _ = write!(hex, "{byte:02x}");
-        }
-        Self(hex)
-    }
-
-    /// 文字列表現から識別子を復元する。小文字 16 進 32 文字以外は受け付けない。
-    ///
-    /// 復元の口を検証つきにしておくのは、**任意の文字列からファイルの場所を
-    /// 組み立てる経路を作らない**ためである。この型を経由しなければパスは
-    /// 組み立てられず、相対参照や区切り文字を含む文字列はここで止まる。
-    pub fn parse(text: &str) -> Option<Self> {
-        let valid = text.len() == TOKEN_HEX_LEN
-            && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-        valid.then(|| Self(text.to_string()))
-    }
-
-    /// 応答へ載せる文字列表現。
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+/// 掃除の期限は書き出す側だけのものであり、引き取る側は知らない。両端で共有する
+/// 取り決めとは置き場所を分ける。
+pub const HANDOFF_TTL: Duration = Duration::from_secs(120);
 
 /// 書き終えた引き渡し用ファイルの申告。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +66,9 @@ pub struct HandoffArtifact {
 /// 触れない。触れば、生きているプロセスの成果物を消し得る。
 #[derive(Debug)]
 pub struct HandoffDir {
-    dir: PathBuf,
+    /// 引き渡しの基底。パスは常にここから組み立てる。
+    root: PathBuf,
+    instance_id: InstanceId,
     /// 書き出してよい成果物の大きさの上限（符号化後のバイト数）。
     max_artifact_bytes: u64,
 }
@@ -134,9 +86,15 @@ impl HandoffDir {
     /// 大きさと同じ値でなければ、書き出せても引き取れない成果物が生まれる。
     pub fn under(root: &Path, instance_id: &InstanceId) -> Self {
         Self {
-            dir: root.join(HANDOFF_DIR).join(instance_id.to_string()),
+            root: root.to_path_buf(),
+            instance_id: *instance_id,
             max_artifact_bytes: ARTIFACT_MAX_BYTES,
         }
+    }
+
+    /// 自インスタンスの引き渡し用ディレクトリ。
+    fn dir(&self) -> PathBuf {
+        handoff_dir(&self.root, &self.instance_id)
     }
 
     /// 書き出しの上限を差し替える。
@@ -203,7 +161,7 @@ impl HandoffDir {
         Ok(HandoffArtifact {
             token,
             byte_length: encoded.len() as u64,
-            sha256: format!("sha256:{}", to_hex(&digest)),
+            sha256: format_sha256(&digest),
         })
     }
 
@@ -223,7 +181,7 @@ impl HandoffDir {
     /// 正常時、ファイルは受け取る側が引き取った直後に消える。これは失敗経路の
     /// ための保険であり、新しい要求を受けたときに行う。専用のスレッドは持たない。
     pub fn sweep_expired(&self, now: SystemTime) {
-        let entries = match std::fs::read_dir(&self.dir) {
+        let entries = match std::fs::read_dir(self.dir()) {
             Ok(entries) => entries,
             // まだ 1 度も書いていない場合はディレクトリ自体が無い。
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -255,7 +213,7 @@ impl HandoffDir {
     ///
     /// 終了へ向かう時点で使う。以後この instance が成果物を書くことはない。
     pub fn remove_all(&self) {
-        match std::fs::remove_dir_all(&self.dir) {
+        match std::fs::remove_dir_all(self.dir()) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => tracing::warn!("引き渡し用ディレクトリを削除できませんでした: {e}"),
@@ -270,7 +228,8 @@ impl HandoffDir {
     /// 既存のディレクトリは検証にとどめ、DACL を書き換えない。想定と異なれば
     /// この要求を失敗させる。
     fn ensure_dir(&self) -> Result<()> {
-        let mut ancestors: Vec<&Path> = self.dir.ancestors().take(3).collect();
+        let dir = self.dir();
+        let mut ancestors: Vec<&Path> = dir.ancestors().take(3).collect();
         ancestors.reverse();
         for dir in ancestors {
             create_protected_directory(dir)
@@ -284,7 +243,7 @@ impl HandoffDir {
     /// 書き出しと掃除の結果を、パスを外へ出さずに確かめるための口である。
     #[cfg(test)]
     pub(crate) fn entry_count(&self) -> usize {
-        std::fs::read_dir(&self.dir)
+        std::fs::read_dir(self.dir())
             .map(|entries| entries.flatten().count())
             .unwrap_or(0)
     }
@@ -303,7 +262,11 @@ impl HandoffDir {
     #[cfg(test)]
     pub(crate) fn age_entries(&self, age: Duration) {
         let aged = SystemTime::now() - age;
-        for entry in std::fs::read_dir(&self.dir).into_iter().flatten().flatten() {
+        for entry in std::fs::read_dir(self.dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let file = std::fs::File::options()
                 .write(true)
                 .open(entry.path())
@@ -314,15 +277,11 @@ impl HandoffDir {
     }
 
     fn artifact_path(&self, token: &HandoffToken) -> PathBuf {
-        self.dir
-            .join(format!("{}.{ARTIFACT_EXTENSION}", token.as_str()))
+        handoff_file(&self.root, &self.instance_id, token)
     }
 
     fn temp_path(&self, token: &HandoffToken) -> PathBuf {
-        self.dir.join(format!(
-            "{}.{ARTIFACT_EXTENSION}.{TEMP_EXTENSION}",
-            token.as_str()
-        ))
+        handoff_temp_file(&self.root, &self.instance_id, token)
     }
 }
 
@@ -419,15 +378,6 @@ fn remove_if_exists(path: &Path) {
     }
 }
 
-fn to_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
-}
-
 fn to_wide(path: &Path) -> Vec<u16> {
     path.as_os_str()
         .encode_wide()
@@ -438,7 +388,7 @@ fn to_wide(path: &Path) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use aviutl2_mcp_core::HANDOFF_DIR;
 
     /// 一時的な基底ディレクトリ。
     struct TempRoot(PathBuf);
@@ -478,46 +428,26 @@ mod tests {
     }
 
     #[test]
-    fn a_token_is_thirty_two_lowercase_hex_characters() {
-        let token = HandoffToken::generate();
-        assert_eq!(token.as_str().len(), TOKEN_HEX_LEN);
+    fn a_written_artifact_lands_at_the_agreed_place() {
+        // 引き取る側は同じ基底と instance から自分で場所を組み立てる。ここでは
+        // 組み立ての結果ではなく、取り決めそのものを書き下して照合する——
+        // 共有の定義が変われば、書き出す側だけが動いてこの照合が落ちる。
+        let root = TempRoot::new();
+        let instance_id = InstanceId::new_v4();
+        let handoff = root.dir_for(&instance_id);
+
+        let artifact = handoff.write(&sample_frame()).expect("書き出しに失敗");
+
+        let agreed = root
+            .0
+            .join("render")
+            .join(instance_id.to_string())
+            .join(format!("{}.png", artifact.token.as_str()));
         assert!(
-            token
-                .as_str()
-                .bytes()
-                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
-            "{}",
-            token.as_str()
+            agreed.is_file(),
+            "取り決めた場所に成果物がありません: {}",
+            agreed.display()
         );
-    }
-
-    #[test]
-    fn only_a_well_formed_token_can_be_restored() {
-        let token = HandoffToken::generate();
-        assert_eq!(HandoffToken::parse(token.as_str()), Some(token.clone()));
-
-        for text in [
-            "",
-            "0123456789abcdef0123456789abcde",
-            "0123456789abcdef0123456789abcdef0",
-            "0123456789ABCDEF0123456789abcdef",
-            "..\\..\\instances\\0123456789abcdef",
-            "0123456789abcdef0123456789abcde/",
-        ] {
-            assert_eq!(
-                HandoffToken::parse(text),
-                None,
-                "{text} が識別子として受理されました"
-            );
-        }
-    }
-
-    #[test]
-    fn tokens_do_not_repeat() {
-        let tokens: HashSet<String> = (0..64)
-            .map(|_| HandoffToken::generate().as_str().to_string())
-            .collect();
-        assert_eq!(tokens.len(), 64, "識別子が重複しました");
     }
 
     #[test]
@@ -531,10 +461,7 @@ mod tests {
         let path = handoff.artifact_path(&artifact.token);
         let written = std::fs::read(&path).expect("書き出したファイルを読めません");
         assert_eq!(artifact.byte_length, written.len() as u64);
-        assert_eq!(
-            artifact.sha256,
-            format!("sha256:{}", to_hex(&Sha256::digest(&written)))
-        );
+        assert_eq!(artifact.sha256, format_sha256(&Sha256::digest(&written)));
         assert!(
             !handoff.temp_path(&artifact.token).exists(),
             "一時ファイルが残っています"
@@ -611,7 +538,7 @@ mod tests {
 
         aviutl2_mcp_win::test_support::assert_protected_dacl(&root.0);
         aviutl2_mcp_win::test_support::assert_protected_dacl(&root.0.join(HANDOFF_DIR));
-        aviutl2_mcp_win::test_support::assert_protected_dacl(&handoff.dir);
+        aviutl2_mcp_win::test_support::assert_protected_dacl(&handoff.dir());
         aviutl2_mcp_win::test_support::assert_protected_dacl(
             &handoff.artifact_path(&artifact.token),
         );
@@ -678,7 +605,7 @@ mod tests {
 
         mine.remove_all();
 
-        assert!(!mine.dir.exists());
+        assert!(!mine.dir().exists());
         assert!(
             other.artifact_path(&other_artifact.token).exists(),
             "他インスタンスのディレクトリを消しました"

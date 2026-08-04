@@ -214,8 +214,8 @@ impl<H: RenderHost> RenderAdapter for HostRenderAdapter<H> {
         // 引き取ることも掃除することもできない。ここで消さなければ、期限切れの
         // 掃除まで残り続ける。
         match HandoffToken::parse(handoff_token) {
-            Some(token) => self.handoff.remove(&token),
-            None => tracing::warn!("引き渡し用ファイルの識別子を解釈できませんでした"),
+            Ok(token) => self.handoff.remove(&token),
+            Err(_) => tracing::warn!("引き渡し用ファイルの識別子を解釈できませんでした"),
         }
     }
 }
