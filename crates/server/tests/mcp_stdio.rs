@@ -1807,11 +1807,11 @@ fn tool_list_changed_count(session: &Session) -> usize {
         .count()
 }
 
-/// 監視が変化に気付くまでの余裕。
+/// 設定ファイルの置換が server の監視スレッドへ届くまでの余裕。
 ///
-/// server が集合を確かめる間隔より長く採る。通知が届いていることを、応答の
-/// 到着より先に確かめられるようにするためである。
-const TOOL_LIST_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+/// **通知の側は待たない。** 値が差し替わった時点で押し出されるため、ここで見て
+/// いるのはファイルシステムからの記録が届くまでだけである。
+const SETTINGS_DELIVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[test]
 fn the_first_tools_list_reflects_the_settings_on_disk() {
@@ -2050,7 +2050,7 @@ fn tools_list_changed_arrives_only_when_the_enabled_set_changes() {
 
     // 公開する集合に関わらない項目だけを変える。
     write_settings(&registry_dir, r#"{"log_level":"warn"}"#);
-    std::thread::sleep(TOOL_LIST_SETTLE);
+    std::thread::sleep(SETTINGS_DELIVERY);
     server.send(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     server.read_until(&[json!(2)]);
 
@@ -2059,7 +2059,7 @@ fn tools_list_changed_arrives_only_when_the_enabled_set_changes() {
         &registry_dir,
         r#"{"log_level":"warn","disabled_tools":["aviutl2_delete_object"]}"#,
     );
-    std::thread::sleep(TOOL_LIST_SETTLE);
+    std::thread::sleep(SETTINGS_DELIVERY);
     server.send(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }));
     server.read_until(&[json!(3)]);
 
@@ -2075,6 +2075,23 @@ fn tools_list_changed_arrives_only_when_the_enabled_set_changes() {
         tool_list_changed_count(&session),
         1,
         "通知の回数が集合の変化と一致しません: {}",
+        session.stdout
+    );
+
+    // 通知は集合を変えた差し替えと同じ契機で押し出される。**変化後の一覧を
+    // 返すより先に届く。** 一定間隔で見に行く実装では、この順序は偶然になる。
+    let messages = session.messages();
+    let notified = messages
+        .iter()
+        .position(|message| message["method"] == json!("notifications/tools/list_changed"))
+        .expect("通知が届いていません");
+    let listed = messages
+        .iter()
+        .position(|message| message["id"] == json!(3))
+        .expect("変化後の一覧がありません");
+    assert!(
+        notified < listed,
+        "通知が変化後の一覧より後に届きました: {}",
         session.stdout
     );
 

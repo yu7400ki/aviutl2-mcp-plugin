@@ -17,6 +17,7 @@ use aviutl2_mcp_core::settings::Settings;
 use aviutl2_mcp_core::tool::ALWAYS_ENABLED_TOOL;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use tokio::sync::watch;
 
 /// 現在どの tool を公開するかの判定。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -61,70 +62,69 @@ impl ToolVisibility {
     }
 }
 
-/// 公開する tool の集合の変化を追う。
+/// 公開する tool の集合が変わるのを待ち受ける。
 ///
-/// 設定が差し替わっても、**公開する集合が変わらなければ何も起きない。** ログ
-/// レベルや期限だけを変えたときに要求元へ `tools/list` の取り直しを求めない
-/// ためである。
+/// **供給元が押し出す。** 設定が差し替わったときにだけ起床するため、何も
+/// 変わっていない間に問い合わせる経路が無い。
 ///
-/// 観測を取りこぼしても正しさは失われない。`tools/list` と call-time の受付
+/// 設定が差し替わっても、**公開する集合が変わらなければ起床したことを外へ
+/// 伝えない。** ログレベルや期限だけを変えたときに要求元へ `tools/list` の
+/// 取り直しを求めないためである。
+///
+/// 起床を取りこぼしても正しさは失われない。`tools/list` と call-time の受付
 /// 判定はいずれも要求の時点で現在の snapshot を読むため、**通知は最適化で
 /// あって正しさの担保ではない。**
 #[derive(Debug)]
 pub struct ToolListWatch {
-    source: Arc<SettingsSource>,
+    settings: watch::Receiver<Arc<Settings>>,
     catalog: Vec<String>,
-    applied: u64,
     visible: BTreeSet<String>,
 }
 
 impl ToolListWatch {
-    /// 現在の集合を基準として観測を始める。
+    /// 現在の集合を基準として待ち受けを始める。
     ///
     /// `catalog` は server が登録している tool 名の全体である。
-    pub fn new(source: Arc<SettingsSource>, catalog: Vec<String>) -> Self {
-        let (applied, visible) = Self::observe(&source, &catalog);
+    ///
+    /// **供給元への参照を持たない。** 購読だけを持つため、供給元が失われれば
+    /// [`ToolListWatch::changed`] が終わりを返す。待ち受ける側が供給元を
+    /// 生かし続けることはない。
+    pub fn new(source: &SettingsSource, catalog: Vec<String>) -> Self {
+        let settings = source.subscribe();
+        let visible = ToolVisibility::from_settings(&settings.borrow())
+            .visible(catalog.iter().map(String::as_str));
         Self {
-            source,
+            settings,
             catalog,
-            applied,
             visible,
         }
     }
 
-    /// 公開する集合が前回の観測から変わっていれば真を返す。
+    /// 公開する集合が変わるまで待つ。
     ///
-    /// 設定が差し替わっていなければ集合を計算し直さない。
-    pub fn changed(&mut self) -> bool {
-        if self.source.applied() == self.applied {
-            return false;
+    /// 変わったら真を返す。**供給元が失われたら偽を返して終わる**——待ち受けを
+    /// 畳む契機はこれだけである。
+    ///
+    /// 起床しても集合が同じなら、外へ伝えずに待ち直す。
+    pub async fn changed(&mut self) -> bool {
+        while self.settings.changed().await.is_ok() {
+            let visible = {
+                let settings = self.settings.borrow_and_update();
+                ToolVisibility::from_settings(&settings)
+                    .visible(self.catalog.iter().map(String::as_str))
+            };
+            if visible == self.visible {
+                continue;
+            }
+            self.visible = visible;
+            return true;
         }
-        let (applied, visible) = Self::observe(&self.source, &self.catalog);
-        self.applied = applied;
-        if visible == self.visible {
-            return false;
-        }
-        self.visible = visible;
-        true
+        false
     }
 
     /// 現在公開している tool 名。
     pub fn visible(&self) -> &BTreeSet<String> {
         &self.visible
-    }
-
-    /// 差し替えの回数と、そのとき以降の snapshot から求めた集合を取る。
-    ///
-    /// **回数を先に読む。** 後に読むと、読み終えてから snapshot を取るまでの間の
-    /// 差し替えを「観測済み」として記録してしまい、その変化に気付けなくなる。
-    /// 先に読めば記録する回数は snapshot と同じか古いだけであり、次の観測で
-    /// 必ず拾い直す。
-    fn observe(source: &SettingsSource, catalog: &[String]) -> (u64, BTreeSet<String>) {
-        let applied = source.applied();
-        let settings = source.settings();
-        let visible =
-            ToolVisibility::from_settings(&settings).visible(catalog.iter().map(String::as_str));
-        (applied, visible)
     }
 }
 

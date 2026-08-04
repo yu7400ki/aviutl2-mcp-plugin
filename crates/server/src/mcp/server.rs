@@ -312,7 +312,9 @@ impl AviUtl2McpServer {
 
     /// 保管庫を持たず、共有設定から予算と tool の公開を引くサーバーを作る。
     ///
-    /// 保管庫の用意を伴わずに設定の効き方を観測するための構築口である。
+    /// **保管庫の用意を伴わずに設定の効き方を観測するための構築口であり、製品の
+    /// 経路では使わない。** 既定では公開しないため、`.exe` にこの経路は無い。
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_settings(registry_dir: PathBuf, settings: Arc<SettingsSource>) -> Self {
         Self::from_limits_source(registry_dir, LimitsSource::Settings(settings))
     }
@@ -1463,13 +1465,6 @@ impl AviUtl2McpServer {
     }
 }
 
-/// 公開する tool の集合が変わっていないかを確かめる間隔。
-///
-/// 設定の変更は人手による稀な操作であり、遅れは体感されない。**遅れても正しさは
-/// 保たれる**——`tools/list` も call-time の受付判定も、要求の時点で現在の
-/// snapshot を読む。通知は要求元が古い一覧を持ち続ける時間を縮めるだけである。
-const TOOL_LIST_WATCH_INTERVAL: Duration = Duration::from_millis(500);
-
 impl ServerHandler for AviUtl2McpServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(
@@ -1545,11 +1540,15 @@ impl ServerHandler for AviUtl2McpServer {
         Ok(normalize_tool_result(&tool, result))
     }
 
-    /// 初期化の完了を受けて、公開する tool の集合の変化を追い始める。
+    /// 初期化の完了を受けて、公開する tool の集合の変化を待ち受け始める。
     ///
     /// `notifications/tools/list_changed` を送るのに要る peer は、ここで初めて
     /// 手に入る。**peer が成立する前の変更は通知しない**——最初の `tools/list` が
     /// そのときの snapshot を読むため、取りこぼしにはならない。
+    ///
+    /// 待ち受けは供給元からの押し出しで起きる。**設定が変わらない限り、この
+    /// タスクは 1 度も起きない。** 畳む契機は 2 つだけである——供給元が失われる
+    /// か、転送が閉じているかである。
     ///
     /// 通知の送信に失敗しても記録は進める。次の `tools/list` が正であり、同じ
     /// 変化を繰り返し通知しても要求元の得るものは変わらない。
@@ -1563,20 +1562,16 @@ impl ServerHandler for AviUtl2McpServer {
             .into_iter()
             .map(|tool| tool.name.to_string())
             .collect();
-        let mut watch = ToolListWatch::new(source, catalog);
+        let mut watch = ToolListWatch::new(&source, catalog);
         let peer = context.peer;
         tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(TOOL_LIST_WATCH_INTERVAL).await;
-                if peer.is_transport_closed() {
-                    return;
-                }
-                if !watch.changed() {
-                    continue;
-                }
+            while watch.changed().await {
                 tracing::debug!("公開する tool の集合が変わりました");
                 if let Err(e) = peer.notify_tool_list_changed().await {
                     tracing::warn!(error = %e, "tool 一覧の変更を通知できませんでした");
+                    if peer.is_transport_closed() {
+                        return;
+                    }
                 }
             }
         });

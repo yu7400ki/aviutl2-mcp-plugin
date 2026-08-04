@@ -10,6 +10,19 @@ use std::time::{Duration, Instant};
 /// 設定の差し替えが監視スレッドへ届くまで待つ上限。
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 供給元が既に新しい値を持ってから、待ち受けが起きるまでに許す時間。
+///
+/// **押し出しであるため実際には待たない。** 有限にするのは届かない実装で試験が
+/// 止まらないためであり、**この幅は「一定間隔で見に行く」実装が間に合わない
+/// 長さに採ってある。**
+const PUSH_DEADLINE: Duration = Duration::from_millis(100);
+
+/// 起きないことを確かめるために様子を見る時間。
+///
+/// 供給元は既に新しい値を持っている。起きるなら即座に起きるため、この幅で
+/// 起きなければ起きない。
+const QUIET_WINDOW: Duration = Duration::from_millis(100);
+
 /// 設定を書いた解決済み snapshot を作る。
 fn settings_from(json: &str) -> Settings {
     SettingsDocument::parse(json)
@@ -117,14 +130,31 @@ fn a_corrupt_file_leaves_every_tool_visible_at_startup() {
     assert_eq!(visible.len(), catalog().len());
 }
 
-#[test]
-fn the_watch_reports_a_change_only_when_the_visible_set_changes() {
+/// 供給元が新しい値を持ってから起床するまでを測る。
+///
+/// **ファイルの変更が監視スレッドへ届くまでは測らない。** そこは押し出しでも
+/// 見に行く形でも変わらない区間であり、含めると測りたい差が埋もれる。
+async fn wake_after_delivery(watch: &mut ToolListWatch) -> bool {
+    tokio::time::timeout(PUSH_DEADLINE, watch.changed())
+        .await
+        .expect("供給元が押し出すため待たずに起床します")
+}
+
+/// 様子を見て、起床しないことを確かめる。
+async fn stays_quiet(watch: &mut ToolListWatch) -> bool {
+    tokio::time::timeout(QUIET_WINDOW, watch.changed())
+        .await
+        .is_err()
+}
+
+#[tokio::test]
+async fn the_watch_wakes_only_when_the_visible_set_changes() {
     let dir = TempDir::new();
     dir.replace_settings(r#"{"log_level":"info"}"#);
     let watcher = SettingsWatcher::start(reader_for(&dir), ParentPolicy::Require)
         .expect("監視を開始できます");
     let source = watcher.source();
-    let mut watch = ToolListWatch::new(Arc::clone(&source), catalog());
+    let mut watch = ToolListWatch::new(&source, catalog());
     assert_eq!(watch.visible().len(), catalog().len());
 
     // 公開する集合に関わらない項目だけを変える。設定は差し替わるが、
@@ -135,8 +165,8 @@ fn the_watch_reports_a_change_only_when_the_visible_set_changes() {
         "設定の差し替えが届きませんでした"
     );
     assert!(
-        !watch.changed(),
-        "集合が変わっていないのに変化と報告しました"
+        stays_quiet(&mut watch).await,
+        "集合が変わっていないのに起床しました"
     );
 
     // 公開する集合を変える。
@@ -145,22 +175,25 @@ fn the_watch_reports_a_change_only_when_the_visible_set_changes() {
         wait_until(|| source.settings().disabled_tools().len() == 1),
         "無効化の指定が届きませんでした"
     );
-    assert!(watch.changed(), "集合の変化を報告しませんでした");
+    assert!(
+        wake_after_delivery(&mut watch).await,
+        "集合の変化で起床しませんでした"
+    );
     assert!(!watch.visible().contains("aviutl2_delete_object"));
 
-    // 同じ観測を繰り返しても 2 度は報告しない。
-    assert!(!watch.changed());
+    // 同じ変化で 2 度は起きない。
+    assert!(stays_quiet(&mut watch).await);
 }
 
-#[test]
-fn disabling_only_the_always_enabled_tool_is_not_a_change() {
+#[tokio::test]
+async fn disabling_only_the_always_enabled_tool_is_not_a_change() {
     // floor があるため、この指定は公開する集合を 1 つも動かさない。
     let dir = TempDir::new();
     dir.replace_settings(r#"{"log_level":"info"}"#);
     let watcher = SettingsWatcher::start(reader_for(&dir), ParentPolicy::Require)
         .expect("監視を開始できます");
     let source = watcher.source();
-    let mut watch = ToolListWatch::new(Arc::clone(&source), catalog());
+    let mut watch = ToolListWatch::new(&source, catalog());
 
     dir.replace_settings(r#"{"log_level":"info","disabled_tools":["aviutl2_list_instances"]}"#);
     assert!(
@@ -168,29 +201,49 @@ fn disabling_only_the_always_enabled_tool_is_not_a_change() {
         "無効化の指定が届きませんでした"
     );
 
-    assert!(!watch.changed());
+    assert!(stays_quiet(&mut watch).await);
     assert!(watch.visible().contains(ALWAYS_ENABLED_TOOL));
 }
 
-#[test]
-fn what_the_watch_consumed_does_not_change_what_the_visibility_reports() {
-    // 通知の送信が失敗しても、観測の記録だけが進む。公開の判定は毎回 snapshot を
+#[tokio::test]
+async fn the_watch_ends_when_the_source_is_dropped() {
+    // 待ち受けを畳む契機は供給元が失われることである。通知タスクはこれで終わる。
+    let dir = TempDir::new();
+    dir.replace_settings(r#"{"log_level":"info"}"#);
+    let watcher = SettingsWatcher::start(reader_for(&dir), ParentPolicy::Require)
+        .expect("監視を開始できます");
+    let source = watcher.source();
+    let mut watch = ToolListWatch::new(&source, catalog());
+
+    // 待ち受ける側は供給元を生かし続けない。
+    drop(source);
+    drop(watcher);
+
+    assert!(
+        !wake_after_delivery(&mut watch).await,
+        "供給元が失われても待ち受けが終わりませんでした"
+    );
+}
+
+#[tokio::test]
+async fn what_the_watch_consumed_does_not_change_what_the_visibility_reports() {
+    // 通知の送信が失敗しても、待ち受けの記録だけが進む。公開の判定は毎回 snapshot を
     // 読み直すため、次の `tools/list` は正しい集合を返す。
     let dir = TempDir::new();
     dir.replace_settings(r#"{"log_level":"info"}"#);
     let watcher = SettingsWatcher::start(reader_for(&dir), ParentPolicy::Require)
         .expect("監視を開始できます");
     let source = watcher.source();
-    let mut watch = ToolListWatch::new(Arc::clone(&source), catalog());
+    let mut watch = ToolListWatch::new(&source, catalog());
 
     dir.replace_settings(r#"{"disabled_tools":["aviutl2_delete_effect"]}"#);
     assert!(
         wait_until(|| source.settings().disabled_tools().len() == 1),
         "無効化の指定が届きませんでした"
     );
-    assert!(watch.changed());
+    assert!(wake_after_delivery(&mut watch).await);
 
-    // 観測を済ませた後（＝通知を送ったつもりで失敗した後）でも、判定は snapshot を
+    // 起床を済ませた後（＝通知を送ったつもりで失敗した後）でも、判定は snapshot を
     // 読み直して同じ結論に至る。
     let visible = ToolVisibility::from_settings(&source.settings())
         .visible(catalog().iter().map(String::as_str));
