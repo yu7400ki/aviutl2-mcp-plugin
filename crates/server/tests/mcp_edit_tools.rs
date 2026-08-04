@@ -1705,3 +1705,36 @@ async fn section_responses_carry_neither_the_alias_nor_a_handle() {
         assert!(!request.contains(forbidden), "params: {request}");
     }
 }
+
+#[tokio::test]
+async fn a_display_start_request_carries_neither_the_alias_nor_a_handle() {
+    let harness = Harness::start(responses("set_selection", selection_state()));
+
+    let result = harness
+        .server
+        .set_selection(Parameters(SetSelectionInput {
+            instance_id: harness.instance_id(),
+            expected_scene_id: SCENE_ID,
+            cursor: None,
+            selected_range: None,
+            focus: Some(FocusChangeInput::Set {
+                object: selector_input(),
+            }),
+            display: Some(DisplayStartInput {
+                layer: 1,
+                frame: 60,
+            }),
+            expected_project_epoch: EPOCH.to_string(),
+        }))
+        .await;
+
+    let text = text_of(&result);
+    let structured = structured(&result).to_string();
+    let request = harness.only_request().params.to_string();
+    assert!(text.contains("表示開始 frame=60 layer=1"), "text: {text}");
+    for forbidden in [SECRET_ALIAS, "[vo]", "_name=", "handle"] {
+        assert!(!text.contains(forbidden), "text: {text}");
+        assert!(!structured.contains(forbidden), "structured: {structured}");
+        assert!(!request.contains(forbidden), "params: {request}");
+    }
+}

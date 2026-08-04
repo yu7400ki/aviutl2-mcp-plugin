@@ -1522,7 +1522,10 @@ fn the_selection_is_applied_in_a_fixed_order() {
             focus: Some(FocusChange::Set {
                 object: harness.selector(1, 100),
             }),
-            display: None,
+            display: Some(DisplayStart {
+                layer: 1,
+                frame: 60,
+            }),
             expected_project_epoch: harness.epoch(),
         })
         .expect("選択状態の変更に失敗しました");
@@ -1538,6 +1541,7 @@ fn the_selection_is_applied_in_a_fixed_order() {
         vec![
             "set_cursor_layer_frame",
             "set_select_range",
+            "set_display_layer_frame",
             "set_focus_object"
         ]
     );
@@ -1546,6 +1550,7 @@ fn the_selection_is_applied_in_a_fixed_order() {
         vec![
             SelectionField::Cursor,
             SelectionField::SelectedRange,
+            SelectionField::Display,
             SelectionField::Focus
         ]
     );
@@ -1559,6 +1564,106 @@ fn the_selection_is_applied_in_a_fixed_order() {
         100,
         "フォーカスの観測値が返っていません"
     );
+}
+
+#[test]
+fn a_display_start_can_be_the_only_requested_change() {
+    let harness = Harness::new();
+    let state = harness
+        .edit
+        .set_selection(&SetSelectionParams {
+            expected_scene_id: SCENE_ID,
+            cursor: None,
+            selected_range: None,
+            focus: None,
+            display: Some(DisplayStart {
+                layer: 2,
+                frame: 30,
+            }),
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect("表示開始位置だけの要求が拒否されました");
+
+    assert_eq!(state.applied, vec![SelectionField::Display]);
+    assert!(state.not_applied.is_empty());
+    assert_eq!(state.display.frame_start, 30);
+    assert_eq!(state.display.layer_start, 2);
+    assert_eq!(harness.host.scene().display.frame_start, 30);
+}
+
+#[test]
+fn a_request_without_a_display_start_does_not_touch_the_display() {
+    let harness = Harness::new();
+    harness
+        .edit
+        .set_selection(&SetSelectionParams {
+            expected_scene_id: SCENE_ID,
+            cursor: Some(CursorPosition { layer: 1, frame: 5 }),
+            selected_range: Some(RangeChange::Clear {}),
+            focus: Some(FocusChange::Clear {}),
+            display: None,
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect("選択状態の変更に失敗しました");
+
+    let calls = harness
+        .host
+        .calls()
+        .into_iter()
+        .filter(|call| *call == "set_display_layer_frame")
+        .count();
+    assert_eq!(calls, 0, "省略した軸に対して SDK が呼ばれました");
+}
+
+#[test]
+fn a_clamped_display_start_is_reported_as_not_applied() {
+    // ホストは設定できる範囲へ調整する。要求どおりの位置に無い以上、反映された
+    // とは言えない。
+    let harness = Harness::new();
+    let state = harness
+        .edit
+        .set_selection(&SetSelectionParams {
+            expected_scene_id: SCENE_ID,
+            cursor: None,
+            selected_range: None,
+            focus: None,
+            display: Some(DisplayStart {
+                layer: 0,
+                frame: 5_000,
+            }),
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect("クランプが失敗として返りました");
+
+    assert!(state.applied.is_empty());
+    assert_eq!(state.not_applied, vec![SelectionField::Display]);
+    assert_eq!(state.display.frame_start, MAX_FRAME);
+}
+
+#[test]
+fn the_display_span_does_not_decide_whether_the_start_was_applied() {
+    // 表示フレーム数・表示レイヤー数は厳密な値ではない。これらを判定に使うと、
+    // 開始位置が要求どおりでも適用できなかったと報告することになる。
+    let harness = Harness::new();
+    let state = harness
+        .edit
+        .set_selection(&SetSelectionParams {
+            expected_scene_id: SCENE_ID,
+            cursor: None,
+            selected_range: None,
+            focus: None,
+            display: Some(DisplayStart {
+                layer: 1,
+                frame: 60,
+            }),
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect("表示開始位置の変更に失敗しました");
+
+    assert_ne!(state.display.frame_num, state.display.frame_start);
+    assert_ne!(state.display.layer_num, state.display.layer_start);
+    assert_eq!(state.applied, vec![SelectionField::Display]);
+    assert!(state.not_applied.is_empty());
 }
 
 #[test]
@@ -2249,7 +2354,10 @@ fn every_requested_selection_field_appears_in_exactly_one_list() {
             cursor: Some(CursorPosition { layer: 1, frame: 5 }),
             selected_range: Some(RangeChange::Clear {}),
             focus: Some(FocusChange::Clear {}),
-            display: None,
+            display: Some(DisplayStart {
+                layer: 1,
+                frame: 60,
+            }),
             expected_project_epoch: harness.epoch(),
         })
         .expect("選択状態の変更");
@@ -2259,6 +2367,7 @@ fn every_requested_selection_field_appears_in_exactly_one_list() {
         vec![
             SelectionField::Cursor,
             SelectionField::SelectedRange,
+            SelectionField::Display,
             SelectionField::Focus
         ]
     );
