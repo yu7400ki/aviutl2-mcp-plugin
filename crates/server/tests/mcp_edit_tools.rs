@@ -755,6 +755,149 @@ async fn invalid_edit_input_is_rejected_before_any_ipc() {
 }
 
 #[tokio::test]
+async fn a_rejected_path_names_the_rule_it_broke() {
+    // 7 種のパス構文の失敗はいずれも invalid_argument で返る。要求元が
+    // 「ローカルへ複製する」「絶対パスにする」「短い場所へ移す」のどれを
+    // 取ればよいかは、名前が無ければ説明の文面からしか読めない。
+    let long_path = format!(r"C:\{}", "a".repeat(32_767));
+    let cases = [
+        ("", "empty_path"),
+        ("C:\\movie\0.mp4", "contains_nul"),
+        (long_path.as_str(), "path_too_long"),
+        (r"\\.\pipe\aviutl2", "device_namespace"),
+        (r"\\?\C:\movie.mp4", "device_namespace"),
+        (r"C:\movie.mp4:stream", "alternate_data_stream"),
+        (r"..\movie.mp4", "not_absolute"),
+        (r"\\server\share\movie.mp4", "unc_path"),
+        ("//server/share/movie.mp4", "unc_path"),
+        (r"\\server\share", "unc_path"),
+    ];
+    let harness = Harness::start(OperationResponses::new());
+
+    for (path, reason) in cases {
+        let result = harness
+            .server
+            .aviutl2_create_object(Parameters(CreateObjectInput {
+                instance_id: harness.instance_id(),
+                source: ObjectSourceInput::MediaFile {
+                    path: path.to_string(),
+                },
+                placement: PlacementInput {
+                    scene_id: SCENE_ID,
+                    layer: 1,
+                    frame: 0,
+                },
+                expected_project_epoch: EPOCH.to_string(),
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true), "{reason}");
+        let structured = structured(&result);
+        assert_eq!(structured["code"], json!("invalid_argument"), "{reason}");
+        assert_eq!(
+            structured["details"]["reason"],
+            json!(reason),
+            "{path:?} が名乗った種別が想定と異なります"
+        );
+        // 名前は種別だけを表す。渡したパスは応答のどこにも現れない。
+        let serialized = serde_json::to_string(&result).expect("直列化できる");
+        assert!(
+            !serialized.contains("movie"),
+            "{reason} の応答にパスが現れました: {serialized}"
+        );
+    }
+    assert!(
+        harness.mock.received_requests().is_empty(),
+        "検証前に IPC を発生させない"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_item_value_names_the_rule_it_broke() {
+    // 設定値の文字列検証も同じである。値そのものは応答へ載せない。
+    let harness = Harness::start(OperationResponses::new());
+    let cases = [
+        ("秘密\0の字幕".to_string(), "contains_nul"),
+        ("秘密\u{1}の字幕".to_string(), "contains_control"),
+        ("秘".repeat(8_192), "too_long"),
+    ];
+
+    for (value, reason) in cases {
+        let result = harness
+            .server
+            .aviutl2_set_object_item(Parameters(SetObjectItemInput {
+                instance_id: harness.instance_id(),
+                selector: effect_selector_input(),
+                item: "テキスト".to_string(),
+                value: ItemValueInput::Text {
+                    value: value.clone(),
+                },
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true), "{reason}");
+        let structured = structured(&result);
+        assert_eq!(structured["code"], json!("invalid_argument"), "{reason}");
+        assert_eq!(structured["details"]["reason"], json!(reason));
+        let serialized = serde_json::to_string(&result).expect("直列化できる");
+        assert!(
+            !serialized.contains("秘密"),
+            "{reason} の応答に設定値が現れました"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_batch_names_the_same_rule_as_the_same_edit_on_its_own() {
+    // 同じ入力が単独編集と一括適用で違う応答になれば、要求元は一括適用の
+    // ためだけの分岐を持つことになる。一括適用は位置も併せて返す。
+    let harness = Harness::start(OperationResponses::new());
+
+    let alone = harness
+        .server
+        .aviutl2_set_object_item(Parameters(SetObjectItemInput {
+            instance_id: harness.instance_id(),
+            selector: effect_selector_input(),
+            item: "ファイル".to_string(),
+            value: ItemValueInput::File {
+                path: r"\\server\share\movie.mp4".to_string(),
+            },
+        }))
+        .await;
+
+    let batched = harness
+        .server
+        .aviutl2_apply_batch(Parameters(ApplyBatchInput {
+            instance_id: harness.instance_id(),
+            operations: vec![
+                move_operation(5),
+                BatchOperationInput::SetObjectItem {
+                    selector: effect_selector_input(),
+                    item: "ファイル".to_string(),
+                    value: ItemValueInput::File {
+                        path: r"\\server\share\movie.mp4".to_string(),
+                    },
+                },
+            ],
+        }))
+        .await;
+
+    assert_eq!(alone.is_error, Some(true));
+    assert_eq!(batched.is_error, Some(true));
+    let alone = structured(&alone);
+    let batched = structured(&batched);
+    assert_eq!(alone["code"], batched["code"]);
+    assert_eq!(alone["details"]["reason"], json!("unc_path"));
+    assert_eq!(batched["details"]["reason"], alone["details"]["reason"]);
+    assert_eq!(batched["details"]["failed_index"], json!(1));
+    assert!(alone["details"].get("failed_index").is_none());
+    assert!(
+        harness.mock.received_requests().is_empty(),
+        "検証前に IPC を発生させない"
+    );
+}
+
+#[tokio::test]
 async fn malformed_instance_id_never_reaches_an_edit_operation() {
     let harness = Harness::start(responses("set_selection", selection_state()));
 

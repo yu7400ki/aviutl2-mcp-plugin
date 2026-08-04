@@ -15,6 +15,9 @@ pub mod pipe;
 pub mod project;
 #[cfg(windows)]
 pub mod read;
+/// `details.reason` の値域を、生成経路と突き合わせて固定する検査。
+#[cfg(all(windows, test))]
+mod reason_values;
 #[cfg(windows)]
 pub mod redact;
 #[cfg(windows)]
