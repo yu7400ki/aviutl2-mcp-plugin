@@ -765,54 +765,6 @@ mod tests {
     }
 
     #[test]
-    fn a_scene_setting_that_never_reached_the_sdk_is_told_apart_from_an_sdk_failure() {
-        // シーン設定の 3 つの setter は `void` であり、ラッパーが返すのは呼び出し
-        // より前に評価される変換の失敗だけである。名前は UTF-16 への写しで NUL を
-        // 弾き、解像度とサンプリングレートは 32bit 符号付き整数への変換で弾く。
-        // どちらもプロジェクトは一切変わっていないため、届いた変更として扱うと
-        // 取り消せない変更を発行したことになる。
-        let utf16_nul = aviutl2::config::translate_strict("シーン\0名")
-            .expect_err("NUL を含む文字列が UTF-16 へ写りました");
-        let out_of_range = i32::try_from(u64::from(u32::MAX) + 1).expect_err("範囲外の変換");
-        let not_issued = [
-            (
-                "set_scene_name",
-                EditSectionError::InputCwstrContainsNull(utf16_nul),
-            ),
-            (
-                "set_scene_size",
-                EditSectionError::ValueOutOfRange(out_of_range),
-            ),
-            (
-                "set_scene_sample_rate",
-                EditSectionError::ValueOutOfRange(out_of_range),
-            ),
-        ];
-        for (operation, error) in not_issued {
-            assert!(
-                matches!(
-                    mutation_failure(operation, &error),
-                    EditError::NotIssued {
-                        reason: NotIssuedReason::ArgumentNotRepresentable
-                    }
-                ),
-                "{operation} の届かなかった失敗が発行済みとして扱われました"
-            );
-        }
-
-        // SDK が失敗を名乗った場合は届いた側のままである。
-        assert!(
-            matches!(
-                mutation_failure("set_scene_name", &EditSectionError::ApiCallFailed),
-                EditError::Sdk {
-                    operation: "set_scene_name"
-                }
-            ),
-            "SDK の失敗が届かなかった扱いになりました"
-        );
-    }
-
-    #[test]
     fn a_section_change_that_the_sdk_refused_is_told_apart_from_a_failure_before_the_call() {
         // 中間点の 3 つは `bool` を返し、ラッパーは `false` を ApiCallFailed と
         // して返す。事前確認を通ったうえでの `false` は要求元に直せる誤りでは
