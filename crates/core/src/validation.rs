@@ -25,6 +25,15 @@ pub const MAX_NAME_UTF16_UNITS: usize = 1024;
 /// 複数行を取る値にはこれらが現れる。
 const LAYOUT_CONTROLS: [char; 3] = ['\n', '\r', '\t'];
 
+/// オブジェクトエイリアス名として使えない文字。
+///
+/// AviUtl2 の UI が登録時に拒否する集合であり、本リポジトリが決めた制約では
+/// ない。Windows のファイル名禁止文字と、table 書式の区切り（`.` は節の
+/// 入れ子、`=` はキーと値、`,` は値の並び）の和になっている。
+const FORBIDDEN_ALIAS_NAME_CHARS: [char; 14] = [
+    '\\', '/', ':', '*', '?', '"', '\'', '<', '>', '|', '%', '=', ',', '.',
+];
+
 /// 文字列の検証失敗。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TextSyntaxError {
@@ -40,6 +49,9 @@ pub enum TextSyntaxError {
     /// 制御文字を含む。
     #[error("制御文字を含む文字列は指定できません")]
     ContainsControl,
+    /// その用途で使えない文字を含む。
+    #[error("使用できない文字を含む文字列は指定できません")]
+    ForbiddenCharacter,
     /// UTF-16 code unit 数の上限を超えた。
     #[error("文字列が長すぎます: {units} UTF-16 code units (上限 {max})")]
     TooLongUtf16 {
@@ -67,6 +79,7 @@ impl TextSyntaxError {
         TextSyntaxError::Empty,
         TextSyntaxError::ContainsNul,
         TextSyntaxError::ContainsControl,
+        TextSyntaxError::ForbiddenCharacter,
         TextSyntaxError::TooLongUtf16 {
             units: MAX_NAME_UTF16_UNITS + 1,
             max: MAX_NAME_UTF16_UNITS,
@@ -85,6 +98,7 @@ impl TextSyntaxError {
             TextSyntaxError::Empty => "empty",
             TextSyntaxError::ContainsNul => "contains_nul",
             TextSyntaxError::ContainsControl => "contains_control",
+            TextSyntaxError::ForbiddenCharacter => "forbidden_character",
             TextSyntaxError::TooLongUtf16 { .. } | TextSyntaxError::TooLongBytes { .. } => {
                 "too_long"
             }
@@ -212,6 +226,36 @@ pub fn validate_multiline_item_text(value: &str) -> Result<(), TextSyntaxError> 
 pub fn validate_name(name: &str) -> Result<(), TextSyntaxError> {
     if name.contains('\0') {
         return Err(TextSyntaxError::ContainsNul);
+    }
+    limit_utf16(name, MAX_NAME_UTF16_UNITS)
+}
+
+/// オブジェクトエイリアス名を検証する。
+///
+/// 判定は次の順で行う。いずれも OS へ問い合わせずに決まる規則である。
+///
+/// 1. 空文字列を拒否する
+/// 2. NUL と制御文字を拒否する
+/// 3. `\ / : * ? " ' < > | % = , .` のいずれかを含む名前を拒否する
+/// 4. [`MAX_NAME_UTF16_UNITS`] を上限とする
+///
+/// **この規則は AviUtl2 の UI が登録時に課すものであり、本リポジトリが決めた
+/// 制約ではない。** 緩めれば UI から登録できない名前を作れてしまうため、
+/// 調整の対象にはしない。禁止する集合は Windows のファイル名禁止文字と、
+/// table 書式の区切り（`.` は節の入れ子、`=` はキーと値、`,` は値の並び）の
+/// 和である。
+///
+/// **名前をファイル名の一部にする前に呼ぶ。** `\` `/` `:` を拒めば区切りと
+/// ドライブ指定が入らず、`.` を拒めば `..` が綴れないため、ディレクトリの外を
+/// 指す名前はここで残らず落ちる。連結してから判定する形にすると、判定対象が
+/// 呼び出し元の与えた文字列ではなくなる。
+pub fn validate_object_alias_name(name: &str) -> Result<(), TextSyntaxError> {
+    if name.is_empty() {
+        return Err(TextSyntaxError::Empty);
+    }
+    validate_control_free(name)?;
+    if name.contains(FORBIDDEN_ALIAS_NAME_CHARS) {
+        return Err(TextSyntaxError::ForbiddenCharacter);
     }
     limit_utf16(name, MAX_NAME_UTF16_UNITS)
 }
@@ -386,6 +430,7 @@ mod tests {
             TextSyntaxError::Empty => "Empty",
             TextSyntaxError::ContainsNul => "ContainsNul",
             TextSyntaxError::ContainsControl => "ContainsControl",
+            TextSyntaxError::ForbiddenCharacter => "ForbiddenCharacter",
             TextSyntaxError::TooLongUtf16 { .. } => "TooLongUtf16",
             TextSyntaxError::TooLongBytes { .. } => "TooLongBytes",
         }
@@ -410,6 +455,7 @@ mod tests {
             "Empty",
             "ContainsNul",
             "ContainsControl",
+            "ForbiddenCharacter",
             "TooLongUtf16",
             "TooLongBytes",
         ];
@@ -626,6 +672,101 @@ mod tests {
                 max: MAX_ITEM_VALUE_BYTES,
             })
         );
+    }
+
+    #[test]
+    fn object_alias_name_rejects_every_forbidden_character() {
+        // 集合は AviUtl2 の UI の観測そのものであり、1 文字ずつが単独で落ちる。
+        for forbidden in FORBIDDEN_ALIAS_NAME_CHARS {
+            let name = format!("立ち絵{forbidden}");
+            assert_eq!(
+                validate_object_alias_name(&name),
+                Err(TextSyntaxError::ForbiddenCharacter),
+                "{forbidden:?} が受理されました"
+            );
+        }
+    }
+
+    #[test]
+    fn object_alias_name_rejects_path_syntax_before_any_join() {
+        // 区切り・ドライブ指定・相対参照は、パスを組み立てる前に落ちる。
+        for name in ["..", r"..\..\x", r"a\b", "a/b", r"C:\x", "."] {
+            assert_eq!(
+                validate_object_alias_name(name),
+                Err(TextSyntaxError::ForbiddenCharacter),
+                "{name:?} が受理されました"
+            );
+        }
+    }
+
+    #[test]
+    fn object_alias_name_rejects_control_characters() {
+        assert_eq!(
+            validate_object_alias_name("立ち絵\0"),
+            Err(TextSyntaxError::ContainsNul)
+        );
+        for control in ['\n', '\r', '\t', '\u{1b}', '\u{7f}'] {
+            assert_eq!(
+                validate_object_alias_name(&format!("立ち絵{control}")),
+                Err(TextSyntaxError::ContainsControl),
+                "{control:?} が受理されました"
+            );
+        }
+    }
+
+    #[test]
+    fn object_alias_name_reports_each_rule_by_its_own_reason() {
+        assert_eq!(
+            validate_object_alias_name("").unwrap_err().reason(),
+            "empty"
+        );
+        assert_eq!(
+            validate_object_alias_name("立ち絵\0").unwrap_err().reason(),
+            "contains_nul"
+        );
+        assert_eq!(
+            validate_object_alias_name("..").unwrap_err().reason(),
+            "forbidden_character"
+        );
+        let name = "a".repeat(MAX_NAME_UTF16_UNITS + 1);
+        assert_eq!(
+            validate_object_alias_name(&name),
+            Err(TextSyntaxError::TooLongUtf16 {
+                units: MAX_NAME_UTF16_UNITS + 1,
+                max: MAX_NAME_UTF16_UNITS,
+            })
+        );
+        assert_eq!(
+            validate_object_alias_name(&name).unwrap_err().reason(),
+            "too_long"
+        );
+    }
+
+    #[test]
+    fn object_alias_name_accepts_usable_names() {
+        for name in [
+            "立ち絵",
+            "alias-01",
+            "立ち絵 (通常)",
+            "＃タグ付き",
+            &"a".repeat(MAX_NAME_UTF16_UNITS),
+        ] {
+            assert_eq!(
+                validate_object_alias_name(name),
+                Ok(()),
+                "{name:?} が拒否されました"
+            );
+        }
+    }
+
+    #[test]
+    fn object_alias_name_accepts_the_yen_sign() {
+        // U+00A5 は表示上 `\`(U+005C) に見えるだけの別の符号位置であり、パスの
+        // 区切りでも table 書式の区切りでもない。落とす理由が実在しない文字を
+        // 落とすと、AviUtl2 が登録を許す名前を使えなくすることになる。
+        assert!(!FORBIDDEN_ALIAS_NAME_CHARS.contains(&'\u{a5}'));
+        assert_eq!(validate_object_alias_name("\u{a5}"), Ok(()));
+        assert_eq!(validate_object_alias_name("立ち絵\u{a5}2"), Ok(()));
     }
 
     #[test]

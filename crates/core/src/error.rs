@@ -207,6 +207,7 @@ pub const REASON_VALUES: &[&str] = &[
     "empty",
     "empty_buffer",
     "empty_path",
+    "forbidden_character",
     "frame_mismatch",
     "frame_out_of_range",
     "frame_outside_object",
