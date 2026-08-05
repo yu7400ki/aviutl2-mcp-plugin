@@ -69,8 +69,12 @@ fn mutation_failure(operation: &'static str, error: &EditSectionError) -> EditEr
 /// 返す。ヘッダーは元にできない effect を指定した場合に失敗すると明記しており、
 /// 呼ぶ前に判別する手段が無い。他の SDK 失敗と混ぜず専用の名前で返す。
 /// 届かなかった失敗の分類は [`mutation_failure`] のものをそのまま使う。
-fn creation_failure(operation: &'static str, error: &EditSectionError) -> EditError {
-    match mutation_failure(operation, error) {
+///
+/// 失敗した関数名を引数に取らない。`nullptr` は「この effect からは作成できない」
+/// という要求内容についての事実であり、どの関数が返したかは要求元の対処を変えない。
+/// 名前を運ばせても応答には現れず、捨てるだけの引数が残る。
+fn creation_failure(error: &EditSectionError) -> EditError {
+    match mutation_failure("create_object", error) {
         EditError::Sdk { .. } => EditError::UnsupportedTarget {
             reason: UnsupportedReason::EffectNotCreatable,
         },
@@ -399,7 +403,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
         self.section
             .create_object(name, layer, frame, None)
             .map(|_| ())
-            .map_err(|error| creation_failure("create_object", &error))
+            .map_err(|error| creation_failure(&error))
     }
 
     fn object_position(&self, object: &ResolvedObject<'_>) -> Result<ObjectPosition, EditError> {
@@ -705,6 +709,45 @@ mod tests {
                 }
             ),
             "SDK の失敗が届かなかった扱いになりました"
+        );
+    }
+
+    #[test]
+    fn a_creation_the_sdk_refused_is_told_apart_from_a_failure_before_the_call() {
+        // ラッパーは `nullptr` を ApiCallFailed として返す。カタログの確認を
+        // 通ったうえでの `nullptr` は「登録はされているが元にできない」という
+        // 別の事実であり、未登録とも他の SDK 失敗とも混ぜない。
+        assert!(
+            matches!(
+                creation_failure(&EditSectionError::ApiCallFailed),
+                EditError::UnsupportedTarget {
+                    reason: UnsupportedReason::EffectNotCreatable
+                }
+            ),
+            "nullptr が作成できない effect として扱われませんでした"
+        );
+
+        // 届いていない失敗の分類は変わらない。プロジェクトは一切変わって
+        // いないため、作成を試みた扱いにすると発行したことになる。
+        assert!(
+            matches!(
+                creation_failure(&EditSectionError::ObjectDoesNotExist),
+                EditError::NotIssued {
+                    reason: NotIssuedReason::TargetMissing
+                }
+            ),
+            "届かなかった失敗が作成できない effect として扱われました"
+        );
+
+        let out_of_range = u8::try_from(300u32).expect_err("範囲外の変換");
+        assert!(
+            matches!(
+                creation_failure(&EditSectionError::ValueOutOfRange(out_of_range)),
+                EditError::NotIssued {
+                    reason: NotIssuedReason::ArgumentNotRepresentable
+                }
+            ),
+            "引数を写せない失敗が作成できない effect として扱われました"
         );
     }
 

@@ -948,13 +948,21 @@ fn every_effect_type_in_the_catalog_reaches_the_creation_api() {
     // どの effect が作成の元になれるかは SDK が述べていない。種別で絞ると、
     // 実際に作れる effect を呼ぶ前に拒むことになる。カタログに在る名前は
     // 種別を問わず SDK へ届くことを固定する。
+    // カタログの種別構成そのものを表として固定する。構成が痩せると、絞り込みが
+    // 入っても素通りする検査になる。
     let types: Vec<EffectType> = crate::edit::fake::fake_catalog()
         .into_iter()
         .map(|effect| effect.effect_type)
         .collect();
-    assert!(
-        types.len() > 1 && types.iter().any(|kind| *kind != EffectType::Input),
-        "カタログが単一種別では絞り込みの有無を判別できません"
+    assert_eq!(
+        types,
+        vec![
+            EffectType::Filter,
+            EffectType::Input,
+            EffectType::Filter,
+            EffectType::Output,
+        ],
+        "カタログの種別構成が変わると絞り込みの有無を判別できません"
     );
 
     for effect in crate::edit::fake::fake_catalog() {
@@ -1179,6 +1187,29 @@ fn creation_from_a_media_file_takes_the_same_difference() {
 
     let layers: Vec<usize> = outcome.created.iter().map(|item| item.layer).collect();
     assert_eq!(layers, vec![1, 2], "別レイヤーへ作られた分が漏れています");
+}
+
+#[test]
+fn creation_from_an_effect_name_takes_the_same_difference() {
+    // 経路によって差分の範囲を変えると、SDK が複数のオブジェクトを作る場合に
+    // 片方だけが取りこぼす。同じ危険には同じ対処を当てる。
+    let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::CreatePair)));
+    let outcome = harness
+        .edit
+        .create_object(&create_from_effect(&harness, "ぼかし", 0, 600))
+        .expect("作成に失敗しました");
+
+    let layers: Vec<usize> = outcome.created.iter().map(|item| item.layer).collect();
+    assert_eq!(layers, vec![0, 1], "別レイヤーへ作られた分が漏れています");
+    assert_eq!(outcome.object.as_ref(), outcome.created.first());
+
+    // 返った selector で 2 件目を個別に削除できる。
+    harness
+        .edit
+        .delete_object(&DeleteObjectParams {
+            selector: outcome.created[1].selector.clone(),
+        })
+        .expect("2 件目を個別に削除できません");
 }
 
 #[test]

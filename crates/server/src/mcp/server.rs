@@ -2991,6 +2991,71 @@ mod tests {
         }
     }
 
+    #[test]
+    fn create_object_states_what_an_effect_name_is_and_when_it_cannot_be_used() {
+        // 作成元が 3 種であること、effect が何の値であること、カタログに在っても
+        // 元にできるとは限らないこと。どれも要求元が名前を用意する前に要る。
+        let description = description_of("create_object");
+        for phrase in [
+            "object alias",
+            "エフェクト名",
+            "effect.name",
+            "list_available_effects",
+            "effect_not_creatable",
+            "effect_not_registered",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "create_object の説明が {phrase} に触れていません"
+            );
+        }
+    }
+
+    #[test]
+    fn the_create_object_input_declares_exactly_the_sources_it_accepts() {
+        // 作成元は判別子つきの union であり、未知フィールドを拒否する。variant を
+        // 落とせば既存の要求が invalid_argument になり、タグ名を変えれば同じ要求が
+        // 通らなくなる。どちらも要求元から見れば契約の破壊である。
+        // 出力側と違い、入力 schema を丸ごと固定する検査は無い。作成元だけは
+        // ここで塞ぐ。
+        let tool = tool_named("create_object");
+        let variants = tool.input_schema["$defs"]["ObjectSourceInput"]["oneOf"]
+            .as_array()
+            .expect("作成元が判別子つきの union として宣言されていません");
+
+        let tags: Vec<&str> = variants
+            .iter()
+            .map(|variant| {
+                variant["properties"]["type"]["const"]
+                    .as_str()
+                    .expect("判別子が固定値として宣言されていません")
+            })
+            .collect();
+        assert_eq!(tags, vec!["media_file", "object_alias", "effect"]);
+
+        // 判別子と対になる値のフィールド名も固定する。タグだけが合っていても、
+        // 値の名前が動けば要求は通らない。
+        let fields: Vec<Vec<&str>> = variants
+            .iter()
+            .map(|variant| {
+                variant["required"]
+                    .as_array()
+                    .expect("必須フィールドが宣言されていません")
+                    .iter()
+                    .map(|field| field.as_str().expect("フィールド名"))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            vec![
+                vec!["type", "path"],
+                vec!["type", "alias"],
+                vec!["type", "name"],
+            ]
+        );
+    }
+
     /// 応答が返す位置が要求した宛先と一致するとは限らない tool。
     ///
     /// ホストが配置を調整し得るため、成功を「要求どおりの位置」と読むと、
