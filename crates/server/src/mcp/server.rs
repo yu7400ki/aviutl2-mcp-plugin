@@ -3347,7 +3347,7 @@ mod tests {
 
     #[test]
     fn create_object_states_what_an_effect_name_is_and_when_it_cannot_be_used() {
-        // 作成元が 3 種であること、effect が何の値であること、カタログに在っても
+        // 作成元が 4 種であること、effect が何の値であること、カタログに在っても
         // 元にできるとは限らないこと。どれも要求元が名前を用意する前に要る。
         let description = description_of("create_object");
         for phrase in [
