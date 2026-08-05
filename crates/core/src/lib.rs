@@ -34,10 +34,13 @@ pub mod handshake;
 pub mod identifier;
 pub mod item_value;
 pub mod json;
+mod kind;
+pub mod module;
 pub mod number;
 pub mod object;
 pub mod operation;
 pub mod page;
+pub mod palette;
 pub mod render;
 pub mod selector;
 pub mod settings;
@@ -106,6 +109,7 @@ pub use item_value::{
     ItemValue, ItemWriteError, encode_item_value, prepare_item_write, validate_item_value,
 };
 pub use json::{JsonStrictError, deserialize_json, parse_json};
+pub use module::{ModuleEntry, ModuleType};
 pub use number::FiniteF64;
 pub use object::{LayerInfo, ObjectDetail, ObjectSummary, SectionRange};
 pub use operation::{
@@ -125,6 +129,7 @@ pub use operation::{
     ReadOperation, RenderOperation, SelectionSnapshot, TrackGroup,
 };
 pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
+pub use palette::{PALETTE_COLOR_COUNT, PaletteEntry, Rgba};
 pub use render::{
     ARTIFACT_MAX_BYTES, MAX_RENDER_FRAME_BYTES, RenderFormat, RenderFrameParams, RenderFrameResult,
     RenderInputError,
