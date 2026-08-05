@@ -246,8 +246,8 @@ fn an_effect_mismatch_names_only_the_position() {
 
 #[test]
 fn a_locked_layer_stops_a_move_but_not_a_value_change() {
-    // レイヤーのロックが止めるのは時間軸上の移動と削除だけである。設定値の
-    // 変更は設定パネルから行えるため止めない。
+    // 一括適用が運ぶ 2 種のうち、レイヤーのロックが止めるのは時間軸上の移動で
+    // ある。設定値の変更は設定パネルから行えるため止めない。
     let harness = Harness::new();
     let effect = harness.effect_selector(1, 100, "ぼかし", 0);
     let selector = harness.selector(1, 100);

@@ -65,9 +65,9 @@ pub trait EditAdapter: Send + Sync {
 
     /// オブジェクトへ中間点を追加する。
     ///
-    /// **レイヤーのロックはこの operation を止めない。** 中間点はオブジェクトの
-    /// 位置も長さも変えず、ロックが止める削除とも時間軸上の移動とも別である。
-    /// 以下の 2 つも同じ扱いになる。
+    /// **対象のレイヤーがロックされている場合は [`EditError::LayerLocked`] になる。**
+    /// ロックが止める範囲を決めるのはホストであり、中間点の編集もそこに含まれる。
+    /// 中間点を変える以下の 2 つも同じ扱いになる。
     fn create_object_section(
         &self,
         params: &CreateObjectSectionParams,
@@ -88,8 +88,8 @@ pub trait EditAdapter: Send + Sync {
     /// レイヤーの名前・表示・ロックを変更する。
     ///
     /// **レイヤーのロックはこの operation を止めない。** 止めると、ロックされた
-    /// レイヤーのロックを外す手段が無くなり、ロックが止める移動・削除・作成の
-    /// 行き止まりが解けなくなる。
+    /// レイヤーのロックを外す手段が無くなり、ロックが止める移動・削除・作成・
+    /// 中間点の編集の行き止まりが解けなくなる。
     fn set_layer_state(&self, params: &SetLayerStateParams)
     -> Result<LayerStateOutcome, EditError>;
 

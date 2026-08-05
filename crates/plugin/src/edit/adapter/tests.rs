@@ -3483,44 +3483,6 @@ fn resetting_the_layer_name_hands_the_sdk_no_name() {
     );
 }
 
-#[test]
-fn a_locked_layer_still_accepts_every_state_change() {
-    // ここでロックを確かめると、ロックされたレイヤーのロックを外せなくなる。
-    // 対象を変える operation へガードを足すときに巻き込みやすい。
-    let harness = Harness::new();
-    assert!(
-        harness.host.scene().layers[2].locked,
-        "レイヤー 2 がロックされていません"
-    );
-
-    harness
-        .edit
-        .set_layer_state(&SetLayerStateParams {
-            name: Some(LayerNameChange::Set {
-                name: "背景".to_string(),
-            }),
-            ..layer_state_params(&harness, 2)
-        })
-        .expect("ロックされたレイヤーの名前を変えられません");
-    harness
-        .edit
-        .set_layer_state(&SetLayerStateParams {
-            enabled: Some(false),
-            ..layer_state_params(&harness, 2)
-        })
-        .expect("ロックされたレイヤーの表示を変えられません");
-    let outcome = harness
-        .edit
-        .set_layer_state(&SetLayerStateParams {
-            locked: Some(false),
-            ..layer_state_params(&harness, 2)
-        })
-        .expect("ロックされたレイヤーのロックを外せません");
-
-    assert!(!outcome.layer.locked, "ロックが外れていません");
-    assert!(!harness.host.scene().layers[2].locked);
-}
-
 /// レイヤーの状態のうち、要求できる軸。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LayerAxis {
@@ -3669,7 +3631,30 @@ fn changing_the_layer_state_is_not_stopped_by_the_layer_lock() {
     // ロックを外すこの operation にロックのガードを掛けると、ロックされた
     // レイヤーの行き止まりが解けなくなる。
     let harness = Harness::new();
+    assert!(
+        harness.host.scene().layers[2].locked,
+        "レイヤー 2 がロックされていません"
+    );
     harness.host.clear_calls();
+
+    // ロックは 3 軸のいずれも止めない。ロックを外す軸だけを確かめると、名前や
+    // 表示にだけガードが掛かった実装が素通りする。
+    harness
+        .edit
+        .set_layer_state(&SetLayerStateParams {
+            name: Some(LayerNameChange::Set {
+                name: "背景".to_string(),
+            }),
+            ..layer_state_params(&harness, 2)
+        })
+        .expect("ロックされたレイヤーの名前を変えられません");
+    harness
+        .edit
+        .set_layer_state(&SetLayerStateParams {
+            enabled: Some(false),
+            ..layer_state_params(&harness, 2)
+        })
+        .expect("ロックされたレイヤーの表示を変えられません");
     let outcome = harness
         .edit
         .set_layer_state(&SetLayerStateParams {
