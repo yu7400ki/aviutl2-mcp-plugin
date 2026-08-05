@@ -13,8 +13,8 @@ use crate::read::{Page, ProjectStatus, ReadAdapter, Snapshot};
 use aviutl2_mcp_core::{
     AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFingerprintInput, EffectInfo,
     EffectItem, EffectItemValues, EffectSelector, EffectType, EvaluatedItem, EvaluatedItemKind,
-    Extent, FiniteF64, FrameRange, GetEffectItemValuesParams, LayerInfo, ListPalettesResult,
-    MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectDetail, ObjectFilter,
+    Extent, FiniteF64, FrameRange, GetEffectItemValuesParams, LayerInfo, ListObjectAliasesResult,
+    ListPalettesResult, MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectDetail, ObjectFilter,
     ObjectFingerprintInput, ObjectSelector, ObjectSummary, PageError, PageMeta, PageRequest,
     PaletteEntry, SceneInfo, SelectionSnapshot, TrackGroup, take_page,
 };
@@ -440,6 +440,27 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
             items,
             snapshot_revision,
         })
+    }
+
+    fn list_object_aliases(
+        &self,
+        label: Option<&str>,
+        page: &PageRequest,
+    ) -> Result<Result<ListObjectAliasesResult, PageError>, ReadError> {
+        // SDK を 1 度も呼ばない。受付判定も参照区間も通らず、読むのは
+        // AviUtl2 のデータディレクトリ配下のファイルだけである。
+        let Some(data_dir) = crate::alias::data_directory() else {
+            return Err(ReadError::AliasDirectoryUnavailable);
+        };
+        // 列挙を始めた時点の revision を採る。一覧の内容はこの値に連動しない。
+        let snapshot_revision = self.project.revision();
+        Ok(crate::alias::list_object_aliases(
+            data_dir,
+            label,
+            page,
+            snapshot_revision,
+            &crate::alias::DiskAliasFiles,
+        ))
     }
 
     fn get_effect_item_values(
@@ -3485,6 +3506,25 @@ mod tests {
         let palettes = adapter();
         palettes.list_palettes_page().unwrap();
         assert_eq!(entries(&palettes), 1, "list_palettes");
+    }
+
+    #[test]
+    fn list_object_aliases_reports_an_unavailable_directory_instead_of_panicking() {
+        // 設定ハンドルが初期化されていない環境では、データディレクトリの解決が
+        // panic で打ち切られる。捕捉層まで上げると「想定外の内部失敗」になり、
+        // 要求元は他の tool も動かないものと読む。
+        let adapter = adapter();
+        let error = adapter
+            .list_object_aliases(None, &PageRequest::default())
+            .unwrap_err();
+
+        assert!(matches!(error, ReadError::AliasDirectoryUnavailable));
+        assert_eq!(
+            error.error_code(),
+            aviutl2_mcp_core::ErrorCode::UnsupportedOperation
+        );
+        // SDK を 1 度も呼ばない。準備状態の問い合わせも参照区間も通らない。
+        assert!(adapter.host.calls().is_empty(), "SDK を呼びました");
     }
 
     #[test]

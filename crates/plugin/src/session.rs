@@ -23,14 +23,14 @@ use aviutl2_mcp_core::{
     GetEffectItemValuesParams, GetObjectParams, GetSelectionParams, InstanceId, InstanceState,
     KnownOperation, ListAvailableEffectsParams, ListAvailableEffectsResult, ListFontsParams,
     ListFontsResult, ListLayersParams, ListLayersResult, ListModulesParams, ListModulesResult,
-    ListObjectsParams, ListObjectsResult, ListPalettesParams, MoveObjectParams,
-    MoveObjectSectionParams, Nonce, ObjectFilterError, PageError, PageRequest, PongProject,
-    PongResult, ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult,
+    ListObjectAliasesParams, ListObjectsParams, ListObjectsResult, ListPalettesParams,
+    MoveObjectParams, MoveObjectSectionParams, Nonce, ObjectFilterError, PageError, PageRequest,
+    PongProject, PongResult, ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult,
     RenderInputError, RenderOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind,
     ResponseResult, ScaledBudgets, SelectionSnapshot, SetEffectEnabledParams, SetGridBpmParams,
     SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSceneSettingsParams,
-    SetSelectionParams, compute_client_mac, compute_server_mac, deserialize_json, take_page,
-    verify_mac,
+    SetSelectionParams, TextSyntaxError, compute_client_mac, compute_server_mac, deserialize_json,
+    take_page, verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -859,6 +859,7 @@ enum ReadRequest {
     ListFonts(ListFontsParams),
     ListPalettes(ListPalettesParams),
     ListModules(ListModulesParams),
+    ListObjectAliases(ListObjectAliasesParams),
 }
 
 /// operation 別の params を復号し、要求内容だけで決まる検証を済ませる。
@@ -921,9 +922,12 @@ fn decode_request(operation: ReadOperation, params: &Value) -> Result<ReadReques
             params.page.validate().map_err(page_error)?;
             ReadRequest::ListModules(params)
         }
-        // オブジェクトエイリアスを列挙する読み取り口はまだ無い。実装を足す
-        // ときにここで params を復号し、要求を組み立てる。
-        ReadOperation::ListObjectAliases => return Err(unsupported_operation()),
+        ReadOperation::ListObjectAliases => {
+            let params: ListObjectAliasesParams = decode_params(params)?;
+            params.page.validate().map_err(page_error)?;
+            params.validate().map_err(label_error)?;
+            ReadRequest::ListObjectAliases(params)
+        }
     })
 }
 
@@ -1029,6 +1033,15 @@ fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Valu
             )
             .map_err(page_error)?;
             to_result(&ListModulesResult { items, page })
+        }
+        ReadRequest::ListObjectAliases(params) => {
+            // 切り出しは読み取り口が済ませている。ファイルを開くのが窓に入った
+            // 分だけであることを、切り出しと同じ場所で保証する必要がある。
+            let result = adapter
+                .list_object_aliases(params.label.as_deref(), &catalog_page_request(&params.page))
+                .map_err(read_error)?
+                .map_err(page_error)?;
+            to_result(&result)
         }
     }
 }
@@ -1370,6 +1383,17 @@ fn filter_error(error: ObjectFilterError) -> ErrorObject {
     error_object(ErrorCode::InvalidArgument, error.to_string())
 }
 
+/// 文字列の構文の失敗を応答用のエラーへ変換する。
+///
+/// 添えるのは失敗の種別名だけである。検証対象の文字列そのものは、説明の文面
+/// にも補助情報にも現れない。
+fn label_error(error: TextSyntaxError) -> ErrorObject {
+    with_details(
+        error_object(ErrorCode::InvalidArgument, error.to_string()),
+        input_error_details(Some(error.reason()), None),
+    )
+}
+
 /// 補間後の値の要求内容の失敗を応答用のエラーへ変換する。
 ///
 /// 見るのは件数と項目名の規則だけであり、どれも説明の文面で訂正できる。分岐に
@@ -1521,11 +1545,12 @@ mod tests {
     use aviutl2_mcp_core::{
         AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
         EffectItemType, EffectItemValues, EffectSelector, EffectType, EvaluatedItem, Extent,
-        FiniteF64, FrameRange, LayerInfo, ListPalettesResult, MAX_EVALUATED_FRAMES,
-        MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectDetail, ObjectFilter,
-        ObjectFingerprintInput, ObjectSelector, ObjectSummary, PALETTE_COLOR_COUNT, PaletteEntry,
-        Rgba, SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET,
-        SceneInfo, SectionRange, TRANSPORT_HEADROOM,
+        FiniteF64, FrameRange, LayerInfo, ListObjectAliasesResult, ListPalettesResult,
+        MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectAliasSummary,
+        ObjectDetail, ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary,
+        PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SERVER_EDIT_REQUEST_BUDGET,
+        SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, SceneInfo, SectionRange,
+        TRANSPORT_HEADROOM,
     };
     use std::sync::Mutex;
 
@@ -1786,6 +1811,28 @@ mod tests {
             })
         }
 
+        fn list_object_aliases(
+            &self,
+            label: Option<&str>,
+            page: &PageRequest,
+        ) -> Result<Result<ListObjectAliasesResult, PageError>, ReadError> {
+            self.enter("list_object_aliases")?;
+            let mut items = fake_object_aliases();
+            if let Some(label) = label {
+                items.retain(|item| item.label.as_deref() == Some(label));
+            }
+            // 呼ぶたびに revision が進む。照合を外したことが実際に効いているか
+            // は、進んだ後の 2 ページ目が通るかでしか見えない。
+            let calls = self
+                .calls()
+                .iter()
+                .filter(|call| **call == "list_object_aliases")
+                .count() as u64;
+            let revision = REVISION + calls - 1;
+            Ok(take_page(&items, page, revision)
+                .map(|(items, page)| ListObjectAliasesResult { items, page }))
+        }
+
         fn get_effect_item_values(
             &self,
             params: &GetEffectItemValuesParams,
@@ -1958,6 +2005,23 @@ mod tests {
         vec!["既定".to_string(), "暖色".to_string(), "寒色".to_string()]
     }
 
+    fn fake_object_aliases() -> Vec<ObjectAliasSummary> {
+        vec![
+            ObjectAliasSummary {
+                name: "テロップ".to_string(),
+                label: Some("テロップ集".to_string()),
+                object_count: Some(1),
+                effects: vec!["テキスト".to_string(), "標準描画".to_string()],
+            },
+            ObjectAliasSummary {
+                name: "背景".to_string(),
+                label: None,
+                object_count: Some(2),
+                effects: vec!["図形".to_string()],
+            },
+        ]
+    }
+
     fn fake_modules() -> Vec<ModuleEntry> {
         vec![
             ModuleEntry {
@@ -2017,6 +2081,7 @@ mod tests {
             (ReadOperation::ListFonts, json!({})),
             (ReadOperation::ListPalettes, json!({})),
             (ReadOperation::ListModules, json!({})),
+            (ReadOperation::ListObjectAliases, json!({})),
         ]
     }
 
@@ -2024,23 +2089,17 @@ mod tests {
     ///
     /// 表は手書きであり、載せ忘れた operation は表を使う検査を全て素通りする。
     /// 応答の秘匿・期限超過・状態の検査はいずれもこの表を材料にしている。
-    ///
-    /// **表から外れているものを併せて固定する。** 読み取り口を持たない
-    /// operation は `decode_request` が params を見ずに拒否するため、表に
-    /// 載せると期限・状態・params 検証を確かめる他のテストが崩れる。除外を
-    /// 増やせばここが落ちる。
     #[test]
-    fn all_operations_covers_every_declared_read_operation() {
+    fn all_operations_covers_every_read_operation() {
         let covered: std::collections::BTreeSet<&str> = all_operations()
             .iter()
             .map(|(operation, _)| operation.as_str())
             .collect();
-        let excluded: Vec<&str> = ReadOperation::ALL
-            .into_iter()
-            .map(ReadOperation::as_str)
-            .filter(|name| !covered.contains(name))
+        let expected: std::collections::BTreeSet<&str> = ReadOperation::ALL
+            .iter()
+            .map(|operation| operation.as_str())
             .collect();
-        assert_eq!(excluded, vec![ReadOperation::ListObjectAliases.as_str()]);
+        assert_eq!(covered, expected);
     }
 
     #[test]
@@ -2061,6 +2120,7 @@ mod tests {
             ("list_fonts", ReadOperation::ListFonts),
             ("list_palettes", ReadOperation::ListPalettes),
             ("list_modules", ReadOperation::ListModules),
+            ("list_object_aliases", ReadOperation::ListObjectAliases),
         ] {
             assert_eq!(
                 classify_operation(name).unwrap(),
@@ -2328,6 +2388,7 @@ mod tests {
             (ReadOperation::ListFonts, json!({})),
             (ReadOperation::ListPalettes, json!({})),
             (ReadOperation::ListModules, json!({})),
+            (ReadOperation::ListObjectAliases, json!({})),
         ];
 
         for (operation, params) in paged {
@@ -2477,11 +2538,12 @@ mod tests {
     /// ページ間の revision 照合を行わない列挙。
     ///
     /// いずれも登録物の集合であり、プロジェクトの編集内容から独立している。
-    const CATALOG_OPERATIONS: [ReadOperation; 4] = [
+    const CATALOG_OPERATIONS: [ReadOperation; 5] = [
         ReadOperation::ListAvailableEffects,
         ReadOperation::ListFonts,
         ReadOperation::ListPalettes,
         ReadOperation::ListModules,
+        ReadOperation::ListObjectAliases,
     ];
 
     #[test]
@@ -2516,6 +2578,84 @@ mod tests {
                 result["page"]["snapshot_revision"], REVISION,
                 "{operation:?}"
             );
+        }
+    }
+
+    #[test]
+    fn the_object_alias_listing_does_not_verify_the_snapshot_revision() {
+        // 前ページが返した値をそのまま送り返しても拒否されない。素の
+        // PageRequest をそのまま渡すと落ちる。
+        let adapter = FakeAdapter::new();
+        let first = read(
+            &adapter,
+            ReadOperation::ListObjectAliases,
+            json!({ "offset": 0, "limit": 1 }),
+        )
+        .unwrap();
+        let returned = first["page"]["snapshot_revision"].clone();
+
+        let second = read(
+            &adapter,
+            ReadOperation::ListObjectAliases,
+            json!({ "offset": 1, "limit": 1, "snapshot_revision": returned }),
+        )
+        .unwrap();
+
+        assert_eq!(second["page"]["offset"], 1);
+        assert_eq!(second["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_advanced_revision_does_not_reject_the_second_page_of_object_aliases() {
+        // 上と対になる。上は「照合しない」を、こちらは「照合しないことが実際に
+        // 効く」を見る。フェイクは呼ぶたびに revision を進める。
+        let adapter = FakeAdapter::new();
+        let first = read(
+            &adapter,
+            ReadOperation::ListObjectAliases,
+            json!({ "offset": 0, "limit": 1 }),
+        )
+        .unwrap();
+        let second = read(
+            &adapter,
+            ReadOperation::ListObjectAliases,
+            json!({ "offset": 1, "limit": 1, "snapshot_revision": REVISION }),
+        )
+        .unwrap();
+
+        assert_eq!(first["page"]["snapshot_revision"], REVISION);
+        assert_eq!(second["page"]["snapshot_revision"], REVISION + 1);
+        assert_eq!(second["page"]["offset"], 1);
+    }
+
+    #[test]
+    fn the_object_alias_listing_filters_by_label() {
+        let adapter = FakeAdapter::new();
+        let result = read(
+            &adapter,
+            ReadOperation::ListObjectAliases,
+            json!({ "label": "テロップ集" }),
+        )
+        .unwrap();
+
+        assert_eq!(result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(result["items"][0]["name"], "テロップ");
+        assert_eq!(result["page"]["total_count"], 1);
+    }
+
+    #[test]
+    fn an_unusable_label_is_invalid_argument_without_reading() {
+        for label in [json!("\u{0}"), json!("あ".repeat(1025))] {
+            let adapter = FakeAdapter::new();
+            let error = read(
+                &adapter,
+                ReadOperation::ListObjectAliases,
+                json!({ "label": label }),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{label}");
+            assert!(adapter.calls().is_empty(), "{label}");
         }
     }
 

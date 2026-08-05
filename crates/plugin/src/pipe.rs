@@ -858,6 +858,17 @@ mod tests {
             Err(crate::read::ReadError::NotReady)
         }
 
+        fn list_object_aliases(
+            &self,
+            _label: Option<&str>,
+            _page: &aviutl2_mcp_core::PageRequest,
+        ) -> Result<
+            Result<aviutl2_mcp_core::ListObjectAliasesResult, aviutl2_mcp_core::PageError>,
+            crate::read::ReadError,
+        > {
+            Err(crate::read::ReadError::AliasDirectoryUnavailable)
+        }
+
         fn get_effect_item_values(
             &self,
             _params: &aviutl2_mcp_core::GetEffectItemValuesParams,
@@ -2153,6 +2164,17 @@ mod tests {
         ) -> Result<crate::read::Snapshot<aviutl2_mcp_core::ModuleEntry>, crate::read::ReadError>
         {
             StubReadAdapter.list_modules(module_type)
+        }
+
+        fn list_object_aliases(
+            &self,
+            label: Option<&str>,
+            page: &aviutl2_mcp_core::PageRequest,
+        ) -> Result<
+            Result<aviutl2_mcp_core::ListObjectAliasesResult, aviutl2_mcp_core::PageError>,
+            crate::read::ReadError,
+        > {
+            StubReadAdapter.list_object_aliases(label, page)
         }
 
         fn get_effect_item_values(

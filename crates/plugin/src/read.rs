@@ -19,8 +19,9 @@ pub mod sdk;
 use crate::project::ProjectState;
 use aviutl2_mcp_core::{
     AvailableEffect, EditInfo, EffectItemValues, EffectType, GetEffectItemValuesParams, LayerInfo,
-    ListPalettesResult, ModuleEntry, ModuleType, ObjectDetail, ObjectFilter, ObjectSelector,
-    ObjectSummary, PageError, PageMeta, PageRequest, SceneInfo, SelectionSnapshot,
+    ListObjectAliasesResult, ListPalettesResult, ModuleEntry, ModuleType, ObjectDetail,
+    ObjectFilter, ObjectSelector, ObjectSummary, PageError, PageMeta, PageRequest, SceneInfo,
+    SelectionSnapshot,
 };
 use std::sync::Arc;
 
@@ -183,6 +184,28 @@ pub trait ReadAdapter: Send + Sync {
         &self,
         module_type: Option<&ModuleType>,
     ) -> Result<Snapshot<ModuleEntry>, ReadError>;
+
+    /// 登録済みオブジェクトエイリアスを列挙し、要求ページを切り出して返す。
+    ///
+    /// **SDK を 1 度も呼ばない。** 参照区間にも編集区間にも入らず、ホストの
+    /// メインスレッドを 1 度も保持しない。読むのは AviUtl2 のデータディレクトリ
+    /// 配下のファイルだけであり、プロジェクトの状態は 1 つも観測しない。
+    ///
+    /// 切り出しをここで行うのは [`Self::list_palettes`] と同じ理由である。
+    /// エントリ 1 件の読み取りはファイルを開いてパースする分だけ重く、応答へ
+    /// 載せない対象まで読むと費用がディレクトリの中身で決まってしまう。
+    ///
+    /// 返す `snapshot_revision` は列挙を始めた時点のプロジェクト revision だが、
+    /// 一覧の内容はこの値に連動しない。扱いは
+    /// [`Self::list_available_effects`] と同じである。
+    ///
+    /// データディレクトリを解決できない場合は、この AviUtl2 では機能が使えない
+    /// ことを述べる失敗を返す。要求そのものは正しい。
+    fn list_object_aliases(
+        &self,
+        label: Option<&str>,
+        page: &PageRequest,
+    ) -> Result<Result<ListObjectAliasesResult, PageError>, ReadError>;
 
     /// effect の設定項目を、要求されたフレームで評価した値を返す。
     ///
