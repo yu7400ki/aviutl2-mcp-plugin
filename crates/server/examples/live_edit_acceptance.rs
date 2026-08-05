@@ -1466,6 +1466,8 @@ const WRITABLE_ITEM_TYPES: &[EffectItemType] = &[
     EffectItemType::Color,
     EffectItemType::Select,
     EffectItemType::Combo,
+    EffectItemType::Mask,
+    EffectItemType::Figure,
 ];
 
 /// 書き込みを公開している種別か。

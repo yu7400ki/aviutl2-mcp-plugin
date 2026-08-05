@@ -45,7 +45,10 @@ pub enum ItemValue {
     Choice {
         /// 選択された表示文字列。
         value: String,
-        /// 選択肢の 0 始まりインデックス。特定できない場合は null。
+        /// 選択肢の 0 始まりインデックス。
+        ///
+        /// 読み取りは常に null を返す。選択肢の一覧を得る手段が無く、表示
+        /// 文字列が何番目かを知る材料が無いためである。書き込みでは無視する。
         index: Option<usize>,
     },
     /// ファイルパス。
@@ -155,7 +158,7 @@ impl ItemWriteError {
                 value_kind: "text",
             },
             ItemWriteError::UnsupportedItemType {
-                item_type: "figure".to_string(),
+                item_type: "scene".to_string(),
             },
         ];
         all.extend(
@@ -298,13 +301,14 @@ pub fn validate_item_value(value: &ItemValue) -> Result<(), ItemWriteError> {
 
 /// 書き込みを公開している種別か。
 ///
-/// 複合種別のうち `scene` / `range` / `mask` / `figure` / `data` と未知種別は、
-/// 値の表記が確定していないため公開しない。推測した表記で書き込むと、検証を
-/// 通ったのに意図と異なる値が入る。
+/// 複合種別のうち `scene` / `range` / `data` と未知種別は、値の表記が確定して
+/// いないため公開しない。推測した表記で書き込むと、検証を通ったのに意図と
+/// 異なる値が入る。
 ///
-/// `combo` は表記が確定しているため公開する。読み取りは `select` と同じ
-/// [`ItemValue::Choice`] で返し、有効な値を知る手段も `select` と同じ——
-/// 既存のオブジェクトから読む——である。
+/// 選択肢から選ぶ 4 種別は表記が確定しているため公開する。読み取りはいずれも
+/// [`ItemValue::Choice`] で返し、有効な値を知る手段は既存のオブジェクトから
+/// 読むことである。選択肢に無い値を渡したことは [`verifies_read_back`] が
+/// 要求する照合で分かる。
 fn is_writable(item_type: &EffectItemType) -> bool {
     matches!(
         item_type,
@@ -319,6 +323,8 @@ fn is_writable(item_type: &EffectItemType) -> bool {
             | EffectItemType::Color
             | EffectItemType::Select
             | EffectItemType::Combo
+            | EffectItemType::Mask
+            | EffectItemType::Figure
     )
 }
 
@@ -374,7 +380,10 @@ fn accepts(item_type: &EffectItemType, value: &ItemValue) -> bool {
             | (EffectItemType::Font, ItemValue::Font { .. })
             | (EffectItemType::Color, ItemValue::Color { .. })
             | (
-                EffectItemType::Select | EffectItemType::Combo,
+                EffectItemType::Select
+                    | EffectItemType::Combo
+                    | EffectItemType::Mask
+                    | EffectItemType::Figure,
                 ItemValue::Choice { .. }
             )
     )
@@ -390,9 +399,8 @@ fn accepts(item_type: &EffectItemType, value: &ItemValue) -> bool {
 /// テキストを書く直接の手段が無くなる。色・フォント名・選択肢の値に改行が
 /// 現れる余地は無いため、緩和しない。
 ///
-/// [`ItemValue::Choice`] の `index` は読み取りが付ける補助情報であり、
-/// 書き込みでは無視する。選択肢の並びはホスト側の都合で変わり得るため、
-/// index を正としない。
+/// [`ItemValue::Choice`] の `index` は書き込みでは無視する。選択肢の並びは
+/// ホスト側の都合で変わり得るため、index を正としない。
 fn encode_value(value: &ItemValue) -> Result<String, ItemWriteError> {
     match value {
         ItemValue::Unknown { .. } => Err(ItemWriteError::UnknownValue),
@@ -519,7 +527,7 @@ mod tests {
     fn write_failures_only_name_reasons_from_the_shared_value_set() {
         let named = [
             ItemWriteError::UnsupportedItemType {
-                item_type: "figure".to_string(),
+                item_type: "scene".to_string(),
             },
             ItemWriteError::Text(TextSyntaxError::ContainsNul),
             ItemWriteError::Path(PathSyntaxError::UncPath),
@@ -724,6 +732,32 @@ mod tests {
                 },
                 "通常",
             ),
+            (
+                EffectItemType::Mask,
+                ItemValue::Choice {
+                    value: "四角形".to_string(),
+                    index: Some(1),
+                },
+                "四角形",
+            ),
+            (
+                EffectItemType::Figure,
+                ItemValue::Choice {
+                    value: "星型".to_string(),
+                    index: None,
+                },
+                "星型",
+            ),
+        ]
+    }
+
+    /// 選択肢から選ぶ種別。
+    fn choice_item_types() -> Vec<EffectItemType> {
+        vec![
+            EffectItemType::Select,
+            EffectItemType::Combo,
+            EffectItemType::Mask,
+            EffectItemType::Figure,
         ]
     }
 
@@ -732,8 +766,6 @@ mod tests {
         vec![
             EffectItemType::Scene,
             EffectItemType::Range,
-            EffectItemType::Mask,
-            EffectItemType::Figure,
             EffectItemType::Data,
             EffectItemType::Unknown(99),
         ]
@@ -755,11 +787,11 @@ mod tests {
             | EffectItemType::Font
             | EffectItemType::Color
             | EffectItemType::Select
-            | EffectItemType::Combo => true,
+            | EffectItemType::Combo
+            | EffectItemType::Mask
+            | EffectItemType::Figure => true,
             EffectItemType::Scene
             | EffectItemType::Range
-            | EffectItemType::Mask
-            | EffectItemType::Figure
             | EffectItemType::Data
             | EffectItemType::Unknown(_) => false,
         }
@@ -895,18 +927,36 @@ mod tests {
 
     #[test]
     fn write_rejects_non_writable_item_types() {
-        // 複合種別と未知種別は、値の形にかかわらず未対応として拒否する。
-        let value = ItemValue::Text {
-            value: "文字列".to_string(),
-        };
+        // 複合種別と未知種別は、値の形にかかわらず未対応として拒否する。選択肢
+        // として書けるようになった種別と取り違えないよう、選択肢の値でも試す。
+        let values = [
+            ItemValue::Text {
+                value: "文字列".to_string(),
+            },
+            ItemValue::Choice {
+                value: "四角形".to_string(),
+                index: None,
+            },
+        ];
         for item_type in non_writable_item_types() {
-            assert_eq!(
-                encode_item_value(&item_type, &value),
-                Err(ItemWriteError::UnsupportedItemType {
-                    item_type: item_type.kind_name(),
-                }),
-                "{item_type}"
-            );
+            for value in &values {
+                let error = encode_item_value(&item_type, value)
+                    .expect_err("公開しない種別への書き込みが受理されました");
+                assert_eq!(
+                    error,
+                    ItemWriteError::UnsupportedItemType {
+                        item_type: item_type.kind_name(),
+                    },
+                    "{item_type} / {}",
+                    value.kind()
+                );
+                assert_eq!(
+                    error.error_code(),
+                    ErrorCode::UnsupportedOperation,
+                    "{item_type} / {}",
+                    value.kind()
+                );
+            }
         }
     }
 
@@ -952,7 +1002,7 @@ mod tests {
     #[test]
     fn write_ignores_the_choice_index() {
         // 選択肢の並びはホスト側の都合で変わり得るため、index を正としない。
-        for item_type in [EffectItemType::Select, EffectItemType::Combo] {
+        for item_type in choice_item_types() {
             let encoded: Vec<String> = [Some(0), Some(7), None]
                 .into_iter()
                 .map(|index| {
@@ -971,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn combo_shares_the_select_write_path() {
+    fn every_choice_type_shares_the_select_write_path() {
         // 表記が同じであることを、専用の分岐を持たないことで示す。同じ値に
         // 対して受理・拒否・変換結果のすべてが一致する。
         let cases = [
@@ -995,24 +1045,36 @@ mod tests {
         ];
         for value in cases {
             let select = encode_item_value(&EffectItemType::Select, &value);
-            let combo = encode_item_value(&EffectItemType::Combo, &value);
-            // 種別名だけは異なるため、エラーはその点を除いて比べる。
-            match (select, combo) {
-                (Ok(select), Ok(combo)) => assert_eq!(select, combo, "{}", value.kind()),
-                (Err(select), Err(combo)) => {
-                    assert_eq!(select.error_code(), combo.error_code(), "{}", value.kind());
-                    assert_eq!(
-                        std::mem::discriminant(&select),
-                        std::mem::discriminant(&combo),
-                        "{}",
-                        value.kind()
-                    );
+            for item_type in choice_item_types() {
+                if item_type == EffectItemType::Select {
+                    continue;
                 }
-                (select, combo) => {
-                    panic!(
-                        "{} で結果が分かれました: {select:?} / {combo:?}",
-                        value.kind()
-                    )
+                let other = encode_item_value(&item_type, &value);
+                // 種別名だけは異なるため、エラーはその点を除いて比べる。
+                match (&select, &other) {
+                    (Ok(select), Ok(other)) => {
+                        assert_eq!(select, other, "{item_type} / {}", value.kind())
+                    }
+                    (Err(select), Err(other)) => {
+                        assert_eq!(
+                            select.error_code(),
+                            other.error_code(),
+                            "{item_type} / {}",
+                            value.kind()
+                        );
+                        assert_eq!(
+                            std::mem::discriminant(select),
+                            std::mem::discriminant(other),
+                            "{item_type} / {}",
+                            value.kind()
+                        );
+                    }
+                    (select, other) => {
+                        panic!(
+                            "{item_type} の {} で結果が分かれました: {select:?} / {other:?}",
+                            value.kind()
+                        )
+                    }
                 }
             }
         }
@@ -1243,8 +1305,8 @@ mod tests {
                 item_type: EffectItemType::Number,
             },
             AvailableEffectItem {
-                name: "図形".to_string(),
-                item_type: EffectItemType::Figure,
+                name: "シーン".to_string(),
+                item_type: EffectItemType::Scene,
             },
         ];
 
@@ -1274,13 +1336,13 @@ mod tests {
         assert_eq!(
             prepare_item_write(
                 &items,
-                "図形",
+                "シーン",
                 &ItemValue::Text {
-                    value: "円".to_string(),
+                    value: "0".to_string(),
                 },
             ),
             Err(ItemWriteError::UnsupportedItemType {
-                item_type: "figure".to_string(),
+                item_type: "scene".to_string(),
             })
         );
     }
@@ -1289,8 +1351,6 @@ mod tests {
     fn only_the_four_choice_types_are_verified_by_reading_back() {
         // 照合の対象は選択肢から選ぶ 4 種別に限る。ほかの種別はホストが表記を
         // 正規化し得るため、一致を求めると正常な正規化を失敗と誤診断する。
-        // 書き込みを公開していない mask / figure も、種別の性質としては照合の
-        // 対象である。
         //
         // 既知の全種別と未知種別を走査して照合する側を集めるため、この 1 つの
         // 比較が全種別についての要否を決める。種別を足したときにここを書き
@@ -1300,15 +1360,7 @@ mod tests {
             .chain([EffectItemType::Unknown(99)])
             .filter(verifies_read_back)
             .collect();
-        assert_eq!(
-            verified,
-            vec![
-                EffectItemType::Select,
-                EffectItemType::Combo,
-                EffectItemType::Mask,
-                EffectItemType::Figure,
-            ]
-        );
+        assert_eq!(verified, choice_item_types());
     }
 
     #[test]

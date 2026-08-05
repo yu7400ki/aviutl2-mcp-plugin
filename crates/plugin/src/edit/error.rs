@@ -756,7 +756,7 @@ pub(crate) mod tests {
                 item: "範囲".to_string(),
             }),
             EditError::ItemWrite(ItemWriteError::UnsupportedItemType {
-                item_type: EffectItemType::Figure.kind_name(),
+                item_type: EffectItemType::Scene.kind_name(),
             }),
             EditError::ItemWrite(ItemWriteError::UnknownValue),
             EditError::ItemWrite(ItemWriteError::ValueKindMismatch {

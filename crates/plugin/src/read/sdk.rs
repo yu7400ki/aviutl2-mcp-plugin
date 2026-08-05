@@ -750,6 +750,10 @@ fn track_info(
 /// 設定項目の種別に応じて生文字列を値へ写す。
 ///
 /// 対応する表現が無い種別と、種別どおりに解釈できない値は生文字列のまま返す。
+///
+/// 選択肢から選ぶ種別は、選択された表示文字列をそのまま持つ。何番目の選択肢か
+/// は選択肢の一覧を得る手段が無いため付けられない。生文字列として返すと書き
+/// 込みが受け付けない形になり、読み取った値をそのまま書き戻せなくなる。
 fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
     match item_type {
         EffectItemType::Integer => match raw.trim().parse::<i64>() {
@@ -767,7 +771,10 @@ fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
             None => ItemValue::Unknown { raw },
         },
         EffectItemType::Color => ItemValue::Color { value: raw },
-        EffectItemType::Select | EffectItemType::Combo => ItemValue::Choice {
+        EffectItemType::Select
+        | EffectItemType::Combo
+        | EffectItemType::Mask
+        | EffectItemType::Figure => ItemValue::Choice {
             value: raw,
             index: None,
         },
@@ -777,8 +784,6 @@ fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
         EffectItemType::Text | EffectItemType::String => ItemValue::Text { value: raw },
         EffectItemType::Scene
         | EffectItemType::Range
-        | EffectItemType::Mask
-        | EffectItemType::Figure
         | EffectItemType::Data
         | EffectItemType::Unknown(_) => ItemValue::Unknown { raw },
     }
@@ -796,7 +801,7 @@ fn parse_check(raw: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::{ErrorCode, PALETTE_COLOR_COUNT};
+    use aviutl2_mcp_core::{ErrorCode, ItemWriteError, PALETTE_COLOR_COUNT, prepare_item_write};
 
     fn placement(frame_start: usize, frame_end: usize) -> HostObjectPlacement {
         HostObjectPlacement {
@@ -1259,8 +1264,6 @@ mod tests {
         for item_type in [
             EffectItemType::Scene,
             EffectItemType::Range,
-            EffectItemType::Mask,
-            EffectItemType::Figure,
             EffectItemType::Data,
             EffectItemType::Unknown(99),
         ] {
@@ -1270,6 +1273,225 @@ mod tests {
                     raw: "raw".to_string()
                 },
                 "{item_type} が生文字列を保持しません"
+            );
+        }
+    }
+
+    #[test]
+    fn every_choice_type_reads_into_a_choice_value() {
+        // 選択肢から選ぶ 4 種別は同じ形で返る。生文字列で返すと書き込みが
+        // 受け付けず、読み取った値をそのまま書き戻せない。
+        for item_type in [
+            EffectItemType::Select,
+            EffectItemType::Combo,
+            EffectItemType::Mask,
+            EffectItemType::Figure,
+        ] {
+            assert_eq!(
+                item_value(&item_type, "四角形".to_string()),
+                ItemValue::Choice {
+                    value: "四角形".to_string(),
+                    index: None,
+                },
+                "{item_type} が選択肢として返りません"
+            );
+        }
+    }
+
+    /// 既知の種別と、未知を名乗る種別を 1 つ並べる。
+    ///
+    /// 未知の種別に当たるまで raw 値を辿るため、既知の種別が増えても種別値が
+    /// 連続する限り一覧は自動で伸びる。
+    fn all_item_types() -> Vec<EffectItemType> {
+        let mut types = Vec::new();
+        for raw in 1i32.. {
+            let item_type = EffectItemType::from_raw(raw);
+            if item_type == EffectItemType::Unknown(raw) {
+                break;
+            }
+            types.push(item_type);
+        }
+        types.push(EffectItemType::Unknown(99));
+        types
+    }
+
+    /// 種別ごとに、読み取りが返す値と、その値をそのまま書き戻した結果を並べる。
+    ///
+    /// 読み取りの写像・書き込みを公開する種別・種別が受け付ける値の形の 3 つが
+    /// 揃って初めて、読み取った値がそのまま書き戻せる。どれか 1 つが欠けると
+    /// この表と食い違う。
+    fn read_then_write_back() -> Vec<(
+        EffectItemType,
+        &'static str,
+        ItemValue,
+        Result<String, ItemWriteError>,
+    )> {
+        let unknown_value = Err(ItemWriteError::UnknownValue);
+        vec![
+            (
+                EffectItemType::Integer,
+                "42",
+                ItemValue::Integer { value: 42 },
+                Ok("42".to_string()),
+            ),
+            (
+                EffectItemType::Number,
+                "1.5",
+                ItemValue::Number {
+                    value: FiniteF64::try_new(1.5).unwrap(),
+                },
+                Ok("1.5".to_string()),
+            ),
+            (
+                EffectItemType::Check,
+                "1",
+                ItemValue::Bool { value: true },
+                Ok("1".to_string()),
+            ),
+            (
+                EffectItemType::Text,
+                "字幕",
+                ItemValue::Text {
+                    value: "字幕".to_string(),
+                },
+                Ok("字幕".to_string()),
+            ),
+            (
+                EffectItemType::String,
+                "文字列",
+                ItemValue::Text {
+                    value: "文字列".to_string(),
+                },
+                Ok("文字列".to_string()),
+            ),
+            (
+                EffectItemType::File,
+                r"C:\movie.mp4",
+                ItemValue::File {
+                    path: r"C:\movie.mp4".to_string(),
+                },
+                Ok(r"C:\movie.mp4".to_string()),
+            ),
+            (
+                EffectItemType::Color,
+                "#ff8800",
+                ItemValue::Color {
+                    value: "#ff8800".to_string(),
+                },
+                Ok("#ff8800".to_string()),
+            ),
+            (
+                EffectItemType::Select,
+                "通常",
+                ItemValue::Choice {
+                    value: "通常".to_string(),
+                    index: None,
+                },
+                Ok("通常".to_string()),
+            ),
+            (
+                EffectItemType::Scene,
+                "0",
+                ItemValue::Unknown {
+                    raw: "0".to_string(),
+                },
+                unknown_value.clone(),
+            ),
+            (
+                EffectItemType::Range,
+                "0",
+                ItemValue::Unknown {
+                    raw: "0".to_string(),
+                },
+                unknown_value.clone(),
+            ),
+            (
+                EffectItemType::Combo,
+                "左寄せ[上]",
+                ItemValue::Choice {
+                    value: "左寄せ[上]".to_string(),
+                    index: None,
+                },
+                Ok("左寄せ[上]".to_string()),
+            ),
+            (
+                EffectItemType::Mask,
+                "四角形",
+                ItemValue::Choice {
+                    value: "四角形".to_string(),
+                    index: None,
+                },
+                Ok("四角形".to_string()),
+            ),
+            (
+                EffectItemType::Font,
+                "Meiryo",
+                ItemValue::Font {
+                    name: "Meiryo".to_string(),
+                },
+                Ok("Meiryo".to_string()),
+            ),
+            (
+                EffectItemType::Figure,
+                "星型",
+                ItemValue::Choice {
+                    value: "星型".to_string(),
+                    index: None,
+                },
+                Ok("星型".to_string()),
+            ),
+            (
+                EffectItemType::Data,
+                "opaque",
+                ItemValue::Unknown {
+                    raw: "opaque".to_string(),
+                },
+                unknown_value.clone(),
+            ),
+            (
+                EffectItemType::Folder,
+                r"C:\assets",
+                ItemValue::Folder {
+                    path: r"C:\assets".to_string(),
+                },
+                Ok(r"C:\assets".to_string()),
+            ),
+            (
+                EffectItemType::Unknown(99),
+                "opaque",
+                ItemValue::Unknown {
+                    raw: "opaque".to_string(),
+                },
+                unknown_value,
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_read_mapping_and_the_write_path_agree_for_every_item_type() {
+        // 読み取りが返した値をそのまま書き戻す。表が種別を網羅しているため、
+        // 読み取りの写像・公開する種別・受け付ける値の形のどれを片方だけ
+        // 変えても落ちる。
+        let table = read_then_write_back();
+        assert_eq!(
+            table
+                .iter()
+                .map(|(item_type, ..)| item_type.clone())
+                .collect::<Vec<_>>(),
+            all_item_types(),
+            "表が種別を網羅していません"
+        );
+        for (item_type, raw, expected_read, expected_write) in table {
+            let value = item_value(&item_type, raw.to_string());
+            assert_eq!(value, expected_read, "{item_type} の読み取り");
+            let items = vec![AvailableEffectItem {
+                name: "項目".to_string(),
+                item_type: item_type.clone(),
+            }];
+            assert_eq!(
+                prepare_item_write(&items, "項目", &value).map(|write| write.value().to_string()),
+                expected_write,
+                "{item_type} の書き戻し"
             );
         }
     }
