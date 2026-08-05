@@ -829,7 +829,12 @@ impl AviUtl2McpServer {
         .await
     }
 
-    /// メディアファイルまたは object alias からオブジェクトを作成する。
+    /// メディアファイル・object alias・エフェクト名のいずれかからオブジェクトを作成する。
+    /// source の effect はエイリアスファイルの effect.name の値であり、
+    /// list_available_effects が返す名前をそのまま指定する。
+    /// カタログに在る名前でも作成元にできるとは限らず、その場合は
+    /// unsupported_operation（effect_not_creatable）となる。名前がカタログに無い場合は
+    /// unsupported_operation（effect_not_registered）となる。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
     /// project_epoch をそのまま指定する。省略はできない。作成は対象を指す selector を

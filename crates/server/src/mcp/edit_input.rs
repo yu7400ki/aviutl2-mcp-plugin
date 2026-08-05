@@ -127,6 +127,12 @@ pub enum ObjectSourceInput {
         #[schemars(length(max = MAX_ALIAS_CHARS))]
         alias: String,
     },
+    /// エフェクト名から作成する。
+    Effect {
+        /// エイリアスファイルの effect.name の値。list_available_effects が返す名前を指定する。
+        #[schemars(length(max = MAX_NAME_CHARS))]
+        name: String,
+    },
 }
 
 impl ObjectSourceInput {
@@ -136,6 +142,7 @@ impl ObjectSourceInput {
             ObjectSourceInput::ObjectAlias { alias } => ObjectSource::ObjectAlias {
                 alias: alias.clone(),
             },
+            ObjectSourceInput::Effect { name } => ObjectSource::Effect { name: name.clone() },
         }
     }
 }
@@ -1614,6 +1621,61 @@ mod tests {
             input.to_params().expect_err("上限超過は拒否される").code,
             ErrorCode::InvalidArgument
         );
+    }
+
+    #[test]
+    fn an_effect_source_becomes_the_effect_variant_of_the_params() {
+        let input: CreateObjectInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "source": { "type": "effect", "name": "テキスト" },
+            "placement": { "scene_id": 3, "layer": 1, "frame": 0 },
+            "expected_project_epoch": SAMPLE_EPOCH,
+        }))
+        .expect("入力型としては受理される");
+        let params = input.to_params().expect("effect 名は受理される");
+        assert_eq!(
+            params.source,
+            ObjectSource::Effect {
+                name: "テキスト".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_effect_source_name_over_the_limit_is_rejected() {
+        let input: CreateObjectInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "source": { "type": "effect", "name": "a".repeat(MAX_NAME_CHARS as usize + 1) },
+            "placement": { "scene_id": 3, "layer": 1, "frame": 0 },
+            "expected_project_epoch": SAMPLE_EPOCH,
+        }))
+        .expect("入力型としては受理される");
+        assert_eq!(
+            input.to_params().expect_err("上限超過は拒否される").code,
+            ErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn the_path_rules_do_not_reach_an_effect_source() {
+        // 作成元がパスを運ばない以上、パスの規則は掛からない。
+        for name in [
+            r"..\図形",
+            r"\\.\図形",
+            r"C:\図形:1",
+            r"\\server\share\図形",
+        ] {
+            let input: CreateObjectInput = serde_json::from_value(json!({
+                "instance_id": SAMPLE_ID,
+                "source": { "type": "effect", "name": name },
+                "placement": { "scene_id": 3, "layer": 1, "frame": 0 },
+                "expected_project_epoch": SAMPLE_EPOCH,
+            }))
+            .expect("入力型としては受理される");
+            input
+                .to_params()
+                .unwrap_or_else(|error| panic!("{name} がパスの規則で拒否されました: {error:?}"));
+        }
     }
 
     #[test]

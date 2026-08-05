@@ -338,6 +338,51 @@ async fn create_object_tool_sends_create_object_operation() {
 }
 
 #[tokio::test]
+async fn create_object_tool_sends_an_effect_name_as_its_own_source() {
+    let expected = created();
+    let harness = Harness::start(responses("create_object", expected.clone()));
+
+    let result = harness
+        .server
+        .create_object(Parameters(CreateObjectInput {
+            instance_id: harness.instance_id(),
+            source: ObjectSourceInput::Effect {
+                name: "テキスト".to_string(),
+            },
+            placement: PlacementInput {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame: 0,
+            },
+            expected_project_epoch: EPOCH.to_string(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+
+    let request = harness.only_request();
+    assert_eq!(request.operation, "create_object");
+    assert_eq!(
+        request.params,
+        json!({
+            "source": { "type": "effect", "name": "テキスト" },
+            "placement": { "scene_id": SCENE_ID, "layer": 1, "frame": 0 },
+            "expected_project_epoch": EPOCH,
+        }),
+    );
+
+    // 作成元の種別が変わっても、応答が運ぶものは変わらない。
+    let serialized = serde_json::to_string(&result).expect("直列化できる");
+    for forbidden in ["秘密の立ち絵", "object_handle", "alias"] {
+        assert!(
+            !serialized.contains(forbidden),
+            "{forbidden} が tool result に含まれています: {serialized}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn move_object_tool_sends_move_object_operation() {
     let expected = object_changed();
     let harness = Harness::start(responses("move_object", expected.clone()));
