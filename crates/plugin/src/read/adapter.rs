@@ -134,7 +134,7 @@ fn guard<T>(f: impl FnOnce() -> Result<T, ReadError>) -> Result<T, ReadError> {
 ///
 /// 総件数へ反映するのは本ページで落とした分だけである。他のページで落ちるかは
 /// そのページを切り出すまで分からず、読まずに数えることはできない。
-fn dropped_from_page(meta: PageMeta, dropped: usize, count: usize) -> PageMeta {
+pub(crate) fn dropped_from_page(meta: PageMeta, dropped: usize, count: usize) -> PageMeta {
     PageMeta {
         total_count: meta.total_count.saturating_sub(dropped as u32),
         count: count as u32,

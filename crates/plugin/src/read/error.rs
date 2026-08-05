@@ -1,5 +1,6 @@
 //! 読み取りの失敗を表す型と、応答へ載せる安全な補助情報。
 
+use crate::alias::REASON_ALIAS_DIRECTORY_UNAVAILABLE;
 use crate::read::host::EditState;
 use aviutl2_mcp_core::{ErrorCode, ObjectSummary};
 use serde_json::{Value, json};
@@ -146,6 +147,12 @@ pub enum ReadError {
     /// 無いためである。区別は補助情報の `reason` が担う。
     #[error("編集情報の値が受け渡せる範囲を超えています")]
     EditInfoOutOfRange,
+    /// AviUtl2 のデータディレクトリを解決できない。
+    ///
+    /// 要求そのものは正しく、この AviUtl2 では機能が使えないことを述べている。
+    /// 名前を直しても解消しないため、要求内容の誤りとは分ける。
+    #[error("AviUtl2 のデータディレクトリを解決できません")]
+    AliasDirectoryUnavailable,
     /// 参照区間の処理で panic を捕捉した。
     #[error("読み取り処理で panic を捕捉しました")]
     Panicked,
@@ -165,7 +172,9 @@ impl ReadError {
             ReadError::ObjectNotFound { .. }
             | ReadError::EffectNotFound
             | ReadError::ItemNotFound => ErrorCode::NotFound,
-            ReadError::ItemNotEvaluatable => ErrorCode::UnsupportedOperation,
+            ReadError::ItemNotEvaluatable | ReadError::AliasDirectoryUnavailable => {
+                ErrorCode::UnsupportedOperation
+            }
             ReadError::AmbiguousObject { .. } => ErrorCode::AmbiguousSelector,
             ReadError::Sdk { .. }
             | ReadError::EditInfoOutOfRange
@@ -226,6 +235,9 @@ impl ReadError {
                 "sdk_operation": EDIT_INFO_OPERATION,
                 "reason": REASON_EDIT_INFO_OUT_OF_RANGE,
             }),
+            ReadError::AliasDirectoryUnavailable => json!({
+                "reason": REASON_ALIAS_DIRECTORY_UNAVAILABLE,
+            }),
             ReadError::Panicked => json!({}),
         }
     }
@@ -270,6 +282,7 @@ pub(crate) mod tests {
             ReadError::TrackValueUnavailable {
                 operation: "get_effect_track_value",
             },
+            ReadError::AliasDirectoryUnavailable,
             ReadError::Panicked,
         ]
     }
@@ -295,6 +308,7 @@ pub(crate) mod tests {
             ReadError::Sdk { .. } => "Sdk",
             ReadError::EditInfoOutOfRange => "EditInfoOutOfRange",
             ReadError::TrackValueUnavailable { .. } => "TrackValueUnavailable",
+            ReadError::AliasDirectoryUnavailable => "AliasDirectoryUnavailable",
             ReadError::Panicked => "Panicked",
         }
     }
@@ -317,6 +331,7 @@ pub(crate) mod tests {
             "Sdk",
             "EditInfoOutOfRange",
             "TrackValueUnavailable",
+            "AliasDirectoryUnavailable",
             "Panicked",
         ];
         let covered: Vec<&str> = all_errors().iter().map(variant_name).collect();
@@ -360,6 +375,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_unavailable_alias_directory_is_told_apart_from_an_internal_failure() {
+        // 設定ハンドルの未初期化は panic としてしか観測できない。捕捉せずに
+        // 上げると、この失敗は「想定外の内部失敗」と同じ応答になる。要求元に
+        // 打つ手が無い点は同じでも、他の tool が動くことは応答から読めなくなる。
+        let unavailable = ReadError::AliasDirectoryUnavailable;
+        let panicked = ReadError::Panicked;
+
+        assert_eq!(unavailable.error_code(), ErrorCode::UnsupportedOperation);
+        assert_eq!(panicked.error_code(), ErrorCode::InternalError);
+        assert_eq!(
+            unavailable.details()["reason"],
+            json!(REASON_ALIAS_DIRECTORY_UNAVAILABLE)
+        );
+        assert!(panicked.details().get("reason").is_none());
+        assert!(!unavailable.retryable());
+    }
+
+    #[test]
     fn error_codes_match_read_mapping() {
         let mapped: Vec<ErrorCode> = all_errors().iter().map(ReadError::error_code).collect();
         assert_eq!(
@@ -384,6 +417,9 @@ pub(crate) mod tests {
                 // 呼び出しの失敗と同じであり、コードは分けない。
                 ErrorCode::SdkError,
                 ErrorCode::SdkError,
+                // 要求は正しいが、この AviUtl2 では機能が使えない。要求元に
+                // 打つ手が無い点は内部の失敗と同じだが、他の tool は動く。
+                ErrorCode::UnsupportedOperation,
                 ErrorCode::InternalError,
             ]
         );

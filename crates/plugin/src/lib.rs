@@ -4,6 +4,8 @@
 //! MCP server からの要求を受け付ける。
 
 #[cfg(windows)]
+pub mod alias;
+#[cfg(windows)]
 mod atomic_file;
 #[cfg(windows)]
 pub mod edit;

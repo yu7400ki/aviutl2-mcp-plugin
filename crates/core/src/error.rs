@@ -189,6 +189,9 @@ impl fmt::Display for ErrorCode {
 /// 同じ事実を表す失敗は種別が別でも同じ名前を名乗る。どのエラーコードで
 /// 返るかは名前とは独立に決まる。
 pub const REASON_VALUES: &[&str] = &[
+    "alias_directory_unavailable",
+    "alias_not_parsable",
+    "alias_without_effect",
     "alternate_data_stream",
     "argument_not_representable",
     "buffer_length_mismatch",
