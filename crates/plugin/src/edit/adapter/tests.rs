@@ -795,6 +795,10 @@ fn an_effect_source_calls_the_creation_api_that_takes_an_effect_name() {
             && !calls.contains(&"create_object_from_media_file"),
         "既存 2 種の経路が呼ばれています: {calls:?}"
     );
+    assert!(
+        harness.host.mutated(),
+        "作成が変更 API の発行として記録されていません"
+    );
 }
 
 #[test]
