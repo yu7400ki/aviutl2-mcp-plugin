@@ -3549,8 +3549,8 @@ mod tests {
                     );
                 }
                 UndoStatement::NotUndoableAndJumpsBack => {
-                    // 完了条件の 1 つである。要約する要求元は末尾を落とすため、
-                    // 冒頭に在ることまでを固定する。
+                    // 要約する要求元は末尾を落とすため、冒頭に在ることまでを
+                    // 固定する。
                     assert!(
                         description.starts_with("この操作は取り消せない"),
                         "{name} の説明が取り消せないことを冒頭で述べていません"
@@ -4179,6 +4179,14 @@ mod tests {
                 "set_scene_settings の説明に {keyword} がありません"
             );
         }
+
+        // 説明が名指しする上限は、実際に課している値から導く。数を直に書いた
+        // まま定数を動かすと、説明だけが黙って古くなる。
+        let mib = aviutl2_mcp_core::render::MAX_RENDER_FRAME_BYTES / (1024 * 1024);
+        assert!(
+            description.contains(&format!("{mib} MiB")),
+            "set_scene_settings の説明が実際の上限を述べていません"
+        );
     }
 
     #[test]

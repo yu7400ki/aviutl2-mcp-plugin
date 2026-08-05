@@ -800,7 +800,7 @@ async fn set_scene_settings_tool_reports_a_change_that_cannot_be_undone() {
     let structured = structured(&result);
     assert_eq!(structured["non_undoable"], json!(true));
     assert_eq!(structured["observed_after_edit"], json!(true));
-    // 省略した軸は要求にも現れない。
+    // 省略した軸は null として運ばれる。値を持つ軸だけが要求に現れる形ではない。
     assert_eq!(
         harness.only_request().params,
         json!({

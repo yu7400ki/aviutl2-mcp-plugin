@@ -2151,12 +2151,20 @@ mod tests {
     #[test]
     fn a_scene_size_needs_both_axes() {
         // 片方だけを変える手段がホストに無いため、組でしか綴れない形にする。
-        for size in [json!({ "width": 1920 }), json!({ "height": 1080 })] {
+        //
+        // 落ちた理由まで見る。`is_err` だけを見ると、`size` という入れ子その
+        // ものが消えて未知フィールドとして落ちる形でも通ってしまう。
+        for (size, missing) in [
+            (json!({ "width": 1920 }), "height"),
+            (json!({ "height": 1080 }), "width"),
+        ] {
             let mut value = scene_settings_json();
             value["size"] = size.clone();
+            let error = serde_json::from_value::<SetSceneSettingsInput>(value)
+                .expect_err(&format!("{size} が受理されました"));
             assert!(
-                serde_json::from_value::<SetSceneSettingsInput>(value).is_err(),
-                "{size} が受理されました"
+                error.to_string().contains(missing),
+                "{size} が {missing} の欠落として落ちていません: {error}"
             );
         }
     }
