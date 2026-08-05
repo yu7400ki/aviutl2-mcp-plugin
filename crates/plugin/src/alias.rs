@@ -64,6 +64,17 @@ pub const REASON_ALIAS_WITHOUT_EFFECT: &str = "alias_without_effect";
 /// 同じ事実を表す失敗は種別が別でも同じ名前を名乗る。
 const REASON_TOO_LONG: &str = "too_long";
 
+/// 節の入れ子として受け付ける深さの上限。
+///
+/// パーサが返す表は入れ子を再帰的に解放する。深い入れ子はスタックを使い切って
+/// プロセスごと落とし、**スタックの枯渇は捕捉層では受け止められない。** 実測
+/// では 20 KB 程度の入力でも深さ 10,000 で落ちる。
+///
+/// 実機が保存する形式の深さは `[Object.0]` の 2、UI 状態ファイルの
+/// `[Effect.object.<名前>]` でも 3 である。上限はそれらを十分に上回る位置へ
+/// 置く。
+const MAX_SECTION_DEPTH: usize = 64;
+
 /// 解決した AviUtl2 のデータディレクトリ。
 ///
 /// 値は plugin の生存期間中に変わらず、取得のたびにロックと文字列の複製を
@@ -206,7 +217,7 @@ impl AliasRejection {
 pub fn admit_alias(dir: &Path, name: &str) -> Result<AdmittedAlias, AliasRejection> {
     validate_object_alias_name(name).map_err(AliasRejection::ForbiddenName)?;
     let raw = read_alias(dir, name)?;
-    let table: Table = raw.parse().map_err(|_| AliasRejection::NotParsable)?;
+    let table: Table = parse_table(&raw).ok_or(AliasRejection::NotParsable)?;
     let summary = summarize(&table);
     if summary.effects.is_empty() {
         return Err(AliasRejection::WithoutEffect);
@@ -258,6 +269,43 @@ fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Option<Vec<u8>>> {
         return Ok(None);
     }
     Ok(Some(bytes))
+}
+
+/// 表としてパースする。安全に扱えない入力は `None` を返す。
+///
+/// 深さの判定はパースより先に行う。パースそのものは深さで落ちないが、出来上
+/// がった表を解放する時点でスタックが尽きる。**受け取ってしまってからでは
+/// 捨てることもできない。**
+fn parse_table(text: &str) -> Option<Table> {
+    if !section_depth_within_limit(text) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// 節の入れ子が [`MAX_SECTION_DEPTH`] を超えないことを確かめる。
+///
+/// 深さを増やすのは節の見出しだけである。値の側の `.` は数えない——設定値に
+/// 小数が並ぶだけの正当なファイルを落とすことになる。見出しが行を跨ぐ書き方も
+/// パーサが受け付けるため、閉じるまで区切りを数え続ける。
+fn section_depth_within_limit(text: &str) -> bool {
+    let mut pending: Option<usize> = None;
+    for line in text.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let separators = match pending.take() {
+            Some(counted) => counted + line.matches('.').count(),
+            None if line.starts_with('[') => line.matches('.').count(),
+            None => continue,
+        };
+        if line.ends_with(']') {
+            if separators >= MAX_SECTION_DEPTH {
+                return false;
+            }
+        } else {
+            pending = Some(separators);
+        }
+    }
+    true
 }
 
 /// パース結果から要約を導く。
@@ -339,7 +387,7 @@ impl LabelTable {
 /// UI 状態ファイルを読んでパースする。失敗はすべて `None` に畳む。
 fn read_history(data_dir: &Path) -> Option<Table> {
     let bytes = read_bounded(&data_dir.join(HISTORY_FILE), MAX_HISTORY_INI_BYTES).ok()??;
-    String::from_utf8(bytes).ok()?.parse().ok()
+    parse_table(&String::from_utf8(bytes).ok()?)
 }
 
 /// エイリアスの読み取り口。
@@ -711,6 +759,72 @@ pub(crate) mod tests {
             admit_alias(&alias_dir, "効果なし"),
             Err(AliasRejection::WithoutEffect)
         );
+    }
+
+    #[test]
+    fn a_deeply_nested_section_is_refused_before_it_is_parsed() {
+        // 表は入れ子を再帰的に解放する。深い入れ子は 20 KB 程度の入力でも
+        // スタックを使い切り、捕捉層では受け止められないままプロセスごと落ちる。
+        let deep = format!(
+            "[{}]\r\nk=v\r\n",
+            vec!["a"; MAX_SECTION_DEPTH + 1].join(".")
+        );
+        assert!(!section_depth_within_limit(&deep));
+        assert_eq!(parse_table(&deep), None);
+
+        // 行を跨いで綴っても同じ深さである。閉じるまで数え続けなければ、
+        // 分割するだけで判定を抜けられる。
+        let split = format!(
+            "[{}\r\n{}]\r\nk=v\r\n",
+            vec!["a"; MAX_SECTION_DEPTH].join("."),
+            vec!["a"; MAX_SECTION_DEPTH].join(".")
+        );
+        assert!(!section_depth_within_limit(&split));
+
+        // 値の側の区切りは数えない。小数が並ぶだけの正当なファイルは通る。
+        let values = format!("[Object.0]\r\n{}\r\n", "X=0.0\r\n".repeat(1_000));
+        assert!(section_depth_within_limit(&values));
+        assert!(section_depth_within_limit(SINGLE));
+        assert!(section_depth_within_limit(MULTIPLE));
+        assert!(section_depth_within_limit(HISTORY));
+    }
+
+    #[test]
+    fn a_deeply_nested_alias_is_dropped_from_the_listing() {
+        let dir = TempDir::new();
+        dir.write_alias("正常", SINGLE.as_bytes());
+        dir.write_alias(
+            "深い",
+            format!(
+                "[{}]\r\neffect.name=図形\r\n",
+                vec!["a"; MAX_SECTION_DEPTH + 1].join(".")
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            admit_alias(&dir.alias_dir(), "深い"),
+            Err(AliasRejection::NotParsable)
+        );
+        let result = list(&dir, None, &page(0, DEFAULT_PAGE_LIMIT));
+        assert_eq!(item_names(&result), vec!["正常"]);
+    }
+
+    #[test]
+    fn a_deeply_nested_history_leaves_every_label_empty() {
+        let dir = TempDir::new();
+        dir.write_alias("正常", SINGLE.as_bytes());
+        dir.write_history(
+            format!(
+                "[{}]\r\nlabel=x\r\n",
+                vec!["a"; MAX_SECTION_DEPTH + 1].join(".")
+            )
+            .as_bytes(),
+        );
+
+        let result = list(&dir, None, &page(0, DEFAULT_PAGE_LIMIT));
+        assert_eq!(item_names(&result), vec!["正常"]);
+        assert!(result.items.iter().all(|item| item.label.is_none()));
     }
 
     #[test]
