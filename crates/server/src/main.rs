@@ -1,7 +1,7 @@
 use aviutl2_mcp_core::settings::{SettingsReader, SettingsRefresh, settings_location};
 use aviutl2_mcp_server::api::{ListInstancesRequest, list_instances};
 use aviutl2_mcp_server::artifact::base_dir_for_registry;
-use aviutl2_mcp_server::discovery::default_registry_dir;
+use aviutl2_mcp_server::discovery::{DiscoveryConfig, default_registry_dir};
 use aviutl2_mcp_server::init_logging;
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, REGISTRY_DIR_ENV};
 use aviutl2_mcp_server::settings::{ParentPolicy, SettingsWatcher};
@@ -113,7 +113,9 @@ fn run_list_instances_cli() -> ExitCode {
         limit: 50,
     };
 
-    match list_instances(&registry_dir, request) {
+    // この経路は設定ファイルを読まず、記録の水準も既定で動く。生存確認の配分も
+    // 同じく既定から採り、1 つの起動の中で設定の有無が混ざらないようにする。
+    match list_instances(&registry_dir, request, DiscoveryConfig::default()) {
         Ok(response) => {
             let json = serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".to_string());
             // テスト用出力は stderr へ。

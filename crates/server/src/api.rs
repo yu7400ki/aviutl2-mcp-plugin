@@ -97,9 +97,13 @@ impl ListInstancesError {
 ///
 /// `registry_dir` が存在しない場合はインスタンス 0 件として空の結果を返す。
 /// ディレクトリを列挙できない場合は 0 件と区別するためエラーを返す。
+///
+/// 生存確認の配分は呼び出し側が渡す。**一覧だけが別の配分で解決すると、
+/// 期限を延ばした設定でも一覧からだけインスタンスが落ちる。**
 pub fn list_instances(
     registry_dir: &Path,
     request: ListInstancesRequest,
+    discovery: DiscoveryConfig,
 ) -> Result<ListInstancesResponse, ListInstancesError> {
     // 範囲外の要求で registry を走査しないよう、生存確認の前に検証する。
     let page_request = request.page();
@@ -107,7 +111,7 @@ pub fn list_instances(
         .validate()
         .map_err(|_| ListInstancesError::InvalidArgument)?;
 
-    let all = find_instances(registry_dir, DiscoveryConfig::default(), true)
+    let all = find_instances(registry_dir, discovery, true)
         .map_err(|e| ListInstancesError::RegistryUnreadable(e.io_error_kind()))?;
 
     let (instances, page) = take_page(&all, &page_request, NO_SNAPSHOT_REVISION)
@@ -151,6 +155,14 @@ mod tests {
         dir
     }
 
+    /// 倍率を掛けない配分で一覧を取る。
+    fn list(
+        registry_dir: &Path,
+        request: ListInstancesRequest,
+    ) -> Result<ListInstancesResponse, ListInstancesError> {
+        list_instances(registry_dir, request, DiscoveryConfig::default())
+    }
+
     fn descriptor_for(id: InstanceId, pid: u32) -> InstanceDescriptor {
         InstanceDescriptor {
             schema_version: 1,
@@ -174,7 +186,7 @@ mod tests {
     fn empty_registry_returns_empty() {
         let dir = temp_registry_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        let response = list_instances(
+        let response = list(
             &dir,
             ListInstancesRequest {
                 offset: 0,
@@ -231,7 +243,7 @@ mod tests {
         let dir = temp_registry_dir();
         std::fs::create_dir_all(&dir).unwrap();
         assert!(
-            list_instances(
+            list(
                 &dir,
                 ListInstancesRequest {
                     offset: 0,
@@ -241,7 +253,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            list_instances(
+            list(
                 &dir,
                 ListInstancesRequest {
                     offset: 0,
@@ -258,7 +270,7 @@ mod tests {
         let dir = temp_registry_dir();
         assert!(!dir.exists());
 
-        let response = list_instances(
+        let response = list(
             &dir,
             ListInstancesRequest {
                 offset: 0,
@@ -279,7 +291,7 @@ mod tests {
         ));
         std::fs::write(&path, b"not a directory").unwrap();
 
-        let error = list_instances(
+        let error = list(
             &path,
             ListInstancesRequest {
                 offset: 0,
@@ -306,7 +318,7 @@ mod tests {
         let dir = temp_registry_dir();
         std::fs::create_dir_all(&dir).unwrap();
 
-        let response = list_instances(
+        let response = list(
             &dir,
             ListInstancesRequest {
                 offset: u32::MAX,
@@ -330,7 +342,7 @@ mod tests {
 
         for limit in [1, MAX_PAGE_LIMIT] {
             assert!(
-                list_instances(&dir, ListInstancesRequest { offset: 0, limit }).is_ok(),
+                list(&dir, ListInstancesRequest { offset: 0, limit }).is_ok(),
                 "limit {limit} は許容される"
             );
         }
@@ -347,7 +359,7 @@ mod tests {
         let path = dir.join(format!("{}.json", id));
         std::fs::write(&path, serde_json::to_string(&descriptor).unwrap()).unwrap();
 
-        let response = list_instances(
+        let response = list(
             &dir,
             ListInstancesRequest {
                 offset: 0,
@@ -369,7 +381,7 @@ mod tests {
         let path = dir.join(format!("{}.json", id));
         std::fs::write(&path, b"not json").unwrap();
 
-        let response = list_instances(
+        let response = list(
             &dir,
             ListInstancesRequest {
                 offset: 0,

@@ -291,6 +291,81 @@ pub fn write_bare_descriptor(registry_dir: &std::path::Path) -> InstanceId {
     instance_id
 }
 
+/// 接続は受けるが 1 バイトも返さない待受と、その descriptor。
+///
+/// PID は自プロセスを指すためプロセス同一性の確認を通り、pipe も実在するため
+/// 接続に成功する。**handshake の応答だけが返らない**ので、要求元は解決フェーズ
+/// の期限を使い切る。**待った時間が、その期限がどこから来たかを表す。**
+pub struct SilentPipe {
+    instance_id: InstanceId,
+    handle: SendHandle,
+}
+
+impl SilentPipe {
+    /// 待受を作り、それを指す descriptor を registry へ書く。
+    pub fn listening_in(registry_dir: &std::path::Path) -> Self {
+        let instance_id = InstanceId::new_v4();
+        let pipe_name = pipe_name_for(&instance_id);
+        let wide: Vec<u16> = OsStr::new(&pipe_name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
+        let handle = unsafe {
+            CreateNamedPipeW(
+                PCWSTR(wide.as_ptr()),
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                4096,
+                4096,
+                0,
+                None,
+            )
+        };
+        assert!(!handle.is_invalid(), "応答しない待受を作成できませんでした");
+
+        let created_at = current_process_created_at();
+        let descriptor = InstanceDescriptor {
+            schema_version: 1,
+            protocol_version: ProtocolVersion::CURRENT,
+            instance_id,
+            pipe_name,
+            auth_secret: AuthSecret::generate(),
+            pid: std::process::id(),
+            process_created_at: created_at.clone(),
+            hwnd: None,
+            started_at: created_at,
+            state: InstanceState::Ready,
+            project: None,
+        };
+        std::fs::create_dir_all(registry_dir).unwrap();
+        std::fs::write(
+            registry_dir.join(format!("{instance_id}.json")),
+            serde_json::to_string(&descriptor).unwrap(),
+        )
+        .unwrap();
+
+        Self {
+            instance_id,
+            handle: SendHandle(handle),
+        }
+    }
+
+    pub fn instance_id(&self) -> InstanceId {
+        self.instance_id
+    }
+}
+
+impl Drop for SilentPipe {
+    fn drop(&mut self) {
+        // SAFETY: 本型のみが所有しており、ここでのみ閉じられる。
+        unsafe {
+            let _ = CloseHandle(self.handle.0);
+        }
+    }
+}
+
 impl Drop for MockPipeServer {
     fn drop(&mut self) {
         // 停止を通知してスレッドの終了を待ってから pipe を閉じる。

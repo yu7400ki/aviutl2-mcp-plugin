@@ -3,6 +3,7 @@
 mod support;
 
 use aviutl2_mcp_core::AuthSecret;
+use aviutl2_mcp_core::settings::{Settings, SettingsDocument};
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
     EffectItemValues, EffectType, ErrorCode, ErrorObject, EvaluatedItem, Extent, FiniteF64,
@@ -22,14 +23,15 @@ use aviutl2_mcp_server::mcp::input::{
     PageInput,
 };
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
+use aviutl2_mcp_server::settings::SettingsSource;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::time::Duration;
 use support::{
-    MOCK_STARTUP_GRACE, MockPipeServer, OperationResponses, current_process_created_at, err_result,
-    ok_result, remove_test_registry, temp_registry_dir,
+    MOCK_STARTUP_GRACE, MockPipeServer, OperationResponses, SilentPipe, current_process_created_at,
+    err_result, ok_result, remove_test_registry, temp_registry_dir,
 };
 
 /// 生存する mock インスタンスと、それを見る MCP サーバー。
@@ -111,6 +113,15 @@ fn text_of(result: &CallToolResult) -> String {
 
 fn responses(operation: &str, result: serde_json::Value) -> OperationResponses {
     OperationResponses::from([(operation.to_string(), ok_result(result))])
+}
+
+/// 倍率を適用した設定を配る供給元。
+fn settings_source_with_scale(percent: u32) -> std::sync::Arc<SettingsSource> {
+    let settings = SettingsDocument::parse(&format!(r#"{{"budget_scale_percent":{percent}}}"#))
+        .expect("設定を解釈できる")
+        .resolve(&Settings::default())
+        .0;
+    SettingsSource::fixed(settings)
 }
 
 fn sample_scene_info() -> SceneInfo {
@@ -979,6 +990,75 @@ async fn dead_instance_becomes_instance_stale() {
     assert_eq!(structured["retryable"], json!(true));
 
     drop(mock);
+    remove_test_registry(&registry_dir);
+}
+
+#[tokio::test]
+async fn a_shrunk_budget_scale_still_reaches_the_instance() {
+    // 設定 → tool handler → 解決 → 接続 → handshake → 要求までを 1 本で通す。
+    // 倍率が経路のどこかで落ちると、縮んだ期限と縮まない予約が突き合わされ、
+    // 生きているインスタンスが instance_stale として返る。
+    let registry_dir = temp_registry_dir();
+    let expected = serde_json::to_value(sample_edit_info()).expect("直列化できる");
+    let mock = MockPipeServer::start_with_operations(
+        InstanceId::new_v4(),
+        AuthSecret::generate(),
+        std::process::id(),
+        current_process_created_at(),
+        InstanceState::Ready,
+        responses("get_edit_info", expected.clone()),
+    );
+    mock.write_descriptor(&registry_dir);
+    std::thread::sleep(MOCK_STARTUP_GRACE);
+
+    let server =
+        AviUtl2McpServer::with_settings(registry_dir.clone(), settings_source_with_scale(10));
+    let result = server
+        .get_edit_info(Parameters(InstanceInput {
+            instance_id: mock.instance_id().to_string(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+
+    drop(mock);
+    remove_test_registry(&registry_dir);
+}
+
+#[tokio::test]
+async fn the_budget_scale_reaches_the_instance_listing() {
+    // 一覧だけが別の配分で解決すると、倍率を変えても待ち時間が変わらない。
+    // 応答を返さない待受へ向け、期限を使い切るまでの時間で出所を確かめる。
+    let registry_dir = temp_registry_dir();
+    let silent = SilentPipe::listening_in(&registry_dir);
+
+    let server =
+        AviUtl2McpServer::with_settings(registry_dir.clone(), settings_source_with_scale(10));
+    let started = std::time::Instant::now();
+    let result = server
+        .list_instances(Parameters(ListInstancesInput {
+            offset: 0,
+            limit: 50,
+        }))
+        .await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(
+        structured(&result)["total_count"],
+        json!(0),
+        "handshake を返さない待受が一覧に残っています"
+    );
+    // 倍率 10% の解決フェーズ予算は 500 ミリ秒である。倍率を掛けない 5 秒を
+    // 待っていれば、一覧の解決が設定を見ていない。
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "一覧の解決に {}ms かかっており、倍率が届いていません",
+        elapsed.as_millis()
+    );
+
+    drop(silent);
     remove_test_registry(&registry_dir);
 }
 
