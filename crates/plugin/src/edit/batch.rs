@@ -29,7 +29,7 @@
 
 use crate::edit::adapter::{
     attribute, ensure_destination_free, ensure_layers_unlocked, index, reread_with_effects,
-    unlisted_item,
+    unlisted_item, verify_written_item,
 };
 use crate::edit::error::{EditError, RollbackOutcome, UnsupportedReason};
 use crate::edit::host::{ObjectPosition, SceneEditor};
@@ -44,7 +44,7 @@ use crate::read::host::{
 };
 use aviutl2_mcp_core::{
     AvailableEffectItem, BatchOperation, BatchOutcome, BatchStepOutcome, FiniteF64, FrameRange,
-    GridBpm, ItemWriteError, ObjectSelector, ObjectSummary, Rgba, prepare_item_write,
+    GridBpm, ItemWrite, ItemWriteError, ObjectSelector, ObjectSummary, Rgba, prepare_item_write,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -189,8 +189,8 @@ enum PlannedStep<'sec> {
         /// 計画の配列が最大の枝に合わせて膨らまないよう間接参照にする。
         effect: Box<ResolvedEffect<'sec>>,
         item: String,
-        /// 要求された値を SDK の形式へ写したもの。
-        value: String,
+        /// 要求された値を SDK の形式へ写したものと、書き込み後の照合の要否。
+        write: ItemWrite,
         /// 変更前の、SDK が返した生の文字列。
         origin_value: String,
     },
@@ -264,8 +264,8 @@ fn plan_step<'sec>(
         } => {
             let (object, effect) = resolve_effect(editor, boundary, selector)?;
             let items = editor.effect_items(&effect)?;
-            let value = match prepare_item_write(&items, item, value) {
-                Ok(value) => value,
+            let write = match prepare_item_write(&items, item, value) {
+                Ok(write) => write,
                 Err(ItemWriteError::ItemNotFound { item }) => {
                     return Err(unlisted_item(editor, &effect, &item));
                 }
@@ -286,7 +286,7 @@ fn plan_step<'sec>(
                 object,
                 effect: Box::new(effect),
                 item: item.clone(),
-                value,
+                write,
                 origin_value,
             })
         }
@@ -358,6 +358,32 @@ struct ApplyFailure {
     applied: usize,
 }
 
+/// 1 件の発行が落ちた理由と、その step 自身の変更が入っているか。
+struct IssueFailure {
+    error: EditError,
+    /// 落ちた時点で、この step 自身の変更が既に入っているか。**入っていれば
+    /// この step も巻き戻しの対象になる。**
+    applied: bool,
+}
+
+impl IssueFailure {
+    /// この step の変更は入っていない。
+    fn unapplied(error: EditError) -> Self {
+        Self {
+            error,
+            applied: false,
+        }
+    }
+
+    /// この step の変更は入っている。
+    fn applied(error: EditError) -> Self {
+        Self {
+            error,
+            applied: true,
+        }
+    }
+}
+
 /// 適用相。要求の配列順に発行する。
 fn apply(
     plan: &BatchPlan<'_>,
@@ -366,13 +392,14 @@ fn apply(
     boundary: &Boundary,
 ) -> Result<(), ApplyFailure> {
     for (position, step) in plan.steps.iter().enumerate() {
-        if let Err(error) = issue(step, editor, permit, boundary) {
-            // 落ちた step 自身は巻き戻しの対象にならない。宛先の確認で落ちた
-            // 場合は SDK を呼んでおらず、SDK へ届かなかった失敗も同じである。
+        if let Err(failure) = issue(step, editor, permit, boundary) {
+            // 落ちた step 自身が巻き戻しの対象になるのは、変更を発行し終えた
+            // 後で落ちた場合だけである。宛先の確認で落ちた場合は SDK を呼んで
+            // おらず、SDK へ届かなかった失敗も同じである。
             return Err(ApplyFailure {
                 index: position,
-                error,
-                applied: position,
+                error: failure.error,
+                applied: position + usize::from(failure.applied),
             });
         }
     }
@@ -385,7 +412,7 @@ fn issue(
     editor: &dyn SceneEditor,
     permit: &MutationPermit<'_>,
     boundary: &Boundary,
-) -> Result<(), EditError> {
+) -> Result<(), IssueFailure> {
     match step {
         PlannedStep::Move {
             object,
@@ -399,7 +426,8 @@ fn issue(
                 permit,
                 boundary,
                 editor.reader().object_placements(destination.layer),
-            )?;
+            )
+            .map_err(IssueFailure::unapplied)?;
             let moving_from = (destination.layer == origin.layer).then_some(origin.frame);
             attribute(
                 permit,
@@ -410,19 +438,31 @@ fn issue(
                     destination.frame,
                     moving_from,
                 ),
-            )?;
-            permit.issue(boundary, |ticket| {
-                editor.move_object(ticket, object, destination.layer, destination.frame)
-            })
+            )
+            .map_err(IssueFailure::unapplied)?;
+            permit
+                .issue(boundary, |ticket| {
+                    editor.move_object(ticket, object, destination.layer, destination.frame)
+                })
+                .map_err(IssueFailure::unapplied)
         }
         PlannedStep::SetItem {
             effect,
             item,
-            value,
+            write,
             ..
-        } => permit.issue(boundary, |ticket| {
-            editor.set_effect_item(ticket, effect, item, value)
-        }),
+        } => {
+            permit
+                .issue(boundary, |ticket| {
+                    editor.set_effect_item(ticket, effect, item, write.value())
+                })
+                .map_err(IssueFailure::unapplied)?;
+            // choice 系だけは、適用の直後に 1 回読み直して照合する。単独の変更で
+            // 失敗する入力が一括適用では成功する経路を作らないためであり、費用は
+            // sub-operation 1 件あたり 1 回に留まる。
+            verify_written_item(editor, permit, boundary, effect, item, write)
+                .map_err(IssueFailure::applied)
+        }
     }
 }
 

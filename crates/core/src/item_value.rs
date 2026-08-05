@@ -202,6 +202,33 @@ impl ItemWriteError {
     }
 }
 
+/// 設定項目へ書き込む文字列と、書き込み後の照合の要否。
+///
+/// 照合する文字列は SDK へ渡すもの**そのもの**である。要求に現れた値を別に
+/// 保持しないため、照合の材料が要求側の値へすり替わる余地が無い。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemWrite {
+    value: String,
+    verify_read_back: bool,
+}
+
+impl ItemWrite {
+    /// SDK へ渡す文字列。
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// 書き込んだ直後に読み直し、渡した文字列との一致を確かめる種別か。
+    pub fn verifies_read_back(&self) -> bool {
+        self.verify_read_back
+    }
+
+    /// 読み直した文字列が、SDK へ渡した文字列と一致するか。
+    pub fn read_back_matches(&self, observed: &str) -> bool {
+        observed == self.value
+    }
+}
+
 /// 設定項目名の実在確認から書き込む文字列の組み立てまでを行う。
 ///
 /// `items` は対象 effect が公開している設定項目の一覧である。判定は次の順で
@@ -211,12 +238,12 @@ impl ItemWriteError {
 /// 2. `item` が `items` に存在することを確認する
 /// 3. 種別への書き込みが公開されているかを確認する
 /// 4. 種別と値の形が対応するかを確認する
-/// 5. 書き込む文字列へ変換する
+/// 5. 書き込む文字列へ変換し、照合の要否を種別から決める
 pub fn prepare_item_write(
     items: &[AvailableEffectItem],
     item: &str,
     value: &ItemValue,
-) -> Result<String, ItemWriteError> {
+) -> Result<ItemWrite, ItemWriteError> {
     if matches!(value, ItemValue::Unknown { .. }) {
         return Err(ItemWriteError::UnknownValue);
     }
@@ -226,7 +253,10 @@ pub fn prepare_item_write(
         .ok_or_else(|| ItemWriteError::ItemNotFound {
             item: item.to_string(),
         })?;
-    encode_item_value(&entry.item_type, value)
+    Ok(ItemWrite {
+        value: encode_item_value(&entry.item_type, value)?,
+        verify_read_back: verifies_read_back(&entry.item_type),
+    })
 }
 
 /// 種別と値を照合し、書き込む文字列を組み立てる。
@@ -287,6 +317,42 @@ fn is_writable(item_type: &EffectItemType) -> bool {
             | EffectItemType::Select
             | EffectItemType::Combo
     )
+}
+
+/// 書き込んだ値を読み直し、渡した文字列との一致を確かめる種別か。
+///
+/// 選択肢から選ぶ 4 種別だけを対象とする。SDK は選択肢を列挙する手段を持たず、
+/// 選択肢に無い値を渡しても失敗を返さずに黙って無視するため、読み直さない限り
+/// 反映されなかったことを知る手段が無い。
+///
+/// 他の種別は対象にしない。色や数値の表記、テキストの改行はホストが正規化し
+/// 得るため、渡した文字列との一致を求めると正常な正規化を失敗と誤診断する。
+///
+/// 書き込みを公開していない種別についても述べる。公開の可否は [`is_writable`]
+/// が別に決めており、ここは種別そのものの性質だけを言う。
+///
+/// **`_` を使わない網羅 `match` である。** 種別を足すと、照合するかを書くまで
+/// コンパイルできない。
+fn verifies_read_back(item_type: &EffectItemType) -> bool {
+    match item_type {
+        EffectItemType::Select
+        | EffectItemType::Combo
+        | EffectItemType::Mask
+        | EffectItemType::Figure => true,
+        EffectItemType::Integer
+        | EffectItemType::Number
+        | EffectItemType::Check
+        | EffectItemType::Text
+        | EffectItemType::String
+        | EffectItemType::File
+        | EffectItemType::Folder
+        | EffectItemType::Font
+        | EffectItemType::Color
+        | EffectItemType::Scene
+        | EffectItemType::Range
+        | EffectItemType::Data
+        | EffectItemType::Unknown(_) => false,
+    }
 }
 
 /// 種別が値の形を受け付けるか。
@@ -1186,7 +1252,8 @@ mod tests {
                 &ItemValue::Number {
                     value: FiniteF64::try_new(1.5).unwrap(),
                 },
-            ),
+            )
+            .map(|write| write.value().to_string()),
             Ok("1.5".to_string())
         );
         assert_eq!(
@@ -1213,6 +1280,120 @@ mod tests {
                 item_type: "figure".to_string(),
             })
         );
+    }
+
+    /// 種別ごとに、書き込み後の照合を行うかを述べる。
+    ///
+    /// [`EffectItemType`] に対する網羅 `match` であり `_` を使わない。**種別を
+    /// 足すとここが落ち、照合するかを書くまでコンパイルできない。**
+    fn expects_read_back_verification(item_type: &EffectItemType) -> bool {
+        match item_type {
+            EffectItemType::Select
+            | EffectItemType::Combo
+            | EffectItemType::Mask
+            | EffectItemType::Figure => true,
+            EffectItemType::Integer
+            | EffectItemType::Number
+            | EffectItemType::Check
+            | EffectItemType::Text
+            | EffectItemType::String
+            | EffectItemType::File
+            | EffectItemType::Folder
+            | EffectItemType::Font
+            | EffectItemType::Color
+            | EffectItemType::Scene
+            | EffectItemType::Range
+            | EffectItemType::Data
+            | EffectItemType::Unknown(_) => false,
+        }
+    }
+
+    #[test]
+    fn only_the_four_choice_types_are_verified_by_reading_back() {
+        // 照合の対象は選択肢から選ぶ 4 種別に限る。ほかの種別はホストが表記を
+        // 正規化し得るため、一致を求めると正常な正規化を失敗と誤診断する。
+        // 書き込みを公開していない mask / figure も、種別の性質としては照合の
+        // 対象である。
+        let verified: Vec<EffectItemType> = known_item_types()
+            .into_iter()
+            .chain([EffectItemType::Unknown(99)])
+            .filter(verifies_read_back)
+            .collect();
+        assert_eq!(
+            verified,
+            vec![
+                EffectItemType::Select,
+                EffectItemType::Combo,
+                EffectItemType::Mask,
+                EffectItemType::Figure,
+            ]
+        );
+        for item_type in known_item_types()
+            .into_iter()
+            .chain([EffectItemType::Unknown(99)])
+        {
+            assert_eq!(
+                verifies_read_back(&item_type),
+                expects_read_back_verification(&item_type),
+                "{item_type} の照合の要否が宣言と異なります"
+            );
+        }
+    }
+
+    #[test]
+    fn the_prepared_write_carries_the_verification_of_its_item_type() {
+        // 照合の要否は要求内容ではなく、対象 effect が公開する種別で決まる。
+        let items = vec![
+            AvailableEffectItem {
+                name: "図形の種類".to_string(),
+                item_type: EffectItemType::Select,
+            },
+            AvailableEffectItem {
+                name: "色".to_string(),
+                item_type: EffectItemType::Color,
+            },
+        ];
+        let choice = prepare_item_write(
+            &items,
+            "図形の種類",
+            &ItemValue::Choice {
+                value: "四角形".to_string(),
+                index: Some(1),
+            },
+        )
+        .expect("選択肢の書き込み");
+        assert!(choice.verifies_read_back());
+        assert!(choice.read_back_matches("四角形"));
+        assert!(!choice.read_back_matches("円"));
+
+        let color = prepare_item_write(
+            &items,
+            "色",
+            &ItemValue::Color {
+                value: "#FFAA00".to_string(),
+            },
+        )
+        .expect("色の書き込み");
+        assert!(!color.verifies_read_back());
+    }
+
+    #[test]
+    fn the_read_back_is_compared_against_the_encoded_value() {
+        // 照合の材料は SDK へ渡す文字列であり、要求に現れた値ではない。両者が
+        // 異なる種別で、渡した文字列とだけ一致することを固定する。
+        let items = vec![AvailableEffectItem {
+            name: "反転".to_string(),
+            item_type: EffectItemType::Check,
+        }];
+        let write =
+            prepare_item_write(&items, "反転", &ItemValue::Bool { value: true }).expect("書き込み");
+        assert_eq!(
+            write.value(),
+            encode_item_value(&EffectItemType::Check, &ItemValue::Bool { value: true })
+                .expect("変換")
+        );
+        assert!(write.read_back_matches("1"));
+        assert!(!write.read_back_matches("true"));
     }
 
     #[test]

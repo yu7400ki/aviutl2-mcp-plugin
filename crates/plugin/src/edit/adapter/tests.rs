@@ -6,10 +6,10 @@
 
 use super::*;
 use crate::edit::fake::{
-    CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, EFFECT_LIST, FakeEditHost, FakeLayer, FakeObject,
-    FakeReadHost, Fault, ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX, MAX_FRAME,
-    MAX_ITEM_VALUE, MAX_LAYER, MOVE_FRAME_SHIFT, MUTATIONS, PanicPoint, READ_SECTION, SCENE_ID,
-    SECTION_RANGES,
+    CHOICE_VALUES, CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, EFFECT_LIST, FakeEditHost, FakeLayer,
+    FakeObject, FakeReadHost, Fault, ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX,
+    MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER, MOVE_FRAME_SHIFT, MUTATIONS, PanicPoint, READ_SECTION,
+    SCENE_ID, SECTION_RANGES, SHAPE, shape, shape_catalog_entry,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
@@ -1594,6 +1594,181 @@ fn a_successful_item_write_never_probes_the_value() {
         !harness.host.calls().contains(&ITEM_VALUE),
         "成功経路で項目の値を読み直しました: {:?}",
         harness.host.calls()
+    );
+}
+
+/// 選択肢から選ぶ設定項目を持つ effect を足したフェイクを組む。
+///
+/// カタログと対象オブジェクトの双方へ同じ effect を足す。種別はカタログの
+/// 一覧から引かれるため、両方を揃えないと本番と同じ経路を通らない。
+fn harness_with_choice_effect() -> Harness {
+    Harness::with(|host| {
+        host.catalog.push(shape_catalog_entry());
+        host.scene.get_mut().unwrap().layers[1].objects[1]
+            .effects
+            .push(shape(0));
+    })
+}
+
+/// 選択肢を持つ項目への書き込み要求を組み立てる。
+fn set_choice(harness: &Harness, value: &str) -> SetObjectItemParams {
+    SetObjectItemParams {
+        selector: harness.effect_selector(1, 300, SHAPE, 0),
+        item: "図形の種類".to_string(),
+        value: ItemValue::Choice {
+            value: value.to_string(),
+            index: None,
+        },
+    }
+}
+
+/// 応答が返した effect から、指定した設定項目の値を取り出す。
+fn changed_item(outcome: &EditOutcome, item: &str) -> ItemValue {
+    outcome
+        .effect
+        .as_ref()
+        .expect("変更後の effect")
+        .items
+        .iter()
+        .find(|entry| entry.name == item)
+        .unwrap_or_else(|| panic!("設定項目 {item} がありません"))
+        .value
+        .clone()
+}
+
+#[test]
+fn a_choice_value_the_host_ignores_is_reported_as_a_failure() {
+    // SDK は選択肢を列挙する手段を持たず、選択肢に無い値を渡しても失敗を返さず
+    // に無視する。読み直して照合しなければ、当て推量が外れたことを成功として
+    // 報告してしまう。
+    let harness = harness_with_choice_effect();
+    let rejected = "存在しない形";
+    assert!(
+        !CHOICE_VALUES.contains(&rejected),
+        "ホストが受け付ける値を無効な値として使っています"
+    );
+
+    let error = harness
+        .edit
+        .set_object_item(&set_choice(&harness, rejected))
+        .expect_err("選択肢に無い値が成功として返りました");
+
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(error.details()["reason"], json!("choice_value_rejected"));
+    assert!(!error.retryable(), "読み直しても値は有効になりません");
+}
+
+#[test]
+fn a_choice_value_the_host_accepts_succeeds() {
+    let harness = harness_with_choice_effect();
+    harness.host.clear_calls();
+
+    let outcome = harness
+        .edit
+        .set_object_item(&set_choice(&harness, CHOICE_VALUES[1]))
+        .expect("選択肢に在る値が拒否されました");
+
+    assert_eq!(
+        changed_item(&outcome, "図形の種類"),
+        ItemValue::Choice {
+            value: CHOICE_VALUES[1].to_string(),
+            index: None,
+        }
+    );
+    assert_eq!(
+        harness
+            .host
+            .calls()
+            .iter()
+            .filter(|call| **call == ITEM_VALUE)
+            .count(),
+        1,
+        "照合の読み直しは 1 回だけです: {:?}",
+        harness.host.calls()
+    );
+}
+
+#[test]
+fn a_value_the_host_normalizes_is_not_treated_as_a_choice_rejection() {
+    // 色・実数・テキストはホストが表記を正規化し得る。渡した文字列との一致を
+    // 求めると、正常な正規化を失敗と誤診断する。**読み直した値が要求と違っても
+    // 成功すること**を種別ごとに固定する。
+    let cases = [
+        (
+            "色",
+            ItemValue::Color {
+                value: "#FFAA00".to_string(),
+            },
+            ItemValue::Color {
+                value: "#ffaa00".to_string(),
+            },
+        ),
+        (
+            "サイズ",
+            ItemValue::Number {
+                value: FiniteF64::try_new((MAX_ITEM_VALUE + 150) as f64).expect("有限値"),
+            },
+            ItemValue::Number {
+                value: FiniteF64::try_new(MAX_ITEM_VALUE as f64).expect("有限値"),
+            },
+        ),
+        (
+            "メモ",
+            ItemValue::Text {
+                value: "上\n下".to_string(),
+            },
+            ItemValue::Text {
+                value: "上\\n下".to_string(),
+            },
+        ),
+    ];
+    for (item, requested, normalized) in cases {
+        assert_ne!(
+            requested, normalized,
+            "{item} は正規化されておらず、比較の有無を判別できません"
+        );
+        let harness = harness_with_choice_effect();
+        let outcome = harness
+            .edit
+            .set_object_item(&SetObjectItemParams {
+                selector: harness.effect_selector(1, 300, SHAPE, 0),
+                item: item.to_string(),
+                value: requested,
+            })
+            .unwrap_or_else(|error| panic!("{item} の正規化が失敗として扱われました: {error}"));
+
+        assert_eq!(changed_item(&outcome, item), normalized, "{item}");
+    }
+}
+
+#[test]
+fn a_rejected_choice_value_is_told_apart_from_a_change_that_did_not_apply() {
+    // 選択肢を列挙できない以上、当て推量が外れることは常態である。ヘッダーが
+    // 変更を拒む旨を記していない setter の不一致と畳むと、要求元は「異常」と
+    // 「よくある入力誤り」を区別できない。
+    let choice = harness_with_choice_effect();
+    let rejected = choice
+        .edit
+        .set_object_item(&set_choice(&choice, "存在しない形"))
+        .expect_err("選択肢に無い値が成功として返りました");
+
+    let ignored =
+        Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::IgnoreObjectName)));
+    let not_applied = ignored
+        .edit
+        .set_object_name(&SetObjectNameParams {
+            selector: ignored.selector(1, 100),
+            name: Some("新しい名前".to_string()),
+        })
+        .expect_err("無視された改名が成功として返りました");
+
+    assert_eq!(rejected.error_code(), not_applied.error_code());
+    assert_eq!(rejected.details()["reason"], json!("choice_value_rejected"));
+    assert_eq!(not_applied.details()["reason"], json!("change_not_applied"));
+    assert_ne!(
+        rejected.details()["reason"],
+        not_applied.details()["reason"],
+        "2 つの失敗が同じ名前を名乗っています"
     );
 }
 

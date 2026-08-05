@@ -1524,11 +1524,12 @@ impl SceneEditor for FakeSceneEditor<'_> {
             .unwrap()
             .push(value.to_string());
         let item = item.to_string();
-        // ホストは値を正規化し得る。上限を超える指定は丸めて書き込まれる。
-        let normalized = value.parse::<i64>().unwrap_or_default().min(MAX_ITEM_VALUE);
+        let value = value.to_string();
         self.with_effect(effect, move |effect| {
-            if let Some(entry) = effect.items.iter_mut().find(|entry| entry.name == item) {
-                entry.value = ItemValue::Integer { value: normalized };
+            if let Some(entry) = effect.items.iter_mut().find(|entry| entry.name == item)
+                && let Some(written) = host_write(&entry.item_type, &value)
+            {
+                entry.value = written;
             }
         })
     }
@@ -1774,14 +1775,69 @@ pub(crate) const DISPLAY_LAYER_NUM: usize = 4;
 /// ホストが設定項目の値を丸める上限。
 pub(crate) const MAX_ITEM_VALUE: i64 = 100;
 
+/// ホストが受け付ける選択肢の値。
+///
+/// SDK は選択肢を列挙する手段を持たないため、フェイクもこの一覧を公開しない。
+/// 一覧に無い値の書き込みは黙って無視される。
+pub(crate) const CHOICE_VALUES: [&str; 2] = ["円", "四角形"];
+
 /// ホストが項目名に対して返す生の設定値。
 ///
-/// 呼び出し側は値そのものを使わず、読めたかどうかで項目の存在を判定する。
+/// 保持している値をそのまま文字列にする。種別ごとに別の表記へ写すと、書き込みが
+/// 渡した文字列と読み直した文字列を比べる検査が成立しない。
 fn raw_item_value(value: &ItemValue) -> String {
     match value {
         ItemValue::Unknown { raw } => raw.clone(),
         ItemValue::Integer { value } => value.to_string(),
-        other => other.kind().to_string(),
+        ItemValue::Number { value } => value.to_string(),
+        ItemValue::Bool { value } => if *value { "1" } else { "0" }.to_string(),
+        ItemValue::Color { value }
+        | ItemValue::Choice { value, .. }
+        | ItemValue::Text { value } => value.clone(),
+        ItemValue::Font { name } => name.clone(),
+        ItemValue::File { path } | ItemValue::Folder { path } => path.clone(),
+    }
+}
+
+/// ホストが書き込む値。受け付けない値では `None` を返し、状態を変えない。
+///
+/// 選択肢から選ぶ種別は、選択肢に無い値を失敗を返さずに無視する。ほかの種別は
+/// 表記を正規化して受け付ける——上限への丸め、色の小文字化、実数の桁の詰め、
+/// 改行のエスケープ表記である。**正規化した値は書いた文字列と一致しない。**
+fn host_write(item_type: &EffectItemType, value: &str) -> Option<ItemValue> {
+    match item_type {
+        EffectItemType::Select
+        | EffectItemType::Combo
+        | EffectItemType::Mask
+        | EffectItemType::Figure => CHOICE_VALUES.contains(&value).then(|| ItemValue::Choice {
+            value: value.to_string(),
+            index: None,
+        }),
+        EffectItemType::Color => Some(ItemValue::Color {
+            value: value.to_lowercase(),
+        }),
+        EffectItemType::Number => Some(ItemValue::Number {
+            value: value
+                .parse::<f64>()
+                .ok()
+                .map(|parsed| parsed.min(MAX_ITEM_VALUE as f64))
+                .and_then(FiniteF64::try_new)
+                .unwrap_or_else(|| FiniteF64::try_new(0.0).expect("有限値")),
+        }),
+        EffectItemType::Text | EffectItemType::String => Some(ItemValue::Text {
+            value: value.replace('\n', "\\n"),
+        }),
+        EffectItemType::Integer
+        | EffectItemType::Check
+        | EffectItemType::File
+        | EffectItemType::Folder
+        | EffectItemType::Font
+        | EffectItemType::Scene
+        | EffectItemType::Range
+        | EffectItemType::Data
+        | EffectItemType::Unknown(_) => Some(ItemValue::Integer {
+            value: value.parse::<i64>().unwrap_or_default().min(MAX_ITEM_VALUE),
+        }),
     }
 }
 
@@ -1832,6 +1888,74 @@ pub(crate) fn blur(index: usize, range: i64) -> HostEffect {
         }],
     }
 }
+
+/// 選択肢から選ぶ設定項目と、ホストが表記を正規化する設定項目を並べて持つ effect。
+///
+/// 既定の状態には含めない。選択肢の検証を要する試験だけが
+/// [`shape_catalog_entry`] と対にして差し込む。
+pub(crate) fn shape(index: usize) -> HostEffect {
+    HostEffect {
+        name: SHAPE.to_string(),
+        index,
+        enabled: true,
+        locked: false,
+        items: vec![
+            EffectItem {
+                name: "図形の種類".to_string(),
+                item_type: EffectItemType::Select,
+                value: ItemValue::Choice {
+                    value: CHOICE_VALUES[0].to_string(),
+                    index: None,
+                },
+                track: None,
+            },
+            EffectItem {
+                name: "色".to_string(),
+                item_type: EffectItemType::Color,
+                value: ItemValue::Color {
+                    value: "#ffffff".to_string(),
+                },
+                track: None,
+            },
+            EffectItem {
+                name: "サイズ".to_string(),
+                item_type: EffectItemType::Number,
+                value: ItemValue::Number {
+                    value: FiniteF64::try_new(1.0).expect("有限値"),
+                },
+                track: None,
+            },
+            EffectItem {
+                name: "メモ".to_string(),
+                item_type: EffectItemType::Text,
+                value: ItemValue::Text {
+                    value: String::new(),
+                },
+                track: None,
+            },
+        ],
+    }
+}
+
+/// [`shape`] をカタログへ載せる形。
+pub(crate) fn shape_catalog_entry() -> AvailableEffect {
+    AvailableEffect {
+        name: SHAPE.to_string(),
+        effect_type: EffectType::Filter,
+        flags: EffectFlags::from_raw(1),
+        items: shape(0)
+            .items
+            .into_iter()
+            .map(|item| AvailableEffectItem {
+                name: item.name,
+                item_type: item.item_type,
+            })
+            .collect(),
+    }
+}
+
+/// [`shape`] の effect 名。
+pub(crate) const SHAPE: &str = "図形";
 
 /// 入力 effect。
 fn video() -> HostEffect {

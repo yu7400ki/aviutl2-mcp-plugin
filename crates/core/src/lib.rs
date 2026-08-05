@@ -106,7 +106,8 @@ pub use handshake::{
 };
 pub use identifier::{InstanceId, ProtocolVersion, RequestId, pipe_name_for};
 pub use item_value::{
-    ItemValue, ItemWriteError, encode_item_value, prepare_item_write, validate_item_value,
+    ItemValue, ItemWrite, ItemWriteError, encode_item_value, prepare_item_write,
+    validate_item_value,
 };
 pub use json::{JsonStrictError, deserialize_json, parse_json};
 pub use module::{ModuleEntry, ModuleType};

@@ -705,6 +705,96 @@ fn a_change_that_never_reached_the_sdk_is_not_rolled_back() {
     assert_eq!(placement_of(&harness, 2), (1, 100));
 }
 
+/// 選択肢を持つ項目を変える sub-operation を組み立てる。
+fn set_choice_op(harness: &Harness, value: &str) -> BatchOperation {
+    BatchOperation::SetObjectItem {
+        selector: harness.effect_selector(1, 300, SHAPE, 0),
+        item: "図形の種類".to_string(),
+        value: ItemValue::Choice {
+            value: value.to_string(),
+            index: None,
+        },
+    }
+}
+
+#[test]
+fn a_choice_value_the_host_ignores_fails_the_batch_and_rolls_it_back() {
+    // 照合を一括適用で省くと、単独では失敗する入力が一括適用では成功する経路が
+    // できる。落ちた sub-operation 自身は変更を発行し終えているため、巻き戻しの
+    // 対象に含める。
+    let harness = harness_with_choice_effect();
+    let params = batch(vec![
+        set_item_op(harness.effect_selector(1, 300, "ぼかし", 0), "範囲", 40),
+        set_choice_op(&harness, "存在しない形"),
+    ]);
+    let error = harness
+        .edit
+        .apply_batch(&params)
+        .expect_err("選択肢に無い値が一括適用で受理されました");
+
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(error.details()["reason"], json!("choice_value_rejected"));
+    assert_eq!(error.details()["failed_index"], json!(1));
+    assert_eq!(error.details()["rolled_back"], json!(true));
+    assert_eq!(error.details()["rolled_back_count"], json!(2));
+
+    // 先行 sub-operation も、落ちた sub-operation 自身も元へ戻っている。
+    assert_eq!(
+        item_of(&harness, 3, 0, "範囲"),
+        ItemValue::Integer { value: 20 }
+    );
+    assert_eq!(
+        item_of(&harness, 3, 1, "図形の種類"),
+        ItemValue::Choice {
+            value: CHOICE_VALUES[0].to_string(),
+            index: None,
+        }
+    );
+}
+
+#[test]
+fn a_choice_value_the_host_accepts_passes_through_the_batch() {
+    let harness = harness_with_choice_effect();
+    let params = batch(vec![
+        set_item_op(harness.effect_selector(1, 300, "ぼかし", 0), "範囲", 40),
+        set_choice_op(&harness, CHOICE_VALUES[1]),
+    ]);
+    harness
+        .edit
+        .apply_batch(&params)
+        .expect("選択肢に在る値が一括適用で拒否されました");
+
+    assert_eq!(
+        item_of(&harness, 3, 1, "図形の種類"),
+        ItemValue::Choice {
+            value: CHOICE_VALUES[1].to_string(),
+            index: None,
+        }
+    );
+}
+
+#[test]
+fn the_same_choice_value_fails_the_same_way_alone_and_in_a_batch() {
+    // 受理する集合が単独編集と一括適用で違ってはならない。同じ入力に対して
+    // 同じ code と同じ名前を返すことで固定する。
+    let rejected = "存在しない形";
+    let alone = harness_with_choice_effect();
+    let single = alone
+        .edit
+        .set_object_item(&set_choice(&alone, rejected))
+        .expect_err("選択肢に無い値が成功として返りました");
+
+    let together = harness_with_choice_effect();
+    let batched = together
+        .edit
+        .apply_batch(&batch(vec![set_choice_op(&together, rejected)]))
+        .expect_err("選択肢に無い値が一括適用で受理されました");
+
+    assert_eq!(single.error_code(), batched.error_code());
+    assert_eq!(single.details()["reason"], batched.details()["reason"]);
+    assert_eq!(batched.details()["failed_index"], json!(0));
+}
+
 #[test]
 fn a_batch_that_issued_nothing_does_not_advance_the_revision() {
     let harness =

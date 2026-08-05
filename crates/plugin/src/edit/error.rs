@@ -60,6 +60,17 @@ pub enum UnsupportedReason {
     ///
     /// ホストが無言で拒否した場合にここへ来る。成功として返してはならない。
     ChangeNotApplied,
+    /// 選択肢から選ぶ設定項目へ、選択肢に無い値を書こうとした。
+    ///
+    /// SDK は選択肢を列挙する手段を持たず、選択肢に無い値を渡しても失敗を
+    /// 返さずに黙って無視する。書き込んだ直後の読み直しだけが検出できる。
+    ///
+    /// [`UnsupportedReason::ChangeNotApplied`] と畳まない。あちらは変更を
+    /// 拒む旨をヘッダーが記していない API で起きる想定外の不一致であり、
+    /// こちらは選択肢を知る手段が無い以上、当て推量が外れて頻発する。
+    /// 要求元が取る行動も違う——前者は異常として報告し、後者は既存の
+    /// オブジェクトから有効な値を読んで別の値を試す。
+    ChoiceValueRejected,
     /// 逆操作の材料を変更前に読み取れない。
     ///
     /// 逆操作を組み立てられない変更は発行しない。実行してから組み立てられないと
@@ -78,6 +89,7 @@ impl UnsupportedReason {
         UnsupportedReason::MediaNotSupported,
         UnsupportedReason::ItemTypeNotWritable,
         UnsupportedReason::ChangeNotApplied,
+        UnsupportedReason::ChoiceValueRejected,
         UnsupportedReason::InverseUnavailable,
     ];
 
@@ -90,6 +102,7 @@ impl UnsupportedReason {
             UnsupportedReason::MediaNotSupported => "media_not_supported",
             UnsupportedReason::ItemTypeNotWritable => "item_type_not_writable",
             UnsupportedReason::ChangeNotApplied => "change_not_applied",
+            UnsupportedReason::ChoiceValueRejected => "choice_value_rejected",
             UnsupportedReason::InverseUnavailable => "inverse_unavailable",
         }
     }
@@ -108,6 +121,9 @@ impl std::fmt::Display for UnsupportedReason {
                 "この種別の設定項目への書き込みには対応していません"
             }
             UnsupportedReason::ChangeNotApplied => "要求した変更が反映されませんでした",
+            UnsupportedReason::ChoiceValueRejected => {
+                "指定した値は設定項目の選択肢として受け付けられませんでした"
+            }
             UnsupportedReason::InverseUnavailable => "逆操作の材料を読み取れませんでした",
         };
         f.write_str(text)
@@ -768,6 +784,9 @@ pub(crate) mod tests {
                 reason: UnsupportedReason::ChangeNotApplied,
             },
             EditError::UnsupportedTarget {
+                reason: UnsupportedReason::ChoiceValueRejected,
+            },
+            EditError::UnsupportedTarget {
                 reason: UnsupportedReason::InverseUnavailable,
             },
             EditError::NotIssued {
@@ -913,6 +932,7 @@ pub(crate) mod tests {
             UnsupportedReason::MediaNotSupported,
             UnsupportedReason::ItemTypeNotWritable,
             UnsupportedReason::ChangeNotApplied,
+            UnsupportedReason::ChoiceValueRejected,
             UnsupportedReason::InverseUnavailable,
         ];
         for reason in unsupported {
@@ -923,6 +943,7 @@ pub(crate) mod tests {
                 | UnsupportedReason::MediaNotSupported
                 | UnsupportedReason::ItemTypeNotWritable
                 | UnsupportedReason::ChangeNotApplied
+                | UnsupportedReason::ChoiceValueRejected
                 | UnsupportedReason::InverseUnavailable => {}
             }
         }
@@ -995,6 +1016,8 @@ pub(crate) mod tests {
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
+                ErrorCode::UnsupportedOperation,
+                // 選択肢に無い値が黙って無視された。読み直しても有効にならない。
                 ErrorCode::UnsupportedOperation,
                 // 逆操作の材料を読めなかった。
                 ErrorCode::UnsupportedOperation,

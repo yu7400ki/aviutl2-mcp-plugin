@@ -193,6 +193,7 @@ pub const REASON_VALUES: &[&str] = &[
     "argument_not_representable",
     "buffer_length_mismatch",
     "change_not_applied",
+    "choice_value_rejected",
     "contains_control",
     "contains_nul",
     "destination_occupied",
