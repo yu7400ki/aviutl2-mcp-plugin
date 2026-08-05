@@ -1,6 +1,6 @@
 //! 編集の失敗を表す型と、応答へ載せる安全な補助情報。
 
-use crate::alias::AliasRejection;
+use crate::alias::{AliasAdmissionError, AliasRejection};
 use crate::read::ReadError;
 use aviutl2_mcp_core::{ErrorCode, ItemWriteError};
 use serde_json::{Map, Value, json};
@@ -471,6 +471,21 @@ pub enum EditError {
         /// 発行済みの変更をどこまで戻せたか。
         rollback: RollbackOutcome,
     },
+}
+
+/// 受け入れの失敗を、編集の失敗へ振り分ける。
+///
+/// 規則で落ちた条件はそのまま運び、環境の事実だけを別の失敗へ写す。振り分けは
+/// 2 つの腕であり、エラーコードも種別の名前も落ちた側が決める。
+impl From<AliasAdmissionError> for EditError {
+    fn from(error: AliasAdmissionError) -> Self {
+        match error {
+            AliasAdmissionError::DirectoryUnavailable => {
+                ReadError::AliasDirectoryUnavailable.into()
+            }
+            AliasAdmissionError::Rejected(rejection) => EditError::AliasRejected(rejection),
+        }
+    }
 }
 
 impl EditError {

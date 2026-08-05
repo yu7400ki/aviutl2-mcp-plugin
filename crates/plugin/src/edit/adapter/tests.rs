@@ -1164,8 +1164,9 @@ fn an_alias_name_with_no_file_is_reported_as_not_found() {
 
 #[test]
 fn an_unresolvable_data_directory_is_told_apart_from_a_bad_name() {
-    // 要求そのものは正しく、この AviUtl2 では機能が使えないことを述べている。
-    // invalid_argument にすると、要求元は正しい名前を直そうとする。
+    // 正しい名前で解決できなければ、要求そのものは正しく、この AviUtl2 では
+    // 機能が使えないことを述べている。invalid_argument にすると、要求元は
+    // 正しい名前を直そうとする。
     let harness = Harness::new();
     let error = harness
         .edit
@@ -1179,6 +1180,27 @@ fn an_unresolvable_data_directory_is_told_apart_from_a_bad_name() {
     );
     assert_eq!(harness.host.enter_calls(), 0);
     harness.assert_untouched();
+
+    // 名前の規則はディレクトリを要さずに決まる。解決できない環境で誤った名前を
+    // 送ると、返るのは名前の側である。順序が逆だと、直せる誤りが「この AviUtl2
+    // では使えない」として返り、要求元は名前を直す手掛かりを失う。
+    for (name, reason) in [
+        (r"..\エイリアス", "forbidden_character"),
+        ("", "empty"),
+        ("エイリアス\0", "contains_nul"),
+    ] {
+        let harness = Harness::new();
+        let Err(error) = harness
+            .edit
+            .create_object(&create_from_alias_name(&harness, name, 1, 600))
+        else {
+            panic!("{name:?} から作成できてしまいました");
+        };
+
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument, "{name:?}");
+        assert_eq!(error.details()["reason"], json!(reason), "{name:?}");
+        harness.assert_untouched();
+    }
 }
 
 #[test]
@@ -1203,6 +1225,20 @@ fn an_alias_name_is_diagnosed_before_the_preconditions_are_checked() {
         assert_eq!(harness.host.enter_calls(), 0, "{label}");
         harness.assert_untouched();
     }
+
+    // 受け入れ規則を通る名前なら、前提条件の失敗がそのまま返る。alias 側が
+    // 常に勝つ実装でも上の 3 件は通ってしまう。
+    let harness = alias_harness(&dir);
+    let mut params = create_from_alias_name(&harness, "正常", 1, 600);
+    params.expected_project_epoch = "別のプロジェクト".to_string();
+    let error = harness
+        .edit
+        .create_object(&params)
+        .expect_err("別プロジェクトの前提が受理されました");
+
+    assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+    assert_eq!(error.details()["mismatch"], json!("project_epoch"));
+    harness.assert_untouched();
 }
 
 #[test]
@@ -1242,40 +1278,85 @@ fn an_alias_name_creates_the_same_object_as_its_raw_text() {
         .create_object(&create_from_alias_name(&by_name, "正常", 1, 600))
         .expect("名前から作成できませんでした");
 
-    let by_text = Harness::new();
-    let raw = by_text
+    let raw = create_from_raw_alias(crate::alias::tests::SINGLE);
+    assert_eq!(created_identity(&named), created_identity(&raw));
+    assert_eq!(named.created.len(), 1);
+}
+
+/// 作成された対象の同一性を、epoch を除いて取り出す。
+///
+/// epoch は一式ごとに新しく作られるため突き合わせられない。同一性を決めるのは
+/// fingerprint であり、その材料は SDK へ渡ったバイト列である。
+fn created_identity(outcome: &EditOutcome) -> Vec<(usize, usize, usize, Fingerprint)> {
+    outcome
+        .created
+        .iter()
+        .map(|object| {
+            (
+                object.layer,
+                object.frame_start,
+                object.frame_end,
+                object.fingerprint.clone(),
+            )
+        })
+        .collect()
+}
+
+/// 生テキストを作成元とする要求を、既定の配置で実行する。
+fn create_from_raw_alias(alias: &str) -> EditOutcome {
+    let harness = Harness::new();
+    harness
         .edit
         .create_object(&CreateObjectParams {
             source: ObjectSource::ObjectAlias {
-                alias: crate::alias::tests::SINGLE.to_string(),
+                alias: alias.to_string(),
             },
             placement: Placement {
                 scene_id: SCENE_ID,
                 layer: 1,
                 frame: 600,
             },
-            expected_project_epoch: by_text.epoch(),
+            expected_project_epoch: harness.epoch(),
         })
-        .expect("生テキストから作成できませんでした");
+        .expect("生テキストから作成できませんでした")
+}
 
-    // epoch は一式ごとに新しく作られるため突き合わせない。同一性を決めるのは
-    // fingerprint であり、その材料は SDK へ渡ったバイト列である。
-    let identity = |outcome: &EditOutcome| {
-        outcome
-            .created
-            .iter()
-            .map(|object| {
-                (
-                    object.layer,
-                    object.frame_start,
-                    object.frame_end,
-                    object.fingerprint.clone(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(identity(&named), identity(&raw));
-    assert_eq!(named.created.len(), 1);
+#[test]
+fn a_creation_by_name_hands_the_sdk_the_bytes_on_disk_and_not_a_re_encoding() {
+    // パースは検証にのみ使い、書き戻さない。書き戻すと改行・空行・重複キーが
+    // 保存されず、同じ対象の fingerprint がパーサの版で揺れる。
+    //
+    // 往復がバイト列を保存する入力で確かめても、書き戻す実装との差が出ない。
+    // 損失を伴う入力を選び、差が出ることを先に確かめてから突き合わせる。
+    let (dir, _) = alias_fixture();
+    let on_disk = dir.alias_text("改行LF");
+    let rewritten = on_disk
+        .parse::<aviutl2::alias::Table>()
+        .expect("往復の材料がパースできません")
+        .to_string();
+    assert_ne!(
+        rewritten, on_disk,
+        "往復が保存される入力では、書き戻す実装と区別できません"
+    );
+
+    let by_name = alias_harness(&dir);
+    let named = by_name
+        .edit
+        .create_object(&create_from_alias_name(&by_name, "改行LF", 1, 600))
+        .expect("名前から作成できませんでした");
+
+    assert_eq!(
+        created_identity(&named),
+        created_identity(&create_from_raw_alias(&on_disk)),
+        "SDK へ渡ったのがディスク上のバイト列ではありません"
+    );
+    // 書き戻したバイト列とは別物になる。同じであれば、この検査は差を
+    // 捕まえられていない。
+    assert_ne!(
+        created_identity(&named),
+        created_identity(&create_from_raw_alias(&rewritten)),
+        "書き戻した文字列と区別が付いていません"
+    );
 }
 
 #[test]

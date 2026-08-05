@@ -203,6 +203,21 @@ impl AliasRejection {
     }
 }
 
+/// 名前で指定されたエイリアスを受け入れられない理由。
+///
+/// 受け入れ規則そのものと、規則を掛ける相手が居ないことを分ける。前者は要求
+/// 内容の誤りであり、後者は要求が正しくてもこの AviUtl2 では機能が使えないこと
+/// を述べる。[`AliasRejection`] は 4 条件だけを表し、環境の事実を混ぜない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AliasAdmissionError {
+    /// AviUtl2 のデータディレクトリを解決できない。
+    #[error("AviUtl2 のデータディレクトリを解決できません")]
+    DirectoryUnavailable,
+    /// 受け入れ規則で落ちた。
+    #[error(transparent)]
+    Rejected(#[from] AliasRejection),
+}
+
 /// エイリアスを収めたディレクトリ。
 ///
 /// **デバイス名の置換が起きない形（`\\?\` 前置）へ正規化済みであることを型が
@@ -253,18 +268,26 @@ pub fn admit_alias(dir: &AliasDirectory, name: &str) -> Result<AdmittedAlias, Al
     admit_named_file(dir, name)
 }
 
-/// データディレクトリを起点に受け入れ規則を通す。
+/// データディレクトリの解決結果を起点に受け入れ規則を通す。
 ///
 /// 一覧は窓の 1 件ごとに [`admit_alias`] を呼ぶため、正規化したディレクトリを
 /// 1 度だけ組み立てて持ち回る。1 件だけを見る作成の経路にはその持ち回りが無く、
 /// 組み立てまで含めてここが引き受ける。
 ///
-/// エイリアスディレクトリが無ければ、その名前のファイルも無い。判定は名前の
-/// 規則より後に置く——規則はファイルを開かずに決まり、費用の順で先に来る。
-pub fn admit_alias_in(data_dir: &Path, name: &str) -> Result<AdmittedAlias, AliasRejection> {
+/// **判定は名前の規則から始める。** 規則はファイルもディレクトリも要さずに
+/// 決まり、費用の順で先に来る。データディレクトリの不在を先に名乗ると、名前が
+/// 誤っている要求へ「この AviUtl2 では機能が使えない」と答えることになり、
+/// 要求元は直せる誤りを直せないものとして読む。
+///
+/// エイリアスディレクトリが無い場合は、その名前のファイルも無い。
+pub fn admit_alias_in(
+    data_dir: Option<&Path>,
+    name: &str,
+) -> Result<AdmittedAlias, AliasAdmissionError> {
     validate_object_alias_name(name).map_err(AliasRejection::ForbiddenName)?;
+    let data_dir = data_dir.ok_or(AliasAdmissionError::DirectoryUnavailable)?;
     let dir = AliasDirectory::resolve(data_dir).ok_or(AliasRejection::NotFound)?;
-    admit_named_file(&dir, name)
+    Ok(admit_named_file(&dir, name)?)
 }
 
 /// 名前の規則を通った後の、条件 2 以降を判定する。
@@ -608,6 +631,13 @@ pub(crate) mod tests {
     /// 複数オブジェクト形式のエイリアス。
     const MULTIPLE: &str = "[0]\r\nlayer=0\r\nframe=0,80\r\n[0.0]\r\neffect.name=テキスト\r\nテキスト=ひとつめ\r\n[1]\r\nlayer=1\r\nframe=0,80\r\n[1.0]\r\neffect.name=図形\r\n";
 
+    /// 受け入れ規則の 4 条件を通るが、往復がバイト列を保存しないエイリアス。
+    ///
+    /// 改行が LF であり、空行を含む。パースして書き戻すと改行は CRLF になり、
+    /// 空行は消える。**保存される入力だけを置くと、書き戻す実装でも差が出ず、
+    /// 生バイト列を渡していることを確かめられない。**
+    pub(crate) const LOSSY: &str = "[Object]\nframe=0,80\n\n[Object.0]\neffect.name=図形\n";
+
     /// パースはできるが effect 名を 1 つも持たないエイリアス。
     const WITHOUT_EFFECT: &str = "[Object]\r\nframe=0,80\r\n[Object.0]\r\nX=0.0\r\n";
 
@@ -650,6 +680,19 @@ pub(crate) mod tests {
 
         pub(crate) fn write_history(&self, contents: &[u8]) {
             std::fs::write(self.0.join(HISTORY_FILE), contents).unwrap();
+        }
+
+        /// 置いたエイリアスをディスク上のバイト列のまま読み直す。
+        ///
+        /// 受け入れ規則を通さずに読む。規則が返す `raw` と突き合わせる相手は、
+        /// 規則の側が組み立てた値であってはならない。
+        pub(crate) fn alias_text(&self, name: &str) -> String {
+            let bytes = std::fs::read(
+                self.raw_alias_dir()
+                    .join(format!("{name}.{ALIAS_EXTENSION}")),
+            )
+            .unwrap();
+            String::from_utf8(bytes).unwrap()
         }
     }
 
@@ -703,6 +746,7 @@ pub(crate) mod tests {
     pub(crate) fn write_fixture(dir: &TempDir) -> Vec<String> {
         dir.write_alias("正常", SINGLE.as_bytes());
         dir.write_alias("複数", MULTIPLE.as_bytes());
+        dir.write_alias("改行LF", LOSSY.as_bytes());
         dir.write_alias("不正な.名前", SINGLE.as_bytes());
         dir.write_alias("巨大", &oversized_alias());
         dir.write_alias("BOM付き", format!("\u{feff}{SINGLE}").as_bytes());
@@ -712,6 +756,7 @@ pub(crate) mod tests {
         [
             "正常",
             "複数",
+            "改行LF",
             "不正な.名前",
             "巨大",
             "BOM付き",
@@ -1397,6 +1442,9 @@ pub(crate) mod tests {
         assert_eq!(
             labels,
             vec![
+                // UI 状態ファイルに項目を持たない名前は label を欠く。既定を
+                // 補完しない。
+                ("改行LF".to_string(), None),
                 ("正常".to_string(), Some("テロップ集".to_string())),
                 ("複数".to_string(), Some("カスタムオブジェクト".to_string())),
             ]

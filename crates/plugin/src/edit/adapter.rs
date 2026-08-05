@@ -169,12 +169,12 @@ impl<H: EditHost> HostEditAdapter<H> {
     /// 戻り値であり、片方にだけ条件を足すことができない。
     ///
     /// データディレクトリを解決できないことだけは規則の外にある。要求そのものは
-    /// 正しく、この AviUtl2 では機能が使えないことを述べている。
+    /// 正しく、この AviUtl2 では機能が使えないことを述べている。判定の順序は
+    /// 受け入れ規則の側が持つ——ここでホストへ先に問い合わせると、誤った名前へ
+    /// 環境の失敗を返すことになる。
     fn admit_alias(&self, name: &str) -> Result<AdmittedAlias, EditError> {
-        let Some(data_dir) = self.host.alias_data_directory() else {
-            return Err(ReadError::AliasDirectoryUnavailable.into());
-        };
-        Ok(crate::alias::admit_alias_in(&data_dir, name)?)
+        let data_dir = self.host.alias_data_directory();
+        Ok(crate::alias::admit_alias_in(data_dir.as_deref(), name)?)
     }
 
     /// 有効・無効を変更できないと分かる対象を、編集区間へ入る前に弾く。
