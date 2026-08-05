@@ -2645,7 +2645,12 @@ mod tests {
 
     #[test]
     fn an_unusable_label_is_invalid_argument_without_reading() {
-        for label in [json!("\u{0}"), json!("あ".repeat(1025))] {
+        // 種別まで固定する。コードだけを見ると、NUL と長さ超過が同じ応答に
+        // 畳まれても気付けない。
+        for (label, reason) in [
+            (json!("\u{0}"), "contains_nul"),
+            (json!("あ".repeat(1025)), "too_long"),
+        ] {
             let adapter = FakeAdapter::new();
             let error = read(
                 &adapter,
@@ -2655,6 +2660,8 @@ mod tests {
             .unwrap_err();
 
             assert_eq!(error.code, ErrorCode::InvalidArgument, "{label}");
+            assert_eq!(error.details["reason"], json!(reason), "{label}");
+            assert!(!error.retryable, "{label}");
             assert!(adapter.calls().is_empty(), "{label}");
         }
     }

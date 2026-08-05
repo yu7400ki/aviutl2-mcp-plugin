@@ -203,6 +203,40 @@ impl AliasRejection {
     }
 }
 
+/// エイリアスを収めたディレクトリ。
+///
+/// **デバイス名の置換が起きない形（`\\?\` 前置）へ正規化済みであることを型が
+/// 保証する。** 正規化はディレクトリ 1 つにつき 1 度だけ行う。窓の 1 件ごとに
+/// 行うと、1 要求で開くハンドルの数が [`crate::read::ReadAdapter`] の定める
+/// 上限（窓の大きさ ＋ 1）の 2 倍になる。
+///
+/// 保証を型で運ぶのは、組み立てる側が忘れられないようにするためである。パスを
+/// 受け取る形にすると、呼び出しごとに正規化したかどうかが分かれる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasDirectory(PathBuf);
+
+impl AliasDirectory {
+    /// データディレクトリ配下のエイリアスディレクトリを正規化して得る。
+    ///
+    /// 存在しなければ `None` を返す。不在は「ディレクトリが違う」ことも「まだ
+    /// 1 つも登録していない」ことも意味し、我々には区別できない。
+    pub fn resolve(data_dir: &Path) -> Option<Self> {
+        std::fs::canonicalize(data_dir.join(ALIAS_DIRECTORY))
+            .ok()
+            .map(Self)
+    }
+
+    /// 直下のエイリアスファイルのパスを組み立てる。
+    fn file(&self, name: &str) -> PathBuf {
+        self.0.join(format!("{name}.{ALIAS_EXTENSION}"))
+    }
+
+    /// 正規化済みのディレクトリそのものを返す。
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
 /// エイリアス名から、受け入れた結果か、落ちた条件を返す。
 ///
 /// 判定は次の順で行う。
@@ -214,7 +248,7 @@ impl AliasRejection {
 ///
 /// `dir` はエイリアスを収めたディレクトリである。名前の判定はここを通る前に
 /// 済んでおり、連結してから判定する形にはしない。
-pub fn admit_alias(dir: &Path, name: &str) -> Result<AdmittedAlias, AliasRejection> {
+pub fn admit_alias(dir: &AliasDirectory, name: &str) -> Result<AdmittedAlias, AliasRejection> {
     validate_object_alias_name(name).map_err(AliasRejection::ForbiddenName)?;
     let raw = read_alias(dir, name)?;
     let table: Table = parse_table(&raw).ok_or(AliasRejection::NotParsable)?;
@@ -231,15 +265,19 @@ pub fn admit_alias(dir: &Path, name: &str) -> Result<AdmittedAlias, AliasRejecti
 
 /// エイリアスファイルを読み、大きさと符号化を確かめる。
 ///
-/// 開く前にディレクトリを正規化する。Windows は `CON` や `NUL` といった予約
-/// デバイス名を通常のパスの中でもデバイスとして解決するが、禁止文字の集合には
-/// 現れないためエイリアス名としては通ってしまう。正規化が返す `\\?\` 付きの
-/// パスの下ではこの読み替えが起きず、存在しないファイルとして落ちる。禁止文字を
-/// 増やす形は採らない。集合は AviUtl2 の UI が課すものであり、我々が広げると
-/// UI から登録できる名前を我々だけが拒むことになる。
-fn read_alias(dir: &Path, name: &str) -> Result<String, AliasRejection> {
-    let dir = std::fs::canonicalize(dir).map_err(|_| AliasRejection::NotFound)?;
-    let path = dir.join(format!("{name}.{ALIAS_EXTENSION}"));
+/// `CON` や `NUL` といった Windows の予約デバイス名は禁止文字の集合に現れず、
+/// エイリアス名としては通る。**禁止文字を増やす形は採らない。** 集合は AviUtl2
+/// の UI が課すものであり、我々が広げると UI から登録できる名前を我々だけが
+/// 拒むことになる。防ぐのはパスの組み立ての側であり、[`AliasDirectory`] が
+/// 保証する `\\?\` 前置の下では置換が起きないことを実測している。
+///
+/// **拡張子を付ける形が単独で効いているかは当てにしない。** 実測では
+/// `<dir>\NUL.object` は素の連結でもデバイスへ解決しなかったが、`<dir>\NUL` は
+/// 解決した。どちらが効いているかは Windows の版に依る話であり、**置換が起き
+/// ない形を我々の側で作っておくことと、拡張子が結果的に助けていることは別で
+/// ある。**
+fn read_alias(dir: &AliasDirectory, name: &str) -> Result<String, AliasRejection> {
+    let path = dir.file(name);
     let bytes = match read_bounded(&path, MAX_ALIAS_BYTES as u64) {
         Ok(Some(bytes)) => bytes,
         Ok(None) => return Err(AliasRejection::TooLarge),
@@ -396,7 +434,11 @@ fn read_history(data_dir: &Path) -> Option<Table> {
 /// ファイルを開いていないことを呼び出し回数として数えられる。
 pub trait AliasFiles {
     /// 受け入れ規則を 1 件について適用する。
-    fn admit(&self, alias_dir: &Path, name: &str) -> Result<AdmittedAlias, AliasRejection>;
+    fn admit(
+        &self,
+        alias_dir: &AliasDirectory,
+        name: &str,
+    ) -> Result<AdmittedAlias, AliasRejection>;
 
     /// label の表を読む。
     fn label_table(&self, data_dir: &Path) -> LabelTable;
@@ -406,7 +448,11 @@ pub trait AliasFiles {
 pub struct DiskAliasFiles;
 
 impl AliasFiles for DiskAliasFiles {
-    fn admit(&self, alias_dir: &Path, name: &str) -> Result<AdmittedAlias, AliasRejection> {
+    fn admit(
+        &self,
+        alias_dir: &AliasDirectory,
+        name: &str,
+    ) -> Result<AdmittedAlias, AliasRejection> {
         admit_alias(alias_dir, name)
     }
 
@@ -429,6 +475,7 @@ impl AliasFiles for DiskAliasFiles {
 /// **ファイルを開くのは 6 だけである。** 名前の規則もラベルの絞り込みも中身を
 /// 要さないため、パースの費用が窓の大きさで頭打ちになる。ラベルの表は窓の外に
 /// 置く——3 の絞り込みが表を要し、絞り込みの後でなければ窓が決まらない。
+/// ディレクトリの正規化も 1 度だけであり、窓の件数に比例させない。
 ///
 /// 6 で落ちたエントリは載せず、その分を総件数から引く。1 件のために一覧全体を
 /// 落とさない。
@@ -439,8 +486,15 @@ pub fn list_object_aliases(
     snapshot_revision: u64,
     files: &dyn AliasFiles,
 ) -> Result<ListObjectAliasesResult, PageError> {
-    let alias_dir = data_dir.join(ALIAS_DIRECTORY);
     let labels = files.label_table(data_dir);
+    let Some(alias_dir) = AliasDirectory::resolve(data_dir) else {
+        // ディレクトリが無ければ列挙するものも無い。空のページを返す。
+        let (_, meta) = take_page::<(String, Option<String>)>(&[], page, snapshot_revision)?;
+        return Ok(ListObjectAliasesResult {
+            items: Vec::new(),
+            page: meta,
+        });
+    };
     let mut entries: Vec<(String, Option<String>)> = enumerate_alias_names(&alias_dir)
         .into_iter()
         .map(|name| {
@@ -477,18 +531,22 @@ pub fn list_object_aliases(
 
 /// ディレクトリを列挙し、名前の規則を通るものだけを集める。
 ///
-/// ディレクトリの不在は空の列挙として扱う。不在は「ディレクトリが違う」ことも
-/// 「まだ 1 つも登録していない」ことも意味し、我々には区別できない。区別できない
-/// ものを失敗として名乗らない。
+/// 並びは決めない。列挙の順はファイルシステムが決めるものであり、要求元へ返す
+/// 並びは呼び出し側が名前で整列して作る。
 ///
 /// 件数は打ち切らない。名前 1 件は小さく、重いのはファイルを開くことであって、
 /// それは窓の分に限られている。打ち切ると総件数が嘘になる。
-fn enumerate_alias_names(alias_dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(alias_dir) else {
+///
+/// ディレクトリは除く。判定は列挙が返した属性で決まり、ファイルを開かない。
+/// 除かないと、総件数だけが窓を開くまで多い状態になる。**リンクは除かない** —
+/// 開けば実体へ届くものを、名前の段で落とさない。
+fn enumerate_alias_names(alias_dir: &AliasDirectory) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(alias_dir.path()) else {
         return Vec::new();
     };
     entries
         .flatten()
+        .filter(|entry| entry.file_type().map(|kind| !kind.is_dir()).unwrap_or(true))
         .filter_map(|entry| alias_name_of(&entry.path()))
         .collect()
 }
@@ -552,13 +610,20 @@ pub(crate) mod tests {
             &self.0
         }
 
-        fn alias_dir(&self) -> PathBuf {
+        /// 正規化を経ていない素のエイリアスディレクトリ。
+        fn raw_alias_dir(&self) -> PathBuf {
             self.0.join(ALIAS_DIRECTORY)
+        }
+
+        /// 生産経路が使うのと同じ、正規化済みのエイリアスディレクトリ。
+        fn alias_dir(&self) -> AliasDirectory {
+            AliasDirectory::resolve(&self.0).unwrap()
         }
 
         fn write_alias(&self, name: &str, contents: &[u8]) {
             std::fs::write(
-                self.alias_dir().join(format!("{name}.{ALIAS_EXTENSION}")),
+                self.raw_alias_dir()
+                    .join(format!("{name}.{ALIAS_EXTENSION}")),
                 contents,
             )
             .unwrap();
@@ -598,7 +663,11 @@ pub(crate) mod tests {
     }
 
     impl AliasFiles for CountingFiles {
-        fn admit(&self, alias_dir: &Path, name: &str) -> Result<AdmittedAlias, AliasRejection> {
+        fn admit(
+            &self,
+            alias_dir: &AliasDirectory,
+            name: &str,
+        ) -> Result<AdmittedAlias, AliasRejection> {
             self.opens.set(self.opens.get() + 1);
             self.inner.admit(alias_dir, name)
         }
@@ -789,6 +858,57 @@ pub(crate) mod tests {
         assert!(section_depth_within_limit(HISTORY));
     }
 
+    /// パースした表の入れ子の深さを測る。
+    ///
+    /// 判定はパーサのトークン化をテキストの上で写したものである。写しである
+    /// 以上、上流が変われば黙って乖離する。実際にパースして測った深さと突き
+    /// 合わせることで、写しの前提そのものを固定する。
+    fn measured_depth(table: &Table) -> usize {
+        let mut deepest = 0;
+        let mut stack: Vec<(&Table, usize)> = vec![(table, 0)];
+        while let Some((current, depth)) = stack.pop() {
+            deepest = deepest.max(depth);
+            stack.extend(current.subtables().map(|(_, child)| (child, depth + 1)));
+        }
+        deepest
+    }
+
+    #[test]
+    fn what_the_depth_check_admits_really_parses_within_the_limit() {
+        // 判定が通した入力は、実際にパースしても上限を超えない。超える入力を
+        // 通してしまえば、表を捨てる時点でスタックが尽きる。
+        let deep = vec!["a"; MAX_SECTION_DEPTH - 1].join(".");
+        let adversarial = [
+            SINGLE.to_string(),
+            MULTIPLE.to_string(),
+            HISTORY.to_string(),
+            // 上限ちょうど。
+            format!("[{deep}]\r\nk=v\r\n"),
+            // 見出しが行を跨ぐ。パーサは閉じるまで名前として読み続ける。
+            "[a.b\r\nc.d]\r\nk=v\r\n".to_string(),
+            // 値の側に区切りが並ぶ。深さは増えない。
+            "[Object.0]\r\nX=0.0\r\nY=1.2.3\r\n".to_string(),
+            // 見出しの後に別の浅い見出しが来る。深さは最大値で決まる。
+            format!("[{deep}]\r\nk=v\r\n[Object]\r\nk=v\r\n"),
+            // 空の見出し。
+            "[]\r\nk=v\r\n".to_string(),
+            // 節を持たない。
+            "k=v\r\n".to_string(),
+        ];
+
+        for source in adversarial {
+            assert!(
+                section_depth_within_limit(&source),
+                "判定が落としました: {source:?}"
+            );
+            let table = parse_table(&source).unwrap_or_else(|| panic!("{source:?}"));
+            assert!(
+                measured_depth(&table) <= MAX_SECTION_DEPTH,
+                "測った深さが上限を超えました: {source:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_deeply_nested_alias_is_dropped_from_the_listing() {
         let dir = TempDir::new();
@@ -812,14 +932,26 @@ pub(crate) mod tests {
 
     #[test]
     fn a_deeply_nested_history_leaves_every_label_empty() {
+        // 深い節だけを置くと、深さの判定が無くても label は引けない——その
+        // ファイルは Effect.object.<名前> を持たないためである。判定が効いて
+        // いることは、引ける label を同じファイルへ同居させて初めて見える。
         let dir = TempDir::new();
         dir.write_alias("正常", SINGLE.as_bytes());
         dir.write_history(
             format!(
-                "[{}]\r\nlabel=x\r\n",
+                "{HISTORY}[{}]\r\nlabel=x\r\n",
                 vec!["a"; MAX_SECTION_DEPTH + 1].join(".")
             )
             .as_bytes(),
+        );
+
+        // 同じ内容から深い節だけを除けば label は引ける。差は深さだけである。
+        let shallow = TempDir::new();
+        shallow.write_alias("正常", SINGLE.as_bytes());
+        shallow.write_history(HISTORY.as_bytes());
+        assert_eq!(
+            list(&shallow, None, &page(0, DEFAULT_PAGE_LIMIT)).items[0].label,
+            Some("テロップ集".to_string())
         );
 
         let result = list(&dir, None, &page(0, DEFAULT_PAGE_LIMIT));
@@ -833,6 +965,19 @@ pub(crate) mod tests {
         // 解決すると、読み取りが戻らないことがある。
         let dir = TempDir::new();
         let alias_dir = dir.alias_dir();
+
+        // 素の連結ではデバイスへ解決する。ここで固定するのは Windows の挙動
+        // そのものであり、我々が防いでいる対象である。
+        assert!(
+            File::open(dir.raw_alias_dir().join("NUL")).is_ok(),
+            "素の連結でデバイスへ解決しませんでした"
+        );
+        // 受け入れ規則が使うディレクトリは置換の起きない形になっている。
+        assert!(
+            File::open(alias_dir.path().join("NUL")).is_err(),
+            "正規化したディレクトリの下でデバイスへ解決しました"
+        );
+
         for name in ["CON", "NUL", "PRN", "AUX", "COM1"] {
             assert_eq!(
                 admit_alias(&alias_dir, name),
@@ -994,7 +1139,7 @@ pub(crate) mod tests {
         for item in &result.items {
             let admitted = admit_alias(&dir.alias_dir(), &item.name).unwrap();
             let on_disk = std::fs::read(
-                dir.alias_dir()
+                dir.raw_alias_dir()
                     .join(format!("{}.{ALIAS_EXTENSION}", item.name)),
             )
             .unwrap();
@@ -1111,15 +1256,31 @@ pub(crate) mod tests {
         assert_eq!(result.page.total_count, 1);
     }
 
+    /// 列挙が返す生の並びと、名前の昇順が食い違う名前。
+    ///
+    /// ディレクトリの列挙は大文字化した UTF-16 の照合順で返り、`String` の
+    /// 比較は符号位置の順である。**大小が混ざらない名前だけを並べると 2 つの
+    /// 順が一致してしまい、整列そのものを消しても気付けない。**
+    const COLLATION_SENSITIVE: [&str; 5] = ["a", "B", "z", "あ", "お"];
+
     #[test]
     fn the_items_are_sorted_by_name_across_pages_regardless_of_creation_order() {
-        let created: Vec<&str> = vec!["う", "あ", "お", "い", "え"];
-        let mut collected = Vec::new();
         let dir = TempDir::new();
-        for name in &created {
+        for name in COLLATION_SENSITIVE {
             dir.write_alias(name, SINGLE.as_bytes());
         }
 
+        // 列挙が返す生の並びが、期待する並びと実際に違うことを先に確かめる。
+        // 一致してしまう fixture では、この検査は何も守っていない。
+        let enumerated = enumerate_alias_names(&dir.alias_dir());
+        let mut expected = enumerated.clone();
+        expected.sort();
+        assert_ne!(
+            enumerated, expected,
+            "列挙の順と名前の昇順が一致する fixture では整列を確かめられません"
+        );
+
+        let mut collected = Vec::new();
         let mut offset = 0;
         loop {
             let result = list(&dir, None, &page(offset, 2));
@@ -1129,10 +1290,10 @@ pub(crate) mod tests {
                 None => break,
             }
         }
-        assert_eq!(collected, vec!["あ", "い", "う", "え", "お"]);
+        assert_eq!(collected, expected);
 
         let reversed = TempDir::new();
-        for name in created.iter().rev() {
+        for name in COLLATION_SENSITIVE.iter().rev() {
             reversed.write_alias(name, SINGLE.as_bytes());
         }
         let result = list(&reversed, None, &page(0, DEFAULT_PAGE_LIMIT));
@@ -1140,9 +1301,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_directory_that_looks_like_an_alias_is_not_counted() {
+        // 判定は列挙が返した属性で決まり、ファイルを開かない。除かないと、
+        // 総件数だけが窓を開くまで多い状態になる。
+        let dir = TempDir::new();
+        dir.write_alias("正常", SINGLE.as_bytes());
+        std::fs::create_dir_all(dir.raw_alias_dir().join("紛らわしい.object")).unwrap();
+
+        let result = list(&dir, None, &page(0, DEFAULT_PAGE_LIMIT));
+        assert_eq!(item_names(&result), vec!["正常"]);
+        assert_eq!(result.page.total_count, 1);
+    }
+
+    #[test]
     fn a_missing_alias_directory_yields_an_empty_listing() {
         let dir = TempDir::new();
-        std::fs::remove_dir_all(dir.alias_dir()).unwrap();
+        std::fs::remove_dir_all(dir.raw_alias_dir()).unwrap();
 
         let result = list(&dir, None, &page(0, DEFAULT_PAGE_LIMIT));
         assert!(result.items.is_empty());
