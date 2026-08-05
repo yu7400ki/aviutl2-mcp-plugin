@@ -4445,7 +4445,8 @@ mod tests {
                 | Edit::CreateObjectSection
                 | Edit::DeleteObjectSection
                 | Edit::MoveObjectSection
-                | Edit::SetGridBpm => limits.edit_request,
+                | Edit::SetGridBpm
+                | Edit::SetSceneSettings => limits.edit_request,
             };
             assert_eq!(
                 limits.request_phase_budget(op.as_str()),

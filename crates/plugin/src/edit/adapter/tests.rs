@@ -3439,9 +3439,9 @@ fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
         },
         // 選択状態はプロジェクトの内容ではない。revision を進めない。
         EditOperation::SetSelection => return None,
-        // 一括適用に対応する編集口のメソッドはまだ無い。実装を足すときに
-        // ここへ手続きを書き、下の表から自動的に検査される。
-        EditOperation::ApplyBatch => return None,
+        // シーン設定の変更と一括適用に対応する編集口のメソッドはまだ無い。実装を
+        // 足すときにここへ手続きを書き、下の表から自動的に検査される。
+        EditOperation::SetSceneSettings | EditOperation::ApplyBatch => return None,
     })
 }
 
@@ -3473,6 +3473,7 @@ fn the_content_edit_table_leaves_out_only_the_declared_operations() {
         excluded,
         vec![
             EditOperation::SetSelection.as_str(),
+            EditOperation::SetSceneSettings.as_str(),
             EditOperation::ApplyBatch.as_str(),
         ]
     );
@@ -3564,9 +3565,9 @@ fn locked_layer(operation: EditOperation) -> Option<LockedLayer> {
         // BPM グリッドはシーンに属し、どのレイヤーの対象にも触れない。
         | EditOperation::SetGridBpm => LockedLayer::Allowed,
         EditOperation::SetSelection => return None,
-        // 一括適用に対応する編集口のメソッドはまだ無い。実装を足すときに
-        // 可否をここへ書く。
-        EditOperation::ApplyBatch => return None,
+        // シーン設定の変更と一括適用に対応する編集口のメソッドはまだ無い。実装を
+        // 足すときに可否をここへ書く。
+        EditOperation::SetSceneSettings | EditOperation::ApplyBatch => return None,
     })
 }
 
@@ -3620,6 +3621,7 @@ fn the_layer_lock_table_leaves_out_only_the_declared_operations() {
         excluded,
         vec![
             EditOperation::SetSelection.as_str(),
+            EditOperation::SetSceneSettings.as_str(),
             EditOperation::ApplyBatch.as_str(),
         ]
     );

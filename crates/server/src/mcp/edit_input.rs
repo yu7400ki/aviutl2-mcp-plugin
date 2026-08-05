@@ -1099,6 +1099,9 @@ mod tests {
                 "entries": [{ "tempo": 120.0, "beat": 4, "start": 0.0, "offset": 0.0 }],
                 "expected_project_epoch": SAMPLE_EPOCH,
             }),
+            // シーン設定の変更に対応する入力型はまだ無い。足すときにここへ
+            // 入力の形を書く。
+            EditOperation::SetSceneSettings => return None,
             EditOperation::ApplyBatch => json!({
                 "instance_id": SAMPLE_ID,
                 "operations": [batch_move_json()],
@@ -1142,6 +1145,9 @@ mod tests {
             EditOperation::DeleteObjectSection => decoded!(DeleteObjectSectionInput),
             EditOperation::MoveObjectSection => decoded!(MoveObjectSectionInput),
             EditOperation::SetGridBpm => decoded!(SetGridBpmInput),
+            // 入力型を持たない operation は `current_input` が除外するため、
+            // ここへは到達しない。
+            EditOperation::SetSceneSettings => unreachable!("入力型を持たない operation"),
             EditOperation::ApplyBatch => decoded!(ApplyBatchInput),
         })
     }

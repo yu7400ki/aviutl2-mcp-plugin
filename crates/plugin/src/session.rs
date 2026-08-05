@@ -1121,6 +1121,9 @@ fn decode_edit_request(
             decoded!(MoveObjectSectionParams, EditRequest::MoveObjectSection)
         }
         EditOperation::SetGridBpm => decoded!(SetGridBpmParams, EditRequest::SetGridBpm),
+        // シーン設定の変更に対応する編集口のメソッドはまだ無い。実装を足すときに
+        // ここで params を復号し、要求を組み立てる。
+        EditOperation::SetSceneSettings => return Err(unsupported_operation()),
         EditOperation::ApplyBatch => {
             let params: ApplyBatchParams = decode_params(params)?;
             params.validate().map_err(batch_input_error)?;
@@ -3392,6 +3395,9 @@ mod edit_tests {
                 "entries": [{ "tempo": 120.0, "beat": 4, "start": 0.0, "offset": 0.0 }],
                 "expected_project_epoch": EPOCH,
             }),
+            // シーン設定の変更に対応する編集口のメソッドはまだ無い。実装を
+            // 足すときにここへ要求の形を書く。
+            EditOperation::SetSceneSettings => return None,
             EditOperation::ApplyBatch => batch_params(),
         })
     }
@@ -3613,20 +3619,17 @@ mod edit_tests {
     }
 
     #[test]
-    fn the_request_table_leaves_out_no_operation() {
+    fn the_request_table_leaves_out_only_the_declared_operations() {
         // 網羅 match は operation の追加を止めるが、既存の枝を除外へ書き換えても
-        // 止まらない。表から外れているものが 1 つも無いことを固定することで、
-        // 除外を増やせばここが落ちる。
+        // 止まらない。表から外れているものを併せて固定することで、追加も除外も
+        // 見逃さない。
         let excluded: Vec<&str> = EditOperation::ALL
             .into_iter()
             .filter(|operation| current_request(*operation).is_none())
             .map(EditOperation::as_str)
             .collect();
 
-        assert!(
-            excluded.is_empty(),
-            "要求の形の表から外れています: {excluded:?}"
-        );
+        assert_eq!(excluded, vec![EditOperation::SetSceneSettings.as_str()]);
     }
 
     #[test]
@@ -3671,7 +3674,9 @@ mod edit_tests {
         // 要求内容の誤りに対する扱いは同じでなければならない。
         for (state, deadline, order) in misordering_cases() {
             for operation in EditOperation::ALL {
-                let mut params = current_request(operation).expect("要求の形が表にありません");
+                let Some(mut params) = current_request(operation) else {
+                    continue;
+                };
                 params
                     .as_object_mut()
                     .expect("params は object")
