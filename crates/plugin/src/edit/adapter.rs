@@ -1556,4 +1556,4 @@ fn selection_state(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

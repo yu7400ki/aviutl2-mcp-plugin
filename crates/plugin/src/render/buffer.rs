@@ -196,7 +196,7 @@ pub fn extract(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use proptest::prelude::*;
 
@@ -211,6 +211,75 @@ mod tests {
         validate_layout(call.0, call.1, call.2, call.3, call.4, call.5)
     }
 
+    /// 規則を実際に破る組を並べる。
+    ///
+    /// [`BufferRule`] に対する網羅 `match` であり `_` を使わない。**規則を足すと
+    /// ここが落ち、それを破る組を書くまでコンパイルできない。** 規則を数え上げる
+    /// のは [`BufferRule::ALL`] の役目であり、破れることの証明は組の側が持つ。
+    fn calls_breaking(rule: &BufferRule) -> Vec<(u32, u32, u32, u32, u32, usize)> {
+        match rule {
+            BufferRule::FrameMismatch => vec![(7, 8, 4, 3, 16, 48)],
+            BufferRule::DimensionOutOfRange => vec![
+                (7, 7, MAX_DIMENSION + 1, 3, 16, 48),
+                (7, 7, 4, MAX_DIMENSION + 1, 16, 48),
+                (7, 7, 4, 3, MAX_DIMENSION + 1, 48),
+            ],
+            BufferRule::EmptyDimension => vec![(7, 7, 0, 3, 16, 0), (7, 7, 4, 0, 16, 0)],
+            // 規則 2 を通る最大の幅でも、1 行のバイト数は u32 に収まらない。
+            BufferRule::RowBytesOverflow => vec![(
+                7,
+                7,
+                MAX_DIMENSION,
+                1,
+                MAX_DIMENSION,
+                MAX_DIMENSION as usize,
+            )],
+            BufferRule::PitchTooSmall => vec![(7, 7, 4, 3, 15, 45)],
+            BufferRule::EmptyBuffer => vec![(7, 7, 4, 3, 16, 0)],
+            BufferRule::BufferLengthMismatch => vec![(7, 7, 4, 3, 16, 47)],
+            BufferRule::FrameTooLarge => {
+                // 詰め物を除いた大きさが上限をちょうど 1 バイト超える組を作る。
+                let width = 4 * 1024;
+                let row_bytes = width * BYTES_PER_PIXEL;
+                let height = (MAX_RENDER_FRAME_BYTES / row_bytes as u64) as u32 + 1;
+                let buffer_len = row_bytes as usize * height as usize;
+                vec![(7, 7, width, height, row_bytes, buffer_len)]
+            }
+        }
+    }
+
+    /// 規則を破る組がすべてその規則で拒否されることを確かめ、組を返す。
+    fn assert_breaks(rule: BufferRule) -> Vec<(u32, u32, u32, u32, u32, usize)> {
+        let calls = calls_breaking(&rule);
+        assert!(!calls.is_empty(), "{} を破る組がありません", rule.as_str());
+        for call in &calls {
+            assert_eq!(
+                validate(*call),
+                Err(rule),
+                "{call:?} が {} を破りませんでした",
+                rule.as_str()
+            );
+        }
+        calls
+    }
+
+    /// 検証が実際に返した規則違反を集める。
+    ///
+    /// 破る組を持たない規則と、別の規則を返した組をその場で落とす。
+    pub(crate) fn broken_buffer_rules() -> Vec<BufferRule> {
+        BufferRule::ALL
+            .iter()
+            .flat_map(|rule| assert_breaks(*rule).into_iter().map(|_| *rule))
+            .collect()
+    }
+
+    #[test]
+    fn every_buffer_rule_has_a_call_that_breaks_it() {
+        // 検証を通らない組を書かないまま規則を足すと、応答に現れない名前が
+        // 一覧へ残る。
+        broken_buffer_rules();
+    }
+
     #[test]
     fn a_consistent_call_passes_every_rule() {
         let layout = validate(valid_call()).expect("整合した組が拒否されました");
@@ -223,9 +292,7 @@ mod tests {
 
     #[test]
     fn rule_1_rejects_a_frame_that_is_not_the_requested_one() {
-        let mut call = valid_call();
-        call.1 = 8;
-        assert_eq!(validate(call), Err(BufferRule::FrameMismatch));
+        assert_breaks(BufferRule::FrameMismatch);
     }
 
     #[test]
@@ -233,77 +300,41 @@ mod tests {
         // 負値が符号なしとして写ると 2^31 以上になる。3 つの寸法それぞれで
         // 個別に確かめる。長さは崩した寸法に合わせても届かないため、規則 2 が
         // 先に拒否することを見ている。
-        for (width, height, pitch) in [
-            (MAX_DIMENSION + 1, 3, 16),
-            (4, MAX_DIMENSION + 1, 16),
-            (4, 3, MAX_DIMENSION + 1),
-        ] {
-            assert_eq!(
-                validate_layout(7, 7, width, height, pitch, 48),
-                Err(BufferRule::DimensionOutOfRange),
-                "({width}, {height}, {pitch})"
-            );
-        }
+        assert_eq!(assert_breaks(BufferRule::DimensionOutOfRange).len(), 3);
     }
 
     #[test]
     fn rule_3_rejects_an_empty_dimension() {
-        assert_eq!(
-            validate_layout(7, 7, 0, 3, 16, 0),
-            Err(BufferRule::EmptyDimension)
-        );
-        assert_eq!(
-            validate_layout(7, 7, 4, 0, 16, 0),
-            Err(BufferRule::EmptyDimension)
-        );
+        assert_eq!(assert_breaks(BufferRule::EmptyDimension).len(), 2);
     }
 
     #[test]
     fn rule_4_rejects_a_width_whose_row_does_not_fit_in_u32() {
-        // 規則 2 を通る最大の幅でも、1 行のバイト数は u32 に収まらない。
-        let width = MAX_DIMENSION;
-        assert_eq!(
-            validate_layout(7, 7, width, 1, MAX_DIMENSION, MAX_DIMENSION as usize),
-            Err(BufferRule::RowBytesOverflow)
-        );
+        assert_breaks(BufferRule::RowBytesOverflow);
     }
 
     #[test]
     fn rule_5_rejects_a_pitch_shorter_than_a_row() {
-        let mut call = valid_call();
-        call.4 = 15;
-        call.5 = 45;
-        assert_eq!(validate(call), Err(BufferRule::PitchTooSmall));
+        assert_breaks(BufferRule::PitchTooSmall);
     }
 
     #[test]
     fn rule_6_rejects_a_length_that_does_not_match_the_dimensions() {
-        let mut call = valid_call();
-        call.5 = 47;
-        assert_eq!(validate(call), Err(BufferRule::BufferLengthMismatch));
+        assert_breaks(BufferRule::BufferLengthMismatch);
     }
 
     #[test]
     fn rule_6_rejects_a_buffer_that_collapsed_to_empty() {
         // ラッパーは長さの算出が破綻すると空スライスへ倒す。検査しなければ
         // 0 バイトの画像が成功として通る。
-        let mut call = valid_call();
-        call.5 = 0;
-        assert_eq!(validate(call), Err(BufferRule::EmptyBuffer));
+        assert_breaks(BufferRule::EmptyBuffer);
     }
 
     #[test]
     fn rule_7_rejects_a_frame_larger_than_the_cap() {
-        // 詰め物を除いた大きさが上限をちょうど 1 バイト超える組を作る。
-        let width = 4 * 1024;
-        let row_bytes = width * 4;
-        let height = (MAX_RENDER_FRAME_BYTES / row_bytes as u64) as u32 + 1;
-        let buffer_len = row_bytes as usize * height as usize;
-        assert!(buffer_len as u64 > MAX_RENDER_FRAME_BYTES);
-        assert_eq!(
-            validate_layout(7, 7, width, height, row_bytes, buffer_len),
-            Err(BufferRule::FrameTooLarge)
-        );
+        for call in assert_breaks(BufferRule::FrameTooLarge) {
+            assert!(call.5 as u64 > MAX_RENDER_FRAME_BYTES);
+        }
     }
 
     #[test]

@@ -655,8 +655,58 @@ impl SceneEditor for SdkSceneEditor<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// 理由を実際に起こすラッパーの失敗を並べる。
+    ///
+    /// [`NotIssuedReason`] に対する網羅 `match` であり `_` を使わない。**理由を
+    /// 足すとここが落ち、それを起こす失敗を書くまでコンパイルできない。**
+    /// 理由を数え上げるのは [`NotIssuedReason::ALL`] の役目であり、SDK へ届く
+    /// 前に落ちることの証明は失敗の側が持つ。
+    fn failures_before_the_call(reason: &NotIssuedReason) -> Vec<EditSectionError> {
+        match reason {
+            NotIssuedReason::TargetMissing => vec![
+                EditSectionError::ObjectDoesNotExist,
+                EditSectionError::EffectDoesNotExist,
+            ],
+            NotIssuedReason::ArgumentNotRepresentable => vec![
+                EditSectionError::ValueOutOfRange(u8::try_from(300u32).expect_err("範囲外の変換")),
+                EditSectionError::InputCstrContainsNull(
+                    std::ffi::CString::new("a\0b").expect_err("NUL を含む文字列"),
+                ),
+                EditSectionError::InputCwstrContainsNull(
+                    aviutl2::config::translate_strict("a\0b")
+                        .expect_err("NUL を含む文字列が UTF-16 へ写りました"),
+                ),
+            ],
+        }
+    }
+
+    /// 変更 API の失敗の写しが実際に返した「届かなかった」失敗を集める。
+    ///
+    /// 起こす失敗を持たない理由と、別の理由を名乗った写しをその場で落とす。
+    pub(crate) fn failures_that_never_reached_the_sdk() -> Vec<EditError> {
+        let mut produced = Vec::new();
+        for reason in NotIssuedReason::ALL {
+            let failures = failures_before_the_call(reason);
+            assert!(
+                !failures.is_empty(),
+                "{} を起こす失敗がありません",
+                reason.as_str()
+            );
+            for failure in failures {
+                let mapped = mutation_failure("move_object", &failure);
+                assert!(
+                    matches!(mapped, EditError::NotIssued { reason: named } if named == *reason),
+                    "{failure} が {} として扱われませんでした",
+                    reason.as_str()
+                );
+                produced.push(mapped);
+            }
+        }
+        produced
+    }
 
     #[test]
     fn uninitialized_edit_handle_is_not_ready() {
@@ -683,40 +733,7 @@ mod tests {
         //
         // 対象の存在確認も、引数を SDK の型へ写す変換も、いずれも FFI の
         // 呼び出しより前にある。到達しないまま戻る理由をすべて挙げる。
-        let out_of_range = u8::try_from(300u32).expect_err("範囲外の変換");
-        let utf8_nul = std::ffi::CString::new("a\0b").expect_err("NUL を含む文字列");
-        let utf16_nul = aviutl2::config::translate_strict("a\0b")
-            .expect_err("NUL を含む文字列が UTF-16 へ写りました");
-        let not_issued: Vec<(EditSectionError, NotIssuedReason)> = vec![
-            (
-                EditSectionError::ObjectDoesNotExist,
-                NotIssuedReason::TargetMissing,
-            ),
-            (
-                EditSectionError::EffectDoesNotExist,
-                NotIssuedReason::TargetMissing,
-            ),
-            (
-                EditSectionError::ValueOutOfRange(out_of_range),
-                NotIssuedReason::ArgumentNotRepresentable,
-            ),
-            (
-                EditSectionError::InputCstrContainsNull(utf8_nul),
-                NotIssuedReason::ArgumentNotRepresentable,
-            ),
-            (
-                EditSectionError::InputCwstrContainsNull(utf16_nul),
-                NotIssuedReason::ArgumentNotRepresentable,
-            ),
-        ];
-        for (error, expected) in not_issued {
-            let mapped = mutation_failure("move_object", &error);
-            assert!(
-                matches!(mapped, EditError::NotIssued { reason } if reason == expected),
-                "{error} が {} として扱われませんでした",
-                expected.as_str()
-            );
-        }
+        assert_eq!(failures_that_never_reached_the_sdk().len(), 5);
 
         assert!(
             matches!(

@@ -16,11 +16,11 @@ use crate::edit::fake::{
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
 use aviutl2_mcp_core::{
-    AvailableEffect, CreateObjectSectionParams, CursorPosition, DeleteObjectSectionParams,
-    Destination, EditOperation, EffectFlags, EffectItem, EffectItemType, EffectSelector,
-    EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemValue, LayerNameChange,
-    MAX_GRID_BPM_ENTRIES, MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSelector,
-    PageRequest, Placement, SceneSize,
+    ApplyBatchParams, AvailableEffect, BatchOperation, CreateObjectSectionParams, CursorPosition,
+    DeleteObjectSectionParams, Destination, EditOperation, EffectFlags, EffectItem, EffectItemType,
+    EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemValue,
+    LayerNameChange, MAX_GRID_BPM_ENTRIES, MoveObjectSectionParams, ObjectSectionsOutcome,
+    ObjectSelector, PageRequest, Placement, SceneSize,
 };
 use serde_json::json;
 use std::sync::mpsc::channel;
@@ -4486,12 +4486,19 @@ fn the_section_response_carries_no_alias() {
     );
 }
 
-/// 事前確認で落ちる要求と、そこで名乗るべき理由。
-fn section_precondition_failures(harness: &Harness) -> Vec<(&'static str, EditError)> {
+/// 理由を実際に起こす要求を、事前確認へ通した結果として並べる。
+///
+/// [`SectionPreconditionReason`] に対する網羅 `match` であり `_` を使わない。
+/// **理由を足すとここが落ち、それを起こす要求を書くまでコンパイルできない。**
+/// 理由を数え上げるのは [`SectionPreconditionReason::ALL`] の役目であり、
+/// 事前確認が実際にその理由で落とすことの証明は要求の側が持つ。
+fn section_precondition_case(
+    harness: &Harness,
+    reason: &SectionPreconditionReason,
+) -> Vec<EditError> {
     let selector = || harness.selector(1, 100);
-    vec![
-        (
-            "frame_outside_object",
+    match reason {
+        SectionPreconditionReason::FrameOutsideObject => vec![
             harness
                 .edit
                 .create_object_section(&CreateObjectSectionParams {
@@ -4499,9 +4506,8 @@ fn section_precondition_failures(harness: &Harness) -> Vec<(&'static str, EditEr
                     frame: 400,
                 })
                 .expect_err("オブジェクトの範囲外への追加が受理されました"),
-        ),
-        (
-            "section_boundary_exists",
+        ],
+        SectionPreconditionReason::SectionBoundaryExists => vec![
             harness
                 .edit
                 .create_object_section(&CreateObjectSectionParams {
@@ -4509,9 +4515,10 @@ fn section_precondition_failures(harness: &Harness) -> Vec<(&'static str, EditEr
                     frame: 150,
                 })
                 .expect_err("既にある境界への追加が受理されました"),
-        ),
-        (
-            "section_index_out_of_range",
+        ],
+        // 区間数との比較は削除と移動の双方に掛かる。移動だけが素通りすると、
+        // 番号が範囲外の要求が事前確認を抜けて SDK へ届く。
+        SectionPreconditionReason::SectionIndexOutOfRange => vec![
             harness
                 .edit
                 .delete_object_section(&DeleteObjectSectionParams {
@@ -4519,11 +4526,6 @@ fn section_precondition_failures(harness: &Harness) -> Vec<(&'static str, EditEr
                     section: 4,
                 })
                 .expect_err("区間数以上の番号での削除が受理されました"),
-        ),
-        // 区間数との比較は削除と移動の双方に掛かる。移動だけが素通りすると、
-        // 番号が範囲外の要求が事前確認を抜けて SDK へ届く。
-        (
-            "section_index_out_of_range",
             harness
                 .edit
                 .move_object_section(&MoveObjectSectionParams {
@@ -4532,9 +4534,8 @@ fn section_precondition_failures(harness: &Harness) -> Vec<(&'static str, EditEr
                     frame: 190,
                 })
                 .expect_err("区間数以上の番号での移動が受理されました"),
-        ),
-        (
-            "section_move_crosses_boundary",
+        ],
+        SectionPreconditionReason::SectionMoveCrossesBoundary => vec![
             harness
                 .edit
                 .move_object_section(&MoveObjectSectionParams {
@@ -4543,11 +4544,8 @@ fn section_precondition_failures(harness: &Harness) -> Vec<(&'static str, EditEr
                     frame: 150,
                 })
                 .expect_err("後ろの中間点を越える移動が受理されました"),
-        ),
-        // 下限は 1 つ前の区間の開始フレーム「以下」を拒否する。等号を含めないと、
-        // 中間点をひとつ前の境界そのものへ重ねられる。
-        (
-            "section_move_crosses_boundary",
+            // 下限は 1 つ前の区間の開始フレーム「以下」を拒否する。等号を含め
+            // ないと、中間点をひとつ前の境界そのものへ重ねられる。
             harness
                 .edit
                 .move_object_section(&MoveObjectSectionParams {
@@ -4556,19 +4554,49 @@ fn section_precondition_failures(harness: &Harness) -> Vec<(&'static str, EditEr
                     frame: 100,
                 })
                 .expect_err("ひとつ前の区間の開始フレームへの移動が受理されました"),
-        ),
-    ]
+        ],
+    }
+}
+
+/// 事前確認が実際に返した失敗を集める。
+///
+/// 起こす要求を持たない理由と、別の理由を名乗った失敗をその場で落とす。
+fn section_precondition_failures(harness: &Harness) -> Vec<EditError> {
+    let mut produced = Vec::new();
+    for reason in SectionPreconditionReason::ALL {
+        let failures = section_precondition_case(harness, reason);
+        assert!(
+            !failures.is_empty(),
+            "{} を起こす要求がありません",
+            reason.as_str()
+        );
+        for failure in &failures {
+            assert_eq!(
+                failure.details()["reason"],
+                json!(reason.as_str()),
+                "{} を起こすはずの要求が別の失敗を返しました",
+                reason.as_str()
+            );
+        }
+        produced.extend(failures);
+    }
+    produced
+}
+
+/// 中間点を 3 つ持つ一式を組み、事前確認が実際に返した失敗を集める。
+pub(crate) fn produced_section_precondition_failures() -> Vec<EditError> {
+    section_precondition_failures(&harness_with_sections())
 }
 
 #[test]
 fn every_section_precondition_names_its_own_reason() {
-    for (reason, error) in section_precondition_failures(&harness_with_sections()) {
+    for error in produced_section_precondition_failures() {
+        let reason = error.details()["reason"].clone();
         assert_eq!(
             error.error_code(),
             ErrorCode::PreconditionFailed,
             "{reason} が前提条件の不整合になっていません"
         );
-        assert_eq!(error.details()["reason"], json!(reason));
         assert_eq!(error.details()["retry_requires"], json!("refetch"));
     }
 }
@@ -4576,14 +4604,13 @@ fn every_section_precondition_names_its_own_reason() {
 #[test]
 fn the_section_precondition_cases_cover_every_reason() {
     // 事前確認が名乗り得る 4 種を、どれか 1 つでも欠けたら落ちる形で固定する。
-    let harness = harness_with_sections();
-    let covered: std::collections::BTreeSet<&str> = section_precondition_failures(&harness)
-        .into_iter()
-        .map(|(reason, _)| reason)
-        .collect();
-    let expected: std::collections::BTreeSet<&str> = SectionPreconditionReason::ALL
+    let covered: std::collections::BTreeSet<String> = produced_section_precondition_failures()
         .iter()
-        .map(|reason| reason.as_str())
+        .map(|error| error.details()["reason"].to_string())
+        .collect();
+    let expected: std::collections::BTreeSet<String> = SectionPreconditionReason::ALL
+        .iter()
+        .map(|reason| json!(reason.as_str()).to_string())
         .collect();
     assert_eq!(covered, expected);
 }
@@ -5446,6 +5473,172 @@ fn the_scene_settings_response_carries_no_alias_path_or_item_value() {
     for secret in ["alias", "handle", "[1:100]", "0x", "C:\\"] {
         assert!(!value.contains(secret), "{secret} が応答に現れました");
     }
+}
+
+/// 理由を実際に起こす要求を、編集手順へ通した結果として並べる。
+///
+/// [`UnsupportedReason`] に対する網羅 `match` であり `_` を使わない。**理由を
+/// 足すとここが落ち、それを起こす要求を書くまでコンパイルできない。** 理由を
+/// 数え上げるのは [`UnsupportedReason::ALL`] の役目であり、編集手順が実際に
+/// その理由で落とすことの証明は要求の側が持つ。
+fn unsupported_target_case(reason: &UnsupportedReason) -> Vec<EditError> {
+    match reason {
+        UnsupportedReason::EffectNotRegistered => {
+            let harness = Harness::new();
+            vec![
+                harness
+                    .edit
+                    .create_object(&create_from_effect(
+                        &harness,
+                        "存在しないエフェクト",
+                        1,
+                        600,
+                    ))
+                    .expect_err("未登録の effect 名から作成できました"),
+            ]
+        }
+        UnsupportedReason::EffectNotCreatable => {
+            let harness = Harness::with(|host| {
+                host.arm(|knobs| knobs.fault = Some(Fault::RejectObjectCreation))
+            });
+            vec![
+                harness
+                    .edit
+                    .create_object(&create_from_effect(&harness, "ぼかし", 1, 600))
+                    .expect_err("拒否された作成が成功として返りました"),
+            ]
+        }
+        UnsupportedReason::EffectStateImmutable => {
+            let harness = Harness::with(|host| {
+                host.arm(|knobs| knobs.fault = Some(Fault::IgnoreEffectState))
+            });
+            vec![
+                harness
+                    .edit
+                    .set_effect_enabled(&SetEffectEnabledParams {
+                        selector: harness.effect_selector(1, 100, "ぼかし", 0),
+                        enabled: false,
+                    })
+                    .expect_err("無言で無視された変更が成功として返りました"),
+            ]
+        }
+        UnsupportedReason::MediaNotSupported => {
+            let harness = Harness::new();
+            vec![
+                harness
+                    .edit
+                    .create_object(&CreateObjectParams {
+                        source: ObjectSource::MediaFile {
+                            path: r"C:\media\clip.xyz".to_string(),
+                        },
+                        placement: Placement {
+                            scene_id: SCENE_ID,
+                            layer: 1,
+                            frame: 600,
+                        },
+                        expected_project_epoch: harness.epoch(),
+                    })
+                    .expect_err("対応しないメディアから作成できました"),
+            ]
+        }
+        UnsupportedReason::ItemTypeNotWritable => {
+            let harness = harness_with_unlisted_item();
+            vec![
+                harness
+                    .edit
+                    .set_object_item(&SetObjectItemParams {
+                        selector: harness.effect_selector(1, 100, "ぼかし", 0),
+                        item: "未知種別の項目".to_string(),
+                        value: ItemValue::Integer { value: 1 },
+                    })
+                    .expect_err("未知種別の項目へ書き込めました"),
+            ]
+        }
+        UnsupportedReason::ChangeNotApplied => {
+            let harness =
+                Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::IgnoreObjectName)));
+            vec![
+                harness
+                    .edit
+                    .set_object_name(&SetObjectNameParams {
+                        selector: harness.selector(1, 100),
+                        name: Some("新しい名前".to_string()),
+                    })
+                    .expect_err("無言で無視された改名が成功として返りました"),
+            ]
+        }
+        UnsupportedReason::ChoiceValueRejected => {
+            let harness = harness_with_choice_effect();
+            vec![
+                harness
+                    .edit
+                    .set_object_item(&set_choice(&harness, "存在しない形"))
+                    .expect_err("選択肢に無い値が成功として返りました"),
+            ]
+        }
+        UnsupportedReason::InverseUnavailable => {
+            // 逆操作を組み立てられない sub-operation は、一括適用の事前解決相で
+            // 落ちる。単独の operation にはこの相が無い。
+            let harness = Harness::with(|host| {
+                host.arm(|knobs| knobs.fault = Some(Fault::ItemValueUnreadable))
+            });
+            let params = ApplyBatchParams {
+                operations: vec![
+                    BatchOperation::MoveObject {
+                        selector: harness.selector(0, 0),
+                        destination: Destination {
+                            layer: 1,
+                            frame: 500,
+                        },
+                    },
+                    BatchOperation::SetObjectItem {
+                        selector: harness.effect_selector(1, 100, "ぼかし", 0),
+                        item: "範囲".to_string(),
+                        value: ItemValue::Integer { value: 40 },
+                    },
+                ],
+            };
+            vec![
+                harness
+                    .edit
+                    .apply_batch(&params)
+                    .expect_err("逆操作を組み立てられない要求が受理されました"),
+            ]
+        }
+    }
+}
+
+/// 編集手順が実際に返した「対象が要求を受け付けない」失敗を集める。
+///
+/// 起こす要求を持たない理由と、別の理由を名乗った失敗をその場で落とす。
+pub(crate) fn unsupported_target_failures() -> Vec<EditError> {
+    let mut produced = Vec::new();
+    for reason in UnsupportedReason::ALL {
+        let failures = unsupported_target_case(reason);
+        assert!(
+            !failures.is_empty(),
+            "{} を起こす要求がありません",
+            reason.as_str()
+        );
+        for failure in &failures {
+            // 発行後の失敗は覆いに包まれて返る。名乗る名前は覆いを通しても
+            // 変わらないため、突き合わせは応答へ載る名前で行う。
+            assert_eq!(
+                failure.details()["reason"],
+                json!(reason.as_str()),
+                "{} を起こすはずの要求が別の失敗を返しました",
+                reason.as_str()
+            );
+        }
+        produced.extend(failures);
+    }
+    produced
+}
+
+#[test]
+fn every_unsupported_reason_has_a_request_that_produces_it() {
+    // 要求を書かないまま理由を足すと、応答に現れない名前が一覧へ残る。
+    unsupported_target_failures();
 }
 
 /// 一括適用の統合テスト。
