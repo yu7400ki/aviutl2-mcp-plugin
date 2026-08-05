@@ -61,8 +61,9 @@ fn instance_line(info: &InstanceInfo) -> String {
         .and_then(|p| p.display_name.as_deref())
         .map(|name| clamp_chars(name, MAX_NAME_CHARS))
         .unwrap_or_else(|| "-".to_string());
-    // 未保存の変更の有無は保存を促すかどうかを分ける。structuredContent を
-    // 読まない呼び出し側にも届くよう、行に載せる。
+    // 未保存の変更があり得るかどうかは保存を促すかどうかを分ける。真は
+    // 「変更があり得る」ことを、偽だけが「変更が無い」ことを表す。structuredContent
+    // を読まない呼び出し側にも届くよう、行に載せる。
     let modified = info
         .project
         .as_ref()

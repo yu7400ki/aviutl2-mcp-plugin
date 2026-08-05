@@ -144,6 +144,9 @@ pub struct InstanceProject {
     /// プロジェクトの revision。未取得のときは None。
     pub revision: Option<u64>,
     /// 未保存の変更があるか。未取得のときは None。
+    ///
+    /// 真は「変更があり得る」ことを表し、偽だけが「変更が無い」ことを表す。
+    /// プロジェクトを開いた直後・新規作成した直後は、編集していなくても真になる。
     pub modified: Option<bool>,
 }
 
