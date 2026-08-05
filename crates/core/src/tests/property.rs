@@ -21,11 +21,13 @@ use crate::json::{JsonStrictError, parse_json};
 use crate::number::FiniteF64;
 use crate::render::RenderFrameParams;
 use crate::selector::ObjectSelector;
-use crate::validation::{MAX_PATH_UTF16_UNITS, PathSyntaxError, validate_path};
+use crate::validation::{
+    MAX_PATH_UTF16_UNITS, PathSyntaxError, validate_object_alias_name, validate_path,
+};
 use proptest::prelude::*;
 use proptest::string::string_regex;
 use proptest::test_runner::TestCaseError;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 // ============================================================================
 // json
@@ -933,5 +935,77 @@ proptest! {
             value.push('0');
         }
         prop_assert_eq!(HandoffToken::parse(&value), Err(HandoffTokenFormatError));
+    }
+}
+
+// ============================================================================
+// オブジェクトエイリアス名
+// ============================================================================
+
+/// エイリアス名らしい文字列。
+///
+/// 一様乱数の文字列は区切りも相対参照もほとんど生成しないため、規則の境界に
+/// 当たる断片を組み合わせる。
+fn object_alias_name_like_strategy() -> impl Strategy<Value = String> {
+    let prefix = prop_oneof![
+        Just(String::new()),
+        Just("..".to_string()),
+        Just(r"..\".to_string()),
+        Just("../".to_string()),
+        Just("C:".to_string()),
+        Just(".".to_string()),
+    ];
+    let segment = prop_oneof![
+        string_regex(r"[a-zA-Z0-9_ あ\u{a5}]{0,12}").unwrap(),
+        string_regex(r#"[\\/:*?"'<>|%=,.]{1,3}"#).unwrap(),
+        Just("\0".to_string()),
+    ];
+    (prefix, prop::collection::vec(segment, 0..4))
+        .prop_map(|(prefix, segments)| format!("{prefix}{}", segments.concat()))
+}
+
+/// `.` と `..` を解決したパスを返す。
+///
+/// ファイルシステムへ問い合わせず、構成要素だけで畳む。
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+proptest! {
+    /// 受理されたエイリアス名は、エイリアスディレクトリの外を指すパスを
+    /// 組み立てない。
+    ///
+    /// 名前の判定はパスの組み立てより先に行うため、ファイル名の一部になるのは
+    /// 通った名前だけである。区切りも相対参照も残らないことを、任意の入力に
+    /// 対して固定する。
+    #[test]
+    fn an_accepted_object_alias_name_never_builds_a_path_outside_its_directory(
+        name in prop_oneof![".*", object_alias_name_like_strategy()],
+    ) {
+        let dir = Path::new(r"C:\ProgramData\aviutl2\Alias");
+        if validate_object_alias_name(&name).is_err() {
+            // 組み立てる材料が得られない。ここで止まる。
+            return Ok(());
+        }
+
+        let path = dir.join(format!("{name}.object"));
+        prop_assert_eq!(path.parent(), Some(dir));
+        prop_assert_eq!(path.components().count(), dir.components().count() + 1);
+        // 解決しても位置が動かない。
+        let normalized = normalize_lexically(&path);
+        prop_assert_eq!(&normalized, &path);
+        prop_assert!(normalized.starts_with(dir));
     }
 }
