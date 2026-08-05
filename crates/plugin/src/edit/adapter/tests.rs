@@ -4109,8 +4109,13 @@ fn the_fake_names_the_call_that_could_not_produce_a_value() {
 #[test]
 fn the_selection_of_three_objects_carries_no_handle() {
     let harness = Harness::new();
-    // ホストが返す順序は規定されていない。昇順とは逆に並べて渡す。
-    harness.host.select_objects(&[(1, 300), (1, 100), (0, 0)]);
+    // ホストが返す順序は規定されていない。昇順とは逆に並べて渡す。ホストが既に
+    // 昇順で返していれば、並べ替えを外した実装でも同じ結果になる。
+    let armed = [(1, 300), (1, 100), (0, 0)];
+    let mut ascending = armed;
+    ascending.sort();
+    assert_ne!(armed, ascending, "フェイクが昇順で返しています");
+    harness.host.select_objects(&armed);
     harness.host.focus_object(Some((1, 100)), Some(1));
 
     let snapshot = harness

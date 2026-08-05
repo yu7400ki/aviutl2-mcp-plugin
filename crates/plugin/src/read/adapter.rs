@@ -3503,6 +3503,15 @@ mod tests {
     #[test]
     fn the_selection_is_ordered_by_layer_and_start_frame() {
         let adapter = adapter_with(|_| selecting_host());
+        // ホストが既に昇順で返していれば、並べ替えを外した実装でも同じ結果に
+        // なる。フェイクの並びが期待と違うことを先に押さえる。
+        let mut ascending = adapter.host.selected.clone();
+        ascending.sort();
+        assert_ne!(
+            adapter.host.selected, ascending,
+            "フェイクが昇順で返しています"
+        );
+
         let snapshot = adapter.get_selection_page(0).unwrap();
 
         let positions: Vec<(usize, usize)> = snapshot
