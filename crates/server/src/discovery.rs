@@ -1064,6 +1064,21 @@ mod tests {
     }
 
     #[test]
+    fn a_connection_timeout_is_reported_as_a_stale_instance() {
+        // 期限まで待って接続できなかった相手は到達不能として扱い、instance_stale
+        // へ写す。予算が本当に足りない場合はこの経路が正しい報告であり、
+        // 「設定が原因である」ことを表す値を新たに設けない。
+        assert_eq!(
+            map_pipe_error(&PipeClientError::Timeout),
+            ExclusionReason::PipeUnreachable
+        );
+        assert_eq!(
+            ExclusionReason::PipeUnreachable.error_code(),
+            ErrorCode::InstanceStale
+        );
+    }
+
+    #[test]
     fn resolve_instance_reports_not_registered_for_missing_descriptor() {
         let dir = temp_registry_dir();
         std::fs::create_dir_all(&dir).unwrap();
