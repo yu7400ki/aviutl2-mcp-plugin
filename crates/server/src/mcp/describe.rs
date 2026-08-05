@@ -813,6 +813,33 @@ mod tests {
     }
 
     #[test]
+    fn selection_text_is_bounded_for_oversized_results() {
+        let selected: Vec<ObjectSummary> = (0..OVERSIZED_COUNT)
+            .map(|i| {
+                ObjectSummary::new(
+                    "78be92d1-c8c9-44c6-ae52-387548971468",
+                    ObjectFingerprintInput {
+                        scene_id: 0,
+                        layer: i,
+                        frame_start: 0,
+                        frame_end: 10,
+                        name: Some(&long_name()),
+                        alias: "alias",
+                    },
+                )
+            })
+            .collect();
+        let snapshot = SelectionSnapshot {
+            project_revision: 42,
+            focus: selected.first().cloned(),
+            focus_section: Some(1),
+            selected,
+            page: page(100_000, OVERSIZED_COUNT as u32),
+        };
+        assert_truncated_within_limit(&selection(&snapshot));
+    }
+
+    #[test]
     fn available_effects_text_is_bounded_for_oversized_results() {
         let items: Vec<AvailableEffect> = (0..OVERSIZED_COUNT)
             .map(|_| AvailableEffect {
@@ -937,6 +964,16 @@ mod tests {
             project_revision: 42,
         });
         assert!(object_detail_text.contains("structuredContent"));
+
+        let selection_text = selection(&SelectionSnapshot {
+            project_revision: 42,
+            focus: None,
+            focus_section: None,
+            selected: Vec::new(),
+            page: page(0, 0),
+        });
+        assert!(selection_text.contains("get_object"));
+        assert!(selection_text.contains("selector"));
 
         let available_effects_text = available_effects(&ListAvailableEffectsResult {
             items: Vec::new(),

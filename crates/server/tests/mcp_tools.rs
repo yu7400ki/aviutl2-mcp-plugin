@@ -9,13 +9,13 @@ use aviutl2_mcp_core::{
     FrameRange, GetCurrentSceneResult, GridBpm, InstanceId, InstanceState, LayerInfo,
     ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, ObjectDetail,
     ObjectFingerprintInput, ObjectSummary, PageMeta, RequestEnvelope, SceneInfo, SectionRange,
-    TrackGroup,
+    SelectionSnapshot, TrackGroup,
 };
 
 use aviutl2_mcp_server::mcp::input::{
     AvailableEffectsPageInput, EffectSelectorInput, GetEffectItemValuesInput, GetObjectInput,
-    InstanceInput, ListAvailableEffectsInput, ListInstancesInput, ListLayersInput,
-    ListObjectsInput, ObjectFilterInput, ObjectSelectorInput, PageInput,
+    GetSelectionInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput,
+    ListLayersInput, ListObjectsInput, ObjectFilterInput, ObjectSelectorInput, PageInput,
 };
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
 use rmcp::handler::server::wrapper::Parameters;
@@ -364,6 +364,152 @@ async fn get_object_tool_sends_selector() {
         requests[0].params,
         json!({ "selector": serde_json::to_value(&summary.selector).expect("直列化できる") }),
     );
+}
+
+/// フォーカスと選択を持つ選択状態。
+fn sample_selection_snapshot() -> SelectionSnapshot {
+    SelectionSnapshot {
+        project_revision: 42,
+        focus: Some(sample_object_summary()),
+        focus_section: Some(1),
+        selected: vec![sample_object_summary()],
+        page: sample_page_meta(),
+    }
+}
+
+#[tokio::test]
+async fn get_selection_tool_sends_the_scene_guard_and_the_page() {
+    let expected = serde_json::to_value(sample_selection_snapshot()).expect("直列化できる");
+    let harness = Harness::start(responses("get_selection", expected.clone()));
+
+    let result = harness
+        .server
+        .get_selection(Parameters(GetSelectionInput {
+            instance_id: harness.instance_id(),
+            expected_scene_id: 3,
+            page: page_input(5, 10, Some(42)),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+    let requests = harness.read_requests();
+    assert_eq!(requests[0].operation, "get_selection");
+    assert_eq!(
+        requests[0].params,
+        json!({
+            "expected_scene_id": 3,
+            "offset": 5,
+            "limit": 10,
+            "snapshot_revision": 42,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn the_selection_text_separates_the_focus_from_the_timeline_selection() {
+    // 2 つは別の概念である。同じ応答に並べる以上、並んでいることが「同じもの」と
+    // 読まれないようにする。
+    let expected = serde_json::to_value(sample_selection_snapshot()).expect("直列化できる");
+    let harness = Harness::start(responses("get_selection", expected));
+
+    let result = harness
+        .server
+        .get_selection(Parameters(GetSelectionInput {
+            instance_id: harness.instance_id(),
+            expected_scene_id: 3,
+            page: page_input(0, 50, None),
+        }))
+        .await;
+
+    let text = text_of(&result);
+    assert!(
+        text.contains("オブジェクト設定ウィンドウ"),
+        "フォーカスの意味が示されていません: {text}"
+    );
+    assert!(
+        text.contains("タイムライン"),
+        "選択の意味が示されていません: {text}"
+    );
+    assert!(
+        text.contains("区間番号 1"),
+        "区間番号が示されていません: {text}"
+    );
+    // 秘匿値は text へ載せない。
+    for forbidden in ["alias", "fingerprint", "handle"] {
+        assert!(
+            !text.contains(forbidden),
+            "text content に秘匿値が載りました: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_selection_carries_neither_the_cursor_nor_the_selected_range() {
+    // どちらも get_edit_info が既に返している。同じ値を 2 つの読み取りが返すと、
+    // 要求元は「どちらが新しいか」を判断する規則を持つことになる。
+    let expected = serde_json::to_value(sample_selection_snapshot()).expect("直列化できる");
+    let harness = Harness::start(responses("get_selection", expected));
+
+    let result = harness
+        .server
+        .get_selection(Parameters(GetSelectionInput {
+            instance_id: harness.instance_id(),
+            expected_scene_id: 3,
+            page: page_input(0, 50, None),
+        }))
+        .await;
+
+    let structured = structured(&result);
+    let fields = structured.as_object().expect("オブジェクト");
+    for forbidden in ["cursor", "selected_range", "display"] {
+        assert!(
+            !fields.contains_key(forbidden),
+            "{forbidden} が応答に現れました: {structured}"
+        );
+    }
+    let text = text_of(&result);
+    for forbidden in ["cursor", "選択範囲"] {
+        assert!(
+            !text.contains(forbidden),
+            "{forbidden} が text content に現れました: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_empty_selection_still_reports_the_absence_of_a_focus() {
+    let expected = serde_json::to_value(SelectionSnapshot {
+        project_revision: 42,
+        focus: None,
+        focus_section: None,
+        selected: Vec::new(),
+        page: PageMeta {
+            total_count: 0,
+            count: 0,
+            offset: 0,
+            has_more: false,
+            next_offset: None,
+            snapshot_revision: 42,
+        },
+    })
+    .expect("直列化できる");
+    let harness = Harness::start(responses("get_selection", expected.clone()));
+
+    let result = harness
+        .server
+        .get_selection(Parameters(GetSelectionInput {
+            instance_id: harness.instance_id(),
+            expected_scene_id: 3,
+            page: page_input(0, 50, None),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+    let text = text_of(&result);
+    assert!(text.contains("フォーカス"), "{text}");
+    assert!(text.contains("区間番号なし"), "{text}");
 }
 
 #[tokio::test]
