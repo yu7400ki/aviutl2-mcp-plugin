@@ -20,7 +20,7 @@ use crate::project::ProjectState;
 use aviutl2_mcp_core::{
     AvailableEffect, EditInfo, EffectItemValues, EffectType, GetEffectItemValuesParams, LayerInfo,
     ObjectDetail, ObjectFilter, ObjectSelector, ObjectSummary, PageError, PageMeta, PageRequest,
-    SceneInfo,
+    SceneInfo, SelectionSnapshot,
 };
 use std::sync::Arc;
 
@@ -110,6 +110,28 @@ pub trait ReadAdapter: Send + Sync {
 
     /// セレクターが指すオブジェクトの詳細を取得する。
     fn get_object(&self, selector: &ObjectSelector) -> Result<ObjectDetail, ReadError>;
+
+    /// フォーカス対象・その区間番号・選択中オブジェクトの一覧を取得する。
+    ///
+    /// `expected_scene_id` が現在シーンと異なる場合は前提条件の不整合とする。
+    /// 選択は現在シーンの内側の概念であり、シーンが変わった後の選択を前の
+    /// シーンのものとして返さない。
+    ///
+    /// 切り出しは [`Self::list_objects`] と同じ理由でここで行う。選択件数だけ
+    /// alias を読むと、1 要求あたりの重い読み取りが要求ページではなく選択の
+    /// 規模で決まってしまう。ページングが掛かるのは選択の一覧だけであり、
+    /// フォーカス対象は 1 件しか無い。
+    ///
+    /// フォーカス対象と区間番号は同じ参照区間の内側で読む。別の呼び出しに
+    /// 分けると、間に利用者の操作が入って両者が食い違った組を返し得る。
+    ///
+    /// スナップショット revision の不一致は参照区間の失敗ではないため、畳まずに
+    /// 返す。
+    fn get_selection(
+        &self,
+        expected_scene_id: i32,
+        page: &PageRequest,
+    ) -> Result<Result<SelectionSnapshot, PageError>, ReadError>;
 
     /// 登録済み effect を全件列挙する。
     ///

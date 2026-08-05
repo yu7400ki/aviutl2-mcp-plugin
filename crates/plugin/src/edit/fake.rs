@@ -137,6 +137,15 @@ pub(crate) const ITEM_VALUE: &str = "get_effect_item_value";
 /// 中間点で区切られた区間を読み直したことを表す記録。
 pub(crate) const SECTION_RANGES: &str = "get_object_section_ranges";
 
+/// タイムライン上の選択の位置を読んだことを表す記録。
+pub(crate) const SELECTED_PLACEMENTS: &str = "get_selected_object";
+
+/// オブジェクト設定ウィンドウの選択を読んだことを表す記録。
+pub(crate) const FOCUSED_OBJECT: &str = "get_focus_object";
+
+/// フォーカス対象の区間番号を読んだことを表す記録。
+pub(crate) const FOCUS_SECTION: &str = "get_focus_object_section";
+
 /// オブジェクトが存在する最大レイヤーを読み直したことを表す記録。
 pub(crate) const LAYER_MAX: &str = "get_edit_info";
 
@@ -245,6 +254,16 @@ pub(crate) struct FakeScene {
     pub(crate) cursor: Cursor,
     pub(crate) selected_range: Option<FrameRange>,
     pub(crate) focus: Option<usize>,
+    /// フォーカス対象の区間番号。
+    ///
+    /// フォーカス対象とは独立に持つ。対象が無いのに番号だけを返すホストでも、
+    /// 読み取り側が組を揃えることを確かめられる。
+    pub(crate) focus_section: Option<usize>,
+    /// タイムライン上で選択されているオブジェクトの識別子。
+    ///
+    /// **ホストが返す順序をそのまま表す。** 並び順は規定されておらず、
+    /// 読み取り側が並べ替えることを確かめられるよう、与えた順序で返す。
+    pub(crate) selected: Vec<usize>,
     pub(crate) display: DisplayRange,
     pub(crate) grid_bpm: Vec<GridBpm>,
 }
@@ -440,6 +459,43 @@ impl FakeEditHost {
     /// レイヤーのロック状態を切り替える。
     pub(crate) fn lock_layer(&self, layer: usize, locked: bool) {
         self.scene.lock().unwrap().layers[layer].locked = locked;
+    }
+
+    /// タイムライン上の選択を、ホストが返す順序ごと差し替える。
+    ///
+    /// 位置はレイヤー番号と開始フレーム番号の組で指す。与えた順序がそのまま
+    /// ホストの返す順序になる。
+    pub(crate) fn select_objects(&self, positions: &[(usize, usize)]) {
+        let mut scene = self.scene.lock().unwrap();
+        let ids = positions
+            .iter()
+            .map(|&(layer, frame_start)| {
+                scene
+                    .find(layer, frame_start)
+                    .unwrap_or_else(|| {
+                        panic!("レイヤー {layer} フレーム {frame_start} の対象がありません")
+                    })
+                    .id
+            })
+            .collect();
+        scene.selected = ids;
+    }
+
+    /// オブジェクト設定ウィンドウの選択と、その区間番号を差し替える。
+    ///
+    /// 両者を独立に指定できる。対象が無いのに番号だけを返すホストも作れる。
+    pub(crate) fn focus_object(&self, position: Option<(usize, usize)>, section: Option<usize>) {
+        let mut scene = self.scene.lock().unwrap();
+        let id = position.map(|(layer, frame_start)| {
+            scene
+                .find(layer, frame_start)
+                .unwrap_or_else(|| {
+                    panic!("レイヤー {layer} フレーム {frame_start} の対象がありません")
+                })
+                .id
+        });
+        scene.focus = id;
+        scene.focus_section = section;
     }
 
     /// 対象が持つ中間点のフレーム番号を差し替える。
@@ -789,6 +845,37 @@ impl SceneReader for FakeSceneEditor<'_> {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    fn selected_placements(&self) -> Result<Vec<HostObjectPlacement>, ReadError> {
+        self.host.record(SELECTED_PLACEMENTS);
+        let scene = self.host.scene.lock().unwrap();
+        scene
+            .selected
+            .iter()
+            .map(|&id| {
+                scene
+                    .by_id(id)
+                    .map(|object| object.placement.clone())
+                    .ok_or(ReadError::Sdk {
+                        operation: "get_selected_object",
+                    })
+            })
+            .collect()
+    }
+
+    fn focused_object(&self) -> Result<Option<HostObject>, ReadError> {
+        self.host.record(FOCUSED_OBJECT);
+        let scene = self.host.scene.lock().unwrap();
+        Ok(scene
+            .focus
+            .and_then(|id| scene.by_id(id))
+            .map(FakeObject::identity))
+    }
+
+    fn focus_section(&self) -> Result<Option<usize>, ReadError> {
+        self.host.record(FOCUS_SECTION);
+        Ok(self.host.scene.lock().unwrap().focus_section)
     }
 
     fn object_identity(&self, layer: usize, frame_start: usize) -> Result<HostObject, ReadError> {
@@ -1768,6 +1855,8 @@ pub(crate) fn fake_scene() -> FakeScene {
         cursor: Cursor { frame: 0, layer: 0 },
         selected_range: None,
         focus: None,
+        focus_section: None,
+        selected: Vec::new(),
         display: DisplayRange {
             frame_start: 0,
             layer_start: 0,

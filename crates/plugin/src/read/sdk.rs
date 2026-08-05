@@ -166,6 +166,37 @@ impl SceneReader for SdkSceneReader<'_> {
         })
     }
 
+    fn selected_placements(&self) -> Result<Vec<HostObjectPlacement>, ReadError> {
+        // ハンドルは区間の内側で位置へ写し切る。戻り値へ持ち出さないため、
+        // ここから先の経路にハンドルは現れない。
+        let handles = self
+            .section
+            .get_selected_objects()
+            .map_err(|_| sdk("get_selected_object"))?;
+        handles
+            .into_iter()
+            .map(|handle| self.placement_at(handle))
+            .collect()
+    }
+
+    fn focused_object(&self) -> Result<Option<HostObject>, ReadError> {
+        let Some(handle) = self
+            .section
+            .get_focused_object()
+            .map_err(|_| sdk("get_focus_object"))?
+        else {
+            return Ok(None);
+        };
+        // 応答へ載せるのは概要だけであり、配下 effect は読まない。
+        Ok(Some(self.object_at(handle)?))
+    }
+
+    fn focus_section(&self) -> Result<Option<usize>, ReadError> {
+        self.section
+            .get_focus_object_section()
+            .map_err(|_| sdk("get_focus_object_section"))
+    }
+
     fn object_identity(&self, layer: usize, frame_start: usize) -> Result<HostObject, ReadError> {
         let handle = self.locate_object(layer, frame_start)?;
         ensure_start_frame(self.object_at(handle)?, frame_start)

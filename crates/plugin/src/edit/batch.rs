@@ -660,6 +660,18 @@ impl SceneReader for CachingEditor<'_> {
         Ok(placements)
     }
 
+    fn selected_placements(&self) -> Result<Vec<HostObjectPlacement>, ReadError> {
+        self.inner.reader().selected_placements()
+    }
+
+    fn focused_object(&self) -> Result<Option<HostObject>, ReadError> {
+        self.inner.reader().focused_object()
+    }
+
+    fn focus_section(&self) -> Result<Option<usize>, ReadError> {
+        self.inner.reader().focus_section()
+    }
+
     fn object_identity(&self, layer: usize, frame_start: usize) -> Result<HostObject, ReadError> {
         if let Some(cached) = self.identities.borrow().get(&(layer, frame_start)) {
             return Ok(cached.clone());

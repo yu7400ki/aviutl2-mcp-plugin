@@ -34,6 +34,9 @@ pub const OPERATION_LIST_AVAILABLE_EFFECTS: &str = "list_available_effects";
 /// effect の設定項目を任意フレームで評価する operation 名。
 pub const OPERATION_GET_EFFECT_ITEM_VALUES: &str = "get_effect_item_values";
 
+/// 選択中・フォーカス中のオブジェクトを取得する operation 名。
+pub const OPERATION_GET_SELECTION: &str = "get_selection";
+
 /// media file / alias からオブジェクトを作成する operation 名。
 pub const OPERATION_CREATE_OBJECT: &str = "create_object";
 
@@ -104,13 +107,15 @@ pub enum ReadOperation {
     ListAvailableEffects,
     /// [`OPERATION_GET_EFFECT_ITEM_VALUES`]。
     GetEffectItemValues,
+    /// [`OPERATION_GET_SELECTION`]。
+    GetSelection,
 }
 
 impl ReadOperation {
     /// 全 variant。
     ///
     /// 要素数と内容は `read_operation_all_is_exhaustive` テストで固定する。
-    pub const ALL: [ReadOperation; 7] = [
+    pub const ALL: [ReadOperation; 8] = [
         ReadOperation::GetEditInfo,
         ReadOperation::GetCurrentScene,
         ReadOperation::ListLayers,
@@ -118,6 +123,7 @@ impl ReadOperation {
         ReadOperation::GetObject,
         ReadOperation::ListAvailableEffects,
         ReadOperation::GetEffectItemValues,
+        ReadOperation::GetSelection,
     ];
 
     /// operation 名の文字列表現を返す。
@@ -130,6 +136,7 @@ impl ReadOperation {
             ReadOperation::GetObject => OPERATION_GET_OBJECT,
             ReadOperation::ListAvailableEffects => OPERATION_LIST_AVAILABLE_EFFECTS,
             ReadOperation::GetEffectItemValues => OPERATION_GET_EFFECT_ITEM_VALUES,
+            ReadOperation::GetSelection => OPERATION_GET_SELECTION,
         }
     }
 
@@ -336,7 +343,8 @@ impl KnownOperation {
                 | ReadOperation::ListObjects
                 | ReadOperation::GetObject
                 | ReadOperation::ListAvailableEffects
-                | ReadOperation::GetEffectItemValues => RequestBudgetKind::Read,
+                | ReadOperation::GetEffectItemValues
+                | ReadOperation::GetSelection => RequestBudgetKind::Read,
             },
             KnownOperation::Edit(operation) => match operation {
                 EditOperation::CreateObject
@@ -456,6 +464,22 @@ pub struct ListAvailableEffectsParams {
     pub page: PageRequest,
 }
 
+/// `get_selection` の params。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GetSelectionParams {
+    /// 取得対象が現在シーンのままであることを確認するための guard。
+    ///
+    /// 選択は現在シーンの内側の概念であり、シーンが変わった後の選択を前の
+    /// シーンのものとして受け取らないよう必須とする。
+    pub expected_scene_id: i32,
+    /// ページ指定。要求では offset / limit / snapshot_revision として展開される。
+    ///
+    /// 掛かるのは [`SelectionSnapshot::selected`] だけである。
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
 /// 1 度の要求で評価できるフレームの最大件数。
 pub const MAX_EVALUATED_FRAMES: usize = 16;
 
@@ -568,6 +592,29 @@ pub struct ListAvailableEffectsResult {
     pub page: PageMeta,
 }
 
+/// `get_selection` の result。
+///
+/// 編集カーソルとフレーム範囲選択は載せない。どちらも [`crate::EditInfo`] が
+/// 返しており、同じ値を 2 つの読み取りが返すと、要求元は「どちらが新しいか」を
+/// 判断する規則を持つことになる。ここに載せるのは編集情報に無いものだけである。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SelectionSnapshot {
+    /// 取得時点のプロジェクト revision。
+    pub project_revision: u64,
+    /// オブジェクト設定ウィンドウで選択されているオブジェクト。未選択は null。
+    pub focus: Option<ObjectSummary>,
+    /// フォーカス対象の区間番号。未選択は null。
+    ///
+    /// [`Self::focus`] が null のときは必ず null である。
+    pub focus_section: Option<usize>,
+    /// タイムライン上で選択されているオブジェクト。
+    ///
+    /// レイヤー番号・開始フレーム番号の昇順で並ぶ。
+    pub selected: Vec<ObjectSummary>,
+    /// [`Self::selected`] のページのメタ情報。
+    pub page: PageMeta,
+}
+
 /// `get_effect_item_values` の result。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectItemValues {
@@ -669,6 +716,7 @@ mod tests {
         assert_eq!(OPERATION_GET_OBJECT, "get_object");
         assert_eq!(OPERATION_LIST_AVAILABLE_EFFECTS, "list_available_effects");
         assert_eq!(OPERATION_GET_EFFECT_ITEM_VALUES, "get_effect_item_values");
+        assert_eq!(OPERATION_GET_SELECTION, "get_selection");
     }
 
     #[test]
@@ -763,6 +811,10 @@ mod tests {
         assert_eq!(
             ReadOperation::GetEffectItemValues.as_str(),
             OPERATION_GET_EFFECT_ITEM_VALUES
+        );
+        assert_eq!(
+            ReadOperation::GetSelection.as_str(),
+            OPERATION_GET_SELECTION
         );
     }
 
@@ -869,7 +921,8 @@ mod tests {
                 | ReadOperation::ListObjects
                 | ReadOperation::GetObject
                 | ReadOperation::ListAvailableEffects
-                | ReadOperation::GetEffectItemValues => {}
+                | ReadOperation::GetEffectItemValues
+                | ReadOperation::GetSelection => {}
             }
             assert!(
                 ReadOperation::ALL.contains(&op),
@@ -884,7 +937,8 @@ mod tests {
         assert_listed(ReadOperation::GetObject);
         assert_listed(ReadOperation::ListAvailableEffects);
         assert_listed(ReadOperation::GetEffectItemValues);
-        assert_eq!(ReadOperation::ALL.len(), 7);
+        assert_listed(ReadOperation::GetSelection);
+        assert_eq!(ReadOperation::ALL.len(), 8);
     }
 
     /// [`RenderOperation::ALL`] が全 variant を含むことを固定する。
@@ -1009,6 +1063,22 @@ mod tests {
             );
             assert!(EditOperation::ALL.contains(&op));
         }
+    }
+
+    #[test]
+    fn reading_the_selection_is_an_ordinary_read() {
+        // 費用は list_objects と同じ形である（ページを切り出してから alias を
+        // 読む）。新しい予算区分を作る理由が無い。
+        let op = ReadOperation::GetSelection;
+        assert_eq!(
+            KnownOperation::Read(op).budget_kind(),
+            RequestBudgetKind::Read
+        );
+        assert!(ReadOperation::ALL.contains(&op));
+        assert_eq!(
+            ReadOperation::from_operation_name(OPERATION_GET_SELECTION),
+            Some(op)
+        );
     }
 
     #[test]
@@ -1463,6 +1533,72 @@ mod tests {
         let s = serde_json::to_string(&result).unwrap();
         let restored: ListLayersResult = serde_json::from_str(&s).unwrap();
         assert_eq!(restored, result);
+    }
+
+    #[test]
+    fn get_selection_params_accept_flat_page_fields() {
+        let params: GetSelectionParams =
+            serde_json::from_str(r#"{"expected_scene_id":3,"offset":2,"limit":5}"#).unwrap();
+        assert_eq!(params.expected_scene_id, 3);
+        assert_eq!(params.page.offset, 2);
+        assert_eq!(params.page.limit, 5);
+    }
+
+    #[test]
+    fn get_selection_params_require_the_scene_guard() {
+        assert!(serde_json::from_str::<GetSelectionParams>(r#"{"offset":0}"#).is_err());
+    }
+
+    #[test]
+    fn get_selection_params_reject_unknown_field() {
+        assert!(
+            serde_json::from_str::<GetSelectionParams>(r#"{"expected_scene_id":0,"future":1}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn selection_snapshot_roundtrip() {
+        let snapshot = SelectionSnapshot {
+            project_revision: 42,
+            focus: Some(sample_object_summary()),
+            focus_section: Some(2),
+            selected: vec![sample_object_summary()],
+            page: sample_page_meta(),
+        };
+        let s = serde_json::to_string(&snapshot).unwrap();
+        let restored: SelectionSnapshot = serde_json::from_str(&s).unwrap();
+        assert_eq!(restored, snapshot);
+    }
+
+    #[test]
+    fn selection_snapshot_carries_neither_the_cursor_nor_the_selected_range() {
+        // どちらも編集情報が返す。同じ値を 2 つの読み取りが返すと、要求元は
+        // 「どちらが新しいか」を判断する規則を持つことになる。
+        let snapshot = SelectionSnapshot {
+            project_revision: 0,
+            focus: None,
+            focus_section: None,
+            selected: Vec::new(),
+            page: sample_page_meta(),
+        };
+        let value = serde_json::to_value(&snapshot).unwrap();
+        let keys: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .expect("オブジェクト")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "project_revision",
+                "focus",
+                "focus_section",
+                "selected",
+                "page",
+            ])
+        );
     }
 
     #[test]

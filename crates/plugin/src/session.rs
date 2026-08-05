@@ -20,15 +20,15 @@ use aviutl2_mcp_core::{
     CreateObjectParams, CreateObjectSectionParams, DeleteEffectParams, DeleteObjectParams,
     DeleteObjectSectionParams, EditInputError, EditOperation, EffectItemValuesInputError,
     ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams,
-    GetEffectItemValuesParams, GetObjectParams, InstanceId, InstanceState, KnownOperation,
-    ListAvailableEffectsParams, ListAvailableEffectsResult, ListLayersParams, ListLayersResult,
-    ListObjectsParams, ListObjectsResult, MoveObjectParams, MoveObjectSectionParams, Nonce,
-    ObjectFilterError, PageError, PageRequest, PongProject, PongResult, ProtocolVersion,
-    ReadOperation, RenderFrameParams, RenderFrameResult, RenderInputError, RenderOperation,
-    RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult, ScaledBudgets,
-    SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
-    SetObjectNameParams, SetSelectionParams, compute_client_mac, compute_server_mac,
-    deserialize_json, take_page, verify_mac,
+    GetEffectItemValuesParams, GetObjectParams, GetSelectionParams, InstanceId, InstanceState,
+    KnownOperation, ListAvailableEffectsParams, ListAvailableEffectsResult, ListLayersParams,
+    ListLayersResult, ListObjectsParams, ListObjectsResult, MoveObjectParams,
+    MoveObjectSectionParams, Nonce, ObjectFilterError, PageError, PageRequest, PongProject,
+    PongResult, ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult,
+    RenderInputError, RenderOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind,
+    ResponseResult, ScaledBudgets, SelectionSnapshot, SetEffectEnabledParams, SetGridBpmParams,
+    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+    compute_client_mac, compute_server_mac, deserialize_json, take_page, verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -853,6 +853,7 @@ enum ReadRequest {
     GetObject(Box<GetObjectParams>),
     ListAvailableEffects(ListAvailableEffectsParams),
     GetEffectItemValues(Box<GetEffectItemValuesParams>),
+    GetSelection(GetSelectionParams),
 }
 
 /// operation 別の params を復号し、要求内容だけで決まる検証を済ませる。
@@ -894,6 +895,11 @@ fn decode_request(operation: ReadOperation, params: &Value) -> Result<ReadReques
             let params: GetEffectItemValuesParams = decode_params(params)?;
             params.validate().map_err(item_values_error)?;
             ReadRequest::GetEffectItemValues(Box::new(params))
+        }
+        ReadOperation::GetSelection => {
+            let params: GetSelectionParams = decode_params(params)?;
+            params.page.validate().map_err(page_error)?;
+            ReadRequest::GetSelection(params)
         }
     })
 }
@@ -961,6 +967,15 @@ fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Valu
                 .get_effect_item_values(&params)
                 .map_err(read_error)?,
         ),
+        ReadRequest::GetSelection(params) => {
+            // 切り出しは読み取り口が済ませている。参照区間の失敗と、ページ要求
+            // そのものの不整合は別の失敗であり、対応するエラーも異なる。
+            let snapshot: SelectionSnapshot = adapter
+                .get_selection(params.expected_scene_id, &params.page)
+                .map_err(read_error)?
+                .map_err(page_error)?;
+            to_result(&snapshot)
+        }
     }
 }
 
@@ -1673,6 +1688,25 @@ mod tests {
                 truncated: false,
             })
         }
+
+        fn get_selection(
+            &self,
+            expected_scene_id: i32,
+            page: &PageRequest,
+        ) -> Result<Result<SelectionSnapshot, PageError>, ReadError> {
+            self.enter("get_selection")?;
+            ensure_scene(expected_scene_id)?;
+            let items = fake_objects();
+            Ok(
+                take_page(&items, page, REVISION).map(|(selected, meta)| SelectionSnapshot {
+                    project_revision: REVISION,
+                    focus: Some(fake_object()),
+                    focus_section: Some(1),
+                    selected,
+                    page: meta,
+                }),
+            )
+        }
     }
 
     /// レイヤー 1・フレーム 100 のオブジェクトが持つ effect を指すセレクター。
@@ -1835,7 +1869,28 @@ mod tests {
                 ReadOperation::GetEffectItemValues,
                 json!({ "effect": fake_effect_selector(), "frames": [100.0] }),
             ),
+            (
+                ReadOperation::GetSelection,
+                json!({ "expected_scene_id": SCENE_ID }),
+            ),
         ]
+    }
+
+    /// [`all_operations`] が全 read operation を含むことを固定する。
+    ///
+    /// 表は手書きであり、載せ忘れた operation は表を使う検査を全て素通りする。
+    /// 応答の秘匿・期限超過・状態の検査はいずれもこの表を材料にしている。
+    #[test]
+    fn all_operations_covers_every_read_operation() {
+        let covered: std::collections::BTreeSet<&str> = all_operations()
+            .iter()
+            .map(|(operation, _)| operation.as_str())
+            .collect();
+        let expected: std::collections::BTreeSet<&str> = ReadOperation::ALL
+            .iter()
+            .map(|operation| operation.as_str())
+            .collect();
+        assert_eq!(covered, expected);
     }
 
     #[test]
@@ -1852,6 +1907,7 @@ mod tests {
                 ReadOperation::ListAvailableEffects,
             ),
             ("get_effect_item_values", ReadOperation::GetEffectItemValues),
+            ("get_selection", ReadOperation::GetSelection),
         ] {
             assert_eq!(
                 classify_operation(name).unwrap(),
@@ -2155,6 +2211,12 @@ mod tests {
                 ReadOperation::ListObjects,
                 json!({ "expected_scene_id": SCENE_ID, "snapshot_revision": REVISION - 1 }),
             ),
+            // 選択はプロジェクトの状態であり revision に連動する。カタログの
+            // 一覧と違い、照合の対象になる。
+            (
+                ReadOperation::GetSelection,
+                json!({ "expected_scene_id": SCENE_ID, "snapshot_revision": REVISION - 1 }),
+            ),
         ];
 
         for (operation, params) in paged {
@@ -2169,6 +2231,45 @@ mod tests {
             assert!(error.retryable);
             assert_eq!(error.details["requested_snapshot_revision"], REVISION - 1);
             assert_eq!(error.details["current_snapshot_revision"], REVISION);
+        }
+    }
+
+    #[test]
+    fn get_selection_returns_the_focus_its_section_and_the_selection() {
+        let adapter = FakeAdapter::new();
+        let result = read(
+            &adapter,
+            ReadOperation::GetSelection,
+            json!({ "expected_scene_id": SCENE_ID }),
+        )
+        .unwrap();
+
+        assert_eq!(result["project_revision"], REVISION);
+        assert_eq!(result["focus"]["layer"], 1);
+        assert_eq!(result["focus_section"], 1);
+        assert_eq!(result["selected"].as_array().unwrap().len(), 2);
+        assert_eq!(result["page"]["total_count"], 2);
+        assert_eq!(adapter.calls(), vec!["get_selection"]);
+    }
+
+    #[test]
+    fn get_selection_carries_neither_the_cursor_nor_the_selected_range() {
+        // どちらも get_edit_info が既に返している。同じ値を 2 つの読み取りが
+        // 返すと、要求元は「どちらが新しいか」を判断する規則を持つことになる。
+        let adapter = FakeAdapter::new();
+        let result = read(
+            &adapter,
+            ReadOperation::GetSelection,
+            json!({ "expected_scene_id": SCENE_ID }),
+        )
+        .unwrap();
+
+        let fields = result.as_object().expect("オブジェクト");
+        for forbidden in ["cursor", "selected_range", "display"] {
+            assert!(
+                !fields.contains_key(forbidden),
+                "{forbidden} が応答に現れました: {result}"
+            );
         }
     }
 

@@ -14,7 +14,8 @@ use aviutl2_mcp_core::{
     BatchOutcome, BatchStepOutcome, EditInfo, EditOutcome, EffectItemValues, EvaluatedItem,
     GetCurrentSceneResult, GridBpmOutcome, InstanceInfo, LayerStateOutcome,
     ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, ObjectDetail,
-    ObjectSectionsOutcome, ObjectSummary, PageMeta, SelectionField, SelectionState,
+    ObjectSectionsOutcome, ObjectSummary, PageMeta, SelectionField, SelectionSnapshot,
+    SelectionState,
 };
 
 /// 名前をそのまま行に載せるときの最大文字数。
@@ -253,6 +254,43 @@ pub fn effect_item_values(values: &EffectItemValues) -> String {
         );
     }
     text.push_line("評価した値は structuredContent を参照してください");
+    text.finish()
+}
+
+/// `get_selection` の text content。
+///
+/// フォーカスと選択を別の行に分けて示す。2 つは別の概念であり、並べて書くと
+/// 同じものと読まれる。
+pub fn selection(snapshot: &SelectionSnapshot) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(match &snapshot.focus {
+        Some(object) => format!(
+            "フォーカス（オブジェクト設定ウィンドウの選択）{}",
+            object_line(object)
+        ),
+        None => "フォーカス（オブジェクト設定ウィンドウの選択）なし".to_string(),
+    });
+    text.push_line(match snapshot.focus_section {
+        Some(section) => format!("フォーカス対象の区間番号 {section}"),
+        None => "フォーカス対象の区間番号なし".to_string(),
+    });
+    text.push_line(format!(
+        "タイムライン上の選択 {}",
+        page_line(&snapshot.page)
+    ));
+    for object in &snapshot.selected {
+        text.push_line(format!(
+            "- layer={} frame={}..{} name={}",
+            object.layer,
+            object.frame_start,
+            object.frame_end,
+            optional_name(object.name.as_deref()),
+        ));
+    }
+    text.push_line(format!("project_revision={}", snapshot.project_revision));
+    text.push_line(
+        "frame / layer は 0 始まりです。詳細は get_object に structuredContent の selector をそのまま渡します",
+    );
     text.finish()
 }
 

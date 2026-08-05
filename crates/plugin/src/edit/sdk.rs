@@ -15,7 +15,7 @@ use crate::edit::host::{
 use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
 use crate::read::ReadError;
-use crate::read::host::{EditState, HostEditInfo, HostObject, ReadHost, SceneReader};
+use crate::read::host::{EditState, HostEditInfo, ReadHost, SceneReader};
 use crate::read::sdk::{
     SdkReadHost, SdkSceneReader, host_edit_info, non_negative, to_inclusive_sections,
 };
@@ -145,10 +145,7 @@ impl EditHost for SdkEditHost {
         // フォーカス対象は参照区間の内側でしか読めない。編集区間を抜けた後で
         // なければ反映されないため、ここで改めて区間へ入る。
         let focus = EDIT_HANDLE
-            .call_read_section(|section| {
-                let reader = SdkSceneReader { section };
-                reader.focused_object()
-            })
+            .call_read_section(|section| SdkSceneReader { section }.focused_object())
             .map_err(|_| sdk("call_read_section"))??;
         Ok(HostSelection {
             scene_id: info.scene_id,
@@ -192,27 +189,6 @@ impl EditHost for SdkEditHost {
             })
             .map_err(|_| sdk("call_edit_section"))?;
         outcome.map_err(|()| EditError::Panicked)?
-    }
-}
-
-impl SdkSceneReader<'_> {
-    /// フォーカスされているオブジェクトを所有型へ写す。
-    fn focused_object(&self) -> Result<Option<HostObject>, EditError> {
-        let Some(handle) = self
-            .section
-            .get_focused_object()
-            .map_err(|_| sdk("get_focus_object"))?
-        else {
-            return Ok(None);
-        };
-        let position = self
-            .section
-            .get_object_layer_frame(handle)
-            .map_err(|_| sdk("get_object_layer_frame"))?;
-        // 応答へ載せるのは概要だけであり、配下 effect は読まない。
-        let object =
-            self.object_identity(non_negative(position.layer), non_negative(position.start))?;
-        Ok(Some(object))
     }
 }
 

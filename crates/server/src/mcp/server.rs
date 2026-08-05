@@ -15,8 +15,9 @@ use crate::mcp::edit_input::{
     SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
 };
 use crate::mcp::input::{
-    GetEffectItemValuesInput, GetObjectInput, InstanceInput, ListAvailableEffectsInput,
-    ListInstancesInput, ListLayersInput, ListObjectsInput, parse_instance_id,
+    GetEffectItemValuesInput, GetObjectInput, GetSelectionInput, InstanceInput,
+    ListAvailableEffectsInput, ListInstancesInput, ListLayersInput, ListObjectsInput,
+    parse_instance_id,
 };
 use crate::mcp::render::{RenderFrameInput, RenderFrameOutput};
 use crate::mcp::summary::{MAX_TEXT_CHARS, clamp_chars};
@@ -31,12 +32,13 @@ use aviutl2_mcp_core::{
     MAX_PAGE_LIMIT, OPERATION_ADD_EFFECT, OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT,
     OPERATION_CREATE_OBJECT_SECTION, OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT,
     OPERATION_DELETE_OBJECT_SECTION, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
-    OPERATION_GET_EFFECT_ITEM_VALUES, OPERATION_GET_OBJECT, OPERATION_LIST_AVAILABLE_EFFECTS,
-    OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS, OPERATION_MOVE_OBJECT,
-    OPERATION_MOVE_OBJECT_SECTION, OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED,
-    OPERATION_SET_GRID_BPM, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
-    OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail, ObjectSectionsOutcome,
-    RenderFrameResult, RequestBudgetKind, ScaledBudgets, SelectionState, request_budget_kind,
+    OPERATION_GET_EFFECT_ITEM_VALUES, OPERATION_GET_OBJECT, OPERATION_GET_SELECTION,
+    OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS,
+    OPERATION_MOVE_OBJECT, OPERATION_MOVE_OBJECT_SECTION, OPERATION_RENDER_FRAME,
+    OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_GRID_BPM, OPERATION_SET_LAYER_STATE,
+    OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail,
+    ObjectSectionsOutcome, RenderFrameResult, RequestBudgetKind, ScaledBudgets, SelectionSnapshot,
+    SelectionState, request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -732,6 +734,55 @@ impl AviUtl2McpServer {
             )?;
             Ok(ToolSuccess {
                 text: describe::object_detail(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// いま選ばれているオブジェクトを取得する。set_selection の読み取り側である。
+    /// focus と selected は別物である。
+    /// focus はオブジェクト設定ウィンドウで選択されている 1 件、
+    /// selected はタイムライン上で選択されている一覧であり、両者は一致しない。
+    /// focus_section は focus の区間番号であり、区間番号 i は
+    /// get_object が返す sections[i] を指す。focus が null のとき focus_section も null である。
+    /// selected は layer 番号・frame_start の昇順で並び、list_objects と同じ並びである。
+    /// frame 番号と layer 番号はいずれも 0 始まりである。
+    /// focus と selected の各要素の selector は get_object や編集 tool へそのまま渡せる。
+    /// offset と limit（1〜200、既定 50）でページを指定し、
+    /// 2 ページ目以降は先頭ページが返した snapshot_revision を添える。
+    /// ページ指定が掛かるのは selected だけであり、focus には掛からない。
+    /// 編集カーソルとフレーム範囲選択は返さない。どちらも get_edit_info が返す。
+    #[tool(
+        name = "get_selection",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::get_selection()
+        )
+    )]
+    pub async fn get_selection(
+        &self,
+        Parameters(input): Parameters<GetSelectionInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits();
+        self.run("get_selection", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: SelectionSnapshot = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_GET_SELECTION,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::selection(&result),
                 structured: to_structured(&result)?,
             })
         })
@@ -2409,6 +2460,7 @@ mod tests {
             | "list_objects"
             | "get_object"
             | "get_effect_item_values"
+            | "get_selection"
             | "create_object"
             | "move_object"
             | "set_object_name"
@@ -2480,6 +2532,7 @@ mod tests {
         "get_object",
         "list_available_effects",
         "get_effect_item_values",
+        "get_selection",
     ];
 
     /// 編集 tool と、宣言する annotation。
@@ -2582,6 +2635,7 @@ mod tests {
             | "get_object"
             | "list_available_effects"
             | "get_effect_item_values"
+            | "get_selection"
             | RENDER_FRAME => false,
             other => panic!("{other} が編集の説明規約に従うかが定義されていません"),
         }
@@ -2642,7 +2696,7 @@ mod tests {
         assert_eq!(names, expected);
         // 件数そのものも固定する。router と表の両方から同じ tool を落とすと、
         // 集合の一致だけでは検出できない。
-        assert_eq!(names.len(), 24, "公開する tool の数が変わりました");
+        assert_eq!(names.len(), 25, "公開する tool の数が変わりました");
     }
 
     /// 共有設定を与えたサーバー。
@@ -2828,6 +2882,7 @@ mod tests {
             "get_object" => schema::object_detail(),
             "list_available_effects" => schema::list_available_effects(),
             "get_effect_item_values" => schema::effect_item_values(),
+            "get_selection" => schema::get_selection(),
             "create_object" => schema::create_object(),
             "move_object" => schema::move_object(),
             "set_object_name" => schema::set_object_name(),

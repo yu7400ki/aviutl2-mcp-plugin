@@ -15,7 +15,7 @@ use aviutl2_mcp_core::{
     EffectItem, EffectItemValues, EffectSelector, EffectType, EvaluatedItem, EvaluatedItemKind,
     Extent, FiniteF64, FrameRange, GetEffectItemValuesParams, LayerInfo, MAX_EVALUATED_ITEMS,
     ObjectDetail, ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary, PageError,
-    PageRequest, SceneInfo, TrackGroup, take_page,
+    PageRequest, SceneInfo, SelectionSnapshot, TrackGroup, take_page,
 };
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -277,6 +277,66 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
             let revision = project.revision();
             let (summary, detail) = resolve_selected_detail(scene, epoch, scene_id, selector)?;
             Ok(object_detail(summary, revision, detail))
+        })
+    }
+
+    fn get_selection(
+        &self,
+        expected_scene_id: i32,
+        page: &PageRequest,
+    ) -> Result<Result<SelectionSnapshot, PageError>, ReadError> {
+        self.ensure_readable()?;
+        let info = self.edit_info()?;
+        ensure_scene(&info, expected_scene_id)?;
+        let scene_id = info.scene_id;
+        let epoch = self.project.epoch();
+        let epoch = epoch.as_str();
+        let project = self.project.as_ref();
+        let page = *page;
+
+        self.read_section(move |scene| {
+            let revision = project.revision();
+
+            // フォーカス対象と区間番号は同じ区間の内側で続けて読む。
+            let focused = scene.focused_object()?;
+            let section = scene.focus_section()?;
+            // 区間番号はフォーカス対象の性質である。対象が無いのに番号だけが
+            // 返る組は応答へ載せない。
+            let focus_section = focused.as_ref().and(section);
+
+            // 位置だけを読んで全件を並べる。ホストが返す順序は規定されて
+            // いないため、ここで並べ替えて総件数と並び順を確定する。並びを
+            // 揃えないと、ページ間で順序が変わって取りこぼしと重複が同時に
+            // 起きる。オブジェクトの列挙と同じ並びにすることで、要求元は
+            // 2 つの応答を突き合わせられる。
+            let mut placements = scene.selected_placements()?;
+            placements.sort_by_key(|placement| (placement.layer, placement.frame_start));
+
+            let (window, meta) = match take_page(&placements, &page, revision) {
+                Ok(page) => page,
+                Err(error) => return Ok(Err(error)),
+            };
+
+            // alias を読むのは窓に入った対象だけにする。応答へ載せない対象まで
+            // 読むと、参照区間の保持時間が要求ページではなく選択の規模で
+            // 決まってしまう。
+            let mut selected = Vec::with_capacity(window.len());
+            for placement in window {
+                let object = scene
+                    .object_identity(placement.layer, placement.frame_start)
+                    .map_err(enumeration_failure)?;
+                selected.push(object_summary(epoch, scene_id, &object));
+            }
+
+            Ok(Ok(SelectionSnapshot {
+                project_revision: revision,
+                focus: focused
+                    .as_ref()
+                    .map(|object| object_summary(epoch, scene_id, object)),
+                focus_section,
+                selected,
+                page: meta,
+            }))
         })
     }
 
@@ -911,6 +971,18 @@ mod tests {
         /// 一覧に無いグループ名は 0 件で返る。「指定グループが無い」は失敗では
         /// ないというヘッダーの明記をそのまま写す。
         group_item_names: Vec<(String, Vec<String>)>,
+        /// タイムライン上で選択されている対象を、ホストが返す順序で並べたもの。
+        ///
+        /// レイヤー番号と開始フレーム番号の組で指す。並び順は規定されて
+        /// いないため、与えた順序をそのまま返す。
+        selected: Vec<(usize, usize)>,
+        /// オブジェクト設定ウィンドウで選択されている対象。
+        focus: Option<(usize, usize)>,
+        /// フォーカス対象の区間番号。
+        ///
+        /// [`Self::focus`] とは独立に持つ。対象が無いのに番号だけを返すホストを
+        /// 作れる。
+        focus_section: Option<usize>,
         project: Option<Arc<ProjectState>>,
         calls: Mutex<Vec<&'static str>>,
     }
@@ -967,6 +1039,9 @@ mod tests {
                 evaluations: Mutex::new(Vec::new()),
                 values_unavailable_for: None,
                 group_item_names: Vec::new(),
+                selected: Vec::new(),
+                focus: None,
+                focus_section: None,
                 project: None,
                 calls: Mutex::new(Vec::new()),
             }
@@ -1127,6 +1202,32 @@ mod tests {
                         .collect()
                 })
                 .unwrap_or_default())
+        }
+
+        fn selected_placements(&self) -> Result<Vec<HostObjectPlacement>, ReadError> {
+            self.host.record("selected_placements");
+            self.host
+                .selected
+                .iter()
+                .map(|&(layer, frame_start)| {
+                    Ok(self.find(layer, frame_start)?.identity.placement.clone())
+                })
+                .collect()
+        }
+
+        fn focused_object(&self) -> Result<Option<HostObject>, ReadError> {
+            self.host.record("focused_object");
+            match self.host.focus {
+                Some((layer, frame_start)) => {
+                    Ok(Some(self.find(layer, frame_start)?.identity.clone()))
+                }
+                None => Ok(None),
+            }
+        }
+
+        fn focus_section(&self) -> Result<Option<usize>, ReadError> {
+            self.host.record("focus_section");
+            Ok(self.host.focus_section)
         }
 
         fn object_identity(
@@ -1464,6 +1565,15 @@ mod tests {
             self.list_objects(expected_scene_id, filter, &PageRequest::default())
                 .map(|page| page.expect("既定のページ要求が拒否されました"))
         }
+
+        /// 既定のページ要求で選択状態を取得する。
+        fn get_selection_page(
+            &self,
+            expected_scene_id: i32,
+        ) -> Result<SelectionSnapshot, ReadError> {
+            self.get_selection(expected_scene_id, &PageRequest::default())
+                .map(|snapshot| snapshot.expect("既定のページ要求が拒否されました"))
+        }
     }
 
     /// adapter とプロジェクト状態を組み立てる。
@@ -1503,6 +1613,7 @@ mod tests {
                 ))
                 .err()
                 .map(|e| e.error_code()),
+            adapter.get_selection_page(0).err().map(|e| e.error_code()),
         ]
         .into_iter()
         .map(|code| code.expect("成功してしまいました"))
@@ -2416,6 +2527,7 @@ mod tests {
         for error in [
             adapter.list_layers(7).unwrap_err(),
             adapter.list_objects_page(7, None).unwrap_err(),
+            adapter.get_selection_page(7).unwrap_err(),
         ] {
             assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
             assert_eq!(error.details()["expected_scene_id"], 7);
@@ -3170,6 +3282,10 @@ mod tests {
             serde_json::to_string(&adapter.list_layers(0).unwrap().items).unwrap(),
         ];
         documents.push(serde_json::to_string(&adapter.get_current_scene().unwrap().0).unwrap());
+        // 選択の取得はハンドルを 2 段で受け取る唯一の読み取りである。3 件の
+        // 選択とフォーカスを持つホストで確かめる。
+        let selection = adapter_with(|_| selecting_host());
+        documents.push(serde_json::to_string(&selection.get_selection_page(0).unwrap()).unwrap());
 
         for document in documents {
             let lowered = document.to_lowercase();
@@ -3363,6 +3479,311 @@ mod tests {
             adapter.host.calls()
         );
         assert_eq!(detail_reads(&adapter), 0);
+    }
+
+    /// 3 件を選択し、そのうち 1 件をフォーカスしたホスト。
+    ///
+    /// 選択はレイヤーと開始フレームの昇順とは**逆の順序**で返す。ホストが返す
+    /// 順序は規定されておらず、並べ替えを我々が行うことを確かめられる。
+    fn selecting_host() -> FakeHost {
+        FakeHost {
+            selected: vec![(1, 300), (1, 100), (0, 0)],
+            focus: Some((1, 100)),
+            focus_section: Some(1),
+            ..FakeHost::new()
+        }
+    }
+
+    /// ホストが逆順で返しても、選択がレイヤー・開始フレームの昇順で返ることを
+    /// 確かめる。
+    ///
+    /// ページ間で順序が変わると、取りこぼしと重複が同時に起きる。オブジェクトの
+    /// 列挙と同じ並びであることも併せて確かめる。要求元は 2 つの応答を
+    /// 突き合わせられる。
+    #[test]
+    fn the_selection_is_ordered_by_layer_and_start_frame() {
+        let adapter = adapter_with(|_| selecting_host());
+        let snapshot = adapter.get_selection_page(0).unwrap();
+
+        let positions: Vec<(usize, usize)> = snapshot
+            .selected
+            .iter()
+            .map(|object| (object.layer, object.frame_start))
+            .collect();
+        assert_eq!(positions, vec![(0, 0), (1, 100), (1, 300)]);
+
+        let enumerated: Vec<(usize, usize)> = adapter
+            .list_objects_page(0, None)
+            .unwrap()
+            .items
+            .iter()
+            .map(|object| (object.layer, object.frame_start))
+            .collect();
+        assert_eq!(positions, enumerated, "列挙と並びが違います");
+    }
+
+    /// 選択の alias を読むのがページの窓に入った分だけであることを確かめる。
+    ///
+    /// 応答へ載せない対象まで読むと、参照区間の保持時間が要求ページではなく
+    /// 選択の規模で決まってしまう。
+    #[test]
+    fn the_selection_reads_aliases_only_within_the_page() {
+        let adapter = adapter_with(|_| selecting_host());
+        let snapshot = adapter
+            .get_selection(
+                0,
+                &PageRequest {
+                    offset: 1,
+                    limit: 1,
+                    snapshot_revision: None,
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+        // 総件数は選択全体の件数であり、窓の件数ではない。
+        assert_eq!(snapshot.page.total_count, 3);
+        assert_eq!(snapshot.page.offset, 1);
+        assert!(snapshot.page.has_more);
+        assert_eq!(snapshot.selected.len(), 1);
+        // 並べ替えた後の 2 件目である。切り出しが並べ替えの前に走れば別の
+        // 対象が返る。
+        assert_eq!(
+            (snapshot.selected[0].layer, snapshot.selected[0].frame_start),
+            (1, 100)
+        );
+
+        assert_eq!(
+            identity_reads(&adapter),
+            1,
+            "窓の外の対象まで alias を読んでいます: {:?}",
+            adapter.host.calls()
+        );
+    }
+
+    /// 選択の一覧が配下 effect を読まないことを確かめる。
+    #[test]
+    fn the_selection_does_not_read_effects() {
+        let adapter = adapter_with(|_| selecting_host());
+        let snapshot = adapter.get_selection_page(0).unwrap();
+
+        assert_eq!(snapshot.selected.len(), 3);
+        assert!(
+            !adapter.host.calls().contains(&EFFECT_LIST),
+            "選択の取得が effect を読みました: {:?}",
+            adapter.host.calls()
+        );
+    }
+
+    /// フォーカス対象とその区間番号が同じ組で返ることを確かめる。
+    #[test]
+    fn the_focused_object_carries_its_section_number() {
+        let adapter = adapter_with(|_| selecting_host());
+        let snapshot = adapter.get_selection_page(0).unwrap();
+
+        let focus = snapshot.focus.expect("フォーカス対象がありません");
+        assert_eq!((focus.layer, focus.frame_start), (1, 100));
+        assert_eq!(snapshot.focus_section, Some(1));
+    }
+
+    /// フォーカス対象が居るのに区間番号が得られない場合を確かめる。
+    ///
+    /// ラッパーはホストの `-1` を `None` へ写す。番号だけが落ちても対象は返る。
+    #[test]
+    fn a_focused_object_without_a_section_number_still_returns_the_object() {
+        let adapter = adapter_with(|_| FakeHost {
+            focus_section: None,
+            ..selecting_host()
+        });
+        let snapshot = adapter.get_selection_page(0).unwrap();
+
+        assert!(snapshot.focus.is_some());
+        assert_eq!(snapshot.focus_section, None);
+    }
+
+    /// フォーカス対象が無ければ区間番号も無いことを確かめる。
+    ///
+    /// 区間番号は対象の性質である。ホストが対象を返さないまま番号だけを返しても、
+    /// 対象と番号の食い違った組を応答へ載せない。
+    #[test]
+    fn an_unfocused_selection_carries_no_section_number() {
+        let adapter = adapter_with(|_| FakeHost {
+            focus: None,
+            focus_section: Some(3),
+            ..selecting_host()
+        });
+        let snapshot = adapter.get_selection_page(0).unwrap();
+
+        assert_eq!(snapshot.focus, None);
+        assert_eq!(snapshot.focus_section, None);
+    }
+
+    /// フォーカス対象と区間番号を同じ参照区間の内側で読むことを確かめる。
+    ///
+    /// 別の区間に分けると、間に利用者の操作が入って両者が食い違った組を返し得る。
+    #[test]
+    fn the_focus_and_its_section_are_read_in_the_same_section() {
+        let adapter = adapter_with(|_| selecting_host());
+        adapter.get_selection_page(0).unwrap();
+
+        let calls = adapter.host.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| **call == "enter_read_section")
+                .count(),
+            1,
+            "参照区間へ複数回入りました: {calls:?}"
+        );
+        let entered = calls
+            .iter()
+            .position(|call| *call == "enter_read_section")
+            .expect("参照区間へ入っていません");
+        for call in ["focused_object", "focus_section"] {
+            let at = calls
+                .iter()
+                .position(|recorded| *recorded == call)
+                .unwrap_or_else(|| panic!("{call} が呼ばれていません: {calls:?}"));
+            assert!(
+                at > entered,
+                "{call} が参照区間の外で呼ばれました: {calls:?}"
+            );
+        }
+    }
+
+    /// シーンの guard が対象を読む前に効くことを確かめる。
+    #[test]
+    fn get_selection_rejects_a_different_scene_before_reading_objects() {
+        let adapter = adapter_with(|_| selecting_host());
+        let error = adapter.get_selection_page(7).unwrap_err();
+
+        assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+        assert_eq!(error.details()["expected_scene_id"], 7);
+        assert_eq!(identity_reads(&adapter), 0);
+    }
+
+    /// 選択の取得がページ間の revision 照合を行うことを確かめる。
+    ///
+    /// 選択はプロジェクトの状態であり、revision に連動する。
+    #[test]
+    fn get_selection_rejects_a_stale_snapshot_revision() {
+        let adapter = adapter_with(|_| selecting_host());
+        let error = adapter
+            .get_selection(
+                0,
+                &PageRequest {
+                    offset: 0,
+                    limit: 50,
+                    snapshot_revision: Some(99),
+                },
+            )
+            .unwrap()
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            PageError::SnapshotRevisionMismatch {
+                requested: 99,
+                current: 0,
+            }
+        );
+        assert_eq!(identity_reads(&adapter), 0);
+    }
+
+    /// 選択が 0 件でもフォーカス対象は返ることを確かめる。
+    ///
+    /// タイムライン上の選択とオブジェクト設定ウィンドウの選択は別物である。
+    #[test]
+    fn an_empty_selection_still_carries_the_focus() {
+        let adapter = adapter_with(|_| FakeHost {
+            selected: Vec::new(),
+            ..selecting_host()
+        });
+        let snapshot = adapter.get_selection_page(0).unwrap();
+
+        assert!(snapshot.selected.is_empty());
+        assert_eq!(snapshot.page.total_count, 0);
+        assert!(snapshot.focus.is_some());
+    }
+
+    /// 応答に現れる項目名を、入れ子をたどって全て集める。
+    fn field_names(value: &serde_json::Value) -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, nested) in map {
+                    names.insert(key.clone());
+                    names.extend(field_names(nested));
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    names.extend(field_names(item));
+                }
+            }
+            _ => {}
+        }
+        names
+    }
+
+    /// 選択の応答が持つ項目を表として固定する。
+    ///
+    /// ハンドルは参照区間の内側で位置と同一性の材料へ写し切る。名前で探す検査は
+    /// `handle` を含まない名前を付けた項目を見逃すため、項目の集合そのものを
+    /// 固定して、区間の外へ持ち出す値が増えたことをここで落とす。
+    #[test]
+    fn the_selection_response_carries_only_position_and_identity() {
+        let adapter = adapter_with(|_| selecting_host());
+        let snapshot = adapter.get_selection_page(0).unwrap();
+        let value = serde_json::to_value(&snapshot).expect("直列化できます");
+
+        let expected: std::collections::BTreeSet<String> = [
+            "project_revision",
+            "focus",
+            "focus_section",
+            "selected",
+            "page",
+            "layer",
+            "frame_start",
+            "frame_end",
+            "name",
+            "selector",
+            "fingerprint",
+            "project_epoch",
+            "scene_id",
+            "frame",
+            "total_count",
+            "count",
+            "offset",
+            "has_more",
+            "next_offset",
+            "snapshot_revision",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        assert_eq!(field_names(&value), expected);
+    }
+
+    /// 選択が返したセレクターで対象を引けることを確かめる。
+    ///
+    /// 「対話利用の起点」の中身である。返ってきた対象をそのまま編集へ渡せる。
+    #[test]
+    fn the_selection_returns_usable_selectors() {
+        let adapter = adapter_with(|_| selecting_host());
+        let snapshot = adapter.get_selection_page(0).unwrap();
+
+        let focus = snapshot.focus.expect("フォーカス対象がありません");
+        let detail = adapter
+            .get_object(&focus.selector)
+            .expect("フォーカス対象のセレクターで引けません");
+        assert_eq!(detail.summary, focus);
+
+        for object in &snapshot.selected {
+            adapter
+                .get_object(&object.selector)
+                .expect("選択のセレクターで引けません");
+        }
     }
 
     /// 対象を指定する取得は配下 effect を読むことを確かめる。

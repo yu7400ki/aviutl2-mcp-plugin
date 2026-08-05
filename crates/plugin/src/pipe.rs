@@ -842,6 +842,17 @@ mod tests {
         ) -> Result<aviutl2_mcp_core::EffectItemValues, crate::read::ReadError> {
             Err(crate::read::ReadError::NotReady)
         }
+
+        fn get_selection(
+            &self,
+            _expected_scene_id: i32,
+            _page: &aviutl2_mcp_core::PageRequest,
+        ) -> Result<
+            Result<aviutl2_mcp_core::SelectionSnapshot, aviutl2_mcp_core::PageError>,
+            crate::read::ReadError,
+        > {
+            Err(crate::read::ReadError::NotReady)
+        }
     }
 
     fn stub_scene() -> aviutl2_mcp_core::SceneInfo {
@@ -940,6 +951,22 @@ mod tests {
             &self,
             _layer: usize,
         ) -> Result<Vec<crate::read::host::HostObjectPlacement>, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn selected_placements(
+            &self,
+        ) -> Result<Vec<crate::read::host::HostObjectPlacement>, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn focused_object(
+            &self,
+        ) -> Result<Option<crate::read::host::HostObject>, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn focus_section(&self) -> Result<Option<usize>, crate::read::ReadError> {
             panic!("参照区間の内側で panic させます")
         }
 
@@ -2069,6 +2096,17 @@ mod tests {
             params: &aviutl2_mcp_core::GetEffectItemValuesParams,
         ) -> Result<aviutl2_mcp_core::EffectItemValues, crate::read::ReadError> {
             StubReadAdapter.get_effect_item_values(params)
+        }
+
+        fn get_selection(
+            &self,
+            expected_scene_id: i32,
+            page: &aviutl2_mcp_core::PageRequest,
+        ) -> Result<
+            Result<aviutl2_mcp_core::SelectionSnapshot, aviutl2_mcp_core::PageError>,
+            crate::read::ReadError,
+        > {
+            StubReadAdapter.get_selection(expected_scene_id, page)
         }
     }
 

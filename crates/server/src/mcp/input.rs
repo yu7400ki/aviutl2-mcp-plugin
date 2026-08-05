@@ -26,9 +26,9 @@
 use crate::mcp::failure::{from_code, invalid_argument};
 use aviutl2_mcp_core::{
     DEFAULT_PAGE_LIMIT, EffectSelector, EffectType, ErrorCode, ErrorObject, FiniteF64,
-    GetEffectItemValuesParams, GetObjectParams, InstanceId, ListAvailableEffectsParams,
-    ListLayersParams, ListObjectsParams, MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, MAX_PAGE_LIMIT,
-    ObjectFilter, ObjectSelector, PageRequest,
+    GetEffectItemValuesParams, GetObjectParams, GetSelectionParams, InstanceId,
+    ListAvailableEffectsParams, ListLayersParams, ListObjectsParams, MAX_EVALUATED_FRAMES,
+    MAX_EVALUATED_ITEMS, MAX_PAGE_LIMIT, ObjectFilter, ObjectSelector, PageRequest,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -191,6 +191,20 @@ pub struct ObjectFilterInput {
     /// 対象とする最大のレイヤー番号。0 始まり。
     #[serde(default)]
     pub layer_max: Option<u32>,
+}
+
+/// `get_selection` の入力。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetSelectionInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// 取得対象が現在シーンのままであることを確認するためのシーン ID。
+    pub expected_scene_id: i32,
+    /// ページ指定。selected の一覧にだけ掛かる。
+    #[serde(flatten)]
+    pub page: PageInput,
 }
 
 /// `get_object` の入力。
@@ -439,6 +453,16 @@ impl ListObjectsInput {
         Ok(ListObjectsParams {
             expected_scene_id: self.expected_scene_id,
             filter,
+            page: self.page.to_page_request()?,
+        })
+    }
+}
+
+impl GetSelectionInput {
+    /// IPC の params へ変換する。
+    pub fn to_params(&self) -> Result<GetSelectionParams, ErrorObject> {
+        Ok(GetSelectionParams {
+            expected_scene_id: self.expected_scene_id,
             page: self.page.to_page_request()?,
         })
     }

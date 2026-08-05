@@ -59,6 +59,19 @@ pub fn list_objects() -> Value {
     page_of(object_summary())
 }
 
+/// `get_selection` の出力。
+///
+/// 編集カーソルとフレーム範囲選択は含まない。どちらも `get_edit_info` が返す。
+pub fn get_selection() -> Value {
+    object(&[
+        ("project_revision", unsigned()),
+        ("focus", nullable(object_summary())),
+        ("focus_section", nullable_unsigned()),
+        ("selected", array(object_summary())),
+        ("page", page_meta()),
+    ])
+}
+
 /// `get_object` の出力。
 pub fn object_detail() -> Value {
     object(&[
@@ -632,7 +645,8 @@ mod tests {
         GetCurrentSceneResult, GridBpm, InstanceId, InstanceInfo, InstanceProject, InstanceState,
         ItemValue, LayerInfo, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
         ObjectDetail, ObjectFingerprintInput, ObjectSummary, ObservedSelection, PageMeta,
-        SceneInfo, SceneRef, SectionRange, SelectionField, SelectionState, TrackGroup, TrackInfo,
+        SceneInfo, SceneRef, SectionRange, SelectionField, SelectionSnapshot, SelectionState,
+        TrackGroup, TrackInfo,
     };
 
     /// 値が schema に適合するかを再帰的に検査する。
@@ -991,6 +1005,25 @@ mod tests {
             page: sample_page_meta(),
         };
         assert_conforms(list_objects(), &to_value(&result));
+    }
+
+    #[test]
+    fn get_selection_schema_matches_dto() {
+        // フォーカスの有無で形が変わる。両方の状態を同じ schema へ通す。
+        for (focus, focus_section) in [
+            (Some(sample_object_summary()), Some(1)),
+            (Some(sample_object_summary()), None),
+            (None, None),
+        ] {
+            let snapshot = SelectionSnapshot {
+                project_revision: 42,
+                focus,
+                focus_section,
+                selected: vec![sample_object_summary()],
+                page: sample_page_meta(),
+            };
+            assert_conforms(get_selection(), &to_value(&snapshot));
+        }
     }
 
     #[test]

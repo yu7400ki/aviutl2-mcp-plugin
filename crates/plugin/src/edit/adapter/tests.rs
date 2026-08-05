@@ -4101,6 +4101,47 @@ fn the_fake_names_the_call_that_could_not_produce_a_value() {
     assert_eq!(named(true), json!("get_effect_check_value"));
 }
 
+/// 選択の取得がハンドルを参照区間の外へ出さないことを確かめる。
+///
+/// 選択はハンドルを 2 段で受け取る唯一の読み取りである。3 件を選択したフェイクで、
+/// 応答が位置と同一性の材料だけで組み立てられることと、対象を指す内部の値が
+/// 現れないことを見る。
+#[test]
+fn the_selection_of_three_objects_carries_no_handle() {
+    let harness = Harness::new();
+    // ホストが返す順序は規定されていない。昇順とは逆に並べて渡す。
+    harness.host.select_objects(&[(1, 300), (1, 100), (0, 0)]);
+    harness.host.focus_object(Some((1, 100)), Some(1));
+
+    let snapshot = harness
+        .read
+        .get_selection(SCENE_ID, &PageRequest::default())
+        .expect("選択を取得できます")
+        .expect("ページ要求が拒否されました");
+
+    // 列挙が返す概要とそのまま一致する。fingerprint まで同じであるため、
+    // 要求元は返ってきた対象をそのまま編集へ渡せる。
+    assert_eq!(
+        snapshot.selected,
+        vec![
+            harness.summary(0, 0),
+            harness.summary(1, 100),
+            harness.summary(1, 300),
+        ]
+    );
+    assert_eq!(snapshot.focus, Some(harness.summary(1, 100)));
+    assert_eq!(snapshot.focus_section, Some(1));
+
+    let payload = serde_json::to_string(&snapshot).expect("直列化できます");
+    let lowered = payload.to_lowercase();
+    for forbidden in ["handle", "pointer", "0x", "alias"] {
+        assert!(
+            !lowered.contains(forbidden),
+            "{forbidden} が応答に現れました: {payload}"
+        );
+    }
+}
+
 /// BPM グリッドの置き換え要求を組み立てる。
 fn set_grid_bpm(harness: &Harness, entries: Vec<GridBpm>) -> SetGridBpmParams {
     SetGridBpmParams {

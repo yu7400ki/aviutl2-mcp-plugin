@@ -193,6 +193,31 @@ pub trait SceneReader {
     /// 途中で走査を打ち切った不完全な一覧は返さない。全件を返せない場合は失敗する。
     fn object_placements(&self, layer: usize) -> Result<Vec<HostObjectPlacement>, ReadError>;
 
+    /// タイムライン上で選択されているオブジェクトの位置と名前を返す。
+    ///
+    /// alias も effect も読まない。位置だけを先に集めることで、並べ替えと
+    /// ページの切り出しを済ませてから、応答へ載せる分の同一性の材料だけを
+    /// [`Self::object_identity`] で読める。
+    ///
+    /// **並び順を保証しない。** ホストが返す順序は規定されておらず、要求ごとに
+    /// 変わり得る。並べ替えは呼び出し側が行う。
+    fn selected_placements(&self) -> Result<Vec<HostObjectPlacement>, ReadError>;
+
+    /// オブジェクト設定ウィンドウで選択されているオブジェクトを返す。未選択は `None`。
+    ///
+    /// タイムライン上の選択とは別の概念であり、[`Self::selected_placements`] の
+    /// 結果に含まれるとは限らない。
+    ///
+    /// 1 件しか無くページの切り出しも掛からないため、位置と同一性の材料を分けて
+    /// 読まない。
+    fn focused_object(&self) -> Result<Option<HostObject>, ReadError>;
+
+    /// フォーカス対象の区間番号を返す。未選択は `None`。
+    ///
+    /// **実装の義務**: [`Self::focused_object`] が `None` を返す状態では `None` を
+    /// 返す。番号は対象の性質であり、対象が無いのに番号だけが返る組には意味が無い。
+    fn focus_section(&self) -> Result<Option<usize>, ReadError>;
+
     /// 開始フレームが完全一致するオブジェクトの同一性の材料を返す。
     ///
     /// alias を読み、配下 effect は読まない。fingerprint はこの結果か
