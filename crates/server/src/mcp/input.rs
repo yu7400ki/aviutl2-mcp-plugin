@@ -48,7 +48,9 @@ const UUID_GROUP_LENGTHS: [usize; 5] = [8, 4, 4, 4, 12];
 /// 試験で突き合わせる。
 pub(crate) const FINGERPRINT_PATTERN: &str = r"^sha256:[0-9a-f]{64}$";
 
-/// オブジェクト名・レイヤー名に許す最大文字数。
+/// 名前として受け取る文字列に許す最大文字数。
+///
+/// 対象を数え上げない。利用側が増えるたびに doc が古くなる。
 pub(crate) const MAX_NAME_CHARS: u32 = 1_024;
 
 /// プロジェクト epoch に許す最大文字数。

@@ -3414,8 +3414,8 @@ mod tests {
     fn the_catalog_tools_say_that_the_revision_is_not_matched() {
         // 受理するが照合しない値である。黙っていると、要求元は 2 ページ目が
         // 落ちない理由も、添えても取りこぼしが防げない理由も分からない。
-        for name in CATALOG_PAGE_TOOLS {
-            let description = description_of(name);
+        for name in catalog_page_tools() {
+            let description = description_of(&name);
             assert!(
                 description.contains("snapshot_revision は受理するがページ間の照合には用いない"),
                 "{name} の説明が照合しないことを述べていません"
@@ -3450,22 +3450,69 @@ mod tests {
         }
     }
 
-    /// ページ指定を 1 つの入力型から受ける tool。
+    /// tool がページ指定を共有の入力型から受けるか。
     ///
-    /// 型を共有しているため、`snapshot_revision` の説明は 5 つで同じ文になる。
-    const CATALOG_PAGE_TOOLS: &[&str] = &[
-        "list_available_effects",
-        "list_fonts",
-        "list_palettes",
-        "list_modules",
-        "list_object_aliases",
-    ];
+    /// 型を共有しているため、`snapshot_revision` の説明は該当する tool すべてで
+    /// 同じ文になる。
+    ///
+    /// **未知の tool 名で落とす。** 一覧を手書きの連結で持つと、共有の入力型へ
+    /// 相乗りした tool をそこへ足し忘れたときに、説明の共有も照合しない旨の
+    /// 明記も黙って未検査になる。
+    fn takes_the_catalog_page(name: &str) -> bool {
+        match name {
+            "list_available_effects"
+            | "list_fonts"
+            | "list_palettes"
+            | "list_modules"
+            | "list_object_aliases" => true,
+            "list_instances"
+            | "get_edit_info"
+            | "get_current_scene"
+            | "list_layers"
+            | "list_objects"
+            | "get_object"
+            | "get_effect_item_values"
+            | "get_selection"
+            | "create_object"
+            | "move_object"
+            | "set_object_name"
+            | "set_object_item"
+            | "add_effect"
+            | "set_effect_enabled"
+            | "delete_effect"
+            | "delete_object"
+            | "set_selection"
+            | "set_layer_state"
+            | "create_object_section"
+            | "delete_object_section"
+            | "move_object_section"
+            | "set_grid_bpm"
+            | "set_scene_settings"
+            | "apply_batch"
+            | "render_frame" => false,
+            other => panic!("{other} がページ指定を共有するかが決まっていません"),
+        }
+    }
+
+    /// ページ指定を共有の入力型から受ける tool の名前を、登録済みの集合から拾う。
+    fn catalog_page_tools() -> Vec<String> {
+        tools()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .filter(|name| takes_the_catalog_page(name))
+            .collect()
+    }
 
     #[test]
     fn the_catalog_tools_share_one_wording_for_the_unmatched_revision() {
-        // 入力型を分けると一致が崩れる。文言を特定の対象へ寄せると、5 つのうち
-        // 1 つにしか当てはまらない説明が残りの 4 tool の schema へ載る。
-        let wordings: Vec<String> = CATALOG_PAGE_TOOLS
+        // 入力型を分けると一致が崩れる。文言を特定の対象へ寄せると、共有して
+        // いる tool のうち 1 つにしか当てはまらない説明が残りの schema へ載る。
+        let names = catalog_page_tools();
+        assert!(
+            names.len() > 1,
+            "共有を確かめるには 2 つ以上の tool が要ります"
+        );
+        let wordings: Vec<String> = names
             .iter()
             .map(|name| {
                 tool_named(name).input_schema["properties"]["snapshot_revision"]["description"]
@@ -3474,7 +3521,7 @@ mod tests {
                     .to_string()
             })
             .collect();
-        for (name, wording) in CATALOG_PAGE_TOOLS.iter().zip(&wordings) {
+        for (name, wording) in names.iter().zip(&wordings) {
             assert_eq!(
                 wording, &wordings[0],
                 "{name} の snapshot_revision の説明が他の tool と違います"
@@ -3513,6 +3560,13 @@ mod tests {
             tool.input_schema["required"],
             serde_json::json!(["instance_id"]),
             "list_object_aliases の必須項目"
+        );
+        // 宣言した上限は接続前に実際へ確かめる。宣言だけを消しても要求元から
+        // 見えるのは schema であり、検証が残っていることは伝わらない。
+        assert_eq!(
+            properties["label"]["maxLength"],
+            serde_json::json!(crate::mcp::input::MAX_NAME_CHARS),
+            "label の上限が宣言されていません"
         );
     }
 
