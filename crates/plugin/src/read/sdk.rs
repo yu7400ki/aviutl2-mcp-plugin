@@ -1300,19 +1300,14 @@ mod tests {
 
     /// 既知の種別と、未知を名乗る種別を 1 つ並べる。
     ///
-    /// 未知の種別に当たるまで raw 値を辿るため、既知の種別が増えても種別値が
-    /// 連続する限り一覧は自動で伸びる。
+    /// 読み取りの写像は未知の種別にも答えるため、検査の対象は既知の一覧より
+    /// 1 件広い。
     fn all_item_types() -> Vec<EffectItemType> {
-        let mut types = Vec::new();
-        for raw in 1i32.. {
-            let item_type = EffectItemType::from_raw(raw);
-            if item_type == EffectItemType::Unknown(raw) {
-                break;
-            }
-            types.push(item_type);
-        }
-        types.push(EffectItemType::Unknown(99));
-        types
+        EffectItemType::ALL
+            .iter()
+            .cloned()
+            .chain([EffectItemType::Unknown(99)])
+            .collect()
     }
 
     /// 種別ごとに、読み取りが返す値と、その値をそのまま書き戻した結果を並べる。

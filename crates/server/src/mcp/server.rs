@@ -3917,11 +3917,7 @@ mod tests {
     /// 動いてもここが動く。
     fn item_types_accepting_a_choice() -> Vec<String> {
         let mut names = Vec::new();
-        for raw in 1i32.. {
-            let item_type = EffectItemType::from_raw(raw);
-            if item_type == EffectItemType::Unknown(raw) {
-                break;
-            }
+        for item_type in EffectItemType::ALL {
             let items = vec![AvailableEffectItem {
                 name: "項目".to_string(),
                 item_type: item_type.clone(),

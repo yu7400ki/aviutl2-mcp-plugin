@@ -270,6 +270,30 @@ pub enum EffectItemType {
 }
 
 impl EffectItemType {
+    /// 既知の全 variant。[`EffectItemType::Unknown`] は含まない。
+    ///
+    /// 要素数と種別値の連番は `effect_item_type_all_matches_sdk_order` テストで
+    /// 固定する。種別値を辿って一覧を導くと、SDK が種別を連番でない値で足した
+    /// 日に一覧が黙って短くなるため、列挙として書く。
+    pub const ALL: &'static [EffectItemType] = &[
+        EffectItemType::Integer,
+        EffectItemType::Number,
+        EffectItemType::Check,
+        EffectItemType::Text,
+        EffectItemType::String,
+        EffectItemType::File,
+        EffectItemType::Color,
+        EffectItemType::Select,
+        EffectItemType::Scene,
+        EffectItemType::Range,
+        EffectItemType::Combo,
+        EffectItemType::Mask,
+        EffectItemType::Font,
+        EffectItemType::Figure,
+        EffectItemType::Data,
+        EffectItemType::Folder,
+    ];
+
     /// 種別値を返す。
     pub fn as_raw(&self) -> i32 {
         match self {
@@ -509,27 +533,6 @@ mod tests {
         ]
     }
 
-    fn known_item_types() -> Vec<EffectItemType> {
-        vec![
-            EffectItemType::Integer,
-            EffectItemType::Number,
-            EffectItemType::Check,
-            EffectItemType::Text,
-            EffectItemType::String,
-            EffectItemType::File,
-            EffectItemType::Color,
-            EffectItemType::Select,
-            EffectItemType::Scene,
-            EffectItemType::Range,
-            EffectItemType::Combo,
-            EffectItemType::Mask,
-            EffectItemType::Font,
-            EffectItemType::Figure,
-            EffectItemType::Data,
-            EffectItemType::Folder,
-        ]
-    }
-
     fn sample_object_selector() -> ObjectSelector {
         ObjectSummary::new(
             "78be92d1-c8c9-44c6-ae52-387548971468",
@@ -644,19 +647,29 @@ mod tests {
 
     #[test]
     fn effect_item_type_roundtrip() {
-        for item_type in known_item_types() {
-            let s = serde_json::to_string(&item_type).unwrap();
+        for item_type in EffectItemType::ALL {
+            let s = serde_json::to_string(item_type).unwrap();
             assert_eq!(s, format!("\"{item_type}\""));
             let restored: EffectItemType = serde_json::from_str(&s).unwrap();
-            assert_eq!(restored, item_type);
+            assert_eq!(&restored, item_type);
         }
     }
 
     #[test]
-    fn effect_item_type_raw_values_match_sdk_order() {
-        // 既知種別は 1..=16 に連番で割り当てられる。
-        let raws: Vec<i32> = known_item_types().iter().map(|t| t.as_raw()).collect();
+    fn effect_item_type_all_matches_sdk_order() {
+        // 既知種別は 1..=16 に連番で割り当てられる。`ALL` の並びが種別値の順で
+        // あり、かつ 1 つも欠けていないことを、網羅 `match` を持つ `as_raw` と
+        // 突き合わせて確かめる。variant を足して `ALL` へ足し忘れると、要素数か
+        // 連番のどちらかが崩れる。
+        assert_eq!(EffectItemType::ALL.len(), 16);
+        let raws: Vec<i32> = EffectItemType::ALL.iter().map(|t| t.as_raw()).collect();
         assert_eq!(raws, (1..=16).collect::<Vec<i32>>());
+        // 種別値からの復元も `ALL` と一致し、連番の次の値は未知のままである。
+        // 一覧へ足さずに variant を足すと、その種別値が未知でなくなって落ちる。
+        for item_type in EffectItemType::ALL {
+            assert_eq!(&EffectItemType::from_raw(item_type.as_raw()), item_type);
+        }
+        assert_eq!(EffectItemType::from_raw(17), EffectItemType::Unknown(17));
     }
 
     #[test]
@@ -710,10 +723,10 @@ mod tests {
             );
         }
 
-        for item_type in known_item_types() {
+        for item_type in EffectItemType::ALL {
             let unknown = EffectItemType::Unknown(item_type.as_raw());
             assert_eq!(unknown.as_raw(), item_type.as_raw());
-            assert_ne!(unknown, item_type);
+            assert_ne!(&unknown, item_type);
             assert_ne!(
                 unknown.kind_name(),
                 item_type.kind_name(),
@@ -724,7 +737,7 @@ mod tests {
 
     #[test]
     fn kind_name_is_unique_across_known_types() {
-        let mut names: Vec<String> = known_item_types()
+        let mut names: Vec<String> = EffectItemType::ALL
             .iter()
             .map(EffectItemType::kind_name)
             .collect();
@@ -740,7 +753,7 @@ mod tests {
         assert_eq!(EffectType::Unknown(1).kind_name(), "unknown(1)");
         assert_eq!(EffectItemType::Number.kind_name(), "number");
         assert_eq!(EffectItemType::Unknown(2).kind_name(), "unknown(2)");
-        for item_type in known_item_types() {
+        for item_type in EffectItemType::ALL {
             assert_eq!(item_type.kind_name(), item_type.to_string());
         }
     }

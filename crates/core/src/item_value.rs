@@ -797,22 +797,6 @@ mod tests {
         }
     }
 
-    /// 既知の種別を列挙する。
-    ///
-    /// 未知を名乗る種別値に当たるまで辿るため、既知の種別が増えても一覧は
-    /// 種別値が連続する限り自動で伸びる。
-    fn known_item_types() -> Vec<EffectItemType> {
-        let mut types = Vec::new();
-        for raw in 1i32.. {
-            let item_type = EffectItemType::from_raw(raw);
-            if item_type == EffectItemType::Unknown(raw) {
-                break;
-            }
-            types.push(item_type);
-        }
-        types
-    }
-
     /// 書き込みが公開されているかを、変換の応答から判定する。
     ///
     /// 公開しない種別だけが [`ItemWriteError::UnsupportedItemType`] を返す。
@@ -890,13 +874,13 @@ mod tests {
     fn the_exposed_types_are_the_ones_declared_writable() {
         // 公開の範囲を、種別を網羅した宣言と突き合わせる。実装だけを直した
         // 場合も、宣言だけを直した場合も落ちる。
-        for item_type in known_item_types()
-            .into_iter()
-            .chain([EffectItemType::Unknown(99)])
+        for item_type in EffectItemType::ALL
+            .iter()
+            .chain([&EffectItemType::Unknown(99)])
         {
             assert_eq!(
-                is_exposed_for_write(&item_type),
-                expects_writable(&item_type),
+                is_exposed_for_write(item_type),
+                expects_writable(item_type),
                 "{item_type} の公開の可否が宣言と異なります"
             );
         }
@@ -911,15 +895,15 @@ mod tests {
             .map(|(item_type, _, _)| item_type)
             .collect();
         let non_writable = non_writable_item_types();
-        for item_type in known_item_types() {
+        for item_type in EffectItemType::ALL {
             assert_eq!(
-                writable.contains(&item_type),
-                expects_writable(&item_type),
+                writable.contains(item_type),
+                expects_writable(item_type),
                 "{item_type} が公開する種別の一覧と宣言で食い違います"
             );
             assert_eq!(
-                non_writable.contains(&item_type),
-                !expects_writable(&item_type),
+                non_writable.contains(item_type),
+                !expects_writable(item_type),
                 "{item_type} が公開しない種別の一覧と宣言で食い違います"
             );
         }
@@ -1355,10 +1339,11 @@ mod tests {
         // 既知の全種別と未知種別を走査して照合する側を集めるため、この 1 つの
         // 比較が全種別についての要否を決める。種別を足したときにここを書き
         // 換えないまま通ることは、生産側の網羅 `match` が防ぐ。
-        let verified: Vec<EffectItemType> = known_item_types()
-            .into_iter()
-            .chain([EffectItemType::Unknown(99)])
-            .filter(verifies_read_back)
+        let verified: Vec<EffectItemType> = EffectItemType::ALL
+            .iter()
+            .chain([&EffectItemType::Unknown(99)])
+            .filter(|item_type| verifies_read_back(item_type))
+            .cloned()
             .collect();
         assert_eq!(verified, choice_item_types());
     }
