@@ -116,19 +116,27 @@ pub(crate) mod test_override {
         static OVERRIDE: RefCell<Option<Arc<Settings>>> = const { RefCell::new(None) };
     }
 
-    /// 差し替えが有効な間だけ生きる印。破棄で元へ戻る。
-    pub(crate) struct Guard;
+    /// 差し替えが有効な間だけ生きる印。
+    ///
+    /// 破棄で直前の差し替えへ戻す。入れ子にした差し替えが外側の値を消さない
+    /// ようにするためであり、いずれの層も自分が置いた値だけを片付ける。
+    pub(crate) struct Guard(Option<Arc<Settings>>);
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+            let previous = self.0.take();
+            OVERRIDE.with(|slot| *slot.borrow_mut() = previous);
         }
     }
 
     /// このスレッドの現在値を差し替える。
+    ///
+    /// **返り値を捨てると差し替えはその場で終わる。** 印が生きている間だけ
+    /// 有効であることを、束縛の忘れが黙って通らない形で示す。
+    #[must_use = "印を束縛しないと差し替えは即座に元へ戻る"]
     pub(crate) fn install(settings: Settings) -> Guard {
-        OVERRIDE.with(|slot| *slot.borrow_mut() = Some(Arc::new(settings)));
-        Guard
+        let previous = OVERRIDE.with(|slot| slot.borrow_mut().replace(Arc::new(settings)));
+        Guard(previous)
     }
 
     /// このスレッドの差し替え。

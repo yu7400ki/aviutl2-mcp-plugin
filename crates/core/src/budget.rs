@@ -10,7 +10,7 @@
 //! 真に小さいことを本モジュールのテストで固定する。差分は
 //! [`ScaledBudgets::transport_headroom`] として明示的に残す。
 //!
-//! # 予算定数は本モジュールの外から見えない
+//! # 予算定数は crate の外から見えない
 //!
 //! 15 個の予算定数は `pub(crate)` であり、crate の外への入口は [`ScaledBudgets`]
 //! だけである。倍率を掛けない値が要る場所も [`ScaledBudgets::unscaled`] を通す。
