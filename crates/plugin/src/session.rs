@@ -2249,6 +2249,23 @@ mod tests {
     }
 
     #[test]
+    fn the_catalog_payloads_carry_no_handle_or_alias() {
+        // 登録物の名前と属性しか載せない。対象を指す内部の値は現れない。
+        for operation in CATALOG_OPERATIONS {
+            let adapter = FakeAdapter::new();
+            let payload = read(&adapter, operation, json!({}))
+                .unwrap_or_else(|error| panic!("{operation:?}: {error:?}"))
+                .to_string();
+            for forbidden in ["alias", "handle", "selector", "0x"] {
+                assert!(
+                    !payload.contains(forbidden),
+                    "{operation:?} の IPC 応答へ {forbidden} が現れました: {payload}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn malformed_params_are_invalid_argument() {
         let cases = [
             (ReadOperation::ListLayers, json!({})),

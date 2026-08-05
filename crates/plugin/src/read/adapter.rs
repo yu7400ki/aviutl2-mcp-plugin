@@ -3618,6 +3618,9 @@ mod tests {
             serde_json::to_string(&adapter.list_layers(0).unwrap().items).unwrap(),
         ];
         documents.push(serde_json::to_string(&adapter.get_current_scene().unwrap().0).unwrap());
+        documents.push(serde_json::to_string(&adapter.list_fonts().unwrap().items).unwrap());
+        documents.push(serde_json::to_string(&adapter.list_palettes_page().unwrap()).unwrap());
+        documents.push(serde_json::to_string(&adapter.list_modules(None).unwrap().items).unwrap());
         // 選択の取得はハンドルを 2 段で受け取る唯一の読み取りである。3 件の
         // 選択とフォーカスを持つホストで確かめる。
         let selection = adapter_with(|_| selecting_host());
