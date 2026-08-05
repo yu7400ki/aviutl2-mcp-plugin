@@ -1396,8 +1396,8 @@ fn label_error(error: TextSyntaxError) -> ErrorObject {
 
 /// 補間後の値の要求内容の失敗を応答用のエラーへ変換する。
 ///
-/// 見るのは件数と項目名の規則だけであり、どれも説明の文面で訂正できる。分岐に
-/// 使う名前は添えない。
+/// 見るのは件数と重複と項目名の規則だけであり、どれも説明の文面で訂正できる。
+/// 分岐に使う名前は添えない。
 fn item_values_error(error: EffectItemValuesInputError) -> ErrorObject {
     error_object(ErrorCode::InvalidArgument, error.to_string())
 }

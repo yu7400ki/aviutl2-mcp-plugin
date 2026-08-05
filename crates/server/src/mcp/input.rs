@@ -399,7 +399,7 @@ const MAX_ITEM_COUNT: u32 = MAX_EVALUATED_ITEMS as u32;
 impl GetEffectItemValuesInput {
     /// IPC の params へ変換する。
     ///
-    /// 件数と項目名の検証は core の実装を呼ぶ。要求元と実行側が同じ判定を
+    /// 件数と重複と項目名の検証は core の実装を呼ぶ。要求元と実行側が同じ判定を
     /// 共有し、宣言した制約を接続前に実際へ確かめる。
     pub fn to_params(&self) -> Result<GetEffectItemValuesParams, ErrorObject> {
         let mut frames = Vec::with_capacity(self.frames.len());

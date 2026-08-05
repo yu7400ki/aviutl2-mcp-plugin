@@ -627,7 +627,11 @@ impl GetEffectItemValuesParams {
     /// 要求元は応答の項目と要求の項目を突き合わせられなくなる。
     ///
     /// 重複は件数の判定より後に見る。先に見ると、上限ちょうどの要求が上限を
-    /// 超えているかどうかを重複の有無が左右する。
+    /// 超えているかどうかを重複の有無が左右する。項目名は構文を先に見るため、
+    /// 構文を満たさない名前が 2 度並んだ要求は重複ではなく名前の失敗を名乗る。
+    ///
+    /// [`FiniteF64`] は丸めずに完全一致で比べる。補間位置は値そのものが意味を
+    /// 持つため、近い 2 つの値を同じ 1 つとして扱えない。
     pub fn validate(&self) -> Result<(), EffectItemValuesInputError> {
         if self.frames.is_empty() || self.frames.len() > MAX_EVALUATED_FRAMES {
             return Err(EffectItemValuesInputError::FrameCountOutOfRange {
@@ -656,8 +660,7 @@ impl GetEffectItemValuesParams {
 
 /// 先に現れた要素と等しくなる最初の位置を返す。
 ///
-/// [`FiniteF64`] は丸めずに完全一致で比べる。補間位置は値そのものが意味を
-/// 持つため、近い 2 つの値を同じ 1 つとして扱えない。
+/// 等価性は要素の型が決める。丸めや正規化は行わない。
 fn first_duplicate<T: PartialEq>(values: &[T]) -> Option<usize> {
     (1..values.len()).find(|index| values[..*index].contains(&values[*index]))
 }
