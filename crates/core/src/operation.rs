@@ -48,6 +48,9 @@ pub const OPERATION_LIST_PALETTES: &str = "list_palettes";
 /// 登録済みモジュールを列挙する operation 名。
 pub const OPERATION_LIST_MODULES: &str = "list_modules";
 
+/// 登録済みオブジェクトエイリアスを列挙する operation 名。
+pub const OPERATION_LIST_OBJECT_ALIASES: &str = "list_object_aliases";
+
 /// media file / alias からオブジェクトを作成する operation 名。
 pub const OPERATION_CREATE_OBJECT: &str = "create_object";
 
@@ -129,13 +132,15 @@ pub enum ReadOperation {
     ListPalettes,
     /// [`OPERATION_LIST_MODULES`]。
     ListModules,
+    /// [`OPERATION_LIST_OBJECT_ALIASES`]。
+    ListObjectAliases,
 }
 
 impl ReadOperation {
     /// 全 variant。
     ///
     /// 要素数と内容は `read_operation_all_is_exhaustive` テストで固定する。
-    pub const ALL: [ReadOperation; 11] = [
+    pub const ALL: [ReadOperation; 12] = [
         ReadOperation::GetEditInfo,
         ReadOperation::GetCurrentScene,
         ReadOperation::ListLayers,
@@ -147,6 +152,7 @@ impl ReadOperation {
         ReadOperation::ListFonts,
         ReadOperation::ListPalettes,
         ReadOperation::ListModules,
+        ReadOperation::ListObjectAliases,
     ];
 
     /// operation 名の文字列表現を返す。
@@ -163,6 +169,7 @@ impl ReadOperation {
             ReadOperation::ListFonts => OPERATION_LIST_FONTS,
             ReadOperation::ListPalettes => OPERATION_LIST_PALETTES,
             ReadOperation::ListModules => OPERATION_LIST_MODULES,
+            ReadOperation::ListObjectAliases => OPERATION_LIST_OBJECT_ALIASES,
         }
     }
 
@@ -381,7 +388,8 @@ impl KnownOperation {
                 | ReadOperation::GetSelection
                 | ReadOperation::ListFonts
                 | ReadOperation::ListPalettes
-                | ReadOperation::ListModules => RequestBudgetKind::Read,
+                | ReadOperation::ListModules
+                | ReadOperation::ListObjectAliases => RequestBudgetKind::Read,
             },
             KnownOperation::Edit(operation) => match operation {
                 EditOperation::CreateObject
@@ -555,6 +563,34 @@ pub struct ListModulesParams {
     pub page: PageRequest,
 }
 
+/// `list_object_aliases` の params。
+///
+/// シーン ID の guard を持たない理由は [`ListFontsParams`] と同じである。
+/// オブジェクトエイリアスはシーンに紐づく値ではない。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListObjectAliasesParams {
+    /// ページ指定。要求では offset / limit / snapshot_revision として展開される。
+    #[serde(flatten)]
+    pub page: PageRequest,
+    /// 指定すると、この label を持つエントリだけを返す。
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+impl ListObjectAliasesParams {
+    /// `label` の構文を検証する。
+    ///
+    /// [`validate_name`] と同じ規則を通す。禁止文字は掛けない — label は名前
+    /// ではなく、パスの組み立てにも使わない。
+    pub fn validate(&self) -> Result<(), TextSyntaxError> {
+        match &self.label {
+            Some(label) => validate_name(label),
+            None => Ok(()),
+        }
+    }
+}
+
 /// 1 度の要求で評価できるフレームの最大件数。
 pub const MAX_EVALUATED_FRAMES: usize = 16;
 
@@ -701,6 +737,28 @@ pub struct ListModulesResult {
     pub page: PageMeta,
 }
 
+/// `list_object_aliases` の result。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListObjectAliasesResult {
+    /// 切り出されたページの要素。
+    pub items: Vec<ObjectAliasSummary>,
+    /// ページのメタ情報。
+    pub page: PageMeta,
+}
+
+/// 登録済みオブジェクトエイリアス 1 件の要約。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectAliasSummary {
+    /// ファイル名（拡張子を除いたもの）。作成時に指定する名前である。
+    pub name: String,
+    /// history.ini 由来の UI ラベル。無ければ null。
+    pub label: Option<String>,
+    /// 作られるオブジェクト数。形式を判別できなければ null。
+    pub object_count: Option<u32>,
+    /// エイリアスが含む effect 名の並び。出現順で、重複を保つ。
+    pub effects: Vec<String>,
+}
+
 /// `get_selection` の result。
 ///
 /// 編集カーソルとフレーム範囲選択は載せない。どちらも [`crate::EditInfo`] が
@@ -830,6 +888,7 @@ mod tests {
         assert_eq!(OPERATION_LIST_FONTS, "list_fonts");
         assert_eq!(OPERATION_LIST_PALETTES, "list_palettes");
         assert_eq!(OPERATION_LIST_MODULES, "list_modules");
+        assert_eq!(OPERATION_LIST_OBJECT_ALIASES, "list_object_aliases");
     }
 
     #[test]
@@ -1045,7 +1104,8 @@ mod tests {
                 | ReadOperation::GetSelection
                 | ReadOperation::ListFonts
                 | ReadOperation::ListPalettes
-                | ReadOperation::ListModules => {}
+                | ReadOperation::ListModules
+                | ReadOperation::ListObjectAliases => {}
             }
             assert!(
                 ReadOperation::ALL.contains(&op),
@@ -1064,7 +1124,8 @@ mod tests {
         assert_listed(ReadOperation::ListFonts);
         assert_listed(ReadOperation::ListPalettes);
         assert_listed(ReadOperation::ListModules);
-        assert_eq!(ReadOperation::ALL.len(), 11);
+        assert_listed(ReadOperation::ListObjectAliases);
+        assert_eq!(ReadOperation::ALL.len(), 12);
     }
 
     /// [`RenderOperation::ALL`] が全 variant を含むことを固定する。
@@ -1210,12 +1271,16 @@ mod tests {
 
     #[test]
     fn listing_the_catalogs_is_an_ordinary_read() {
-        // 3 つとも 1 度の列挙で完結し、費用は既存の列挙と同じ形である。新しい
-        // 予算区分を作る理由が無い。
+        // 4 つとも費用は既存の列挙と同じ形（列挙、または列挙 + 窓の分だけの
+        // 読み取り）であり、新しい予算区分を作る理由が無い。
         for (op, name) in [
             (ReadOperation::ListFonts, OPERATION_LIST_FONTS),
             (ReadOperation::ListPalettes, OPERATION_LIST_PALETTES),
             (ReadOperation::ListModules, OPERATION_LIST_MODULES),
+            (
+                ReadOperation::ListObjectAliases,
+                OPERATION_LIST_OBJECT_ALIASES,
+            ),
         ] {
             assert_eq!(
                 KnownOperation::Read(op).budget_kind(),
@@ -1641,6 +1706,10 @@ mod tests {
             serde_json::from_str(r#"{"module_type":"plugin_input","offset":4,"limit":7}"#).unwrap();
         assert_eq!(modules.module_type, Some(ModuleType::PluginInput));
         assert_eq!((modules.page.offset, modules.page.limit), (4, 7));
+        let aliases: ListObjectAliasesParams =
+            serde_json::from_str(r#"{"label":"見出し","offset":8,"limit":9}"#).unwrap();
+        assert_eq!(aliases.label, Some("見出し".to_string()));
+        assert_eq!((aliases.page.offset, aliases.page.limit), (8, 9));
     }
 
     #[test]
@@ -1648,6 +1717,7 @@ mod tests {
         assert!(serde_json::from_str::<ListFontsParams>(r#"{"future":1}"#).is_err());
         assert!(serde_json::from_str::<ListPalettesParams>(r#"{"future":1}"#).is_err());
         assert!(serde_json::from_str::<ListModulesParams>(r#"{"future":1}"#).is_err());
+        assert!(serde_json::from_str::<ListObjectAliasesParams>(r#"{"future":1}"#).is_err());
     }
 
     #[test]
@@ -1657,6 +1727,7 @@ mod tests {
             serde_json::to_value(ListFontsParams::default()).unwrap(),
             serde_json::to_value(ListPalettesParams::default()).unwrap(),
             serde_json::to_value(ListModulesParams::default()).unwrap(),
+            serde_json::to_value(ListObjectAliasesParams::default()).unwrap(),
         ] {
             let keys: std::collections::BTreeSet<&str> = value
                 .as_object()
@@ -1675,6 +1746,51 @@ mod tests {
     fn list_modules_params_default_the_filter_to_none() {
         let params: ListModulesParams = serde_json::from_str("{}").unwrap();
         assert_eq!(params.module_type, None);
+    }
+
+    #[test]
+    fn list_object_aliases_params_default_the_label_to_none() {
+        let params: ListObjectAliasesParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(params.label, None);
+    }
+
+    #[test]
+    fn list_object_aliases_params_validate_accepts_missing_label() {
+        assert_eq!(ListObjectAliasesParams::default().validate(), Ok(()));
+    }
+
+    #[test]
+    fn list_object_aliases_params_label_rejects_nul_and_excess_length() {
+        // label の検証は validate_name と同じ規則を通す。
+        let params = ListObjectAliasesParams {
+            page: PageRequest::default(),
+            label: Some("名\0前".to_string()),
+        };
+        assert_eq!(params.validate(), Err(TextSyntaxError::ContainsNul));
+
+        let params = ListObjectAliasesParams {
+            page: PageRequest::default(),
+            label: Some("あ".repeat(MAX_NAME_UTF16_UNITS + 1)),
+        };
+        assert_eq!(
+            params.validate(),
+            Err(TextSyntaxError::TooLongUtf16 {
+                units: MAX_NAME_UTF16_UNITS + 1,
+                max: MAX_NAME_UTF16_UNITS,
+            })
+        );
+    }
+
+    #[test]
+    fn list_object_aliases_params_label_does_not_forbid_alias_name_characters() {
+        // label は名前ではなく、パスの組み立てにも使わない。history.ini 由来の
+        // ラベルには「テロップ.赤」のように `.` を含み得るものがあり、名前の
+        // 禁止文字を掛けると弾いてしまう。
+        let params = ListObjectAliasesParams {
+            page: PageRequest::default(),
+            label: Some("テロップ.赤".to_string()),
+        };
+        assert_eq!(params.validate(), Ok(()));
     }
 
     #[test]
@@ -1737,6 +1853,55 @@ mod tests {
             serde_json::from_str::<ListModulesResult>(&s).unwrap(),
             result
         );
+    }
+
+    #[test]
+    fn list_object_aliases_result_roundtrip() {
+        let result = ListObjectAliasesResult {
+            items: vec![ObjectAliasSummary {
+                name: "立ち絵".to_string(),
+                label: Some("テロップ".to_string()),
+                object_count: Some(1),
+                effects: vec!["標準描画".to_string(), "テキスト".to_string()],
+            }],
+            page: sample_page_meta(),
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ListObjectAliasesResult>(&s).unwrap(),
+            result
+        );
+    }
+
+    #[test]
+    fn object_alias_summary_keeps_missing_label_and_object_count_as_null() {
+        let summary = ObjectAliasSummary {
+            name: "立ち絵".to_string(),
+            label: None,
+            object_count: None,
+            effects: Vec::new(),
+        };
+        let value = serde_json::to_value(&summary).unwrap();
+        assert_eq!(value["label"], serde_json::Value::Null);
+        assert_eq!(value["object_count"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn object_alias_summary_keeps_effect_order_and_duplicates() {
+        // 平坦な並びであり、入れ子にしない（§5.3.1）。出現順で重複を保つ。
+        let summary = ObjectAliasSummary {
+            name: "立ち絵".to_string(),
+            label: None,
+            object_count: Some(2),
+            effects: vec![
+                "標準描画".to_string(),
+                "テキスト".to_string(),
+                "標準描画".to_string(),
+            ],
+        };
+        let s = serde_json::to_string(&summary).unwrap();
+        let restored: ObjectAliasSummary = serde_json::from_str(&s).unwrap();
+        assert_eq!(restored.effects, summary.effects);
     }
 
     #[test]

@@ -921,6 +921,9 @@ fn decode_request(operation: ReadOperation, params: &Value) -> Result<ReadReques
             params.page.validate().map_err(page_error)?;
             ReadRequest::ListModules(params)
         }
+        // オブジェクトエイリアスを列挙する読み取り口はまだ無い。実装を足す
+        // ときにここで params を復号し、要求を組み立てる。
+        ReadOperation::ListObjectAliases => return Err(unsupported_operation()),
     })
 }
 
@@ -2021,17 +2024,23 @@ mod tests {
     ///
     /// 表は手書きであり、載せ忘れた operation は表を使う検査を全て素通りする。
     /// 応答の秘匿・期限超過・状態の検査はいずれもこの表を材料にしている。
+    ///
+    /// **表から外れているものを併せて固定する。** 読み取り口を持たない
+    /// operation は `decode_request` が params を見ずに拒否するため、表に
+    /// 載せると期限・状態・params 検証を確かめる他のテストが崩れる。除外を
+    /// 増やせばここが落ちる。
     #[test]
-    fn all_operations_covers_every_read_operation() {
+    fn all_operations_covers_every_declared_read_operation() {
         let covered: std::collections::BTreeSet<&str> = all_operations()
             .iter()
             .map(|(operation, _)| operation.as_str())
             .collect();
-        let expected: std::collections::BTreeSet<&str> = ReadOperation::ALL
-            .iter()
-            .map(|operation| operation.as_str())
+        let excluded: Vec<&str> = ReadOperation::ALL
+            .into_iter()
+            .map(ReadOperation::as_str)
+            .filter(|name| !covered.contains(name))
             .collect();
-        assert_eq!(covered, expected);
+        assert_eq!(excluded, vec![ReadOperation::ListObjectAliases.as_str()]);
     }
 
     #[test]
