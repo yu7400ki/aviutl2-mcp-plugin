@@ -1045,8 +1045,34 @@ mod tests {
                 "move_object_section",
                 object_sections("中間点を移動しました", &sample_sections_outcome()),
             ),
+            (
+                "set_grid_bpm",
+                grid_bpm(&GridBpmOutcome {
+                    project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+                    project_revision: 43,
+                    entries: vec![aviutl2_mcp_core::GridBpm {
+                        tempo: FiniteF64::try_new(120.0).expect("有限値"),
+                        beat: 4,
+                        start: FiniteF64::try_new(0.0).expect("有限値"),
+                        offset: FiniteF64::try_new(0.25).expect("有限値"),
+                    }],
+                }),
+            ),
             ("apply_batch", apply_batch(&sample_batch_outcome())),
         ]
+    }
+
+    #[test]
+    fn every_edit_text_covers_every_edit_tool() {
+        // 表は手書きであり、載せ忘れた tool は 3 つの検査を素通りする。編集
+        // operation の一覧と突き合わせて、載せ忘れをここで落とす。
+        let covered: std::collections::BTreeSet<&str> =
+            every_edit_text().iter().map(|(name, _)| *name).collect();
+        let expected: std::collections::BTreeSet<&str> = aviutl2_mcp_core::EditOperation::ALL
+            .iter()
+            .map(|operation| operation.as_str())
+            .collect();
+        assert_eq!(covered, expected);
     }
 
     /// 中間点を 1 つ持つ対象の変更結果。
@@ -1198,9 +1224,9 @@ mod tests {
 
     /// 応答が対象オブジェクトの位置を運ばない tool。
     ///
-    /// 削除では対象が消えており、レイヤーの状態変更ではそもそも対象が
-    /// オブジェクトではない。
-    const TOOLS_WITHOUT_AN_OBJECT: &[&str] = &["delete_object", "set_layer_state"];
+    /// 削除では対象が消えており、レイヤーの状態変更と BPM グリッドの置き換えでは
+    /// そもそも対象がオブジェクトではない。
+    const TOOLS_WITHOUT_AN_OBJECT: &[&str] = &["delete_object", "set_layer_state", "set_grid_bpm"];
 
     #[test]
     fn edit_text_states_the_change_the_revision_and_the_next_step() {

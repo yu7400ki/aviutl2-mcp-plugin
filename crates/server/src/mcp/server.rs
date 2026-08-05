@@ -1508,6 +1508,10 @@ impl AviUtl2McpServer {
     /// start と offset は秒であり、フレーム番号ではない。start は 0 以上を指定する。
     /// start が一覧の中で重複する要求は invalid_argument（duplicate_target）となる。
     /// 値が範囲外の要求は invalid_argument（grid_bpm_out_of_range）となる。
+    /// tempo は単精度へ丸めた結果も 0 より大きい必要があり、極端に小さい値は
+    /// 丸めると 0 になるため同じ理由で拒否される。
+    /// beat が 32bit 符号付き整数に収まらない要求は
+    /// invalid_argument（argument_not_representable）となる。
     /// start の昇順は求めない。並べ替えはホストが行う。
     /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
     /// project_epoch をそのまま指定する。省略はできない。BPM グリッドは selector も
@@ -2421,6 +2425,43 @@ mod tests {
             // レイヤー番号も現れない。
             "set_grid_bpm" => false,
             other => panic!("{other} が 0 始まりの番号を扱うかが定義されていません"),
+        }
+    }
+
+    /// tool の入力・出力 schema にレイヤー番号かフレーム番号が現れるか。
+    ///
+    /// [`takes_zero_based_numbers`] とは別の根拠である。前者は手書きの判定で
+    /// あり、後者は tool が実際に宣言している形から読める事実である。
+    fn schema_carries_a_layer_or_frame(tool: &Tool) -> bool {
+        let input = Value::Object(tool.input_schema.as_ref().clone()).to_string();
+        let output = tool
+            .output_schema
+            .as_ref()
+            .map(|schema| Value::Object(schema.as_ref().clone()).to_string())
+            .unwrap_or_default();
+        ["layer", "frame"]
+            .iter()
+            .any(|name| input.contains(name) || output.contains(name))
+    }
+
+    #[test]
+    fn no_tool_that_declares_a_layer_or_frame_is_exempt_from_stating_the_origin() {
+        // 起点の明記が要るかは手書きの判定である。番号を扱う tool をそこで
+        // 「扱わない」側へ書き換えると、判定だけを読む検査は 2 つとも黙って
+        // 素通りする。免除してよいのは番号を持たない tool だけであることを、
+        // schema という別の根拠から確かめる。
+        //
+        // 逆向きは求めない。schema に番号が現れなくても説明が番号に触れる tool
+        // があり、そちらは明記を求める側であって緩める側ではない。
+        for tool in tools() {
+            if !schema_carries_a_layer_or_frame(&tool) {
+                continue;
+            }
+            assert!(
+                takes_zero_based_numbers(&tool.name),
+                "{} は schema に番号を宣言しているのに起点の明記を免除されています",
+                tool.name
+            );
         }
     }
 
@@ -3445,6 +3486,7 @@ mod tests {
             "昇順は求めない",
             "duplicate_target",
             "grid_bpm_out_of_range",
+            "argument_not_representable",
             "change_not_applied",
         ] {
             assert!(

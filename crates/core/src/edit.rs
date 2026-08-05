@@ -1220,10 +1220,16 @@ fn validate_grid_bpm(index: usize, entry: &GridBpm) -> Result<(), EditInputError
     }
     // ホストは tempo と offset を単精度で受け取る。単精度で無限大になる値を
     // 書き込むと、以後の読み取りが非有限値として失敗する。
-    if !representable_as_single(entry.tempo) {
-        return Err(out_of_range(FIELD_TEMPO, "単精度で表せる"));
+    //
+    // tempo は 0 へ潰れる側も見る。単精度で 0 になる値は、上の判定を通ったのに
+    // 0 のテンポとして書き込まれる。丸めそのものは受け入れる——拒むのは、
+    // 丸めた結果がここで課した範囲を外れる場合だけである。
+    let single_tempo = as_single(entry.tempo);
+    if !single_tempo.is_finite() || single_tempo <= 0.0 {
+        return Err(out_of_range(FIELD_TEMPO, "単精度で表しても 0 より大きい"));
     }
-    if !representable_as_single(entry.offset) {
+    // offset は 0 を許すため、見るのは無限大への溢れだけである。
+    if !as_single(entry.offset).is_finite() {
         return Err(out_of_range(FIELD_OFFSET, "単精度で表せる"));
     }
     // 拍子は SDK の 32bit 符号付き整数へそのまま渡す。
@@ -1236,9 +1242,9 @@ fn validate_grid_bpm(index: usize, entry: &GridBpm) -> Result<(), EditInputError
     Ok(())
 }
 
-/// 単精度へ写しても有限であるか。
-fn representable_as_single(value: FiniteF64) -> bool {
-    (value.get() as f32).is_finite()
+/// ホストが受け取る単精度へ写した値。
+fn as_single(value: FiniteF64) -> f32 {
+    value.get() as f32
 }
 
 /// 区間番号が中間点を指し得る範囲に収まることを確認する。
@@ -2985,6 +2991,20 @@ mod tests {
     }
 
     #[test]
+    fn a_grid_bpm_value_that_merely_rounds_is_accepted() {
+        // ホストは単精度で受け取るため、要求元が単精度で表せない値を送れば
+        // 読み返した値は要求値と一致しない。それは失敗ではない。拒むのは、
+        // 丸めた結果が課した範囲を外れる場合だけである。
+        set_grid_bpm(vec![bpm(0.1, 4, 0.3, 0.7)])
+            .validate()
+            .expect("丸めが起きるだけの値が拒否されました");
+        // 単精度の最小の正規化数より小さくても、0 へ潰れなければ通る。
+        set_grid_bpm(vec![bpm(f64::from(f32::MIN_POSITIVE), 4, 0.0, 0.0)])
+            .validate()
+            .expect("単精度で表せる最小の正の値が拒否されました");
+    }
+
+    #[test]
     fn a_descending_grid_bpm_list_is_accepted() {
         // 並べ替えはホストの仕事である。求めなかった順序を強制すると、
         // read-back の順序と要求の順序が食い違ったときに説明が要る。
@@ -3006,6 +3026,16 @@ mod tests {
             (
                 "単精度で無限大になる tempo",
                 vec![bpm(1.0e300, 4, 0.0, 0.0)],
+                "grid_bpm_out_of_range",
+            ),
+            (
+                "単精度で 0 へ潰れる tempo",
+                vec![bpm(1.0e-300, 4, 0.0, 0.0)],
+                "grid_bpm_out_of_range",
+            ),
+            (
+                "単精度で無限大になる offset",
+                vec![bpm(120.0, 4, 0.0, 1.0e300)],
                 "grid_bpm_out_of_range",
             ),
             (

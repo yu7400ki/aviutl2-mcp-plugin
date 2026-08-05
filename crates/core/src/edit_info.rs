@@ -32,8 +32,10 @@ pub struct EditInfo {
 /// この型の目的であり、一部のフィールドだけを運ぶ形にすると、差し替えたい要素
 /// 以外の値が書き戻しで失われる。
 ///
-/// 未知フィールドを拒否しない。応答が返した値をそのまま送り返す往復型であり、
-/// 応答へ optional field が増えたときに往復が壊れる。
+/// **未知フィールドを拒否しない。** [`ObjectSelector`](crate::selector::ObjectSelector)
+/// と同じく、応答に含めて返し次の要求でそのまま送り返す双方向の型である。応答を
+/// 組み立てる側と要求を復号する側は別のプロセスであり、版が揃うとは限らない。
+/// 新しい側が足した field を古い側が拒むと、応答をそのまま送り返す往復が壊れる。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GridBpm {
     /// テンポ。
@@ -201,8 +203,9 @@ mod tests {
 
     #[test]
     fn grid_bpm_allows_unknown_optional_fields() {
-        // 応答が返した値をそのまま送り返す往復型である。応答へ field が増えた
-        // ときに往復が壊れないよう、未知フィールドを拒否しない。
+        // 応答に含めて返し、次の要求でそのまま送り返す双方向の型である。応答を
+        // 組み立てる側と要求を復号する側で版が揃うとは限らないため、未知
+        // フィールドを拒否しない。
         let mut value = serde_json::to_value(sample_edit_info().grid_bpm[0]).unwrap();
         value
             .as_object_mut()

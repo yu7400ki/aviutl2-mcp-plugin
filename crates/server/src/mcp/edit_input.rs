@@ -741,7 +741,9 @@ impl SetSelectionInput {
 /// BPM グリッドの 1 件。
 ///
 /// **未知フィールドを拒否しない。** `get_edit_info` が返した要素をそのまま
-/// 送り返す往復型であり、応答へ field が増えたときに往復が壊れる。
+/// 送り返す往復型である。応答を組み立てるのは接続先の別プロセスであり、版が
+/// 揃うとは限らない。新しい接続先が足した field をここで拒むと、応答をそのまま
+/// 送り返す往復が壊れる。
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 pub struct GridBpmInput {
     /// テンポ。0 より大きい値を指定する。

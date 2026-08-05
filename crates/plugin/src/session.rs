@@ -2760,9 +2760,9 @@ mod edit_tests {
     use super::*;
     use crate::edit::error::RollbackOutcome;
     use aviutl2_mcp_core::{
-        EditOutcome, GridBpmOutcome, LayerInfo, LayerStateOutcome, MAX_ITEM_VALUE_BYTES,
-        MAX_PATH_UTF16_UNITS, ObjectFingerprintInput, ObjectSectionsOutcome, ObjectSummary,
-        SERVER_BATCH_REQUEST_BUDGET, SectionRange, SelectionField, SelectionState,
+        EditOutcome, GridBpmOutcome, LayerInfo, LayerStateOutcome, MAX_GRID_BPM_ENTRIES,
+        MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, ObjectFingerprintInput, ObjectSectionsOutcome,
+        ObjectSummary, SERVER_BATCH_REQUEST_BUDGET, SectionRange, SelectionField, SelectionState,
         SetLayerStateParams, TRANSPORT_HEADROOM,
     };
     use serde_json::json;
@@ -3378,6 +3378,79 @@ mod edit_tests {
         )
         .expect("区間番号 1 が編集口へ届きませんでした");
         assert_eq!(adapter.calls(), vec!["delete_object_section"]);
+    }
+
+    /// BPM 情報 1 件を要求の形で組み立てる。
+    fn grid_bpm_json(tempo: f64, beat: i64, start: f64) -> Value {
+        json!({ "tempo": tempo, "beat": beat, "start": start, "offset": 0.0 })
+    }
+
+    /// BPM グリッドの置き換え要求を組み立てる。
+    fn set_grid_bpm_json(entries: Vec<Value>) -> Value {
+        json!({
+            "expected_scene_id": SCENE_ID,
+            "entries": entries,
+            "expected_project_epoch": EPOCH,
+        })
+    }
+
+    #[test]
+    fn an_invalid_grid_bpm_list_never_reaches_the_edit_adapter() {
+        // 検証は core の純関数にあり、要求の復号がそれを呼ぶ。呼ばなくなると
+        // IPC を直接叩く経路が server と違う要求集合を受理するようになる。
+        let over_the_limit = (0..=MAX_GRID_BPM_ENTRIES)
+            .map(|index| grid_bpm_json(120.0, 4, index as f64))
+            .collect::<Vec<_>>();
+        for (label, entries, reason) in [
+            ("上限超過", over_the_limit, Value::Null),
+            (
+                "start の重複",
+                vec![grid_bpm_json(120.0, 4, 5.0), grid_bpm_json(90.0, 3, 5.0)],
+                json!("duplicate_target"),
+            ),
+            (
+                "範囲外の tempo",
+                vec![grid_bpm_json(0.0, 4, 0.0)],
+                json!("grid_bpm_out_of_range"),
+            ),
+            (
+                "受け渡せない beat",
+                vec![grid_bpm_json(120.0, i64::from(i32::MAX) + 1, 0.0)],
+                json!("argument_not_representable"),
+            ),
+        ] {
+            let adapter = FakeEditAdapter::new();
+            let error = execute_edit(
+                &adapter,
+                &InstanceState::Ready,
+                EditOperation::SetGridBpm,
+                &set_grid_bpm_json(entries),
+                within(),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{label}");
+            assert_eq!(error.details["reason"], reason, "{label}");
+            assert!(adapter.calls().is_empty(), "{label} が編集口へ届きました");
+        }
+    }
+
+    #[test]
+    fn a_valid_grid_bpm_list_reaches_the_edit_adapter() {
+        // 拒否だけを固定すると、全ての要求を拒む実装でも緑のまま通る。
+        let adapter = FakeEditAdapter::new();
+        execute_edit(
+            &adapter,
+            &InstanceState::Ready,
+            EditOperation::SetGridBpm,
+            &set_grid_bpm_json(vec![
+                grid_bpm_json(120.0, 4, 30.0),
+                grid_bpm_json(90.0, 3, 10.0),
+            ]),
+            within(),
+        )
+        .expect("正常な一覧が編集口へ届きませんでした");
+        assert_eq!(adapter.calls(), vec!["set_grid_bpm"]);
     }
 
     #[test]

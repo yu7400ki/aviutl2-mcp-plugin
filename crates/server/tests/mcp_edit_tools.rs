@@ -1889,6 +1889,11 @@ async fn each_invalid_grid_bpm_request_names_its_own_reason_before_any_ipc() {
             "grid_bpm_out_of_range",
         ),
         (
+            "単精度で 0 へ潰れる tempo",
+            vec![grid_bpm_input(1.0e-300, 4, 0.0, 0.0)],
+            "grid_bpm_out_of_range",
+        ),
+        (
             "重複した start",
             vec![
                 grid_bpm_input(120.0, 4, 5.0, 0.0),
