@@ -18,42 +18,9 @@ path = "src/main.rs"
 # 実行予算を明示して振る舞いを観測するための構築口を公開する。
 # 製品コードからは使わない。既定では立てないため、`.exe` にはこの経路が無い。
 #
-# 同一 crate の統合試験と example もこの feature を要するため、それらは
-# `required-features` で括ってある。品質ゲートは `--all-features` で回すので、
-# 検査の対象からは外れない。
+# 同一 crate の統合試験がこの feature を要するため、それらは `required-features`
+# で括ってある。品質ゲートは `--all-features` で回すので、検査の対象からは外れない。
 test-support = []
-
-# 実機（AviUtl2 起動）を要する受け入れ確認。
-# example ターゲットは `cargo test` でビルドのみ行われ実行されないため、
-# `cargo test --workspace --all-features` がホストを起動することはない。
-# 一方 `cargo clippy --workspace --all-targets --all-features` の検査対象には含まれる。
-# 実行は `cargo run -p aviutl2-mcp-server --example live_host_acceptance`。
-[[example]]
-name = "live_host_acceptance"
-path = "examples/live_host_acceptance.rs"
-
-# 編集の実機受け入れ確認。破壊的であるため、固定サンプルプロジェクトの複製に対して
-# 実行する。分離方式は上と同じ。
-# 実行は `cargo run -p aviutl2-mcp-server --example live_edit_acceptance`。
-[[example]]
-name = "live_edit_acceptance"
-path = "examples/live_edit_acceptance.rs"
-
-# 一括適用の実機受け入れ確認。破壊的であるため、固定サンプルプロジェクトの複製に
-# 対して実行する。分離方式は上と同じ。
-# 実行は `cargo run -p aviutl2-mcp-server --example live_batch_acceptance`。
-[[example]]
-name = "live_batch_acceptance"
-path = "examples/live_batch_acceptance.rs"
-required-features = ["test-support"]
-
-# 描画の実機受け入れ確認。プロジェクトは書き換えないが、成果物をディスクへ書く。
-# 分離方式は上と同じ。
-# 実行は `cargo run -p aviutl2-mcp-server --example live_render_acceptance`。
-[[example]]
-name = "live_render_acceptance"
-path = "examples/live_render_acceptance.rs"
-required-features = ["test-support"]
 
 # 統合試験のうち、実行予算を明示する構築口を使うもの。
 [[test]]
