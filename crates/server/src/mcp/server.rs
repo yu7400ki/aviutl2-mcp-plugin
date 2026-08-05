@@ -1194,6 +1194,10 @@ impl AviUtl2McpServer {
     /// selector で続けて編集すると precondition_failed となる。
     /// 書き込みを公開していない設定項目種別があり、その場合は unsupported_operation
     /// となる。種別は get_object の item_type で確認できる。
+    /// 選択肢から選ぶ種別（select・combo）へ選択肢に無い値を書くと、書き込み後の
+    /// 読み直しで検出して unsupported_operation となり details.reason は
+    /// choice_value_rejected となる。選択肢の一覧を返す手段が無いため、有効な値は
+    /// get_object が返す既存オブジェクトの値から得る。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     /// 対象が変化していた場合の precondition_failed では、details.current_object に
