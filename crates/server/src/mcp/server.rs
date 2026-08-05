@@ -1594,8 +1594,8 @@ impl AviUtl2McpServer {
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// 対象が変化していた場合の precondition_failed では、details.current_object に
     /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
-    /// ロックされたレイヤー上の対象でも通る。中間点はオブジェクトの位置も長さも
-    /// 変えないため、ロックが止める削除にも時間軸上の移動にも当たらない。
+    /// 対象のレイヤーがロックされている場合は precondition_failed（layer_locked）と
+    /// なる。set_layer_state でロックを解除してから再実行する。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     #[tool(
@@ -1657,8 +1657,8 @@ impl AviUtl2McpServer {
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// 対象が変化していた場合の precondition_failed では、details.current_object に
     /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
-    /// ロックされたレイヤー上の対象でも通る。中間点はオブジェクトの位置も長さも
-    /// 変えないため、ロックが止める削除にも時間軸上の移動にも当たらない。
+    /// 対象のレイヤーがロックされている場合は precondition_failed（layer_locked）と
+    /// なる。set_layer_state でロックを解除してから再実行する。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     #[tool(
@@ -1720,8 +1720,8 @@ impl AviUtl2McpServer {
     /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// 対象が変化していた場合の precondition_failed では、details.current_object に
     /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
-    /// ロックされたレイヤー上の対象でも通る。中間点はオブジェクトの位置も長さも
-    /// 変えないため、ロックが止める削除にも時間軸上の移動にも当たらない。
+    /// 対象のレイヤーがロックされている場合は precondition_failed（layer_locked）と
+    /// なる。set_layer_state でロックを解除してから再実行する。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     #[tool(
@@ -1775,9 +1775,11 @@ impl AviUtl2McpServer {
     /// レイヤーには fingerprint が無いため、読み取った時点から状態が変わっていても
     /// 検出できない。応答が返す layer には変更後に読み直した実際の状態が入るので、
     /// 意図どおりかはその値で確認する。
-    /// レイヤーのロックが止めるのはオブジェクトの削除と時間軸上の移動であり、MCP では
-    /// move_object と delete_object と create_object が
-    /// precondition_failed（layer_locked）になる。設定値の変更や effect の増減は止めない。
+    /// レイヤーのロックが止める範囲は AviUtl2 が決めており、オブジェクトの削除と
+    /// 時間軸上の移動にとどまらない。MCP では move_object と delete_object と
+    /// create_object と create_object_section と delete_object_section と
+    /// move_object_section が precondition_failed（layer_locked）になる。
+    /// 設定値の変更や effect の増減は止めない。
     /// この tool 自身はロックの影響を受けない。ロックされたレイヤーでもロックを外せる。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
@@ -3992,7 +3994,12 @@ mod tests {
                     "fingerprint",
                     "全てを省略した要求は受け付けない",
                     "この tool 自身はロックの影響を受けない",
+                    // 止まる tool の列挙が足りないと、この説明を読んだ要求元は
+                    // 実際には止まる tool を止まらないものとして扱う。
                     "move_object",
+                    "create_object_section",
+                    "delete_object_section",
+                    "move_object_section",
                     "reset",
                 ],
             ),
@@ -4015,31 +4022,26 @@ mod tests {
         StoppedAndNamesTheWayOut,
         /// ロックが止める範囲と、自身が影響を受けないことを述べる。
         DescribesTheScope,
-        /// ロックされたレイヤー上の対象でも通ることを述べる。
-        NotStopped,
         /// ロックについて何も述べない。
         Silent,
     }
 
     /// tool 名から、説明がレイヤーのロックについて述べる内容を引く。
     ///
-    /// 未知の tool 名で落とす。ロックが止めるのはオブジェクトの削除と時間軸上の
-    /// 移動であり、対象を 1 か所へ置いて tool を足したときに素通りしないようにする。
+    /// 未知の tool 名で落とす。ロックが止める範囲を決めるのはホストであり、
+    /// 対象を 1 か所へ置いて tool を足したときに素通りしないようにする。
     fn layer_lock_statement(name: &str) -> LayerLockStatement {
         match name {
             "create_object"
             | "move_object"
             | "delete_object"
+            | "create_object_section"
+            | "delete_object_section"
+            | "move_object_section"
             // 一括適用が止まるのは move_object を含む場合だけだが、止まり方も
             // 解き方も同じであるため、案内する側に属する。
             | "apply_batch" => LayerLockStatement::StoppedAndNamesTheWayOut,
             "set_layer_state" => LayerLockStatement::DescribesTheScope,
-            // 中間点はオブジェクトの位置も長さも変えない。ロックされたレイヤー
-            // 上でも通ることを明記しないと、要求元は解ける状況で先に
-            // set_layer_state を呼ぶ。
-            "create_object_section" | "delete_object_section" | "move_object_section" => {
-                LayerLockStatement::NotStopped
-            }
             "set_object_name"
             | "set_object_item"
             | "add_effect"
@@ -4075,16 +4077,6 @@ mod tests {
                     assert!(
                         description.contains("この tool 自身はロックの影響を受けない"),
                         "{name} の説明が自身にロックが掛からないことを述べていません"
-                    );
-                }
-                LayerLockStatement::NotStopped => {
-                    assert!(
-                        description.contains("ロックされたレイヤー上の対象でも通る"),
-                        "{name} の説明がロックに掛からないことを述べていません"
-                    );
-                    assert!(
-                        !description.contains("layer_locked"),
-                        "{name} の説明が掛からないロックによる拒否を述べています"
                     );
                 }
                 LayerLockStatement::Silent => assert!(
