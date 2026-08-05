@@ -297,7 +297,6 @@ pub fn write_bare_descriptor(registry_dir: &std::path::Path) -> InstanceId {
 /// 接続に成功する。**handshake の応答だけが返らない**ので、要求元は解決フェーズ
 /// の期限を使い切る。**待った時間が、その期限がどこから来たかを表す。**
 pub struct SilentPipe {
-    instance_id: InstanceId,
     handle: SendHandle,
 }
 
@@ -347,13 +346,8 @@ impl SilentPipe {
         .unwrap();
 
         Self {
-            instance_id,
             handle: SendHandle(handle),
         }
-    }
-
-    pub fn instance_id(&self) -> InstanceId {
-        self.instance_id
     }
 }
 

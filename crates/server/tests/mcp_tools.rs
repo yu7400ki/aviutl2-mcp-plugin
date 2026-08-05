@@ -3,6 +3,7 @@
 mod support;
 
 use aviutl2_mcp_core::AuthSecret;
+use aviutl2_mcp_core::ScaledBudgets;
 use aviutl2_mcp_core::settings::{Settings, SettingsDocument};
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
@@ -115,13 +116,12 @@ fn responses(operation: &str, result: serde_json::Value) -> OperationResponses {
     OperationResponses::from([(operation.to_string(), ok_result(result))])
 }
 
-/// 倍率を適用した設定を配る供給元。
-fn settings_source_with_scale(percent: u32) -> std::sync::Arc<SettingsSource> {
-    let settings = SettingsDocument::parse(&format!(r#"{{"budget_scale_percent":{percent}}}"#))
+/// 倍率を適用した設定。
+fn settings_with_scale(percent: u32) -> Settings {
+    SettingsDocument::parse(&format!(r#"{{"budget_scale_percent":{percent}}}"#))
         .expect("設定を解釈できる")
         .resolve(&Settings::default())
-        .0;
-    SettingsSource::fixed(settings)
+        .0
 }
 
 fn sample_scene_info() -> SceneInfo {
@@ -1011,8 +1011,10 @@ async fn a_shrunk_budget_scale_still_reaches_the_instance() {
     mock.write_descriptor(&registry_dir);
     std::thread::sleep(MOCK_STARTUP_GRACE);
 
-    let server =
-        AviUtl2McpServer::with_settings(registry_dir.clone(), settings_source_with_scale(10));
+    let server = AviUtl2McpServer::with_settings(
+        registry_dir.clone(),
+        SettingsSource::fixed(settings_with_scale(10)),
+    );
     let result = server
         .get_edit_info(Parameters(InstanceInput {
             instance_id: mock.instance_id().to_string(),
@@ -1033,8 +1035,10 @@ async fn the_budget_scale_reaches_the_instance_listing() {
     let registry_dir = temp_registry_dir();
     let silent = SilentPipe::listening_in(&registry_dir);
 
+    let settings = settings_with_scale(10);
+    let scaled_resolve = settings.budgets().server_resolve();
     let server =
-        AviUtl2McpServer::with_settings(registry_dir.clone(), settings_source_with_scale(10));
+        AviUtl2McpServer::with_settings(registry_dir.clone(), SettingsSource::fixed(settings));
     let started = std::time::Instant::now();
     let result = server
         .list_instances(Parameters(ListInstancesInput {
@@ -1050,10 +1054,17 @@ async fn the_budget_scale_reaches_the_instance_listing() {
         json!(0),
         "handshake を返さない待受が一覧に残っています"
     );
-    // 倍率 10% の解決フェーズ予算は 500 ミリ秒である。倍率を掛けない 5 秒を
-    // 待っていれば、一覧の解決が設定を見ていない。
+    // 縮めた解決フェーズ予算の半分は待っていること。待受が接続より手前で
+    // 除外されるようになると総数は 0 のまま所要時間だけが消え、**何も測らない
+    // 検査が緑のまま残る。**
     assert!(
-        elapsed < Duration::from_secs(2),
+        elapsed >= scaled_resolve / 2,
+        "一覧の解決が {}ms で終わっており、期限まで走っていません",
+        elapsed.as_millis()
+    );
+    // 倍率を掛けない解決フェーズ予算を待っていれば、一覧が設定を見ていない。
+    assert!(
+        elapsed < ScaledBudgets::unscaled().server_resolve() / 2,
         "一覧の解決に {}ms かかっており、倍率が届いていません",
         elapsed.as_millis()
     );

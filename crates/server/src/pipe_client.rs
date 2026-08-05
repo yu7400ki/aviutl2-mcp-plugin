@@ -448,6 +448,31 @@ fn deadline_to_unix_ms(deadline: Instant) -> Option<u64> {
     now_unix_ms.checked_add(remaining_ms)
 }
 
+/// 1 回の接続待ちに渡すミリ秒。
+///
+/// 残り時間から handshake と ping の取り分を引いた分だけ待ち、1 回の待ちは
+/// `connect_wait_cap` で頭打ちにする。
+///
+/// **上限は待ちを分割するだけで、諦めるまでの合計を変えない。**
+/// `WaitNamedPipeW` は待受の状態が変わった時点で戻るため、上限の効きは接続の
+/// 成否にも所要時間にも現れない。**したがって、上限が配分から来ていることを
+/// 観測できるのはこの計算だけであり、ここを直接確かめる。**
+///
+/// 0 は `NMPWAIT_NOWAIT` ではなく `NMPWAIT_USE_DEFAULT_WAIT`（pipe 既定の
+/// タイムアウト）を意味するため、残りも上限もミリ秒未満へ縮んだ場合でも 0 は
+/// 渡さない。
+fn connect_wait_ms(
+    remaining: Duration,
+    connect_reserve: Duration,
+    connect_wait_cap: Duration,
+) -> u32 {
+    let cap_ms = connect_wait_cap.as_millis().max(1);
+    remaining
+        .saturating_sub(connect_reserve)
+        .as_millis()
+        .clamp(1, cap_ms) as u32
+}
+
 /// 指定 pipe 名に `deadline` までの範囲で接続する。
 ///
 /// 接続先の pipe は同時 1 接続しか受け付けないため、先行する要求が処理中の間は
@@ -471,9 +496,6 @@ fn connect_pipe(
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    // 1 回の待ちの上限。ミリ秒未満へ縮んでも、下の待ち時間の下限 1 ミリ秒を
-    // 下回らせない。
-    let wait_cap_ms = connect_wait_cap.as_millis().max(1);
 
     loop {
         let remaining = win_io::remaining_until(deadline);
@@ -482,11 +504,7 @@ fn connect_pipe(
         }
 
         // pipe サーバーが接続可能になるまで短時間待つ。
-        // 第 2 引数の 0 は NMPWAIT_NOWAIT ではなく NMPWAIT_USE_DEFAULT_WAIT（pipe 既定の
-        // タイムアウト）を意味するため、残り時間が 1 ミリ秒未満でも 0 を渡さない。
-        let wait_ms = (remaining - connect_reserve)
-            .as_millis()
-            .clamp(1, wait_cap_ms) as u32;
+        let wait_ms = connect_wait_ms(remaining, connect_reserve, connect_wait_cap);
         // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
         unsafe {
             let _ = WaitNamedPipeW(PCWSTR(wide.as_ptr()), wait_ms);
@@ -632,24 +650,7 @@ mod tests {
         // そこで諦めると、生きている相手を到達不能として扱ってしまう。
         let name = format!(r"\\.\pipe\aviutl2-mcp-busy-test-{}", InstanceId::new_v4());
         let server = create_single_instance_pipe(&name);
-
-        let wide: Vec<u16> = OsStr::new(&name)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
-        let occupier = unsafe {
-            CreateFileW(
-                PCWSTR(wide.as_ptr()),
-                GENERIC_READ.0 | GENERIC_WRITE.0,
-                FILE_SHARE_NONE,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED,
-                None,
-            )
-        }
-        .expect("唯一の待受インスタンスを占有できる");
+        let occupier = occupy(&name);
         // 接続済みのため `ConnectNamedPipe` は待たずに戻る。
         // SAFETY: `server` は直前に作成した有効な pipe ハンドル。
         let _ = unsafe { ConnectNamedPipe(server, None) };
@@ -689,6 +690,115 @@ mod tests {
             let _ = CloseHandle(handle);
             let _ = CloseHandle(server);
         }
+    }
+
+    #[test]
+    fn connect_gives_up_at_the_scaled_deadline_when_the_pipe_stays_busy() {
+        // 塞がったままの相手には、期限から予約を残した時点で待ちを打ち切る。
+        // **打ち切る時点も配分から決まる**ため、待った時間が窓（期限 − 予約）に
+        // 収まらない実装はここで落ちる——予約が縮まなければ 1 度も待たずに戻り、
+        // 予約を残さなければ期限いっぱいまで待つ。
+        for percent in [10, 50] {
+            let config = discovery_config(percent);
+            let name = format!(r"\\.\pipe\aviutl2-mcp-stuck-test-{}", InstanceId::new_v4());
+            let server = create_single_instance_pipe(&name);
+            let occupier = occupy(&name);
+            // 接続済みのため `ConnectNamedPipe` は待たずに戻る。
+            // SAFETY: `server` は直前に作成した有効な pipe ハンドル。
+            let _ = unsafe { ConnectNamedPipe(server, None) };
+
+            let started = Instant::now();
+            let result = connect_pipe(
+                &name,
+                started + config.per_candidate_deadline(),
+                config.connect_reserve(),
+                config.connect_wait_cap(),
+            );
+            let elapsed = started.elapsed();
+
+            assert!(
+                matches!(result, Err(PipeClientError::Timeout)),
+                "倍率 {percent}% で塞がったままの相手に対する結果: {result:?}"
+            );
+            let window = config.per_candidate_deadline() - config.connect_reserve();
+            assert!(
+                elapsed >= window / 2,
+                "倍率 {percent}% で {}ms しか待っていません。窓は {}ms です",
+                elapsed.as_millis(),
+                window.as_millis()
+            );
+            assert!(
+                elapsed <= window + Duration::from_millis(150),
+                "倍率 {percent}% で {}ms 待っており、handshake と ping の取り分 {}ms を残していません",
+                elapsed.as_millis(),
+                config.connect_reserve().as_millis()
+            );
+
+            // SAFETY: いずれも本テストが所有する有効なハンドル。
+            unsafe {
+                let _ = CloseHandle(occupier);
+                let _ = CloseHandle(server);
+            }
+        }
+    }
+
+    #[test]
+    fn one_wait_is_capped_by_the_scaled_share() {
+        // 1 回の待ちの長さは、接続の成否にも所要時間にも現れない（`WaitNamedPipeW`
+        // は待受の状態が変われば即座に戻る）。上限が倍率に連動していることを
+        // 観測できるのはこの計算だけである。
+        for percent in [10, 50, 100, 400] {
+            let config = discovery_config(percent);
+            let cap = config.connect_wait_cap();
+
+            // 期限いっぱいの残りがあれば、待ちは上限で頭打ちになる。
+            let wait = connect_wait_ms(
+                config.per_candidate_deadline(),
+                config.connect_reserve(),
+                cap,
+            );
+            assert_eq!(
+                u128::from(wait),
+                cap.as_millis(),
+                "倍率 {percent}% の 1 回の待ちが上限 {}ms に揃っていません",
+                cap.as_millis()
+            );
+
+            // 予約までの残りが上限より短ければ、残りの側が効く。
+            let short = config.connect_reserve() + cap / 2;
+            assert_eq!(
+                u128::from(connect_wait_ms(short, config.connect_reserve(), cap)),
+                (cap / 2).as_millis(),
+                "倍率 {percent}% で残りより長く待っています"
+            );
+
+            // 取り分を使い切っていても、pipe 既定のタイムアウトへは落とさない。
+            assert_eq!(
+                connect_wait_ms(config.connect_reserve(), config.connect_reserve(), cap),
+                1
+            );
+        }
+    }
+
+    /// 唯一の待受インスタンスを占有する。
+    fn occupy(name: &str) -> HANDLE {
+        let wide: Vec<u16> = OsStr::new(name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
+        unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                GENERIC_READ.0 | GENERIC_WRITE.0,
+                FILE_SHARE_NONE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                None,
+            )
+        }
+        .expect("唯一の待受インスタンスを占有できる")
     }
 
     /// フレーム受信を検証するための named pipe 対向端。
