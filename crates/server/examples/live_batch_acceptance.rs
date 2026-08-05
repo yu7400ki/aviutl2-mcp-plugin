@@ -1270,6 +1270,8 @@ const WRITABLE_ITEM_TYPES: &[EffectItemType] = &[
     EffectItemType::Color,
     EffectItemType::Select,
     EffectItemType::Combo,
+    EffectItemType::Mask,
+    EffectItemType::Figure,
 ];
 
 /// 値を変えた別の設定値を作る。作れない種別では `None`。

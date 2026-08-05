@@ -1194,7 +1194,7 @@ impl AviUtl2McpServer {
     /// selector で続けて編集すると precondition_failed となる。
     /// 書き込みを公開していない設定項目種別があり、その場合は unsupported_operation
     /// となる。種別は get_object の item_type で確認できる。
-    /// 選択肢から選ぶ種別（select・combo）へ選択肢に無い値を書くと、書き込み後の
+    /// 選択肢から選ぶ種別（select・combo・mask・figure）へ選択肢に無い値を書くと、書き込み後の
     /// 読み直しで検出して unsupported_operation となり details.reason は
     /// choice_value_rejected となる。選択肢の一覧を返す手段が無いため、有効な値は
     /// get_object が返す既存オブジェクトの値から得る。
@@ -2585,6 +2585,7 @@ fn to_mcp_error(error: &ErrorObject) -> McpError {
 mod tests {
     use super::*;
 
+    use aviutl2_mcp_core::{AvailableEffectItem, EffectItemType, ItemValue, prepare_item_write};
     use rmcp::model::Tool;
 
     /// tool が frame / layer を入出力に持ち、0 始まりであることの明記が要るか。
@@ -3472,6 +3473,63 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 説明が「選択肢から選ぶ種別」として挙げている名前を並びごと取り出す。
+    ///
+    /// 語を含むかではなく、挙げている一覧そのものを取り出す。含むかだけを見ると、
+    /// 一覧から種別が落ちても増えても気付けない。
+    fn choice_item_types_named_in(description: &str) -> Vec<String> {
+        const OPENING: &str = "選択肢から選ぶ種別（";
+        let start = description
+            .find(OPENING)
+            .expect("説明が選択肢から選ぶ種別を挙げていません")
+            + OPENING.len();
+        let rest = &description[start..];
+        let end = rest.find('）').expect("種別の一覧が閉じていません");
+        rest[..end].split('・').map(str::to_string).collect()
+    }
+
+    /// 選択肢の値を書き込める設定項目種別を、書き込みの検証そのものから集める。
+    ///
+    /// 判定を書き写さず、公開されている入口へ選択肢の値を渡して受理されるかで
+    /// 決める。書き込みを公開する種別と、種別が受け付ける値の形の、どちらが
+    /// 動いてもここが動く。
+    fn item_types_accepting_a_choice() -> Vec<String> {
+        let mut names = Vec::new();
+        for raw in 1i32.. {
+            let item_type = EffectItemType::from_raw(raw);
+            if item_type == EffectItemType::Unknown(raw) {
+                break;
+            }
+            let items = vec![AvailableEffectItem {
+                name: "項目".to_string(),
+                item_type: item_type.clone(),
+            }];
+            let value = ItemValue::Choice {
+                value: "四角形".to_string(),
+                index: None,
+            };
+            if prepare_item_write(&items, "項目", &value).is_ok() {
+                names.push(item_type.kind_name());
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn the_description_names_every_item_type_that_takes_a_choice() {
+        // 説明は保証である。挙げた種別だけが選択肢として書けると読まれるため、
+        // 一覧が実態と食い違えば、書ける種別が使われないか、書けない種別が
+        // 当て推量で試される。並びごと突き合わせるため、落としても足しても
+        // 順序を変えても落ちる。
+        let named = choice_item_types_named_in(&description_of("set_object_item"));
+        assert!(!named.is_empty(), "説明が種別を 1 つも挙げていません");
+        assert_eq!(
+            named,
+            item_types_accepting_a_choice(),
+            "説明が挙げる種別と、選択肢の値を受け付ける種別が食い違います"
+        );
     }
 
     #[test]

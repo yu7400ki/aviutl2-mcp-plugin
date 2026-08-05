@@ -1740,8 +1740,10 @@ fn a_choice_value_the_host_accepts_succeeds() {
 
 #[test]
 fn a_choice_value_read_from_the_object_can_be_written_straight_back() {
-    // 読み取りが返した値をそのまま書き戻せることが、読み書きの表現が揃って
-    // いることの確認である。片方だけが選択肢の形なら往復が組み立たない。
+    // 読み取り経路が返した値を組み替えずに書き戻せることを、往復の形で固定
+    // する。読み取り口はフェイクが保持する値をそのまま返すため、種別から値へ
+    // の写像そのものはここを通らない。写像との突き合わせは写像を直接呼ぶ側が
+    // 持ち、ここが確かめるのは書き込み側が同じ値を受理することである。
     for item in CHOICE_ITEMS {
         let harness = harness_with_choice_effect();
         let selector = harness.selector(1, 300);
