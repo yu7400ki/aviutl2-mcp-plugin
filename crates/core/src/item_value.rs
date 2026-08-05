@@ -264,7 +264,10 @@ pub fn prepare_item_write(
 /// 書き込みを公開する種別かどうかを、種別と値の対応より**先に**判定する。
 /// 公開しない種別は受け付ける値の形自体を定めていないため、値の形の照合が
 /// 成立しないためである。
-pub fn encode_item_value(
+///
+/// crate の外へは出さない。外から呼べると、SDK へ渡す文字列を [`ItemWrite`]
+/// を経ずに組み立てられ、書き込みと照合が別の文字列を見る余地が生まれる。
+pub(crate) fn encode_item_value(
     item_type: &EffectItemType,
     value: &ItemValue,
 ) -> Result<String, ItemWriteError> {
@@ -1282,38 +1285,16 @@ mod tests {
         );
     }
 
-    /// 種別ごとに、書き込み後の照合を行うかを述べる。
-    ///
-    /// [`EffectItemType`] に対する網羅 `match` であり `_` を使わない。**種別を
-    /// 足すとここが落ち、照合するかを書くまでコンパイルできない。**
-    fn expects_read_back_verification(item_type: &EffectItemType) -> bool {
-        match item_type {
-            EffectItemType::Select
-            | EffectItemType::Combo
-            | EffectItemType::Mask
-            | EffectItemType::Figure => true,
-            EffectItemType::Integer
-            | EffectItemType::Number
-            | EffectItemType::Check
-            | EffectItemType::Text
-            | EffectItemType::String
-            | EffectItemType::File
-            | EffectItemType::Folder
-            | EffectItemType::Font
-            | EffectItemType::Color
-            | EffectItemType::Scene
-            | EffectItemType::Range
-            | EffectItemType::Data
-            | EffectItemType::Unknown(_) => false,
-        }
-    }
-
     #[test]
     fn only_the_four_choice_types_are_verified_by_reading_back() {
         // 照合の対象は選択肢から選ぶ 4 種別に限る。ほかの種別はホストが表記を
         // 正規化し得るため、一致を求めると正常な正規化を失敗と誤診断する。
         // 書き込みを公開していない mask / figure も、種別の性質としては照合の
         // 対象である。
+        //
+        // 既知の全種別と未知種別を走査して照合する側を集めるため、この 1 つの
+        // 比較が全種別についての要否を決める。種別を足したときにここを書き
+        // 換えないまま通ることは、生産側の網羅 `match` が防ぐ。
         let verified: Vec<EffectItemType> = known_item_types()
             .into_iter()
             .chain([EffectItemType::Unknown(99)])
@@ -1328,16 +1309,6 @@ mod tests {
                 EffectItemType::Figure,
             ]
         );
-        for item_type in known_item_types()
-            .into_iter()
-            .chain([EffectItemType::Unknown(99)])
-        {
-            assert_eq!(
-                verifies_read_back(&item_type),
-                expects_read_back_verification(&item_type),
-                "{item_type} の照合の要否が宣言と異なります"
-            );
-        }
     }
 
     #[test]

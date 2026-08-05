@@ -865,9 +865,9 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             })?;
             verify_written_item(editor, &permit, &boundary, &effect, &params.item, &write)?;
 
-            // choice 系以外では、読み直した値を成否の判定に使わない。ホスト側で
-            // 正規化され得るため、書いた文字列との一致を求めると正常な正規化を
-            // 失敗と誤診断する。読み直した値は正規化値として応答へ載せる。
+            // 選択肢から選ぶ種別以外では、読み直した値を成否の判定に使わない。
+            // ホスト側で正規化され得るため、書いた文字列との一致を求めると正常な
+            // 正規化を失敗と誤診断する。読み直した値は正規化値として応答へ載せる。
             let (summary, info) = attribute(
                 &permit,
                 &boundary,

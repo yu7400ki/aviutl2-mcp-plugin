@@ -774,6 +774,48 @@ fn a_choice_value_the_host_accepts_passes_through_the_batch() {
 }
 
 #[test]
+fn the_apply_phase_reads_back_once_per_choice_sub_operation() {
+    // 照合の費用は sub-operation 1 件あたり 1 回に留まる。逆操作の材料を読む
+    // 事前解決相と数を混ぜないため、最初の変更より後だけを数える。選択肢を
+    // 持たない sub-operation は 1 回も足さない。
+    let harness = Harness::with(|host| {
+        host.catalog.push(shape_catalog_entry());
+        let effects = &mut host.scene.get_mut().unwrap().layers[1].objects[1].effects;
+        effects.push(shape(0));
+        effects.push(shape(1));
+    });
+    let params = batch(vec![
+        set_item_op(harness.effect_selector(1, 300, "ぼかし", 0), "範囲", 40),
+        BatchOperation::SetObjectItem {
+            selector: harness.effect_selector(1, 300, SHAPE, 0),
+            item: "図形の種類".to_string(),
+            value: ItemValue::Choice {
+                value: CHOICE_VALUES[1].to_string(),
+                index: None,
+            },
+        },
+        BatchOperation::SetObjectItem {
+            selector: harness.effect_selector(1, 300, SHAPE, 1),
+            item: "図形の種類".to_string(),
+            value: ItemValue::Choice {
+                value: CHOICE_VALUES[1].to_string(),
+                index: None,
+            },
+        },
+    ]);
+    harness.host.clear_calls();
+    harness.edit.apply_batch(&params).expect("一括適用の失敗");
+
+    let calls = harness.host.calls();
+    let first = first_mutation(&calls).expect("変更 API が呼ばれていません");
+    assert_eq!(
+        count(&calls[first..], ITEM_VALUE),
+        2,
+        "適用相の読み直しが選択肢を持つ sub-operation の件数と違います: {calls:?}"
+    );
+}
+
+#[test]
 fn the_same_choice_value_fails_the_same_way_alone_and_in_a_batch() {
     // 受理する集合が単独編集と一括適用で違ってはならない。同じ入力に対して
     // 同じ code と同じ名前を返すことで固定する。

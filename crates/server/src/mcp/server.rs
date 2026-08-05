@@ -3484,7 +3484,16 @@ mod tests {
             ("add_effect", &["fingerprint", "重複して付与"]),
             (
                 "set_object_item",
-                &["fingerprint", "公開していない設定項目種別", "item_type"],
+                &[
+                    "fingerprint",
+                    "公開していない設定項目種別",
+                    "item_type",
+                    // 選択肢の一覧を返す手段が無いため、外した値の直し方を
+                    // 示さなければ要求元は当て推量を繰り返す。
+                    "choice_value_rejected",
+                    "選択肢に無い値",
+                    "get_object が返す既存オブジェクトの値から得る",
+                ],
             ),
             ("set_effect_enabled", &["fingerprint", "出力 item"]),
             ("delete_effect", &["fingerprint", "not_found"]),

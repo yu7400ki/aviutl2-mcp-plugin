@@ -1575,8 +1575,11 @@ fn an_item_missing_from_the_listing_but_readable_is_not_writable() {
 }
 
 #[test]
-fn a_successful_item_write_never_probes_the_value() {
-    // 追加の読み取りは失敗経路でだけ行う。成功する要求の費用は変わらない。
+fn a_successful_write_that_needs_no_verification_never_probes_the_value() {
+    // 書き込んだ値を読み直すのは、選択肢から選ぶ種別の照合と失敗経路だけで
+    // ある。**それ以外の種別では成功する要求の費用が変わらない。** 選択肢から
+    // 選ぶ種別が成功経路でも 1 回読み直すことは別に固定してあり、この検査を
+    // 根拠にその読み直しを削ってはならない。
     let harness = harness_with_unlisted_item();
     let selector = harness.effect_selector(1, 100, "ぼかし", 0);
     harness.host.clear_calls();
@@ -1592,7 +1595,7 @@ fn a_successful_item_write_never_probes_the_value() {
 
     assert!(
         !harness.host.calls().contains(&ITEM_VALUE),
-        "成功経路で項目の値を読み直しました: {:?}",
+        "照合を要しない種別の成功経路で項目の値を読み直しました: {:?}",
         harness.host.calls()
     );
 }

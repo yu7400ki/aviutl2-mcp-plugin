@@ -1802,8 +1802,12 @@ fn raw_item_value(value: &ItemValue) -> String {
 /// ホストが書き込む値。受け付けない値では `None` を返し、状態を変えない。
 ///
 /// 選択肢から選ぶ種別は、選択肢に無い値を失敗を返さずに無視する。ほかの種別は
-/// 表記を正規化して受け付ける——上限への丸め、色の小文字化、実数の桁の詰め、
-/// 改行のエスケープ表記である。**正規化した値は書いた文字列と一致しない。**
+/// 種別に対応する値として受け付け、一部は表記を正規化する——整数と実数の上限
+/// への丸め、色の小文字化、改行のエスケープ表記である。**正規化した値は書いた
+/// 文字列と一致しない。**
+///
+/// 書き込みを公開していない種別は生の文字列のまま保つ。読み取り経路がそれらを
+/// 生値として返すため、書き込みだけが別の形へ写ると場面の状態が種別と食い違う。
 fn host_write(item_type: &EffectItemType, value: &str) -> Option<ItemValue> {
     match item_type {
         EffectItemType::Select
@@ -1827,16 +1831,26 @@ fn host_write(item_type: &EffectItemType, value: &str) -> Option<ItemValue> {
         EffectItemType::Text | EffectItemType::String => Some(ItemValue::Text {
             value: value.replace('\n', "\\n"),
         }),
-        EffectItemType::Integer
-        | EffectItemType::Check
-        | EffectItemType::File
-        | EffectItemType::Folder
-        | EffectItemType::Font
-        | EffectItemType::Scene
+        EffectItemType::Check => Some(ItemValue::Bool {
+            value: value != "0",
+        }),
+        EffectItemType::File => Some(ItemValue::File {
+            path: value.to_string(),
+        }),
+        EffectItemType::Folder => Some(ItemValue::Folder {
+            path: value.to_string(),
+        }),
+        EffectItemType::Font => Some(ItemValue::Font {
+            name: value.to_string(),
+        }),
+        EffectItemType::Integer => Some(ItemValue::Integer {
+            value: value.parse::<i64>().unwrap_or_default().min(MAX_ITEM_VALUE),
+        }),
+        EffectItemType::Scene
         | EffectItemType::Range
         | EffectItemType::Data
-        | EffectItemType::Unknown(_) => Some(ItemValue::Integer {
-            value: value.parse::<i64>().unwrap_or_default().min(MAX_ITEM_VALUE),
+        | EffectItemType::Unknown(_) => Some(ItemValue::Unknown {
+            raw: value.to_string(),
         }),
     }
 }
