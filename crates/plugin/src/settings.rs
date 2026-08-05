@@ -94,7 +94,47 @@ pub fn path() -> Result<PathBuf> {
 ///
 /// 一度も読み込めていない場合は既定値を返す。
 pub fn current() -> Arc<Settings> {
+    #[cfg(test)]
+    if let Some(settings) = test_override::current() {
+        return settings;
+    }
     state().settings()
+}
+
+/// 呼び出しスレッドに閉じた設定の差し替え。
+///
+/// 設定を読む側は差し替えを知らないまま現在値として受け取る。**差し替えを
+/// スレッドに閉じるのは、同時に走る他の検査が本来の設定を読み続けるためである**
+/// ——共有の現在値を書き換えると、無関係な検査が縮んだ期限で走る。
+#[cfg(test)]
+pub(crate) mod test_override {
+    use super::Settings;
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    thread_local! {
+        static OVERRIDE: RefCell<Option<Arc<Settings>>> = const { RefCell::new(None) };
+    }
+
+    /// 差し替えが有効な間だけ生きる印。破棄で元へ戻る。
+    pub(crate) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    /// このスレッドの現在値を差し替える。
+    pub(crate) fn install(settings: Settings) -> Guard {
+        OVERRIDE.with(|slot| *slot.borrow_mut() = Some(Arc::new(settings)));
+        Guard
+    }
+
+    /// このスレッドの差し替え。
+    pub(crate) fn current() -> Option<Arc<Settings>> {
+        OVERRIDE.with(|slot| slot.borrow().clone())
+    }
 }
 
 /// 起動時の読み込みで生じたこと。

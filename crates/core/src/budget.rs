@@ -7,8 +7,8 @@
 //! インスタンスが期限超過として扱われる。
 //!
 //! そこで配分をここへ一本化し、plugin の各段の合計が server のフェーズ予算より
-//! 真に小さいことを本モジュールのテストで固定する。差分は [`TRANSPORT_HEADROOM`]
-//! として明示的に残す。
+//! 真に小さいことを本モジュールのテストで固定する。差分は
+//! [`ScaledBudgets::transport_headroom`] として明示的に残す。
 //!
 //! 要求フェーズの予算は read・edit・batch・render の 4 つが並ぶ。operation 名が
 //! どれに属するかの判定基準は [`crate::operation::KnownOperation`] へ一本化して
@@ -348,6 +348,14 @@ impl ScaledBudgets {
         self.server_connect_wait_cap
     }
 
+    /// 接続待ちが食い潰してはならない、handshake と ping の取り分。
+    ///
+    /// [`BudgetInequality::Resolve`] が解決フェーズ予算から差し引く 2 項そのもので
+    /// ある。合成を利用側へ置くと、片方だけが倍率を採る形を再び作れてしまう。
+    pub fn server_connect_reserve(self) -> Duration {
+        self.plugin_handshake.saturating_add(self.plugin_write)
+    }
+
     /// server の成果物引き取りの上限。
     pub fn server_artifact_ingest(self) -> Duration {
         self.server_artifact_ingest
@@ -567,7 +575,9 @@ mod tests {
     #[test]
     fn unscaled_budgets_match_the_constants() {
         // 倍率 100% の一式が定数そのものであること。ここが崩れると、倍率を
-        // 設定しない利用者の挙動が黙って変わる。
+        // 設定しない利用者の挙動が黙って変わる。**定数は crate の外から見えず、
+        // 一式が唯一の入口である**ため、この対応を確かめられるのはここだけで
+        // ある。
         let budgets = ScaledBudgets::unscaled();
         assert_eq!(budgets.percent(), 100);
         assert_eq!(budgets.server_resolve(), SERVER_RESOLVE_BUDGET);
@@ -594,6 +604,10 @@ mod tests {
         );
         assert_eq!(budgets.plugin_handshake(), PLUGIN_HANDSHAKE_TIMEOUT);
         assert_eq!(budgets.plugin_write(), PLUGIN_WRITE_TIMEOUT);
+        assert_eq!(
+            budgets.server_connect_reserve(),
+            PLUGIN_HANDSHAKE_TIMEOUT + PLUGIN_WRITE_TIMEOUT
+        );
         assert_eq!(budgets.plugin_render_wait(), PLUGIN_RENDER_WAIT_TIMEOUT);
         assert_eq!(
             budgets.plugin_render_artifact(),
@@ -634,6 +648,24 @@ mod tests {
             rejected.is_empty(),
             "不等式を破る倍率があります: {rejected:?}"
         );
+    }
+
+    #[test]
+    fn the_connect_reserve_is_the_middle_of_the_resolve_inequality() {
+        // 接続待ちの取り分と予約の合計が、余白を残して解決フェーズ予算に収まる。
+        // アクセサが `Resolve` の項からずれると、接続待ちが handshake と ping の
+        // 持ち時間を食う配分を利用側へ渡せてしまう。
+        for percent in 10..=400u32 {
+            let budgets = ScaledBudgets::checked(percent).expect("倍率が採用される");
+            let spent = budgets.server_connect_wait_cap()
+                + budgets.server_connect_reserve()
+                + budgets.transport_headroom();
+            assert!(
+                spent <= budgets.server_resolve(),
+                "倍率 {percent}% で接続待ちと予約 {spent:?} が解決フェーズ予算 {:?} に収まらない",
+                budgets.server_resolve()
+            );
+        }
     }
 
     #[test]

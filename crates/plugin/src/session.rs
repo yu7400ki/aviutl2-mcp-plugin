@@ -1548,9 +1548,7 @@ mod tests {
         FiniteF64, FrameRange, LayerInfo, ListObjectAliasesResult, ListPalettesResult,
         MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectAliasSummary,
         ObjectDetail, ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary,
-        PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SERVER_EDIT_REQUEST_BUDGET,
-        SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, SceneInfo, SectionRange,
-        TRANSPORT_HEADROOM,
+        PALETTE_COLOR_COUNT, PaletteEntry, RequestBudgetKind, Rgba, SceneInfo, SectionRange,
     };
     use std::sync::Mutex;
 
@@ -2923,24 +2921,30 @@ mod tests {
         let edit = edit_timeout();
         let write = write_timeout();
         let handshake = handshake_timeout();
+        // 要求元の予算は倍率を掛けない一式から採る。
+        let server = ScaledBudgets::unscaled();
+        let headroom = server.transport_headroom();
+        let read_request = server.server_request_phase(RequestBudgetKind::Read);
+        let edit_request = server.server_request_phase(RequestBudgetKind::Edit);
+        let resolve = server.server_resolve();
         assert!(
-            read + write + TRANSPORT_HEADROOM <= SERVER_READ_REQUEST_BUDGET,
-            "読み取り {read:?} と送信 {write:?} が要求フェーズ予算 {SERVER_READ_REQUEST_BUDGET:?} に収まらない"
+            read + write + headroom <= read_request,
+            "読み取り {read:?} と送信 {write:?} が要求フェーズ予算 {read_request:?} に収まらない"
         );
 
         // 編集が実行の上限まで走っても、応答送信の持ち時間が編集要求フェーズ
         // 予算の内側に残る。編集は結果を破棄しないため、この余地が無いと
         // 応答を送り切れないまま接続が切れ得る。
         assert!(
-            edit + write + TRANSPORT_HEADROOM <= SERVER_EDIT_REQUEST_BUDGET,
-            "編集 {edit:?} と送信 {write:?} が編集要求フェーズ予算 {SERVER_EDIT_REQUEST_BUDGET:?} に収まらない"
+            edit + write + headroom <= edit_request,
+            "編集 {edit:?} と送信 {write:?} が編集要求フェーズ予算 {edit_request:?} に収まらない"
         );
 
         // handshake が解決フェーズの予算を使い切ると、続く ping の往復に
         // 持ち時間が残らず、応答している接続が期限超過として扱われる。
         assert!(
-            handshake + write + TRANSPORT_HEADROOM <= SERVER_RESOLVE_BUDGET,
-            "handshake {handshake:?} と ping 応答 {write:?} が解決フェーズ予算 {SERVER_RESOLVE_BUDGET:?} に収まらない"
+            handshake + write + headroom <= resolve,
+            "handshake {handshake:?} と ping 応答 {write:?} が解決フェーズ予算 {resolve:?} に収まらない"
         );
 
         // 接続を保持する上限（REQUEST_IDLE_TIMEOUT）はここで主張しない。掛かる
@@ -3303,8 +3307,8 @@ mod edit_tests {
     use aviutl2_mcp_core::{
         EditOutcome, FiniteF64, GridBpmOutcome, LayerInfo, LayerStateOutcome, MAX_GRID_BPM_ENTRIES,
         MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, ObjectFingerprintInput, ObjectSectionsOutcome,
-        ObjectSummary, SERVER_BATCH_REQUEST_BUDGET, SceneInfo, SceneSettingsOutcome, SectionRange,
-        SelectionField, SelectionState, SetLayerStateParams, TRANSPORT_HEADROOM,
+        ObjectSummary, RequestBudgetKind, SceneInfo, SceneSettingsOutcome, SectionRange,
+        SelectionField, SelectionState, SetLayerStateParams,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -4462,9 +4466,11 @@ mod edit_tests {
         // この余地が無いと応答を送り切れないまま接続が切れ得る。
         let batch = batch_timeout();
         let write = write_timeout();
+        let server = ScaledBudgets::unscaled();
+        let batch_request = server.server_request_phase(RequestBudgetKind::Batch);
         assert!(
-            batch + write + TRANSPORT_HEADROOM <= SERVER_BATCH_REQUEST_BUDGET,
-            "一括適用 {batch:?} と送信 {write:?} が要求フェーズ予算 {SERVER_BATCH_REQUEST_BUDGET:?} に収まらない"
+            batch + write + server.transport_headroom() <= batch_request,
+            "一括適用 {batch:?} と送信 {write:?} が要求フェーズ予算 {batch_request:?} に収まらない"
         );
     }
 
@@ -4785,10 +4791,7 @@ mod edit_tests {
 #[cfg(test)]
 mod render_tests {
     use super::*;
-    use aviutl2_mcp_core::{
-        RenderFrameResult, SERVER_ARTIFACT_INGEST_BUDGET, SERVER_RENDER_REQUEST_BUDGET,
-        TRANSPORT_HEADROOM,
-    };
+    use aviutl2_mcp_core::{RenderFrameResult, RequestBudgetKind};
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -5396,10 +5399,12 @@ mod render_tests {
         // 予算を超えてから成功する経路ができる。**
         let render = render_timeout();
         let write = write_timeout();
+        let server = ScaledBudgets::unscaled();
+        let ingest = server.server_artifact_ingest();
+        let render_request = server.server_request_phase(RequestBudgetKind::Render);
         assert!(
-            render + write + TRANSPORT_HEADROOM + SERVER_ARTIFACT_INGEST_BUDGET
-                <= SERVER_RENDER_REQUEST_BUDGET,
-            "レンダリング {render:?} と送信 {write:?} と引き取り {SERVER_ARTIFACT_INGEST_BUDGET:?} が要求フェーズ予算 {SERVER_RENDER_REQUEST_BUDGET:?} に収まらない"
+            render + write + server.transport_headroom() + ingest <= render_request,
+            "レンダリング {render:?} と送信 {write:?} と引き取り {ingest:?} が要求フェーズ予算 {render_request:?} に収まらない"
         );
     }
 

@@ -24,9 +24,7 @@ use crate::render::handoff::{ARTIFACT_MEDIA_TYPE, HandoffDir, HandoffToken};
 use crate::render::host::RenderHost;
 use crate::render::slot::{RenderInventory, RenderSlot, SlotWait, StopRequest};
 use crate::render::{RenderAdapter, RenderDrain};
-use aviutl2_mcp_core::{
-    MAX_RENDER_FRAME_BYTES, PLUGIN_RENDER_WAIT_TIMEOUT, RenderFrameParams, RenderFrameResult,
-};
+use aviutl2_mcp_core::{MAX_RENDER_FRAME_BYTES, RenderFrameParams, RenderFrameResult};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -38,7 +36,9 @@ pub struct HostRenderAdapter<H> {
     handoff: HandoffDir,
     inventory: Arc<RenderInventory>,
     stop: Arc<dyn StopRequest>,
-    wait_timeout: Duration,
+    /// 完了待ちの上限を設定から引かずに固定する差し替え。
+    #[cfg(test)]
+    wait_timeout_override: Option<Duration>,
 }
 
 impl<H> HostRenderAdapter<H> {
@@ -60,14 +60,27 @@ impl<H> HostRenderAdapter<H> {
             handoff,
             inventory: RenderInventory::new(),
             stop,
-            wait_timeout: PLUGIN_RENDER_WAIT_TIMEOUT,
+            #[cfg(test)]
+            wait_timeout_override: None,
         }
+    }
+
+    /// 完了通知を待つ上限。
+    ///
+    /// **要求のたびに現在の設定から引く。** 設定は実行中に変わり得るため、
+    /// 構築時の値を握ると、倍率の変更が完了待ちにだけ効かない。
+    fn wait_timeout(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(wait_timeout) = self.wait_timeout_override {
+            return wait_timeout;
+        }
+        crate::settings::current().budgets().plugin_render_wait()
     }
 
     /// 完了の待ち時間を差し替える。
     #[cfg(test)]
     fn with_wait_timeout(mut self, wait_timeout: Duration) -> Self {
-        self.wait_timeout = wait_timeout;
+        self.wait_timeout_override = Some(wait_timeout);
         self
     }
 }
@@ -180,7 +193,7 @@ impl<H: RenderHost> RenderAdapter for HostRenderAdapter<H> {
             return Err(error);
         }
 
-        let frame = match slot.wait(Instant::now() + self.wait_timeout, self.stop.as_ref()) {
+        let frame = match slot.wait(Instant::now() + self.wait_timeout(), self.stop.as_ref()) {
             SlotWait::Done(result) => result?,
             SlotWait::TimedOut => return Err(RenderError::WaitTimeout),
             SlotWait::Stopped => return Err(RenderError::ShuttingDown),
@@ -293,8 +306,9 @@ mod tests {
     use crate::render::handoff::HandoffToken;
     use crate::render::slot::{MAX_ABANDONED_RENDERS, deliver_frame_guarded, guard_callback};
     use crate::test_support::with_silent_panic_hook;
+    use aviutl2_mcp_core::settings::{Settings, SettingsDocument};
     use aviutl2_mcp_core::{
-        ARTIFACT_MAX_BYTES, AvailableEffect, ErrorCode, InstanceId, RenderFormat,
+        ARTIFACT_MAX_BYTES, AvailableEffect, ErrorCode, InstanceId, RenderFormat, ScaledBudgets,
     };
     use serde_json::json;
     use std::ops::Deref;
@@ -689,6 +703,44 @@ mod tests {
             adapter,
             _root: root,
         }
+    }
+
+    /// 差し替えを持たない実行口。完了待ちは現在の設定から引かれる。
+    fn adapter_reading_the_settings() -> (HostRenderAdapter<FakeRenderHost>, TempRoot) {
+        let root = TempRoot::new();
+        let handoff = HandoffDir::under(&root.0, &InstanceId::new_v4());
+        let adapter = HostRenderAdapter::new(
+            FakeRenderHost::new(),
+            Arc::new(ProjectState::new()),
+            handoff,
+            Arc::new(AtomicBool::new(false)),
+        );
+        (adapter, root)
+    }
+
+    #[test]
+    fn the_wait_for_completion_follows_the_configured_budget_scale() {
+        // 完了待ちを構築時に握ると、倍率を縮めても待ち時間だけが縮まない。
+        let (adapter, _root) = adapter_reading_the_settings();
+        assert_eq!(
+            adapter.wait_timeout(),
+            ScaledBudgets::unscaled().plugin_render_wait()
+        );
+
+        let scaled = SettingsDocument::parse(r#"{"budget_scale_percent":10}"#)
+            .expect("設定を解釈できる")
+            .resolve(&Settings::default())
+            .0;
+        let expected = scaled.budgets().plugin_render_wait();
+        let _guard = crate::settings::test_override::install(scaled);
+
+        // 設定を変えた後に作った実行口だけでなく、**既に在る実行口**の待ち時間も
+        // 変わる。構築時に握っていればここが動かない。
+        assert_eq!(adapter.wait_timeout(), expected);
+        assert_ne!(expected, ScaledBudgets::unscaled().plugin_render_wait());
+
+        let (later, _later_root) = adapter_reading_the_settings();
+        assert_eq!(later.wait_timeout(), adapter.wait_timeout());
     }
 
     fn params(frame: u32) -> RenderFrameParams {

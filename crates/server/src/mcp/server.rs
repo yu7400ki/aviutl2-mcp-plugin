@@ -82,10 +82,12 @@ const RESOURCE_MIME_TYPE: &str = "application/json";
 ///
 /// 要求フェーズの予算は operation の区分ごとに異なる。どれを使うかは
 /// [`ipc_request_budget`](CallLimits::ipc_request_budget) が operation 名から選ぶ。
+///
+/// **持つのは要求フェーズの期限だけである。** インスタンス解決フェーズの配分は
+/// [`DiscoveryConfig`] が持つ。接続待ちの内訳をここへ混ぜると、要求フェーズの表と
+/// 解決フェーズの内訳を 1 つの型が兼ねることになる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallLimits {
-    /// インスタンス解決（接続・handshake・ping）の期限。
-    pub resolve: Duration,
     /// read operation 1 件の期限。
     pub request: Duration,
     /// 編集 operation 1 件の期限。
@@ -116,7 +118,6 @@ impl CallLimits {
     /// 別の結論を得る形ができる。
     pub fn from_budgets(budgets: ScaledBudgets) -> Self {
         Self {
-            resolve: budgets.server_resolve(),
             request: budgets.server_request_phase(RequestBudgetKind::Read),
             edit_request: budgets.server_request_phase(RequestBudgetKind::Edit),
             batch_request: budgets.server_request_phase(RequestBudgetKind::Batch),
@@ -233,6 +234,16 @@ impl SettingsOrFixed {
         }
     }
 
+    /// インスタンス解決フェーズの配分。
+    ///
+    /// 固定の構築口は倍率を持たないため、倍率を掛けない配分で解決する。
+    fn discovery(&self) -> DiscoveryConfig {
+        match self {
+            Self::Fixed(_) => DiscoveryConfig::default(),
+            Self::Settings(source) => DiscoveryConfig::from_budgets(source.settings().budgets()),
+        }
+    }
+
     /// 現在公開する tool の判定。
     fn visibility(&self) -> ToolVisibility {
         match self {
@@ -340,6 +351,11 @@ impl AviUtl2McpServer {
     /// tool call 1 回分の実行予算。
     fn limits(&self) -> CallLimits {
         self.settings.limits()
+    }
+
+    /// tool call 1 回分のインスタンス解決の配分。
+    fn discovery(&self) -> DiscoveryConfig {
+        self.settings.discovery()
     }
 
     /// 登録済みの tool 定義を返す。
@@ -568,12 +584,14 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("get_edit_info", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let result: EditInfo = request_operation(
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_GET_EDIT_INFO,
                 &GetEditInfoParams {},
             )?;
@@ -605,12 +623,14 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("get_current_scene", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let result: GetCurrentSceneResult = request_operation(
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_GET_CURRENT_SCENE,
                 &GetCurrentSceneParams {},
             )?;
@@ -644,6 +664,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("list_layers", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -651,6 +672,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_LIST_LAYERS,
                 &params,
             )?;
@@ -685,6 +707,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("list_objects", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -692,6 +715,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_LIST_OBJECTS,
                 &params,
             )?;
@@ -726,6 +750,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("get_object", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -733,6 +758,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_GET_OBJECT,
                 &params,
             )?;
@@ -775,6 +801,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("get_selection", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -782,6 +809,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_GET_SELECTION,
                 &params,
             )?;
@@ -816,6 +844,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("list_available_effects", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -823,6 +852,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_LIST_AVAILABLE_EFFECTS,
                 &params,
             )?;
@@ -858,6 +888,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("list_fonts", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -865,6 +896,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_LIST_FONTS,
                 &params,
             )?;
@@ -907,6 +939,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("list_palettes", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -914,6 +947,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_LIST_PALETTES,
                 &params,
             )?;
@@ -951,6 +985,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("list_modules", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -958,6 +993,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_LIST_MODULES,
                 &params,
             )?;
@@ -1006,6 +1042,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("list_object_aliases", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1013,6 +1050,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_LIST_OBJECT_ALIASES,
                 &params,
             )?;
@@ -1056,6 +1094,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("get_effect_item_values", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1063,6 +1102,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_GET_EFFECT_ITEM_VALUES,
                 &params,
             )?;
@@ -1125,6 +1165,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("create_object", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1132,6 +1173,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_CREATE_OBJECT,
                 &params,
             )?;
@@ -1180,6 +1222,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("move_object", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1187,6 +1230,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_MOVE_OBJECT,
                 &params,
             )?;
@@ -1229,6 +1273,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("set_object_name", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1236,6 +1281,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_SET_OBJECT_NAME,
                 &params,
             )?;
@@ -1287,6 +1333,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("set_object_item", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1294,6 +1341,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_SET_OBJECT_ITEM,
                 &params,
             )?;
@@ -1342,6 +1390,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("add_effect", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1349,6 +1398,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_ADD_EFFECT,
                 &params,
             )?;
@@ -1394,6 +1444,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("set_effect_enabled", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1401,6 +1452,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_SET_EFFECT_ENABLED,
                 &params,
             )?;
@@ -1446,6 +1498,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("delete_effect", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1453,6 +1506,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_DELETE_EFFECT,
                 &params,
             )?;
@@ -1499,6 +1553,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("delete_object", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1506,6 +1561,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_DELETE_OBJECT,
                 &params,
             )?;
@@ -1561,6 +1617,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("create_object_section", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1568,6 +1625,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_CREATE_OBJECT_SECTION,
                 &params,
             )?;
@@ -1623,6 +1681,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("delete_object_section", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1630,6 +1689,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_DELETE_OBJECT_SECTION,
                 &params,
             )?;
@@ -1685,6 +1745,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("move_object_section", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1692,6 +1753,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_MOVE_OBJECT_SECTION,
                 &params,
             )?;
@@ -1742,6 +1804,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("set_layer_state", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1749,6 +1812,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_SET_LAYER_STATE,
                 &params,
             )?;
@@ -1804,6 +1868,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("set_grid_bpm", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1811,6 +1876,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_SET_GRID_BPM,
                 &params,
             )?;
@@ -1872,6 +1938,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("set_scene_settings", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1879,6 +1946,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_SET_SCENE_SETTINGS,
                 &params,
             )?;
@@ -1940,6 +2008,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("set_selection", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -1947,6 +2016,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_SET_SELECTION,
                 &params,
             )?;
@@ -2012,6 +2082,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         self.run("apply_batch", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
             let params = input.to_params()?;
@@ -2019,6 +2090,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_APPLY_BATCH,
                 &params,
             )?;
@@ -2065,6 +2137,7 @@ impl AviUtl2McpServer {
     ) -> CallToolResult {
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         let artifacts = self.artifacts.clone();
         self.run("render_frame", move || {
             let instance_id = parse_instance_id(&input.instance_id)?;
@@ -2079,6 +2152,7 @@ impl AviUtl2McpServer {
                 &registry_dir,
                 instance_id,
                 limits,
+                discovery,
                 OPERATION_RENDER_FRAME,
                 &params,
             )?;
@@ -2263,6 +2337,7 @@ impl ServerHandler for AviUtl2McpServer {
         let uri = request.uri;
         let registry_dir = self.registry_dir();
         let limits = self.limits();
+        let discovery = self.discovery();
         let artifacts = self.artifacts.clone();
 
         let target = parse_resource_uri(&uri)
@@ -2287,6 +2362,7 @@ impl ServerHandler for AviUtl2McpServer {
                             &registry_dir,
                             instance_id,
                             limits,
+                            discovery,
                             OPERATION_GET_EDIT_INFO,
                             &GetEditInfoParams {},
                         )?;
@@ -2537,6 +2613,7 @@ fn request_operation<P, R>(
     registry_dir: &Path,
     instance_id: InstanceId,
     limits: CallLimits,
+    discovery: DiscoveryConfig,
     operation: &str,
     params: &P,
 ) -> Result<R, ErrorObject>
@@ -2544,10 +2621,7 @@ where
     P: Serialize,
     R: DeserializeOwned,
 {
-    let config = DiscoveryConfig {
-        per_candidate_deadline: limits.resolve,
-    };
-    let resolved = resolve_instance(registry_dir, instance_id, config)
+    let resolved = resolve_instance(registry_dir, instance_id, discovery)
         .map_err(|e| failure::from_resolve_error(&e))?;
 
     let deadline = Instant::now() + limits.ipc_request_budget(operation);
@@ -4807,21 +4881,46 @@ mod tests {
     fn default_limits_come_from_the_shared_budget() {
         // 既定値を接続先と共有する配分から外すと、接続先が自身の上限まで使った
         // 段の途中で予算が尽き、応答しているインスタンスが期限超過になる。
-        use aviutl2_mcp_core::{
-            SERVER_ARTIFACT_INGEST_BUDGET, SERVER_BATCH_REQUEST_BUDGET, SERVER_EDIT_REQUEST_BUDGET,
-            SERVER_READ_REQUEST_BUDGET, SERVER_RENDER_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET,
-        };
+        let unscaled = ScaledBudgets::unscaled();
         let limits = CallLimits::default();
-        assert_eq!(limits.resolve, SERVER_RESOLVE_BUDGET);
-        assert_eq!(limits.request, SERVER_READ_REQUEST_BUDGET);
-        assert_eq!(limits.edit_request, SERVER_EDIT_REQUEST_BUDGET);
-        assert_eq!(limits.batch_request, SERVER_BATCH_REQUEST_BUDGET);
-        assert_eq!(limits.render_request, SERVER_RENDER_REQUEST_BUDGET);
-        assert_eq!(limits.artifact_ingest, SERVER_ARTIFACT_INGEST_BUDGET);
         assert_eq!(
-            DiscoveryConfig::default().per_candidate_deadline,
-            SERVER_RESOLVE_BUDGET
+            limits.request,
+            unscaled.server_request_phase(RequestBudgetKind::Read)
         );
+        assert_eq!(
+            limits.edit_request,
+            unscaled.server_request_phase(RequestBudgetKind::Edit)
+        );
+        assert_eq!(
+            limits.batch_request,
+            unscaled.server_request_phase(RequestBudgetKind::Batch)
+        );
+        assert_eq!(
+            limits.render_request,
+            unscaled.server_request_phase(RequestBudgetKind::Render)
+        );
+        assert_eq!(limits.artifact_ingest, unscaled.server_artifact_ingest());
+        assert_eq!(
+            DiscoveryConfig::default(),
+            DiscoveryConfig::from_budgets(unscaled)
+        );
+    }
+
+    #[test]
+    fn the_discovery_config_follows_the_shared_settings() {
+        // 解決フェーズの配分を倍率へ連動させないと、期限だけが縮んだ組が
+        // discovery へ渡り、接続を 1 度も試みないまま到達不能として扱われる。
+        let settings = settings_with_scale(10);
+        let server = AviUtl2McpServer::from_settings_or_fixed(
+            PathBuf::from("registry"),
+            SettingsOrFixed::Settings(SettingsSource::fixed(settings.clone())),
+        );
+
+        assert_eq!(
+            server.discovery(),
+            DiscoveryConfig::from_budgets(settings.budgets())
+        );
+        assert_ne!(server.discovery(), DiscoveryConfig::default());
     }
 
     #[test]
@@ -4868,7 +4967,6 @@ mod tests {
     #[test]
     fn call_limits_can_be_overridden() {
         let limits = CallLimits {
-            resolve: Duration::from_millis(120),
             request: Duration::from_millis(340),
             edit_request: Duration::from_millis(560),
             batch_request: Duration::from_millis(780),
@@ -4876,7 +4974,6 @@ mod tests {
             artifact_ingest: Duration::from_millis(130),
         };
         let server = AviUtl2McpServer::without_artifact_store(PathBuf::from("registry"), limits);
-        assert_eq!(server.limits().resolve, Duration::from_millis(120));
         assert_eq!(server.limits().request, Duration::from_millis(340));
         assert_eq!(server.limits().edit_request, Duration::from_millis(560));
         assert_eq!(server.limits().batch_request, Duration::from_millis(780));
@@ -4887,7 +4984,6 @@ mod tests {
     /// 区分ごとの取り違えが必ず落ちるよう、桁で離した予算。
     fn probe_limits() -> CallLimits {
         CallLimits {
-            resolve: Duration::from_millis(1),
             request: Duration::from_millis(2),
             edit_request: Duration::from_millis(3),
             batch_request: Duration::from_millis(4),

@@ -8,7 +8,7 @@ use crate::pipe_client::{PipeClient, PipeClientError};
 use crate::redact;
 use aviutl2_mcp_core::{
     ErrorCode, ErrorObject, InstanceDescriptor, InstanceId, InstanceInfo, InstanceProject,
-    InstanceState, PongResult, ProtocolVersion, SERVER_RESOLVE_BUDGET, deserialize_json,
+    InstanceState, PongResult, ProtocolVersion, ScaledBudgets, deserialize_json,
     parse_utc_timestamp, pipe_name_for,
 };
 
@@ -204,20 +204,39 @@ impl ExclusionReason {
 }
 
 /// discovery の設定。
-#[derive(Debug, Clone, Copy)]
+///
+/// 解決フェーズの配分をまとめて運ぶ。**3 つは同じ予算一式から採らなければ
+/// ならない**——期限だけが縮み、接続待ちの取り分が縮まなければ、接続を 1 度も
+/// 試みないまま期限超過として返る。[`DiscoveryConfig::from_budgets`] を唯一の
+/// 組み立て口にすることで、その組を作れないようにしている。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiscoveryConfig {
     /// 1 候補あたりの discovery 期限。
     ///
     /// pipe 接続・handshake・ping 往復をこの 1 つの期限で束ねる。接続先は
     /// 自身の各段の上限をこの予算の内側に収める。
     pub per_candidate_deadline: Duration,
+    /// 接続待ちが食い潰してはならない handshake と ping の取り分。
+    pub connect_reserve: Duration,
+    /// 1 回の接続待ちの上限。
+    pub connect_wait_cap: Duration,
+}
+
+impl DiscoveryConfig {
+    /// 倍率を適用済みの予算一式から引く。
+    pub fn from_budgets(budgets: ScaledBudgets) -> Self {
+        Self {
+            per_candidate_deadline: budgets.server_resolve(),
+            connect_reserve: budgets.server_connect_reserve(),
+            connect_wait_cap: budgets.server_connect_wait_cap(),
+        }
+    }
 }
 
 impl Default for DiscoveryConfig {
+    /// 倍率を掛けない配分。
     fn default() -> Self {
-        Self {
-            per_candidate_deadline: SERVER_RESOLVE_BUDGET,
-        }
+        Self::from_budgets(ScaledBudgets::unscaled())
     }
 }
 
@@ -448,14 +467,16 @@ fn verify_candidate(
 
     // pipe 接続、handshake、ping。
     let (client, pong) =
-        run_pipe_handshake_and_ping(&descriptor, deadline).map_err(|err| ExcludedCandidate {
-            instance_id: Some(descriptor.instance_id),
-            reason: map_pipe_error(&err),
-            // インスタンスが応答した場合のみ、その内容を上位の判断へ残す。
-            rejection: match err {
-                PipeClientError::Remote(error) => Some(error),
-                _ => None,
-            },
+        run_pipe_handshake_and_ping(&descriptor, deadline, config).map_err(|err| {
+            ExcludedCandidate {
+                instance_id: Some(descriptor.instance_id),
+                reason: map_pipe_error(&err),
+                // インスタンスが応答した場合のみ、その内容を上位の判断へ残す。
+                rejection: match err {
+                    PipeClientError::Remote(error) => Some(error),
+                    _ => None,
+                },
+            }
         })?;
 
     if matches!(pong.state, InstanceState::Draining | InstanceState::Gone) {
@@ -505,6 +526,7 @@ fn validate_descriptor_file(path: &Path) -> Result<InstanceDescriptor, Exclusion
 fn run_pipe_handshake_and_ping(
     descriptor: &InstanceDescriptor,
     deadline: Instant,
+    config: DiscoveryConfig,
 ) -> Result<(PipeClient, PongResult), PipeClientError> {
     let client = PipeClient::connect_and_handshake(
         descriptor.instance_id,
@@ -512,6 +534,8 @@ fn run_pipe_handshake_and_ping(
         &descriptor.process_created_at,
         &descriptor.auth_secret,
         deadline,
+        config.connect_reserve,
+        config.connect_wait_cap,
     )?;
 
     let pong = client.ping(deadline)?;

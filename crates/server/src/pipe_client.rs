@@ -6,10 +6,9 @@ use crate::redact;
 use crate::win_io::{self, WinIoError};
 use aviutl2_mcp_core::{
     AuthSecret, ClientAuth, ClientHello, ErrorCode, ErrorObject, FrameDecoder, InstanceId, Nonce,
-    PLUGIN_HANDSHAKE_TIMEOUT, PLUGIN_WRITE_TIMEOUT, PongResult, ProtocolVersion, RequestEnvelope,
-    RequestId, RequestKind, ResponseEnvelope, ResponseResult, SERVER_CONNECT_WAIT_CAP, ServerAuth,
-    compute_client_mac, compute_server_mac, deserialize_json, encode_frame, pipe_name_for,
-    verify_mac,
+    PongResult, ProtocolVersion, RequestEnvelope, RequestId, RequestKind, ResponseEnvelope,
+    ResponseResult, ServerAuth, compute_client_mac, compute_server_mac, deserialize_json,
+    encode_frame, pipe_name_for, verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -28,20 +27,6 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Pipes::WaitNamedPipeW;
 use windows::core::PCWSTR;
-
-/// `WaitNamedPipeW` へ渡す待機時間の上限（ミリ秒）。
-///
-/// 解決フェーズの予算は接続待ち・handshake・ping 往復で分け合う。残り時間を
-/// そのまま接続待ちへ渡すと、接続できた時点で handshake と ping の持ち時間が
-/// 尽き、応答している接続先を期限超過として扱ってしまう。接続待ちが取り分けて
-/// よい上限を配分から取り、それ以上は待たない。
-const CONNECT_WAIT_CAP_MS: u128 = SERVER_CONNECT_WAIT_CAP.as_millis();
-
-/// 接続待ちが食い潰してはならない、handshake と ping の取り分。
-///
-/// 接続できた時点でこの取り分が残っていなければ、応答している接続先を期限超過と
-/// して扱ってしまう。残り時間がこれを下回った時点で接続待ちを打ち切る。
-const CONNECT_RESERVE: Duration = PLUGIN_HANDSHAKE_TIMEOUT.saturating_add(PLUGIN_WRITE_TIMEOUT);
 
 /// 1 回の読み取りで受け取る最大バイト数。
 ///
@@ -140,6 +125,11 @@ impl PipeClient {
     /// `pipe_name` へ指定した期限で接続し、handshake を完了する。
     ///
     /// 成功時は認証済みの `PipeClient` を返す。
+    ///
+    /// `connect_reserve` は接続待ちが食い潰してはならない handshake と ping の
+    /// 取り分、`connect_wait_cap` は 1 回の接続待ちの上限である。**いずれも
+    /// `deadline` と同じ配分から採らなければならない。** 期限だけが縮み、予約が
+    /// 縮まなければ、接続を試みる前に期限超過として返る。
     #[instrument(skip_all, fields(instance = %redact::instance_id(&descriptor_id), pid = descriptor_pid))]
     pub fn connect_and_handshake(
         descriptor_id: InstanceId,
@@ -147,9 +137,11 @@ impl PipeClient {
         descriptor_created_at: &str,
         auth_secret: &AuthSecret,
         deadline: Instant,
+        connect_reserve: Duration,
+        connect_wait_cap: Duration,
     ) -> Result<Self, PipeClientError> {
         let pipe_name = pipe_name_for(&descriptor_id);
-        let handle = connect_pipe(&pipe_name, deadline)?;
+        let handle = connect_pipe(&pipe_name, deadline, connect_reserve, connect_wait_cap)?;
 
         let client = Self {
             handle,
@@ -459,30 +451,42 @@ fn deadline_to_unix_ms(deadline: Instant) -> Option<u64> {
 /// 指定 pipe 名に `deadline` までの範囲で接続する。
 ///
 /// 接続先の pipe は同時 1 接続しか受け付けないため、先行する要求が処理中の間は
-/// 待受インスタンスが無く接続に失敗する。1 回の待ちは [`CONNECT_WAIT_CAP_MS`] で
+/// 待受インスタンスが無く接続に失敗する。1 回の待ちは `connect_wait_cap` で
 /// 頭打ちにするので、そこで諦めると解決の予算が余ったまま到達不能な相手として
-/// 扱ってしまう。handshake と ping の取り分を残した期限まで待ち直す。
+/// 扱ってしまう。handshake と ping の取り分（`connect_reserve`）を残した期限まで
+/// 待ち直す。
+///
+/// **2 つの取り分は `deadline` と同じ配分から受け取る。** 定数として持つと、
+/// 期限だけが縮んだときに接続を 1 度も試みないまま期限超過として返る。
 ///
 /// 再試行するのは pipe が存在して塞がっている場合だけである。pipe そのものが
 /// 無い相手は待っても現れないため、即座に失敗として返す。
-fn connect_pipe(pipe_name: &str, deadline: Instant) -> Result<HANDLE, PipeClientError> {
+fn connect_pipe(
+    pipe_name: &str,
+    deadline: Instant,
+    connect_reserve: Duration,
+    connect_wait_cap: Duration,
+) -> Result<HANDLE, PipeClientError> {
     let wide: Vec<u16> = OsStr::new(pipe_name)
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
+    // 1 回の待ちの上限。ミリ秒未満へ縮んでも、下の待ち時間の下限 1 ミリ秒を
+    // 下回らせない。
+    let wait_cap_ms = connect_wait_cap.as_millis().max(1);
 
     loop {
         let remaining = win_io::remaining_until(deadline);
-        if remaining <= CONNECT_RESERVE {
+        if remaining <= connect_reserve {
             return Err(PipeClientError::Timeout);
         }
 
         // pipe サーバーが接続可能になるまで短時間待つ。
         // 第 2 引数の 0 は NMPWAIT_NOWAIT ではなく NMPWAIT_USE_DEFAULT_WAIT（pipe 既定の
         // タイムアウト）を意味するため、残り時間が 1 ミリ秒未満でも 0 を渡さない。
-        let wait_ms = (remaining - CONNECT_RESERVE)
+        let wait_ms = (remaining - connect_reserve)
             .as_millis()
-            .clamp(1, CONNECT_WAIT_CAP_MS) as u32;
+            .clamp(1, wait_cap_ms) as u32;
         // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
         unsafe {
             let _ = WaitNamedPipeW(PCWSTR(wide.as_ptr()), wait_ms);
@@ -514,7 +518,8 @@ fn connect_pipe(pipe_name: &str, deadline: Instant) -> Result<HANDLE, PipeClient
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::{InstanceId, InstanceState, ResponseKind, SERVER_RESOLVE_BUDGET};
+    use crate::discovery::DiscoveryConfig;
+    use aviutl2_mcp_core::{InstanceId, InstanceState, ResponseKind, ScaledBudgets};
     use serde::Deserialize;
     use std::time::Duration;
     use windows::Win32::Storage::FileSystem::{PIPE_ACCESS_DUPLEX, ReadFile, WriteFile};
@@ -529,31 +534,53 @@ mod tests {
         assert_eq!(pipe_name_for(&id), pipe_name_for(&id));
     }
 
+    /// 倍率を適用した解決フェーズの配分。
+    fn discovery_config(percent: u32) -> DiscoveryConfig {
+        DiscoveryConfig::from_budgets(ScaledBudgets::checked(percent).expect("倍率が採用される"))
+    }
+
     #[test]
     fn connect_fails_immediately_when_deadline_passed() {
         let id = InstanceId::new_v4();
+        let config = DiscoveryConfig::default();
         let deadline = Instant::now() - Duration::from_secs(1);
         let started = Instant::now();
-        let result = connect_pipe(&pipe_name_for(&id), deadline);
+        let result = connect_pipe(
+            &pipe_name_for(&id),
+            deadline,
+            config.connect_reserve,
+            config.connect_wait_cap,
+        );
         assert!(matches!(result, Err(PipeClientError::Timeout)));
         assert!(started.elapsed() < Duration::from_millis(100));
     }
 
     #[test]
     fn connect_fails_immediately_when_the_pipe_does_not_exist() {
-        // 待っても現れない相手に予算を使い切らない。
-        let id = InstanceId::new_v4();
-        let started = Instant::now();
-        let result = connect_pipe(&pipe_name_for(&id), started + SERVER_RESOLVE_BUDGET);
-        assert!(
-            matches!(result, Err(PipeClientError::ConnectFailed)),
-            "実際の結果: {result:?}"
-        );
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "存在しない pipe を {}ms 待っています",
-            started.elapsed().as_millis()
-        );
+        // 待っても現れない相手に予算を使い切らない。**どの倍率でも接続を試みる
+        // ことが要点である**——期限だけが縮み、handshake と ping の取り分が
+        // 縮まない組を渡すと、接続を 1 度も試みないまま `Timeout` が返る。
+        // 境界（60% / 61%）を含む倍率で確かめる。
+        for percent in [10, 59, 60, 61, 100, 400] {
+            let id = InstanceId::new_v4();
+            let config = discovery_config(percent);
+            let started = Instant::now();
+            let result = connect_pipe(
+                &pipe_name_for(&id),
+                started + config.per_candidate_deadline,
+                config.connect_reserve,
+                config.connect_wait_cap,
+            );
+            assert!(
+                matches!(result, Err(PipeClientError::ConnectFailed)),
+                "倍率 {percent}% で接続を試みていません: {result:?}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_millis(500),
+                "倍率 {percent}% で存在しない pipe を {}ms 待っています",
+                started.elapsed().as_millis()
+            );
+        }
     }
 
     /// 待受インスタンスを 1 本だけ持つ pipe を作る。
@@ -617,8 +644,10 @@ mod tests {
         // SAFETY: `server` は直前に作成した有効な pipe ハンドル。
         let _ = unsafe { ConnectNamedPipe(server, None) };
 
-        // 1 回の待ちの上限を超えて塞ぎ、その後に待受を張り直す。
-        let busy_for = SERVER_CONNECT_WAIT_CAP + Duration::from_millis(300);
+        // 1 回の待ちの上限を超えて塞ぎ、その後に待受を張り直す。上限は配分から
+        // 採る。定数を直に読むと、上限が倍率に連動しない実装でも通ってしまう。
+        let config = DiscoveryConfig::default();
+        let busy_for = config.connect_wait_cap + Duration::from_millis(300);
         let pipe = BusyPipe { server, occupier };
         let releaser = std::thread::spawn(move || {
             let pipe = pipe;
@@ -633,10 +662,15 @@ mod tests {
         });
 
         let started = Instant::now();
-        let handle = connect_pipe(&name, started + SERVER_RESOLVE_BUDGET)
-            .expect("塞がっていた pipe へ再試行で接続できる");
+        let handle = connect_pipe(
+            &name,
+            started + config.per_candidate_deadline,
+            config.connect_reserve,
+            config.connect_wait_cap,
+        )
+        .expect("塞がっていた pipe へ再試行で接続できる");
         assert!(
-            started.elapsed() >= SERVER_CONNECT_WAIT_CAP,
+            started.elapsed() >= config.connect_wait_cap,
             "1 回の待ちで接続できており、再試行を確かめられていません"
         );
 
