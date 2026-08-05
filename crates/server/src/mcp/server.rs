@@ -3953,6 +3953,30 @@ mod tests {
     }
 
     #[test]
+    fn the_text_item_description_states_the_newline_round_trip_asymmetry() {
+        // 説明は保証である。改行は書き込めても読み直すとエスケープ表記になり、
+        // タブは実タブ文字のまま返る非対称を、要求元は説明を読むまで知りようが
+        // ない。挙動から導く材料が無いため、文言そのものを固定する。
+        let tool = tool_named("set_object_item");
+        let variants = tool.input_schema["$defs"]["ItemValueInput"]["oneOf"]
+            .as_array()
+            .expect("設定値が判別子つきの union として宣言されていません");
+        let text_variant = variants
+            .iter()
+            .find(|variant| variant["properties"]["type"]["const"] == "text")
+            .expect("text 種別の分岐がありません");
+        let description = text_variant["description"]
+            .as_str()
+            .expect("text 種別に説明がありません");
+        assert_eq!(
+            description,
+            "テキスト。改行とタブを含めて書き込める。書いた改行は読み直すとエスケープ\n\
+             表記（バックスラッシュ ＋ n の 2 文字）で返り、タブは実タブ文字のまま返る。\n\
+             読み取った値をそのまま書き戻すと、そのエスケープ表記が二重に育ち得る。"
+        );
+    }
+
+    #[test]
     fn edit_tool_descriptions_state_the_operation_specific_hazards() {
         let hazards: &[(&str, &[&str])] = &[
             (

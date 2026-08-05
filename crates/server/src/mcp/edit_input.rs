@@ -308,7 +308,9 @@ pub enum ItemValueInput {
         #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]
         name: String,
     },
-    /// テキスト。改行とタブを含められる。
+    /// テキスト。改行とタブを含めて書き込める。書いた改行は読み直すとエスケープ
+    /// 表記（バックスラッシュ ＋ n の 2 文字）で返り、タブは実タブ文字のまま返る。
+    /// 読み取った値をそのまま書き戻すと、そのエスケープ表記が二重に育ち得る。
     Text {
         /// 値。
         #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]
