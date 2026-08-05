@@ -28,8 +28,9 @@ use aviutl2_mcp_core::{
     PongResult, ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult,
     RenderInputError, RenderOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind,
     ResponseResult, ScaledBudgets, SelectionSnapshot, SetEffectEnabledParams, SetGridBpmParams,
-    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
-    compute_client_mac, compute_server_mac, deserialize_json, take_page, verify_mac,
+    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSceneSettingsParams,
+    SetSelectionParams, compute_client_mac, compute_server_mac, deserialize_json, take_page,
+    verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -1066,6 +1067,7 @@ enum EditRequest {
     DeleteObjectSection(Box<DeleteObjectSectionParams>),
     MoveObjectSection(Box<MoveObjectSectionParams>),
     SetGridBpm(Box<SetGridBpmParams>),
+    SetSceneSettings(Box<SetSceneSettingsParams>),
     ApplyBatch(Box<ApplyBatchParams>),
 }
 
@@ -1121,9 +1123,9 @@ fn decode_edit_request(
             decoded!(MoveObjectSectionParams, EditRequest::MoveObjectSection)
         }
         EditOperation::SetGridBpm => decoded!(SetGridBpmParams, EditRequest::SetGridBpm),
-        // シーン設定の変更に対応する編集口のメソッドはまだ無い。実装を足すときに
-        // ここで params を復号し、要求を組み立てる。
-        EditOperation::SetSceneSettings => return Err(unsupported_operation()),
+        EditOperation::SetSceneSettings => {
+            decoded!(SetSceneSettingsParams, EditRequest::SetSceneSettings)
+        }
         EditOperation::ApplyBatch => {
             let params: ApplyBatchParams = decode_params(params)?;
             params.validate().map_err(batch_input_error)?;
@@ -1204,6 +1206,9 @@ fn dispatch_edit(adapter: &dyn EditAdapter, request: EditRequest) -> Result<Valu
         }
         EditRequest::SetGridBpm(params) => {
             to_result(&adapter.set_grid_bpm(&params).map_err(edit_error)?)
+        }
+        EditRequest::SetSceneSettings(params) => {
+            to_result(&adapter.set_scene_settings(&params).map_err(edit_error)?)
         }
         EditRequest::ApplyBatch(params) => {
             to_result(&adapter.apply_batch(&params).map_err(edit_error)?)
@@ -3140,10 +3145,10 @@ mod edit_tests {
     use super::*;
     use crate::edit::error::RollbackOutcome;
     use aviutl2_mcp_core::{
-        EditOutcome, GridBpmOutcome, LayerInfo, LayerStateOutcome, MAX_GRID_BPM_ENTRIES,
+        EditOutcome, FiniteF64, GridBpmOutcome, LayerInfo, LayerStateOutcome, MAX_GRID_BPM_ENTRIES,
         MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, ObjectFingerprintInput, ObjectSectionsOutcome,
-        ObjectSummary, SERVER_BATCH_REQUEST_BUDGET, SectionRange, SelectionField, SelectionState,
-        SetLayerStateParams, TRANSPORT_HEADROOM,
+        ObjectSummary, SERVER_BATCH_REQUEST_BUDGET, SceneInfo, SceneSettingsOutcome, SectionRange,
+        SelectionField, SelectionState, SetLayerStateParams, TRANSPORT_HEADROOM,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -3276,6 +3281,29 @@ mod edit_tests {
             Ok(self.enter("set_effect_enabled"))
         }
 
+        fn set_scene_settings(
+            &self,
+            _: &SetSceneSettingsParams,
+        ) -> Result<SceneSettingsOutcome, EditError> {
+            self.calls.lock().unwrap().push("set_scene_settings");
+            Ok(SceneSettingsOutcome {
+                project_epoch: EPOCH.to_string(),
+                project_revision: 1,
+                scene: SceneInfo {
+                    id: SCENE_ID,
+                    name: Some("本編".to_string()),
+                    width: 1280,
+                    height: 720,
+                    fps: FiniteF64::try_new(30.0),
+                    fps_rate: 30,
+                    fps_scale: 1,
+                    sample_rate: 48000,
+                },
+                observed_after_edit: true,
+                non_undoable: true,
+            })
+        }
+
         fn set_layer_state(&self, _: &SetLayerStateParams) -> Result<LayerStateOutcome, EditError> {
             self.calls.lock().unwrap().push("set_layer_state");
             Ok(LayerStateOutcome {
@@ -3395,9 +3423,13 @@ mod edit_tests {
                 "entries": [{ "tempo": 120.0, "beat": 4, "start": 0.0, "offset": 0.0 }],
                 "expected_project_epoch": EPOCH,
             }),
-            // シーン設定の変更に対応する編集口のメソッドはまだ無い。実装を
-            // 足すときにここへ要求の形を書く。
-            EditOperation::SetSceneSettings => return None,
+            EditOperation::SetSceneSettings => json!({
+                "expected_scene_id": SCENE_ID,
+                "name": "本編",
+                "size": { "width": 1280, "height": 720 },
+                "sample_rate": 48000,
+                "expected_project_epoch": EPOCH,
+            }),
             EditOperation::ApplyBatch => batch_params(),
         })
     }
@@ -3431,6 +3463,7 @@ mod edit_tests {
             EditRequest::DeleteObjectSection(params) => serde_json::to_value(params),
             EditRequest::MoveObjectSection(params) => serde_json::to_value(params),
             EditRequest::SetGridBpm(params) => serde_json::to_value(params),
+            EditRequest::SetSceneSettings(params) => serde_json::to_value(params),
             EditRequest::ApplyBatch(params) => serde_json::to_value(params),
         };
         Ok(encoded.expect("params は直列化できる"))
@@ -3577,7 +3610,8 @@ mod edit_tests {
                 EditOperation::CreateObject.as_str(),
                 EditOperation::SetLayerState.as_str(),
                 EditOperation::SetSelection.as_str(),
-                EditOperation::SetGridBpm.as_str()
+                EditOperation::SetGridBpm.as_str(),
+                EditOperation::SetSceneSettings.as_str()
             ]
         );
     }
@@ -3619,17 +3653,20 @@ mod edit_tests {
     }
 
     #[test]
-    fn the_request_table_leaves_out_only_the_declared_operations() {
+    fn the_request_table_leaves_out_no_operation() {
         // 網羅 match は operation の追加を止めるが、既存の枝を除外へ書き換えても
-        // 止まらない。表から外れているものを併せて固定することで、追加も除外も
-        // 見逃さない。
+        // 止まらない。表から外れているものが 1 つも無いことを固定することで、
+        // 除外を増やせばここが落ちる。
         let excluded: Vec<&str> = EditOperation::ALL
             .into_iter()
             .filter(|operation| current_request(*operation).is_none())
             .map(EditOperation::as_str)
             .collect();
 
-        assert_eq!(excluded, vec![EditOperation::SetSceneSettings.as_str()]);
+        assert!(
+            excluded.is_empty(),
+            "要求の形の表から外れています: {excluded:?}"
+        );
     }
 
     #[test]
@@ -3674,9 +3711,7 @@ mod edit_tests {
         // 要求内容の誤りに対する扱いは同じでなければならない。
         for (state, deadline, order) in misordering_cases() {
             for operation in EditOperation::ALL {
-                let Some(mut params) = current_request(operation) else {
-                    continue;
-                };
+                let mut params = current_request(operation).expect("要求の形が表にありません");
                 params
                     .as_object_mut()
                     .expect("params は object")

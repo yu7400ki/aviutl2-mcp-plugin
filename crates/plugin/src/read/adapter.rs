@@ -911,7 +911,10 @@ fn object_detail(summary: ObjectSummary, revision: u64, detail: HostObjectDetail
 }
 
 /// シーン情報を組み立てる。
-fn scene_info(info: &HostEditInfo, name: Option<String>) -> SceneInfo {
+///
+/// 読み取りと編集の応答が同じ材料からシーンを組み立てるよう、両方がここを通る。
+/// 別々に組み立てると、同じシーンが読みと書きで別の形になり得る。
+pub(crate) fn scene_info(info: &HostEditInfo, name: Option<String>) -> SceneInfo {
     SceneInfo {
         id: info.scene_id,
         name,

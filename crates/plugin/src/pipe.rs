@@ -2243,6 +2243,13 @@ mod tests {
             Err(Self::unavailable())
         }
 
+        fn set_scene_settings(
+            &self,
+            _: &aviutl2_mcp_core::SetSceneSettingsParams,
+        ) -> Result<aviutl2_mcp_core::SceneSettingsOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
         fn set_object_item(
             &self,
             _: &aviutl2_mcp_core::SetObjectItemParams,

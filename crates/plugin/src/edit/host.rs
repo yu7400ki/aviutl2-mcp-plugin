@@ -66,6 +66,20 @@ pub struct HostSelection {
     pub display: DisplayRange,
 }
 
+/// 編集の区間を抜けたあとに観測したシーンの状態。
+///
+/// 解像度とサンプリングレートの反映値は編集情報にしか現れず、編集情報は区間へ
+/// 入った時点の複製である。したがって反映値は区間を抜けてから読むほかない。
+/// シーン名は区間の内側でも読めるが、応答へ載せる値は同じ観測から取る——別々に
+/// 取ると、応答の中で名前だけが別の時点の状態になる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostScene {
+    /// 区間を抜けたあとに取り直した編集情報。
+    pub info: HostEditInfo,
+    /// 現在シーンの名前。取得できない場合は `None`。
+    pub name: Option<String>,
+}
+
 /// 編集区間の内側で行える操作。
 ///
 /// 対象の探索は行わない。与えられたトークンに対して SDK の変更 API を呼ぶことと、
@@ -305,6 +319,36 @@ pub trait SceneEditor {
         locked: bool,
     ) -> Result<(), EditError>;
 
+    /// シーン名を設定する。
+    ///
+    /// 空の名前は渡せない。ホストは空文字と `nullptr` をどちらも「変更しない」
+    /// として無視するため、渡せる形にすると何も起きなかった要求を成功として
+    /// 返す経路ができる。空文字は要求の検証が弾く。
+    ///
+    /// **反映は [`SceneReader::scene_name`] で区間の内側から確かめられる。**
+    /// 3 つのシーン設定のうち、原子的に照合できるのはこれだけである。
+    fn set_scene_name(&self, ticket: MutationTicket<'_>, name: &str) -> Result<(), EditError>;
+
+    /// シーンの解像度を設定する。
+    ///
+    /// 幅と高さを個別に変える手段は無い。反映値は編集情報にしか現れないため、
+    /// 区間の内側では確かめられない（[`HostScene`]）。
+    fn set_scene_size(
+        &self,
+        ticket: MutationTicket<'_>,
+        width: usize,
+        height: usize,
+    ) -> Result<(), EditError>;
+
+    /// シーンの音声のサンプリングレートを設定する。
+    ///
+    /// 反映値の観測は [`Self::set_scene_size`] と同じである。
+    fn set_scene_sample_rate(
+        &self,
+        ticket: MutationTicket<'_>,
+        sample_rate: usize,
+    ) -> Result<(), EditError>;
+
     /// BPM グリッドの一覧を置き換える。
     ///
     /// 部分更新ではない。渡した一覧がそのまま現在の一覧になる。
@@ -368,6 +412,9 @@ pub trait EditHost: Send + Sync {
 
     /// 編集区間を抜けたあとに観測する選択状態。
     fn observed_selection(&self) -> Result<HostSelection, EditError>;
+
+    /// 編集区間を抜けたあとに観測するシーンの状態。
+    fn observed_scene(&self) -> Result<HostScene, EditError>;
 
     /// 編集区間へ 1 度だけ入り、クロージャの結果を持ち出す。
     ///

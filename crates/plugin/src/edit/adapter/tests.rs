@@ -18,7 +18,7 @@ use aviutl2_mcp_core::{
     Destination, EditOperation, EffectFlags, EffectItem, EffectItemType, EffectSelector,
     EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemValue, LayerNameChange,
     MAX_GRID_BPM_ENTRIES, MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSelector,
-    PageRequest, Placement,
+    PageRequest, Placement, SceneSize,
 };
 use serde_json::json;
 use std::sync::mpsc::channel;
@@ -3437,11 +3437,31 @@ fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
                 })
                 .map(|outcome| outcome.project_revision)
         },
+        EditOperation::SetSceneSettings => |harness: &Harness, target: ObjectSelector| {
+            let ObjectSelector {
+                project_epoch,
+                scene_id,
+                ..
+            } = target;
+            harness
+                .edit
+                .set_scene_settings(&SetSceneSettingsParams {
+                    expected_scene_id: scene_id,
+                    name: Some("本編".to_string()),
+                    size: Some(SceneSize {
+                        width: 1280,
+                        height: 720,
+                    }),
+                    sample_rate: Some(44_100),
+                    expected_project_epoch: project_epoch,
+                })
+                .map(|outcome| outcome.project_revision)
+        },
         // 選択状態はプロジェクトの内容ではない。revision を進めない。
         EditOperation::SetSelection => return None,
-        // シーン設定の変更と一括適用に対応する編集口のメソッドはまだ無い。実装を
-        // 足すときにここへ手続きを書き、下の表から自動的に検査される。
-        EditOperation::SetSceneSettings | EditOperation::ApplyBatch => return None,
+        // 一括適用に対応する編集口のメソッドはまだ無い。実装を足すときに
+        // ここへ手続きを書き、下の表から自動的に検査される。
+        EditOperation::ApplyBatch => return None,
     })
 }
 
@@ -3473,7 +3493,6 @@ fn the_content_edit_table_leaves_out_only_the_declared_operations() {
         excluded,
         vec![
             EditOperation::SetSelection.as_str(),
-            EditOperation::SetSceneSettings.as_str(),
             EditOperation::ApplyBatch.as_str(),
         ]
     );
@@ -3562,12 +3581,13 @@ fn locked_layer(operation: EditOperation) -> Option<LockedLayer> {
         | EditOperation::CreateObjectSection
         | EditOperation::DeleteObjectSection
         | EditOperation::MoveObjectSection
-        // BPM グリッドはシーンに属し、どのレイヤーの対象にも触れない。
-        | EditOperation::SetGridBpm => LockedLayer::Allowed,
+        // BPM グリッドとシーン設定はシーンに属し、どのレイヤーの対象にも触れない。
+        | EditOperation::SetGridBpm
+        | EditOperation::SetSceneSettings => LockedLayer::Allowed,
         EditOperation::SetSelection => return None,
-        // シーン設定の変更と一括適用に対応する編集口のメソッドはまだ無い。実装を
-        // 足すときに可否をここへ書く。
-        EditOperation::SetSceneSettings | EditOperation::ApplyBatch => return None,
+        // 一括適用に対応する編集口のメソッドはまだ無い。実装を足すときに
+        // 可否をここへ書く。
+        EditOperation::ApplyBatch => return None,
     })
 }
 
@@ -3621,7 +3641,6 @@ fn the_layer_lock_table_leaves_out_only_the_declared_operations() {
         excluded,
         vec![
             EditOperation::SetSelection.as_str(),
-            EditOperation::SetSceneSettings.as_str(),
             EditOperation::ApplyBatch.as_str(),
         ]
     );

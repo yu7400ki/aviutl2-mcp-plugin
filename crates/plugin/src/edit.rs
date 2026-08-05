@@ -21,8 +21,9 @@ use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchOutcome, CreateObjectParams, CreateObjectSectionParams,
     DeleteEffectParams, DeleteObjectParams, DeleteObjectSectionParams, EditOutcome, GridBpmOutcome,
     LayerStateOutcome, MoveObjectParams, MoveObjectSectionParams, ObjectSectionsOutcome,
-    SelectionState, SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams,
-    SetObjectItemParams, SetObjectNameParams, SetSelectionParams,
+    SceneSettingsOutcome, SelectionState, SetEffectEnabledParams, SetGridBpmParams,
+    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSceneSettingsParams,
+    SetSelectionParams,
 };
 use std::sync::Arc;
 
@@ -99,6 +100,20 @@ pub trait EditAdapter: Send + Sync {
     /// 置き換えの API は戻り値を持たないため、同一区間内で読み直して件数を
     /// 照合する。値は照合しない——ホストは単精度で受け取り、並べ替えもする。
     fn set_grid_bpm(&self, params: &SetGridBpmParams) -> Result<GridBpmOutcome, EditError>;
+
+    /// シーンの名前・解像度・サンプリングレートを変更する。
+    ///
+    /// **この変更は取り消せない。** 応答の `non_undoable` がその旨を運ぶ。
+    ///
+    /// 3 つの setter はいずれも戻り値を持たない。名前だけは編集区間の内側で
+    /// 読み直して照合し、反映されていなければ残る 2 つを 1 つも発行しない。
+    /// 解像度とサンプリングレートの反映値は編集情報にしか現れないため、区間を
+    /// 抜けてから観測する。**要求値との差異は失敗にしない** — ホストが値を
+    /// 調整し得るうえ、観測までの間に UI 操作が入り得る。
+    fn set_scene_settings(
+        &self,
+        params: &SetSceneSettingsParams,
+    ) -> Result<SceneSettingsOutcome, EditError>;
 
     /// カーソル・選択範囲・フォーカスを変更する。
     ///

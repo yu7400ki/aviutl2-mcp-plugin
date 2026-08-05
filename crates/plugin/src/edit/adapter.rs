@@ -24,7 +24,7 @@ use crate::edit::resolve::{
 };
 use crate::project::ProjectState;
 use crate::read::ReadError;
-use crate::read::adapter::{effect_info_at, object_summary};
+use crate::read::adapter::{effect_info_at, object_summary, scene_info};
 use crate::read::host::{EditState, HostEffect, HostLayer, HostObjectPlacement};
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchOperation, BatchOutcome, CreateObjectParams,
@@ -32,9 +32,10 @@ use aviutl2_mcp_core::{
     DeleteObjectSectionParams, DisplayRange, DisplayStart, EditOutcome, EffectInfo, EffectType,
     FocusChange, FrameRange, GridBpmOutcome, ItemWrite, ItemWriteError, LayerInfo,
     LayerStateOutcome, MoveObjectParams, MoveObjectSectionParams, ObjectSectionsOutcome,
-    ObjectSelector, ObjectSource, ObjectSummary, ObservedSelection, RangeChange, SectionRange,
-    SelectionField, SelectionState, SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams,
-    SetObjectItemParams, SetObjectNameParams, SetSelectionParams, prepare_item_write,
+    ObjectSelector, ObjectSource, ObjectSummary, ObservedSelection, RangeChange,
+    SceneSettingsOutcome, SectionRange, SelectionField, SelectionState, SetEffectEnabledParams,
+    SetGridBpmParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
+    SetSceneSettingsParams, SetSelectionParams, prepare_item_write,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -1173,6 +1174,78 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 project_revision: permit.project_revision(&boundary),
                 entries: applied,
             })
+        })
+    }
+
+    fn set_scene_settings(
+        &self,
+        params: &SetSceneSettingsParams,
+    ) -> Result<SceneSettingsOutcome, EditError> {
+        self.ensure_editable()?;
+        let project = self.project.as_ref();
+        let name = params.name.as_deref();
+        let size = params
+            .size
+            .as_ref()
+            .map(|size| (index(size.width), index(size.height)));
+        let sample_rate = params.sample_rate.map(index);
+
+        let (epoch, revision) = self.edit_section(move |editor| {
+            let boundary = verify_boundary(
+                project,
+                editor.entry_edit_info(),
+                ExpectedEpoch::Only(params.expected_project_epoch.as_str()),
+                EditKind::Content,
+                &[params.expected_scene_id],
+                &[],
+            )?;
+
+            let permit = boundary.issue_permit(project)?;
+            // 確かめられる軸を先に出す。名前の照合は区間の内側で完結するため、
+            // 反映されていなければ残る 2 つを 1 つも発行せずに戻れる。逆順に
+            // すると、取り消せない変更が「失敗」の応答とともに残る。
+            if let Some(name) = name {
+                permit.issue(&boundary, |ticket| editor.set_scene_name(ticket, name))?;
+                if editor.reader().scene_name().as_deref() != Some(name) {
+                    return Err(permit.attribute(
+                        &boundary,
+                        EditError::UnsupportedTarget {
+                            reason: UnsupportedReason::ChangeNotApplied,
+                        },
+                    ));
+                }
+            }
+            if let Some((width, height)) = size {
+                permit.issue(&boundary, |ticket| {
+                    editor.set_scene_size(ticket, width, height)
+                })?;
+            }
+            if let Some(sample_rate) = sample_rate {
+                permit.issue(&boundary, |ticket| {
+                    editor.set_scene_sample_rate(ticket, sample_rate)
+                })?;
+            }
+            Ok((
+                boundary.epoch().to_string(),
+                permit.project_revision(&boundary),
+            ))
+        })?;
+
+        // 解像度とサンプリングレートの反映値は編集情報にしか現れず、区間が持つ
+        // 編集情報は入口の複製である。したがって区間を抜けてから観測する。
+        // 観測に失敗しても変更は既に発行済みであり、取り消せない。発行の印を
+        // 付けて返す。
+        let observed =
+            guard(|| self.host.observed_scene()).map_err(|error| error.after_mutation(revision))?;
+        // 要求値と観測値の差異は失敗にしない。ホストが値を調整し得るうえ、区間を
+        // 抜けてから観測するまでの間に UI 操作が入り得る。差異を失敗にすると、
+        // 成功した変更を失敗として報告する経路ができる。
+        Ok(SceneSettingsOutcome {
+            project_epoch: epoch,
+            project_revision: revision,
+            scene: scene_info(&observed.info, observed.name),
+            observed_after_edit: true,
+            non_undoable: true,
         })
     }
 

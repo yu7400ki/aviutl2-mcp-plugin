@@ -10,7 +10,7 @@
 use crate::EDIT_HANDLE;
 use crate::edit::error::{EditError, NotIssuedReason, UnsupportedReason};
 use crate::edit::host::{
-    EditHost, EffectSlot, HostSelection, ObjectPosition, ObjectSlot, SceneEditor,
+    EditHost, EffectSlot, HostScene, HostSelection, ObjectPosition, ObjectSlot, SceneEditor,
 };
 use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
@@ -165,6 +165,16 @@ impl EditHost for SdkEditHost {
                 layer_num: info.display_layer_num,
             },
         })
+    }
+
+    fn observed_scene(&self) -> Result<HostScene, EditError> {
+        let info = SdkReadHost.edit_info()?;
+        // シーン名は参照区間の内側でしか読めない。解像度とサンプリングレートを
+        // 運ぶ編集情報と同じ観測として揃えるため、区間を抜けた後のここで読む。
+        let name = EDIT_HANDLE
+            .call_read_section(|section| SdkSceneReader { section }.scene_name())
+            .map_err(|_| sdk("call_read_section"))?;
+        Ok(HostScene { info, name })
     }
 
     fn enter_edit_section<T, F>(&self, f: F) -> Result<T, EditError>
@@ -551,6 +561,33 @@ impl SceneEditor for SdkSceneEditor<'_> {
             .map_err(|error| mutation_failure("set_layer_lock", &error))
     }
 
+    fn set_scene_name(&self, _ticket: MutationTicket<'_>, name: &str) -> Result<(), EditError> {
+        self.section
+            .set_scene_name(name)
+            .map_err(|error| mutation_failure("set_scene_name", &error))
+    }
+
+    fn set_scene_size(
+        &self,
+        _ticket: MutationTicket<'_>,
+        width: usize,
+        height: usize,
+    ) -> Result<(), EditError> {
+        self.section
+            .set_scene_size(width, height)
+            .map_err(|error| mutation_failure("set_scene_size", &error))
+    }
+
+    fn set_scene_sample_rate(
+        &self,
+        _ticket: MutationTicket<'_>,
+        sample_rate: usize,
+    ) -> Result<(), EditError> {
+        self.section
+            .set_scene_sample_rate(sample_rate)
+            .map_err(|error| mutation_failure("set_scene_sample_rate", &error))
+    }
+
     fn set_grid_bpm_list(
         &self,
         _ticket: MutationTicket<'_>,
@@ -724,6 +761,54 @@ mod tests {
                 }
             ),
             "引数を写せない失敗が作成できない effect として扱われました"
+        );
+    }
+
+    #[test]
+    fn a_scene_setting_that_never_reached_the_sdk_is_told_apart_from_an_sdk_failure() {
+        // シーン設定の 3 つの setter は `void` であり、ラッパーが返すのは呼び出し
+        // より前に評価される変換の失敗だけである。名前は UTF-16 への写しで NUL を
+        // 弾き、解像度とサンプリングレートは 32bit 符号付き整数への変換で弾く。
+        // どちらもプロジェクトは一切変わっていないため、届いた変更として扱うと
+        // 取り消せない変更を発行したことになる。
+        let utf16_nul = aviutl2::config::translate_strict("シーン\0名")
+            .expect_err("NUL を含む文字列が UTF-16 へ写りました");
+        let out_of_range = i32::try_from(u64::from(u32::MAX) + 1).expect_err("範囲外の変換");
+        let not_issued = [
+            (
+                "set_scene_name",
+                EditSectionError::InputCwstrContainsNull(utf16_nul),
+            ),
+            (
+                "set_scene_size",
+                EditSectionError::ValueOutOfRange(out_of_range),
+            ),
+            (
+                "set_scene_sample_rate",
+                EditSectionError::ValueOutOfRange(out_of_range),
+            ),
+        ];
+        for (operation, error) in not_issued {
+            assert!(
+                matches!(
+                    mutation_failure(operation, &error),
+                    EditError::NotIssued {
+                        reason: NotIssuedReason::ArgumentNotRepresentable
+                    }
+                ),
+                "{operation} の届かなかった失敗が発行済みとして扱われました"
+            );
+        }
+
+        // SDK が失敗を名乗った場合は届いた側のままである。
+        assert!(
+            matches!(
+                mutation_failure("set_scene_name", &EditSectionError::ApiCallFailed),
+                EditError::Sdk {
+                    operation: "set_scene_name"
+                }
+            ),
+            "SDK の失敗が届かなかった扱いになりました"
         );
     }
 

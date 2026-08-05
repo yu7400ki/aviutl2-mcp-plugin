@@ -9,7 +9,7 @@
 
 use crate::edit::error::{EditError, NotIssuedReason, UnsupportedReason};
 use crate::edit::host::{
-    EditHost, EffectSlot, HostSelection, ObjectPosition, ObjectSlot, SceneEditor,
+    EditHost, EffectSlot, HostScene, HostSelection, ObjectPosition, ObjectSlot, SceneEditor,
 };
 use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
@@ -31,6 +31,9 @@ use std::sync::{Arc, Mutex};
 
 /// フェイクが用いる現在シーンの ID。
 pub(crate) const SCENE_ID: i32 = 0;
+
+/// フェイクの初期状態のシーン名。
+pub(crate) const SCENE_NAME: &str = "Scene 1";
 
 /// 差し込む失敗。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +153,9 @@ pub(crate) const FOCUS_SECTION: &str = "get_focus_object_section";
 /// オブジェクトが存在する最大レイヤーを読み直したことを表す記録。
 pub(crate) const LAYER_MAX: &str = "get_edit_info";
 
+/// 編集区間を抜けたあとにシーンの状態を観測したことを表す記録。
+pub(crate) const OBSERVED_SCENE: &str = "observed_scene";
+
 /// クロージャから巻き戻しが漏れたことを表す記録。
 ///
 /// 実機ではこの位置でホストのプロセスが落ちる。記録が残る経路は、捕捉が
@@ -252,6 +258,14 @@ impl FakeLayer {
 pub(crate) struct FakeScene {
     pub(crate) layers: Vec<FakeLayer>,
     next_id: usize,
+    /// 現在シーンの名前。
+    pub(crate) name: String,
+    /// 画像の横幅。
+    pub(crate) width: u32,
+    /// 画像の高さ。
+    pub(crate) height: u32,
+    /// 音声のサンプリングレート。
+    pub(crate) sample_rate: u32,
     pub(crate) cursor: Cursor,
     pub(crate) selected_range: Option<FrameRange>,
     pub(crate) focus: Option<usize>,
@@ -573,6 +587,9 @@ pub(crate) const MUTATIONS: &[&str] = &[
     "set_layer_name",
     "set_layer_enable",
     "set_layer_lock",
+    "set_scene_name",
+    "set_scene_size",
+    "set_scene_sample_rate",
     "set_cursor_layer_frame",
     "set_display_layer_frame",
     "set_select_range",
@@ -622,6 +639,23 @@ impl EditHost for FakeEditHost {
                 .and_then(|id| scene.by_id(id))
                 .map(FakeObject::identity),
             display: scene.display,
+        })
+    }
+
+    fn observed_scene(&self) -> Result<HostScene, EditError> {
+        self.assert_ready("get_edit_info");
+        self.record(OBSERVED_SCENE);
+        let scene = self.scene.lock().unwrap();
+        // 解像度とサンプリングレートは編集情報として観測される。区間の内側で
+        // 適用した値がここに現れる。
+        Ok(HostScene {
+            info: HostEditInfo {
+                width: scene.width,
+                height: scene.height,
+                sample_rate: scene.sample_rate,
+                ..self.info.clone()
+            },
+            name: Some(scene.name.clone()),
         })
     }
 
@@ -689,6 +723,10 @@ impl EditHost for Arc<FakeEditHost> {
 
     fn observed_selection(&self) -> Result<HostSelection, EditError> {
         self.as_ref().observed_selection()
+    }
+
+    fn observed_scene(&self) -> Result<HostScene, EditError> {
+        self.as_ref().observed_scene()
     }
 
     fn enter_edit_section<T, F>(&self, f: F) -> Result<T, EditError>
@@ -821,7 +859,7 @@ impl FakeSceneEditor<'_> {
 
 impl SceneReader for FakeSceneEditor<'_> {
     fn scene_name(&self) -> Option<String> {
-        Some("Scene 1".to_string())
+        Some(self.host.scene.lock().unwrap().name.clone())
     }
 
     fn grid_bpm(&self) -> Result<Vec<GridBpm>, ReadError> {
@@ -1573,6 +1611,35 @@ impl SceneEditor for FakeSceneEditor<'_> {
         self.with_layer(layer, "set_layer_lock", |fake| fake.locked = locked)
     }
 
+    fn set_scene_name(&self, _ticket: MutationTicket<'_>, name: &str) -> Result<(), EditError> {
+        self.mutation("set_scene_name")?;
+        self.host.scene.lock().unwrap().name = name.to_string();
+        Ok(())
+    }
+
+    fn set_scene_size(
+        &self,
+        _ticket: MutationTicket<'_>,
+        width: usize,
+        height: usize,
+    ) -> Result<(), EditError> {
+        self.mutation("set_scene_size")?;
+        let mut scene = self.host.scene.lock().unwrap();
+        scene.width = width as u32;
+        scene.height = height as u32;
+        Ok(())
+    }
+
+    fn set_scene_sample_rate(
+        &self,
+        _ticket: MutationTicket<'_>,
+        sample_rate: usize,
+    ) -> Result<(), EditError> {
+        self.mutation("set_scene_sample_rate")?;
+        self.host.scene.lock().unwrap().sample_rate = sample_rate as u32;
+        Ok(())
+    }
+
     fn set_grid_bpm_list(
         &self,
         _ticket: MutationTicket<'_>,
@@ -2068,6 +2135,12 @@ pub(crate) fn fake_scene() -> FakeScene {
             FakeLayer::empty(),
         ],
         next_id: 100,
+        // 編集情報が名乗る値と揃える。シーン設定の変更だけがこちらを動かし、
+        // 区間を抜けた後の観測はその値を返す。
+        name: SCENE_NAME.to_string(),
+        width: fake_edit_info().width,
+        height: fake_edit_info().height,
+        sample_rate: fake_edit_info().sample_rate,
         cursor: Cursor { frame: 0, layer: 0 },
         selected_range: None,
         focus: None,

@@ -958,6 +958,31 @@ impl SceneEditor for CachingEditor<'_> {
         self.inner.set_grid_bpm_list(ticket, entries)
     }
 
+    fn set_scene_name(
+        &self,
+        ticket: crate::edit::precondition::MutationTicket<'_>,
+        name: &str,
+    ) -> Result<(), EditError> {
+        self.inner.set_scene_name(ticket, name)
+    }
+
+    fn set_scene_size(
+        &self,
+        ticket: crate::edit::precondition::MutationTicket<'_>,
+        width: usize,
+        height: usize,
+    ) -> Result<(), EditError> {
+        self.inner.set_scene_size(ticket, width, height)
+    }
+
+    fn set_scene_sample_rate(
+        &self,
+        ticket: crate::edit::precondition::MutationTicket<'_>,
+        sample_rate: usize,
+    ) -> Result<(), EditError> {
+        self.inner.set_scene_sample_rate(ticket, sample_rate)
+    }
+
     fn set_object_name(
         &self,
         ticket: crate::edit::precondition::MutationTicket<'_>,
