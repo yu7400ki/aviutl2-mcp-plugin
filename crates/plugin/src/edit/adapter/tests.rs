@@ -1613,16 +1613,50 @@ fn harness_with_choice_effect() -> Harness {
     })
 }
 
+/// 選択肢から選ぶ設定項目の名前。種別はそれぞれ別である。
+const CHOICE_ITEMS: [&str; 3] = ["図形の種類", "マスクの種類", "形状"];
+
 /// 選択肢を持つ項目への書き込み要求を組み立てる。
-fn set_choice(harness: &Harness, value: &str) -> SetObjectItemParams {
+fn set_choice_item(harness: &Harness, item: &str, value: &str) -> SetObjectItemParams {
     SetObjectItemParams {
         selector: harness.effect_selector(1, 300, SHAPE, 0),
-        item: "図形の種類".to_string(),
+        item: item.to_string(),
         value: ItemValue::Choice {
             value: value.to_string(),
             index: None,
         },
     }
+}
+
+/// 選択肢を持つ項目のうち 1 つへの書き込み要求を組み立てる。
+fn set_choice(harness: &Harness, value: &str) -> SetObjectItemParams {
+    set_choice_item(harness, CHOICE_ITEMS[0], value)
+}
+
+#[test]
+fn the_choice_items_of_the_fake_have_distinct_item_types() {
+    // 名前が 3 つあっても種別が 1 つなら、種別ごとに経路が分かれても選択肢の
+    // 試験群は気付けない。
+    let items = shape(0).items;
+    let types: Vec<EffectItemType> = CHOICE_ITEMS
+        .iter()
+        .map(|name| {
+            items
+                .iter()
+                .find(|item| item.name == *name)
+                .unwrap_or_else(|| panic!("設定項目 {name} がありません"))
+                .item_type
+                .clone()
+        })
+        .collect();
+    assert_eq!(
+        types,
+        vec![
+            EffectItemType::Select,
+            EffectItemType::Mask,
+            EffectItemType::Figure,
+        ]
+    );
 }
 
 /// 応答が返した effect から、指定した設定項目の値を取り出す。
@@ -1644,51 +1678,104 @@ fn a_choice_value_the_host_ignores_is_reported_as_a_failure() {
     // SDK は選択肢を列挙する手段を持たず、選択肢に無い値を渡しても失敗を返さず
     // に無視する。読み直して照合しなければ、当て推量が外れたことを成功として
     // 報告してしまう。
-    let harness = harness_with_choice_effect();
     let rejected = "存在しない形";
     assert!(
         !CHOICE_VALUES.contains(&rejected),
         "ホストが受け付ける値を無効な値として使っています"
     );
 
-    let error = harness
-        .edit
-        .set_object_item(&set_choice(&harness, rejected))
-        .expect_err("選択肢に無い値が成功として返りました");
+    for item in CHOICE_ITEMS {
+        let harness = harness_with_choice_effect();
+        let error = harness
+            .edit
+            .set_object_item(&set_choice_item(&harness, item, rejected))
+            .expect_err("選択肢に無い値が成功として返りました");
 
-    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
-    assert_eq!(error.details()["reason"], json!("choice_value_rejected"));
-    assert!(!error.retryable(), "読み直しても値は有効になりません");
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::UnsupportedOperation,
+            "{item}"
+        );
+        assert_eq!(
+            error.details()["reason"],
+            json!("choice_value_rejected"),
+            "{item}"
+        );
+        assert!(!error.retryable(), "{item} は読み直しても有効になりません");
+    }
 }
 
 #[test]
 fn a_choice_value_the_host_accepts_succeeds() {
-    let harness = harness_with_choice_effect();
-    harness.host.clear_calls();
+    for item in CHOICE_ITEMS {
+        let harness = harness_with_choice_effect();
+        harness.host.clear_calls();
 
-    let outcome = harness
-        .edit
-        .set_object_item(&set_choice(&harness, CHOICE_VALUES[1]))
-        .expect("選択肢に在る値が拒否されました");
+        let outcome = harness
+            .edit
+            .set_object_item(&set_choice_item(&harness, item, CHOICE_VALUES[1]))
+            .unwrap_or_else(|error| panic!("{item} で選択肢に在る値が拒否されました: {error}"));
 
-    assert_eq!(
-        changed_item(&outcome, "図形の種類"),
-        ItemValue::Choice {
-            value: CHOICE_VALUES[1].to_string(),
-            index: None,
-        }
-    );
-    assert_eq!(
-        harness
-            .host
-            .calls()
+        assert_eq!(
+            changed_item(&outcome, item),
+            ItemValue::Choice {
+                value: CHOICE_VALUES[1].to_string(),
+                index: None,
+            },
+            "{item}"
+        );
+        assert_eq!(
+            harness
+                .host
+                .calls()
+                .iter()
+                .filter(|call| **call == ITEM_VALUE)
+                .count(),
+            1,
+            "{item} の照合の読み直しは 1 回だけです: {:?}",
+            harness.host.calls()
+        );
+    }
+}
+
+#[test]
+fn a_choice_value_read_from_the_object_can_be_written_straight_back() {
+    // 読み取りが返した値をそのまま書き戻せることが、読み書きの表現が揃って
+    // いることの確認である。片方だけが選択肢の形なら往復が組み立たない。
+    for item in CHOICE_ITEMS {
+        let harness = harness_with_choice_effect();
+        let selector = harness.selector(1, 300);
+        let detail = harness
+            .read
+            .get_object(&selector)
+            .expect("対象の詳細を取得できませんでした");
+        let value = detail
+            .effects
             .iter()
-            .filter(|call| **call == ITEM_VALUE)
-            .count(),
-        1,
-        "照合の読み直しは 1 回だけです: {:?}",
-        harness.host.calls()
-    );
+            .find(|effect| effect.name == SHAPE)
+            .expect("effect がありません")
+            .items
+            .iter()
+            .find(|entry| entry.name == item)
+            .unwrap_or_else(|| panic!("設定項目 {item} がありません"))
+            .value
+            .clone();
+        assert!(
+            matches!(value, ItemValue::Choice { .. }),
+            "{item} が選択肢として読めません: {value:?}"
+        );
+
+        let outcome = harness
+            .edit
+            .set_object_item(&SetObjectItemParams {
+                selector: harness.effect_selector(1, 300, SHAPE, 0),
+                item: item.to_string(),
+                value: value.clone(),
+            })
+            .unwrap_or_else(|error| panic!("{item} の書き戻しが失敗しました: {error}"));
+
+        assert_eq!(changed_item(&outcome, item), value, "{item}");
+    }
 }
 
 #[test]

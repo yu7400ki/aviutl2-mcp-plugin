@@ -1905,6 +1905,9 @@ pub(crate) fn blur(index: usize, range: i64) -> HostEffect {
 
 /// 選択肢から選ぶ設定項目と、ホストが表記を正規化する設定項目を並べて持つ effect。
 ///
+/// 選択肢から選ぶ種別は 1 つに絞らない。ホストの挙動は種別によらず同じであり、
+/// 1 種別だけを置くと種別ごとに経路が分かれても気付けない。
+///
 /// 既定の状態には含めない。選択肢の検証を要する試験だけが
 /// [`shape_catalog_entry`] と対にして差し込む。
 pub(crate) fn shape(index: usize) -> HostEffect {
@@ -1917,6 +1920,24 @@ pub(crate) fn shape(index: usize) -> HostEffect {
             EffectItem {
                 name: "図形の種類".to_string(),
                 item_type: EffectItemType::Select,
+                value: ItemValue::Choice {
+                    value: CHOICE_VALUES[0].to_string(),
+                    index: None,
+                },
+                track: None,
+            },
+            EffectItem {
+                name: "マスクの種類".to_string(),
+                item_type: EffectItemType::Mask,
+                value: ItemValue::Choice {
+                    value: CHOICE_VALUES[0].to_string(),
+                    index: None,
+                },
+                track: None,
+            },
+            EffectItem {
+                name: "形状".to_string(),
+                item_type: EffectItemType::Figure,
                 value: ItemValue::Choice {
                     value: CHOICE_VALUES[0].to_string(),
                     index: None,
