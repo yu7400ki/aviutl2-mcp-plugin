@@ -27,7 +27,7 @@ use crate::validation::{
 use proptest::prelude::*;
 use proptest::string::string_regex;
 use proptest::test_runner::TestCaseError;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 // ============================================================================
 // json
@@ -946,41 +946,27 @@ proptest! {
 ///
 /// 一様乱数の文字列は区切りも相対参照もほとんど生成しないため、規則の境界に
 /// 当たる断片を組み合わせる。
+///
+/// 通る名前へ重みを寄せる。断片を等確率で混ぜると生成のほとんどが検証で落ち、
+/// 性質そのものを評価する回数が数えるほどしか残らない。落ちる入力は規則が
+/// 緩んだ瞬間に性質へ到達させるために要るのであって、多いほど良いものでは
+/// ない。
 fn object_alias_name_like_strategy() -> impl Strategy<Value = String> {
     let prefix = prop_oneof![
-        Just(String::new()),
-        Just("..".to_string()),
-        Just(r"..\".to_string()),
-        Just("../".to_string()),
-        Just("C:".to_string()),
-        Just(".".to_string()),
+        6 => Just(String::new()),
+        1 => Just("..".to_string()),
+        1 => Just(r"..\".to_string()),
+        1 => Just("../".to_string()),
+        1 => Just("C:".to_string()),
+        1 => Just(".".to_string()),
     ];
     let segment = prop_oneof![
-        string_regex(r"[a-zA-Z0-9_ あ\u{a5}]{0,12}").unwrap(),
-        string_regex(r#"[\\/:*?"'<>|%=,.]{1,3}"#).unwrap(),
-        Just("\0".to_string()),
+        8 => string_regex(r"[a-zA-Z0-9_ あ\u{a5}]{0,12}").unwrap(),
+        1 => string_regex(r#"[\\/:*?"'<>|%=,.]{1,3}"#).unwrap(),
+        1 => Just("\0".to_string()),
     ];
     (prefix, prop::collection::vec(segment, 0..4))
         .prop_map(|(prefix, segments)| format!("{prefix}{}", segments.concat()))
-}
-
-/// `.` と `..` を解決したパスを返す。
-///
-/// ファイルシステムへ問い合わせず、構成要素だけで畳む。
-fn normalize_lexically(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !normalized.pop() {
-                    normalized.push(component.as_os_str());
-                }
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
 }
 
 proptest! {
@@ -990,22 +976,25 @@ proptest! {
     /// 名前の判定はパスの組み立てより先に行うため、ファイル名の一部になるのは
     /// 通った名前だけである。区切りも相対参照も残らないことを、任意の入力に
     /// 対して固定する。
+    ///
+    /// 落ちた名前は `prop_assume!` で捨てる。黙って `Ok` を返す形にすると、
+    /// 生成器が偏って通る名前を 1 つも作らなくなっても緑のままになる。
+    /// 捨てた数は proptest が数えており、通る入力が枯れれば落ちる。
     #[test]
     fn an_accepted_object_alias_name_never_builds_a_path_outside_its_directory(
-        name in prop_oneof![".*", object_alias_name_like_strategy()],
+        name in prop_oneof![1 => ".*", 9 => object_alias_name_like_strategy()],
     ) {
-        let dir = Path::new(r"C:\ProgramData\aviutl2\Alias");
-        if validate_object_alias_name(&name).is_err() {
-            // 組み立てる材料が得られない。ここで止まる。
-            return Ok(());
-        }
+        prop_assume!(validate_object_alias_name(&name).is_ok());
 
+        // 名前は 1 つの構成要素にしかならない。区切りが残っていれば親が
+        // 変わり、相対参照が残っていれば構成要素の数が変わる。
+        let dir = Path::new(r"C:\ProgramData\aviutl2\Alias");
         let path = dir.join(format!("{name}.object"));
         prop_assert_eq!(path.parent(), Some(dir));
         prop_assert_eq!(path.components().count(), dir.components().count() + 1);
-        // 解決しても位置が動かない。
-        let normalized = normalize_lexically(&path);
-        prop_assert_eq!(&normalized, &path);
-        prop_assert!(normalized.starts_with(dir));
+        prop_assert!(path.components().all(|component| !matches!(
+            component,
+            Component::CurDir | Component::ParentDir
+        )));
     }
 }
