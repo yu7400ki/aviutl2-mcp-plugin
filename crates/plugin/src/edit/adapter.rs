@@ -12,6 +12,7 @@
 //! JSON への変換と応答の送信は区間の外で行う。区間の内側は SDK 呼び出しと
 //! 所有型へのコピーに限る。
 
+use crate::alias::AdmittedAlias;
 use crate::edit::EditAdapter;
 use crate::edit::batch;
 use crate::edit::error::{EditError, OccupiedRange, SectionPreconditionReason, UnsupportedReason};
@@ -156,6 +157,24 @@ impl<H: EditHost> HostEditAdapter<H> {
         Err(EditError::UnsupportedTarget {
             reason: UnsupportedReason::EffectNotRegistered,
         })
+    }
+
+    /// 名前で指定された登録済みエイリアスを、編集区間へ入る前に読み終える。
+    ///
+    /// ファイルの読み取りとパースはホストのメインスレッドを保持したまま行って
+    /// よい仕事ではない。区間へ持ち込むのは読み取った生バイト列だけであり、
+    /// 呼び出し側はファイルの中身を 1 度も見ない。
+    ///
+    /// 落ちた条件はそのまま失敗へ写す。一覧が除外に使う規則と同じ関数の同じ
+    /// 戻り値であり、片方にだけ条件を足すことができない。
+    ///
+    /// データディレクトリを解決できないことだけは規則の外にある。要求そのものは
+    /// 正しく、この AviUtl2 では機能が使えないことを述べている。
+    fn admit_alias(&self, name: &str) -> Result<AdmittedAlias, EditError> {
+        let Some(data_dir) = self.host.alias_data_directory() else {
+            return Err(ReadError::AliasDirectoryUnavailable.into());
+        };
+        Ok(crate::alias::admit_alias_in(&data_dir, name)?)
     }
 
     /// 有効・無効を変更できないと分かる対象を、編集区間へ入る前に弾く。
@@ -618,6 +637,21 @@ fn layer_state_applied(
     true
 }
 
+/// 編集区間の内側で呼ぶ作成 API と、その引数。
+///
+/// 区間の外で答えが出る仕事は区間の外で終える。名前で指定されたエイリアスは
+/// 区間へ入る前に生バイト列となり、生テキストの作成元とまったく同じ腕へ入る
+/// ——SDK から見れば 2 つは同じ要求であり、区別を区間の内側へ持ち込む理由が無い。
+#[derive(Debug, Clone, Copy)]
+enum ResolvedSource<'a> {
+    /// メディアファイルの絶対パス。
+    MediaFile(&'a str),
+    /// エイリアスの生バイト列。
+    Alias(&'a str),
+    /// 登録済み effect の名前。
+    Effect(&'a str),
+}
+
 impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
     fn create_object(&self, params: &CreateObjectParams) -> Result<EditOutcome, EditError> {
         self.ensure_editable()?;
@@ -627,6 +661,19 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
         if let ObjectSource::Effect { name } = &params.source {
             self.ensure_effect_registered(name)?;
         }
+        // ファイルの読み取りとパースは区間の外で終える。区間の内側でしか答えの
+        // 出ない検査だけを内側へ残し、外で決まる検査は前提条件の照合よりも前に
+        // 返る。
+        let admitted;
+        let source = match &params.source {
+            ObjectSource::MediaFile { path } => ResolvedSource::MediaFile(path),
+            ObjectSource::ObjectAlias { alias } => ResolvedSource::Alias(alias),
+            ObjectSource::Effect { name } => ResolvedSource::Effect(name),
+            ObjectSource::AliasName { name } => {
+                admitted = self.admit_alias(name)?;
+                ResolvedSource::Alias(&admitted.raw)
+            }
+        };
         let project = self.project.as_ref();
         let layer = index(params.placement.layer);
         let frame = index(params.placement.frame);
@@ -650,7 +697,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             // 開くため、割り込めない編集区間の内側では行えない。拡張子が通った
             // うえでの失敗は理由を区別できないので、対応していないファイルだとは
             // 名乗らない。
-            if let ObjectSource::MediaFile { path } = &params.source
+            if let ResolvedSource::MediaFile(path) = source
                 && !editor.supports_media_file(path)?
             {
                 return Err(EditError::UnsupportedTarget {
@@ -659,14 +706,14 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             }
 
             let permit = boundary.issue_permit(project)?;
-            permit.issue(&boundary, |ticket| match &params.source {
-                ObjectSource::MediaFile { path } => {
+            permit.issue(&boundary, |ticket| match source {
+                ResolvedSource::MediaFile(path) => {
                     editor.create_object_from_media_file(ticket, path, layer, frame)
                 }
-                ObjectSource::ObjectAlias { alias } => {
+                ResolvedSource::Alias(alias) => {
                     editor.create_object_from_alias(ticket, alias, layer, frame)
                 }
-                ObjectSource::Effect { name } => {
+                ResolvedSource::Effect(name) => {
                     editor.create_object_from_effect(ticket, name, layer, frame)
                 }
             })?;

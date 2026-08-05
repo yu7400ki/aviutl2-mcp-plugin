@@ -52,6 +52,13 @@ fn edit_failures() -> Vec<EditError> {
                 .map(|source| EditError::ItemWrite(ItemWriteError::Text(*source))),
         )
         .chain(ItemWriteError::all().into_iter().map(EditError::ItemWrite))
+        // 受け入れ規則の失敗は一覧では捨てられ、作成でだけ応答へ載る。載る側の
+        // 経路をここへ通さないと、名前は「生成経路の無い名前」として残る。
+        .chain(
+            crate::alias::tests::all_rejections()
+                .into_iter()
+                .map(EditError::AliasRejected),
+        )
         .collect()
 }
 
@@ -91,13 +98,6 @@ fn produced_reasons() -> BTreeSet<String> {
         crate::read::error::tests::all_errors()
             .iter()
             .filter_map(|e| reason_of(&e.details())),
-    );
-    // 受け入れ規則の失敗は一覧では捨てられ、作成でだけ応答へ載る。載る側の
-    // 写像をここへ通さないと、名前は「生成経路の無い名前」として残る。
-    reasons.extend(
-        crate::alias::tests::all_rejections()
-            .iter()
-            .filter_map(|rejection| reason_of(&rejection.details())),
     );
     // 要求内容だけで決まる検証は実行口へ届く前に落ちるため、応答の組み立ても
     // 別の経路を通る。名前が届いているかは、その経路そのものを通して見る。

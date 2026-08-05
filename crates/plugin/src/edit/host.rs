@@ -20,6 +20,7 @@ use crate::read::host::{EditState, HostEditInfo, HostObject, SceneReader};
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, FrameRange, GridBpm, SectionRange,
 };
+use std::path::PathBuf;
 
 /// 編集区間の内側で対象オブジェクトを指す内部識別子。
 ///
@@ -409,6 +410,12 @@ pub trait EditHost: Send + Sync {
 
     /// 登録済み effect のカタログ。編集区間を必要としない。
     fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, EditError>;
+
+    /// 登録済みエイリアスを収めた AviUtl2 のデータディレクトリ。
+    ///
+    /// 解決できなければ `None`。編集区間を必要とせず、プロジェクトの内容にも
+    /// 連動しない。解決の経路と、解決した先を使う経路を分けるための口である。
+    fn alias_data_directory(&self) -> Option<PathBuf>;
 
     /// 編集区間を抜けたあとに観測する選択状態。
     fn observed_selection(&self) -> Result<HostSelection, EditError>;

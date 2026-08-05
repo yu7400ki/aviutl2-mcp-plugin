@@ -1,5 +1,6 @@
 //! 編集の失敗を表す型と、応答へ載せる安全な補助情報。
 
+use crate::alias::AliasRejection;
 use crate::read::ReadError;
 use aviutl2_mcp_core::{ErrorCode, ItemWriteError};
 use serde_json::{Map, Value, json};
@@ -391,6 +392,12 @@ pub enum EditError {
         /// 対応しない理由。
         reason: UnsupportedReason,
     },
+    /// 名前で指定された登録済みエイリアスが受け入れ規則を通らない。
+    ///
+    /// エラーコードも種別の名前も落ちた条件そのものが決める。ここで写し直すと、
+    /// 一覧が除外に使う規則と作成が拒否に使う規則が別々の答えを持つ。
+    #[error(transparent)]
+    AliasRejected(#[from] AliasRejection),
     /// 読み直した区間の実態が要求と食い違う。
     #[error("{reason}")]
     SectionPrecondition {
@@ -495,6 +502,7 @@ impl EditError {
             EditError::DuplicateTarget => ErrorCode::InvalidArgument,
             EditError::ItemWrite(error) => error.error_code(),
             EditError::UnsupportedTarget { .. } => ErrorCode::UnsupportedOperation,
+            EditError::AliasRejected(rejection) => rejection.error_code(),
             EditError::SectionChangeRejected { .. } | EditError::Sdk { .. } => ErrorCode::SdkError,
             EditError::NotIssued { reason } => match reason {
                 NotIssuedReason::TargetMissing => ErrorCode::NotFound,
@@ -615,6 +623,9 @@ impl EditError {
             EditError::UnsupportedTarget { reason } => {
                 details.insert("reason".to_string(), json!(reason.as_str()));
             }
+            // 落ちた条件が組み立てた補助情報をそのまま取り込む。名前もファイルの
+            // 内容も含まないことは、組み立てる側が保証している。
+            EditError::AliasRejected(rejection) => merge(details, rejection.details()),
             EditError::SectionPrecondition { reason } => {
                 details.insert("reason".to_string(), json!(reason.as_str()));
             }
@@ -789,6 +800,9 @@ pub(crate) mod tests {
             EditError::UnsupportedTarget {
                 reason: UnsupportedReason::InverseUnavailable,
             },
+            // 受け入れ規則の 4 条件は、名前を持つものと持たないものの双方を通す。
+            EditError::AliasRejected(AliasRejection::NotFound),
+            EditError::AliasRejected(AliasRejection::WithoutEffect),
             EditError::NotIssued {
                 reason: NotIssuedReason::TargetMissing,
             },
@@ -870,6 +884,7 @@ pub(crate) mod tests {
             EditError::DuplicateTarget => "DuplicateTarget",
             EditError::ItemWrite(_) => "ItemWrite",
             EditError::UnsupportedTarget { .. } => "UnsupportedTarget",
+            EditError::AliasRejected(_) => "AliasRejected",
             EditError::SectionPrecondition { .. } => "SectionPrecondition",
             EditError::SectionChangeRejected { .. } => "SectionChangeRejected",
             EditError::Sdk { .. } => "Sdk",
@@ -895,6 +910,7 @@ pub(crate) mod tests {
             "DuplicateTarget",
             "ItemWrite",
             "UnsupportedTarget",
+            "AliasRejected",
             "SectionPrecondition",
             "SectionChangeRejected",
             "Sdk",
@@ -1021,6 +1037,10 @@ pub(crate) mod tests {
                 ErrorCode::UnsupportedOperation,
                 // 逆操作の材料を読めなかった。
                 ErrorCode::UnsupportedOperation,
+                // 名前で指定されたエイリアスが受け入れ規則を通らなかった。落ちた
+                // 条件がコードを決めるため、不在と構造の欠陥で別の値になる。
+                ErrorCode::NotFound,
+                ErrorCode::InvalidArgument,
                 // 対象が失われていた。要求の対象が無いのだから見つからない。
                 ErrorCode::NotFound,
                 // 引数を写せなかった。SDK の失敗ではなく要求の誤りである。
@@ -1042,6 +1062,21 @@ pub(crate) mod tests {
                 ErrorCode::InternalError,
             ]
         );
+    }
+
+    #[test]
+    fn a_rejected_alias_keeps_the_code_and_the_reason_the_admission_rule_gave() {
+        // 一覧の除外と作成の拒否は同じ戻り値を見る。ここで写し直すと、片方だけに
+        // 条件を足せる形になり「一覧に載る ⇒ 作成できる」が構造で保てなくなる。
+        for rejection in crate::alias::tests::all_rejections() {
+            let error = EditError::AliasRejected(rejection);
+            assert_eq!(error.error_code(), rejection.error_code(), "{rejection}");
+            assert_eq!(
+                error.details().get("reason").and_then(Value::as_str),
+                rejection.reason(),
+                "{rejection}"
+            );
+        }
     }
 
     #[test]

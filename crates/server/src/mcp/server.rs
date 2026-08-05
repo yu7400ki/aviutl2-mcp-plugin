@@ -1074,12 +1074,20 @@ impl AviUtl2McpServer {
         .await
     }
 
-    /// メディアファイル・object alias・エフェクト名のいずれかからオブジェクトを作成する。
+    /// メディアファイル・object alias・エフェクト名・登録済みエイリアス名のいずれかから
+    /// オブジェクトを作成する。
     /// source の effect はエイリアスファイルの effect.name の値であり、
     /// list_available_effects が返す名前をそのまま指定する。
     /// カタログに在る名前でも作成元にできるとは限らず、その場合は
     /// unsupported_operation（effect_not_creatable）となる。名前がカタログに無い場合は
     /// unsupported_operation（effect_not_registered）となる。
+    /// source の alias_name には list_object_aliases が返した名前を指定する。
+    /// エイリアスファイルの中身を読む必要は無い。
+    /// 名前に `\ / : * ? " ' < > | % = , .` を含めることはできない。
+    /// これは AviUtl2 の UI が登録時に課す制約である。
+    /// alias_name は object_alias（生テキスト）より検証が厳しい。
+    /// パースできないエイリアスと effect を 1 つも含まないエイリアスは、
+    /// 作成前に invalid_argument（alias_not_parsable / alias_without_effect）で拒否される。
     /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
     /// project_epoch をそのまま指定する。省略はできない。作成は対象を指す selector を
@@ -3358,6 +3366,28 @@ mod tests {
     }
 
     #[test]
+    fn create_object_says_where_an_alias_name_comes_from_and_how_it_is_checked() {
+        // 名前の出どころ・使えない文字・生テキストより厳しい検証。どれも要求元が
+        // 名前を用意する前に要る。とくに禁止文字は AviUtl2 の UI が課すもので
+        // あり、我々が決めた制約ではない。
+        let description = description_of("create_object");
+        for phrase in [
+            "list_object_aliases が返した名前",
+            "中身を読む必要は無い",
+            r#"\ / : * ? " ' < > | % = , ."#,
+            "AviUtl2 の UI",
+            "object_alias（生テキスト）より検証が厳しい",
+            "alias_not_parsable",
+            "alias_without_effect",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "create_object の説明が {phrase} に触れていません"
+            );
+        }
+    }
+
+    #[test]
     fn the_catalog_tools_do_not_ask_for_a_scene_id() {
         // フォント・パレット・モジュール・エイリアスはシーンに紐づかない。何も
         // 守らない値を必須にすると、要求元は意味の無い値を用意することになる。
@@ -3633,7 +3663,10 @@ mod tests {
                     .expect("判別子が固定値として宣言されていません")
             })
             .collect();
-        assert_eq!(tags, vec!["media_file", "object_alias", "effect"]);
+        assert_eq!(
+            tags,
+            vec!["media_file", "object_alias", "effect", "alias_name"]
+        );
 
         // 判別子と対になる値のフィールド名も固定する。タグだけが合っていても、
         // 値の名前が動けば要求は通らない。
@@ -3653,6 +3686,7 @@ mod tests {
             vec![
                 vec!["type", "path"],
                 vec!["type", "alias"],
+                vec!["type", "name"],
                 vec!["type", "name"],
             ]
         );

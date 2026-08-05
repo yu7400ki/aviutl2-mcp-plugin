@@ -5,6 +5,7 @@
 //! 順序自体を検証できる。
 
 use super::*;
+use crate::alias::tests::{TempDir, write_fixture};
 use crate::edit::fake::{
     CHOICE_VALUES, CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, EFFECT_LIST, FakeEditHost, FakeLayer,
     FakeObject, FakeReadHost, Fault, ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX,
@@ -1002,6 +1003,330 @@ fn an_unregistered_effect_name_is_rejected_without_entering_the_section() {
     assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
     assert_eq!(error.details()["reason"], json!("effect_not_registered"));
     assert_eq!(harness.host.enter_calls(), 0);
+}
+
+// ------------------------------------------ 登録済みエイリアス名からの作成
+
+/// 一覧の除外と作成の拒否が同じ fixture を見ることを保つための一時ディレクトリ。
+///
+/// fixture を 2 つに割ると、一覧と作成が別の対象について語ることになる。
+fn alias_fixture() -> (TempDir, Vec<String>) {
+    let dir = TempDir::new();
+    let names = write_fixture(&dir);
+    (dir, names)
+}
+
+/// 与えたディレクトリを解決済みのデータディレクトリとして持つ一式を組む。
+fn alias_harness(dir: &TempDir) -> Harness {
+    let harness = Harness::new();
+    harness
+        .host
+        .set_alias_data_directory(Some(dir.path().to_path_buf()));
+    harness
+}
+
+/// 一覧が返す名前を、生産経路と同じ関数から得る。
+fn listed_alias_names(dir: &TempDir) -> Vec<String> {
+    crate::alias::list_object_aliases(
+        dir.path(),
+        None,
+        &PageRequest::default(),
+        0,
+        &crate::alias::DiskAliasFiles,
+    )
+    .expect("ページ要求が拒否されました")
+    .items
+    .into_iter()
+    .map(|item| item.name)
+    .collect()
+}
+
+/// 登録済みエイリアス名を作成元とする要求を組み立てる。
+fn create_from_alias_name(
+    harness: &Harness,
+    name: &str,
+    layer: u32,
+    frame: u32,
+) -> CreateObjectParams {
+    CreateObjectParams {
+        source: ObjectSource::AliasName {
+            name: name.to_string(),
+        },
+        placement: Placement {
+            scene_id: SCENE_ID,
+            layer,
+            frame,
+        },
+        expected_project_epoch: harness.epoch(),
+    }
+}
+
+#[test]
+fn every_alias_name_in_the_items_reaches_the_creation_api() {
+    // 一覧に載る名前は必ず作成できる。載る/載らないの一致だけを見ても、作成が
+    // 実際に通ることは分からない。SDK へ届いた回数で数える。
+    let (dir, _) = alias_fixture();
+    let listed = listed_alias_names(&dir);
+    assert!(listed.len() > 1, "fixture が痩せています: {listed:?}");
+
+    for name in &listed {
+        let harness = alias_harness(&dir);
+        harness.host.clear_calls();
+        harness
+            .edit
+            .create_object(&create_from_alias_name(&harness, name, 1, 600))
+            .unwrap_or_else(|error| panic!("{name} から作成できませんでした: {error}"));
+
+        let calls = harness.host.calls();
+        assert!(
+            calls.contains(&"create_object_from_alias"),
+            "{name} が生テキストの作成 API へ届いていません: {calls:?}"
+        );
+    }
+}
+
+#[test]
+fn every_alias_name_missing_from_the_items_is_refused_with_the_documented_failure() {
+    // 一覧から落ちた名前は、作成でも同じ条件によって落ちる。表は失敗の一覧
+    // そのものであり、載らなかった名前が表に無ければテストが落ちる。
+    let (dir, fixture) = alias_fixture();
+    let listed: std::collections::BTreeSet<String> = listed_alias_names(&dir).into_iter().collect();
+    let expected = [
+        (
+            "不正な.名前",
+            ErrorCode::InvalidArgument,
+            Some("forbidden_character"),
+        ),
+        ("巨大", ErrorCode::InvalidArgument, Some("too_long")),
+        (
+            "BOM付き",
+            ErrorCode::InvalidArgument,
+            Some("alias_not_parsable"),
+        ),
+        (
+            "非UTF8",
+            ErrorCode::InvalidArgument,
+            Some("alias_not_parsable"),
+        ),
+        (
+            "効果なし",
+            ErrorCode::InvalidArgument,
+            Some("alias_without_effect"),
+        ),
+    ];
+
+    let mut refused = 0;
+    for name in &fixture {
+        if listed.contains(name) {
+            continue;
+        }
+        let (_, code, reason) = expected
+            .iter()
+            .find(|(candidate, _, _)| candidate == name)
+            .unwrap_or_else(|| panic!("{name} の失敗が表にありません"));
+        let harness = alias_harness(&dir);
+        let Err(error) = harness
+            .edit
+            .create_object(&create_from_alias_name(&harness, name, 1, 600))
+        else {
+            panic!("{name} から作成できてしまいました");
+        };
+
+        assert_eq!(error.error_code(), *code, "{name}");
+        assert_eq!(
+            error.details().get("reason").and_then(|v| v.as_str()),
+            *reason,
+            "{name}"
+        );
+        assert_eq!(harness.host.enter_calls(), 0, "{name} が区間へ入りました");
+        harness.assert_untouched();
+        refused += 1;
+    }
+    assert_eq!(refused, expected.len(), "落ちた名前の数が表と違います");
+}
+
+#[test]
+fn an_alias_name_with_no_file_is_reported_as_not_found() {
+    // 不在は名前を持たない。コードそのものが失敗を述べており、添えても要求元の
+    // 分岐は増えない。
+    let (dir, _) = alias_fixture();
+    let harness = alias_harness(&dir);
+    let error = harness
+        .edit
+        .create_object(&create_from_alias_name(&harness, "存在しない", 1, 600))
+        .expect_err("存在しない名前から作成できました");
+
+    assert_eq!(error.error_code(), ErrorCode::NotFound);
+    assert!(error.details().get("reason").is_none());
+    assert_eq!(harness.host.enter_calls(), 0);
+    harness.assert_untouched();
+}
+
+#[test]
+fn an_unresolvable_data_directory_is_told_apart_from_a_bad_name() {
+    // 要求そのものは正しく、この AviUtl2 では機能が使えないことを述べている。
+    // invalid_argument にすると、要求元は正しい名前を直そうとする。
+    let harness = Harness::new();
+    let error = harness
+        .edit
+        .create_object(&create_from_alias_name(&harness, "正常", 1, 600))
+        .expect_err("データディレクトリ無しで作成できました");
+
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(
+        error.details()["reason"],
+        json!("alias_directory_unavailable")
+    );
+    assert_eq!(harness.host.enter_calls(), 0);
+    harness.assert_untouched();
+}
+
+#[test]
+fn an_alias_name_is_diagnosed_before_the_preconditions_are_checked() {
+    // 検査が区間の外にある帰結として、alias 側の失敗が前提条件より先に返る。
+    // 期限切れの epoch・ロックされたレイヤー・塞がった宛先のいずれと組み合わせ
+    // ても同じである。復旧の手が違う——再送では直らない誤りを、再送の前に伝える。
+    let (dir, _) = alias_fixture();
+    for (label, layer, frame) in [
+        ("空きのある宛先", 1, 600),
+        ("ロックされたレイヤー", 2, 600),
+        ("塞がった宛先", 1, 150),
+    ] {
+        let harness = alias_harness(&dir);
+        let mut params = create_from_alias_name(&harness, "存在しない", layer, frame);
+        params.expected_project_epoch = "別のプロジェクト".to_string();
+        let Err(error) = harness.edit.create_object(&params) else {
+            panic!("{label} で作成できてしまいました");
+        };
+
+        assert_eq!(error.error_code(), ErrorCode::NotFound, "{label}");
+        assert_eq!(harness.host.enter_calls(), 0, "{label}");
+        harness.assert_untouched();
+    }
+}
+
+#[test]
+fn an_unsupported_media_file_is_diagnosed_after_the_preconditions() {
+    // メディアの対応確認は SDK の区間内 API を要するため、区間の内側にある。
+    // 軸は「区間の外で答えが出るか」の 1 つであり、種別ごとに順序を決めては
+    // いない。前提条件が先に返ることが、その軸のもう一方の側である。
+    let harness = Harness::new();
+    let error = harness
+        .edit
+        .create_object(&CreateObjectParams {
+            source: ObjectSource::MediaFile {
+                path: r"C:\media\clip.xyz".to_string(),
+            },
+            placement: Placement {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame: 600,
+            },
+            expected_project_epoch: "別のプロジェクト".to_string(),
+        })
+        .expect_err("別プロジェクトの前提が受理されました");
+
+    assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+    assert_eq!(error.details()["mismatch"], json!("project_epoch"));
+    harness.assert_untouched();
+}
+
+#[test]
+fn an_alias_name_creates_the_same_object_as_its_raw_text() {
+    // 区間へ持ち込むのは読み取った生バイト列だけである。名前で作ったものと
+    // 生テキストで作ったものが違えば、途中で中身を組み立て直している。
+    let (dir, _) = alias_fixture();
+    let by_name = alias_harness(&dir);
+    let named = by_name
+        .edit
+        .create_object(&create_from_alias_name(&by_name, "正常", 1, 600))
+        .expect("名前から作成できませんでした");
+
+    let by_text = Harness::new();
+    let raw = by_text
+        .edit
+        .create_object(&CreateObjectParams {
+            source: ObjectSource::ObjectAlias {
+                alias: crate::alias::tests::SINGLE.to_string(),
+            },
+            placement: Placement {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame: 600,
+            },
+            expected_project_epoch: by_text.epoch(),
+        })
+        .expect("生テキストから作成できませんでした");
+
+    // epoch は一式ごとに新しく作られるため突き合わせない。同一性を決めるのは
+    // fingerprint であり、その材料は SDK へ渡ったバイト列である。
+    let identity = |outcome: &EditOutcome| {
+        outcome
+            .created
+            .iter()
+            .map(|object| {
+                (
+                    object.layer,
+                    object.frame_start,
+                    object.frame_end,
+                    object.fingerprint.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(identity(&named), identity(&raw));
+    assert_eq!(named.created.len(), 1);
+}
+
+#[test]
+fn the_response_of_a_creation_by_name_carries_neither_the_alias_text_nor_a_path() {
+    let (dir, _) = alias_fixture();
+    let harness = alias_harness(&dir);
+    let outcome = harness
+        .edit
+        .create_object(&create_from_alias_name(&harness, "正常", 1, 600))
+        .expect("名前から作成できませんでした");
+
+    let document = serde_json::to_string(&outcome).expect("応答の直列化");
+    for forbidden in ["こんにちは", "frame=0,80", "effect.name", "Alias"] {
+        assert!(
+            !document.contains(forbidden),
+            "{forbidden} が応答に含まれます: {document}"
+        );
+    }
+    assert!(
+        !document.contains(&dir.path().display().to_string()),
+        "データディレクトリの絶対パスが応答に含まれます: {document}"
+    );
+}
+
+#[test]
+fn the_raw_alias_source_still_accepts_what_the_admission_rule_refuses() {
+    // 生テキストの経路には構造の条件を掛けない。掛けると既存の受理範囲を狭め、
+    // 一覧と作成の一致に寄与しないまま互換を壊す。
+    for alias in ["\u{feff}[Object]\r\n", "[Object]\r\nX=0.0\r\n"] {
+        let harness = Harness::new();
+        harness.host.clear_calls();
+        harness
+            .edit
+            .create_object(&CreateObjectParams {
+                source: ObjectSource::ObjectAlias {
+                    alias: alias.to_string(),
+                },
+                placement: Placement {
+                    scene_id: SCENE_ID,
+                    layer: 1,
+                    frame: 600,
+                },
+                expected_project_epoch: harness.epoch(),
+            })
+            .unwrap_or_else(|error| panic!("{alias:?} が拒否されました: {error}"));
+
+        assert!(
+            harness.host.calls().contains(&"create_object_from_alias"),
+            "{alias:?} が SDK へ届いていません"
+        );
+    }
 }
 
 // -------------------------------------------------------------- 作成の応答

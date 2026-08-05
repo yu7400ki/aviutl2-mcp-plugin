@@ -28,7 +28,7 @@ use crate::render::MAX_RENDER_FRAME_BYTES;
 use crate::selector::{EffectSelector, ObjectSelector};
 use crate::validation::{
     PathSyntaxError, TextSyntaxError, validate_alias, validate_control_free, validate_name,
-    validate_path,
+    validate_object_alias_name, validate_path,
 };
 use serde::{Deserialize, Serialize};
 
@@ -92,6 +92,11 @@ pub enum ObjectSource {
         /// 検証の規則は `add_effect` が受ける effect 名と同じである。
         name: String,
     },
+    /// 登録済みオブジェクトエイリアスの名前から作成する。
+    AliasName {
+        /// 一覧が返した名前。
+        name: String,
+    },
 }
 
 impl ObjectSource {
@@ -107,6 +112,14 @@ impl ObjectSource {
             }
             ObjectSource::Effect { name } => {
                 validate_name(name).map_err(|source| EditInputError::Text {
+                    field: FIELD_NAME,
+                    source,
+                })
+            }
+            // 名前はファイル名の一部になる。禁止文字の判定を連結より先に置く
+            // ため、規則は要求元が与えた文字列そのものに対して掛ける。
+            ObjectSource::AliasName { name } => {
+                validate_object_alias_name(name).map_err(|source| EditInputError::Text {
                     field: FIELD_NAME,
                     source,
                 })
@@ -1797,6 +1810,12 @@ mod tests {
             },
             ..sample_create()
         });
+        assert_roundtrip(CreateObjectParams {
+            source: ObjectSource::AliasName {
+                name: "テストエイリアス".to_string(),
+            },
+            ..sample_create()
+        });
         assert_roundtrip(sample_move());
         assert_roundtrip(DeleteObjectParams {
             selector: sample_object_selector(),
@@ -2057,6 +2076,13 @@ mod tests {
             })
             .unwrap(),
             json!({"type": "effect", "name": "テキスト"})
+        );
+        assert_eq!(
+            serde_json::to_value(ObjectSource::AliasName {
+                name: "テストエイリアス".to_string(),
+            })
+            .unwrap(),
+            json!({"type": "alias_name", "name": "テストエイリアス"})
         );
         assert_eq!(
             serde_json::to_value(RangeChange::Set { start: 1, end: 2 }).unwrap(),
@@ -2583,6 +2609,90 @@ mod tests {
             .validate(),
             Ok(())
         );
+    }
+
+    #[test]
+    fn the_alias_name_source_goes_through_the_alias_name_rules() {
+        // 名前はファイル名の一部になる。禁止文字を拒めばディレクトリの外を指す
+        // 名前は残らないが、規則は連結より先に掛かっていなければならない。
+        for (name, expected) in [
+            ("テストエイリアス", None),
+            ("", Some(TextSyntaxError::Empty)),
+            ("..", Some(TextSyntaxError::ForbiddenCharacter)),
+            (r"..\..\x", Some(TextSyntaxError::ForbiddenCharacter)),
+            ("a/b", Some(TextSyntaxError::ForbiddenCharacter)),
+            (r"C:\x", Some(TextSyntaxError::ForbiddenCharacter)),
+            ("図形\0", Some(TextSyntaxError::ContainsNul)),
+            ("図形\u{1}", Some(TextSyntaxError::ContainsControl)),
+        ] {
+            let result = CreateObjectParams {
+                source: ObjectSource::AliasName {
+                    name: name.to_string(),
+                },
+                ..sample_create()
+            }
+            .validate();
+            match expected {
+                None => assert_eq!(result, Ok(()), "{name:?}"),
+                Some(source) => assert_eq!(
+                    result,
+                    Err(EditInputError::Text {
+                        field: FIELD_NAME,
+                        source,
+                    }),
+                    "{name:?}"
+                ),
+            }
+        }
+
+        // effect 名は 1,024 UTF-16 code units を上限とする。エイリアス名も同じ
+        // 上限を共有する。
+        assert!(matches!(
+            CreateObjectParams {
+                source: ObjectSource::AliasName {
+                    name: "あ".repeat(MAX_NAME_UTF16_UNITS + 1),
+                },
+                ..sample_create()
+            }
+            .validate(),
+            Err(EditInputError::Text {
+                field: FIELD_NAME,
+                source: TextSyntaxError::TooLongUtf16 { .. },
+            })
+        ));
+    }
+
+    #[test]
+    fn the_alias_name_source_is_stricter_than_the_effect_name_source() {
+        // 生テキストと effect 名は禁止文字を持たない。エイリアス名だけが追加の
+        // 規則を負う。片方だけに規則が掛かっていることを 1 つの比較で残す。
+        for name in [r"..\図形", r"C:\図形:1", "図形.1"] {
+            assert_eq!(
+                CreateObjectParams {
+                    source: ObjectSource::Effect {
+                        name: name.to_string(),
+                    },
+                    ..sample_create()
+                }
+                .validate(),
+                Ok(()),
+                "{name}"
+            );
+            assert_eq!(
+                CreateObjectParams {
+                    source: ObjectSource::AliasName {
+                        name: name.to_string(),
+                    },
+                    ..sample_create()
+                }
+                .validate(),
+                Err(EditInputError::Text {
+                    field: FIELD_NAME,
+                    source: TextSyntaxError::ForbiddenCharacter,
+                }),
+                "{name}"
+            );
+        }
     }
 
     #[test]

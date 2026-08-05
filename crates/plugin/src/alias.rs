@@ -250,6 +250,25 @@ impl AliasDirectory {
 /// 済んでおり、連結してから判定する形にはしない。
 pub fn admit_alias(dir: &AliasDirectory, name: &str) -> Result<AdmittedAlias, AliasRejection> {
     validate_object_alias_name(name).map_err(AliasRejection::ForbiddenName)?;
+    admit_named_file(dir, name)
+}
+
+/// データディレクトリを起点に受け入れ規則を通す。
+///
+/// 一覧は窓の 1 件ごとに [`admit_alias`] を呼ぶため、正規化したディレクトリを
+/// 1 度だけ組み立てて持ち回る。1 件だけを見る作成の経路にはその持ち回りが無く、
+/// 組み立てまで含めてここが引き受ける。
+///
+/// エイリアスディレクトリが無ければ、その名前のファイルも無い。判定は名前の
+/// 規則より後に置く——規則はファイルを開かずに決まり、費用の順で先に来る。
+pub fn admit_alias_in(data_dir: &Path, name: &str) -> Result<AdmittedAlias, AliasRejection> {
+    validate_object_alias_name(name).map_err(AliasRejection::ForbiddenName)?;
+    let dir = AliasDirectory::resolve(data_dir).ok_or(AliasRejection::NotFound)?;
+    admit_named_file(&dir, name)
+}
+
+/// 名前の規則を通った後の、条件 2 以降を判定する。
+fn admit_named_file(dir: &AliasDirectory, name: &str) -> Result<AdmittedAlias, AliasRejection> {
     let raw = read_alias(dir, name)?;
     let table: Table = parse_table(&raw).ok_or(AliasRejection::NotParsable)?;
     let summary = summarize(&table);
@@ -584,7 +603,7 @@ pub(crate) mod tests {
     }
 
     /// 単一オブジェクト形式のエイリアス。
-    const SINGLE: &str = "[Object]\r\nframe=0,80\r\n[Object.0]\r\neffect.name=テキスト\r\nテキスト=こんにちは\r\n未知=1\r\n[Object.1]\r\neffect.name=標準描画\r\nX=0.0\r\n";
+    pub(crate) const SINGLE: &str = "[Object]\r\nframe=0,80\r\n[Object.0]\r\neffect.name=テキスト\r\nテキスト=こんにちは\r\n未知=1\r\n[Object.1]\r\neffect.name=標準描画\r\nX=0.0\r\n";
 
     /// 複数オブジェクト形式のエイリアス。
     const MULTIPLE: &str = "[0]\r\nlayer=0\r\nframe=0,80\r\n[0.0]\r\neffect.name=テキスト\r\nテキスト=ひとつめ\r\n[1]\r\nlayer=1\r\nframe=0,80\r\n[1.0]\r\neffect.name=図形\r\n";
@@ -596,17 +615,17 @@ pub(crate) mod tests {
     const HISTORY: &str = "[Window]\r\nmain=0,0,1280,720\r\n[Effect.object.正常]\r\nlabel=テロップ集\r\nhide=0\r\norder=160\r\n[Effect.object.複数]\r\nlabel=カスタムオブジェクト\r\n";
 
     /// 一時ディレクトリを作り、後始末を引き受ける番人。
-    struct TempDir(PathBuf);
+    pub(crate) struct TempDir(PathBuf);
 
     impl TempDir {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let dir = std::env::temp_dir()
                 .join(format!("aviutl2-mcp-alias-test-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(dir.join(ALIAS_DIRECTORY)).unwrap();
             Self(dir)
         }
 
-        fn path(&self) -> &Path {
+        pub(crate) fn path(&self) -> &Path {
             &self.0
         }
 
@@ -620,7 +639,7 @@ pub(crate) mod tests {
             AliasDirectory::resolve(&self.0).unwrap()
         }
 
-        fn write_alias(&self, name: &str, contents: &[u8]) {
+        pub(crate) fn write_alias(&self, name: &str, contents: &[u8]) {
             std::fs::write(
                 self.raw_alias_dir()
                     .join(format!("{name}.{ALIAS_EXTENSION}")),
@@ -629,7 +648,7 @@ pub(crate) mod tests {
             .unwrap();
         }
 
-        fn write_history(&self, contents: &[u8]) {
+        pub(crate) fn write_history(&self, contents: &[u8]) {
             std::fs::write(self.0.join(HISTORY_FILE), contents).unwrap();
         }
     }
@@ -681,7 +700,7 @@ pub(crate) mod tests {
     /// 落ちる条件を 1 つずつ持つ fixture を作る。
     ///
     /// 戻り値はファイル名（拡張子を除いたもの）の一覧である。
-    fn write_fixture(dir: &TempDir) -> Vec<String> {
+    pub(crate) fn write_fixture(dir: &TempDir) -> Vec<String> {
         dir.write_alias("正常", SINGLE.as_bytes());
         dir.write_alias("複数", MULTIPLE.as_bytes());
         dir.write_alias("不正な.名前", SINGLE.as_bytes());

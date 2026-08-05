@@ -26,6 +26,7 @@ use aviutl2_mcp_core::{
     PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange,
 };
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -430,6 +431,11 @@ pub(crate) struct FakeEditHost {
     layer_names: Mutex<Vec<Option<String>>>,
     /// 設定項目の書き込みへ渡された値を、渡された順に覚える。
     item_values: Mutex<Vec<String>>,
+    /// 登録済みエイリアスを収めたデータディレクトリ。
+    ///
+    /// 既定は `None` である。設定ハンドルを初期化できない環境がそのまま既定で
+    /// あり、解決できたことを前提にした経路を作らない。
+    alias_data_dir: Mutex<Option<PathBuf>>,
 }
 
 impl FakeEditHost {
@@ -466,7 +472,16 @@ impl FakeEditHost {
             calls: Mutex::new(Vec::new()),
             layer_names: Mutex::new(Vec::new()),
             item_values: Mutex::new(Vec::new()),
+            alias_data_dir: Mutex::new(None),
         }
+    }
+
+    /// 解決済みのデータディレクトリを差し込む。
+    ///
+    /// 解決そのものはこの位置より下にある。差し込むのは解決した先だけであり、
+    /// 解決できない状況は `None` のまま試せる。
+    pub(crate) fn set_alias_data_directory(&self, dir: Option<PathBuf>) {
+        *self.alias_data_dir.lock().unwrap() = dir;
     }
 
     /// 設定を切り替える。
@@ -655,6 +670,11 @@ impl EditHost for FakeEditHost {
         Ok(self.catalog.clone())
     }
 
+    fn alias_data_directory(&self) -> Option<PathBuf> {
+        self.record("alias_data_directory");
+        self.alias_data_dir.lock().unwrap().clone()
+    }
+
     fn observed_selection(&self) -> Result<HostSelection, EditError> {
         self.assert_ready("get_edit_info");
         self.record("observed_selection");
@@ -753,6 +773,10 @@ impl EditHost for Arc<FakeEditHost> {
 
     fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, EditError> {
         self.as_ref().effect_catalog()
+    }
+
+    fn alias_data_directory(&self) -> Option<PathBuf> {
+        self.as_ref().alias_data_directory()
     }
 
     fn observed_selection(&self) -> Result<HostSelection, EditError> {

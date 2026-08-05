@@ -140,6 +140,10 @@ impl EditHost for SdkEditHost {
         Ok(SdkReadHost.effect_catalog()?)
     }
 
+    fn alias_data_directory(&self) -> Option<std::path::PathBuf> {
+        crate::alias::data_directory().map(std::path::Path::to_path_buf)
+    }
+
     fn observed_selection(&self) -> Result<HostSelection, EditError> {
         let info = SdkReadHost.edit_info()?;
         // フォーカス対象は参照区間の内側でしか読めない。編集区間を抜けた後で

@@ -133,6 +133,13 @@ pub enum ObjectSourceInput {
         #[schemars(length(max = MAX_NAME_CHARS))]
         name: String,
     },
+    /// 登録済みオブジェクトエイリアスの名前から作成する。
+    AliasName {
+        /// list_object_aliases が返した名前。
+        /// `\ / : * ? " ' < > | % = , .` は含められない。
+        #[schemars(length(min = 1, max = MAX_NAME_CHARS))]
+        name: String,
+    },
 }
 
 impl ObjectSourceInput {
@@ -143,6 +150,7 @@ impl ObjectSourceInput {
                 alias: alias.clone(),
             },
             ObjectSourceInput::Effect { name } => ObjectSource::Effect { name: name.clone() },
+            ObjectSourceInput::AliasName { name } => ObjectSource::AliasName { name: name.clone() },
         }
     }
 }
