@@ -3483,6 +3483,44 @@ fn resetting_the_layer_name_hands_the_sdk_no_name() {
     );
 }
 
+#[test]
+fn a_locked_layer_still_accepts_every_state_change() {
+    // ここでロックを確かめると、ロックされたレイヤーのロックを外せなくなる。
+    // 対象を変える operation へガードを足すときに巻き込みやすい。
+    let harness = Harness::new();
+    assert!(
+        harness.host.scene().layers[2].locked,
+        "レイヤー 2 がロックされていません"
+    );
+
+    harness
+        .edit
+        .set_layer_state(&SetLayerStateParams {
+            name: Some(LayerNameChange::Set {
+                name: "背景".to_string(),
+            }),
+            ..layer_state_params(&harness, 2)
+        })
+        .expect("ロックされたレイヤーの名前を変えられません");
+    harness
+        .edit
+        .set_layer_state(&SetLayerStateParams {
+            enabled: Some(false),
+            ..layer_state_params(&harness, 2)
+        })
+        .expect("ロックされたレイヤーの表示を変えられません");
+    let outcome = harness
+        .edit
+        .set_layer_state(&SetLayerStateParams {
+            locked: Some(false),
+            ..layer_state_params(&harness, 2)
+        })
+        .expect("ロックされたレイヤーのロックを外せません");
+
+    assert!(!outcome.layer.locked, "ロックが外れていません");
+    assert!(!harness.host.scene().layers[2].locked);
+}
+
 /// レイヤーの状態のうち、要求できる軸。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LayerAxis {
@@ -3968,14 +4006,18 @@ enum LockedLayer {
 /// 検査を素通りする。
 ///
 /// 拒否するのは、レイヤーのロックが UI で止めるもの——オブジェクトの削除と
-/// 時間軸上の移動——に限る。設定値の変更も effect の増減も UI の設定パネルから
-/// 行えるため、MCP からだけ拒む理由が無い。選択状態の変更は対象を書き換えない
-/// ため表に載らない。実行できない operation も同じく載らない。
+/// 時間軸上の移動と、中間点の追加・移動・削除——に限る。設定値の変更も effect の
+/// 増減も UI の設定パネルから行えるため、MCP からだけ拒む理由が無い。選択状態の
+/// 変更は対象を書き換えないため表に載らない。実行できない operation も同じく
+/// 載らない。
 fn locked_layer(operation: EditOperation) -> Option<LockedLayer> {
     Some(match operation {
-        EditOperation::CreateObject | EditOperation::MoveObject | EditOperation::DeleteObject => {
-            LockedLayer::Refused
-        }
+        EditOperation::CreateObject
+        | EditOperation::MoveObject
+        | EditOperation::DeleteObject
+        | EditOperation::CreateObjectSection
+        | EditOperation::DeleteObjectSection
+        | EditOperation::MoveObjectSection => LockedLayer::Refused,
         EditOperation::SetObjectName
         | EditOperation::SetObjectItem
         | EditOperation::AddEffect
@@ -3983,11 +4025,6 @@ fn locked_layer(operation: EditOperation) -> Option<LockedLayer> {
         | EditOperation::SetEffectEnabled
         // ロックを外す手段そのものをロックで止めると、行き止まりが解けなくなる。
         | EditOperation::SetLayerState
-        // 中間点はオブジェクトの位置も長さも変えない。動くのはオブジェクトの
-        // 内側の分割位置だけであり、ロックが止める 2 つのいずれでもない。
-        | EditOperation::CreateObjectSection
-        | EditOperation::DeleteObjectSection
-        | EditOperation::MoveObjectSection
         // BPM グリッドとシーン設定はシーンに属し、どのレイヤーの対象にも触れない。
         | EditOperation::SetGridBpm
         | EditOperation::SetSceneSettings => LockedLayer::Allowed,
@@ -4787,6 +4824,160 @@ fn the_precheck_reads_the_sections_inside_the_edit_section() {
         2,
         "{calls:?}"
     );
+}
+
+/// 中間点を変える SDK の関数名。
+///
+/// フェイクが記録する名前であり、変更が発行されたかを名前で数えられる。成否だけを
+/// 見ると、判定が変更の後に置かれた実装でも通ってしまう。
+const SECTION_MUTATIONS: [&str; 3] = [
+    "create_object_section",
+    "delete_object_section",
+    "move_object_section",
+];
+
+/// ロックされたレイヤーの対象に対して 3 operation を 1 度ずつ実行する。
+fn locked_layer_section_changes(harness: &Harness) -> Vec<(&'static str, EditError)> {
+    let selector = || harness.selector(1, 100);
+    vec![
+        (
+            "create_object_section",
+            harness
+                .edit
+                .create_object_section(&CreateObjectSectionParams {
+                    selector: selector(),
+                    frame: 160,
+                })
+                .expect_err("ロックされたレイヤーへ中間点を追加できました"),
+        ),
+        (
+            "delete_object_section",
+            harness
+                .edit
+                .delete_object_section(&DeleteObjectSectionParams {
+                    selector: selector(),
+                    section: 1,
+                })
+                .expect_err("ロックされたレイヤーの中間点を削除できました"),
+        ),
+        (
+            "move_object_section",
+            harness
+                .edit
+                .move_object_section(&MoveObjectSectionParams {
+                    selector: selector(),
+                    section: 1,
+                    frame: 110,
+                })
+                .expect_err("ロックされたレイヤーの中間点を移動できました"),
+        ),
+    ]
+}
+
+#[test]
+fn every_section_change_is_refused_on_a_locked_layer() {
+    let harness = harness_with_sections();
+    harness.host.lock_layer(1, true);
+
+    for (operation, error) in locked_layer_section_changes(&harness) {
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::PreconditionFailed,
+            "{operation}"
+        );
+        assert_eq!(
+            error.details()["reason"],
+            json!("layer_locked"),
+            "{operation}"
+        );
+        assert_eq!(error.details()["layer"], json!(1), "{operation}");
+    }
+
+    // 数えるのは変更 API だけである。対象の解決とロック状態の読み取りは判定に
+    // 要るため、読み取りが起きないことは求めない。
+    let calls = harness.host.calls();
+    for mutation in SECTION_MUTATIONS {
+        assert!(
+            !calls.contains(&mutation),
+            "{mutation} が呼ばれました: {calls:?}"
+        );
+    }
+    harness.assert_untouched();
+}
+
+#[test]
+fn a_locked_layer_is_reported_before_the_section_precheck() {
+    // 事前確認にも掛かる要求を送る。ロックの判定が事前確認より後にある実装は、
+    // 要求元が直しても解けない理由を名乗り、要求元は往復を繰り返す。
+    let harness = harness_with_sections();
+    harness.host.lock_layer(1, true);
+    let selector = || harness.selector(1, 100);
+
+    let failures = [
+        (
+            "範囲外のフレームへの追加",
+            harness
+                .edit
+                .create_object_section(&CreateObjectSectionParams {
+                    selector: selector(),
+                    frame: 400,
+                })
+                .expect_err("範囲外への追加が受理されました"),
+        ),
+        (
+            "区間数以上の番号での削除",
+            harness
+                .edit
+                .delete_object_section(&DeleteObjectSectionParams {
+                    selector: selector(),
+                    section: 4,
+                })
+                .expect_err("区間数以上の番号での削除が受理されました"),
+        ),
+        (
+            "区間数以上の番号での移動",
+            harness
+                .edit
+                .move_object_section(&MoveObjectSectionParams {
+                    selector: selector(),
+                    section: 4,
+                    frame: 190,
+                })
+                .expect_err("区間数以上の番号での移動が受理されました"),
+        ),
+    ];
+
+    for (label, error) in failures {
+        assert_eq!(error.details()["reason"], json!("layer_locked"), "{label}");
+    }
+}
+
+#[test]
+fn every_section_change_passes_on_an_unlocked_layer() {
+    // ガードが広すぎないこと。ロックしていないレイヤーでは 3 つとも通る。
+    let harness = harness_with_sections();
+    harness
+        .edit
+        .create_object_section(&CreateObjectSectionParams {
+            selector: harness.selector(1, 100),
+            frame: 160,
+        })
+        .expect("中間点の追加が拒否されました");
+    harness
+        .edit
+        .move_object_section(&MoveObjectSectionParams {
+            selector: harness.selector(1, 100),
+            section: 1,
+            frame: 110,
+        })
+        .expect("中間点の移動が拒否されました");
+    harness
+        .edit
+        .delete_object_section(&DeleteObjectSectionParams {
+            selector: harness.selector(1, 100),
+            section: 1,
+        })
+        .expect("中間点の削除が拒否されました");
 }
 
 #[test]
