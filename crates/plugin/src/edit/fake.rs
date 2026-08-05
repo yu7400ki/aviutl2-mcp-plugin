@@ -39,6 +39,14 @@ pub(crate) const SCENE_NAME: &str = "Scene 1";
 pub(crate) const MAX_SCENE_WIDTH: u32 = 1280;
 /// ホストがシーンの解像度を切り詰める上限。
 pub(crate) const MAX_SCENE_HEIGHT: u32 = 720;
+/// ホストがシーンのサンプリングレートを切り詰める上限。
+///
+/// 初期状態の値とは別にする。応答が観測値ではなく初期値を返していても、要求値を
+/// 返していても、どちらも食い違いとして現れる。
+pub(crate) const MAX_SCENE_SAMPLE_RATE: u32 = 96_000;
+
+/// 編集区間を抜けた後に UI から付け直されるシーン名。
+pub(crate) const RENAMED_SCENE_NAME: &str = "UI で付け直した名前";
 
 /// 差し込む失敗。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,10 +107,18 @@ pub(crate) enum Fault {
     ///
     /// 区間の内側の読み直しが要求値と違う状態を作る。
     IgnoreSceneName,
-    /// シーンの解像度を要求より小さい値へ切り詰める。
+    /// シーンの解像度とサンプリングレートを要求より小さい値へ切り詰める。
     ///
     /// ホストが指定を調整する状況を作る。区間を抜けた後の観測が要求値と食い違う。
-    ClampSceneSize,
+    /// 2 つの軸をまとめて扱うのは、どちらも同じ「ホストが受け取った値を調整する」
+    /// 挙動だからである。
+    ClampSceneSettings,
+    /// 編集区間を抜けた後、観測までの間にシーン名が付け直される。
+    ///
+    /// 区間の内側の照合は要求どおりに通る。区間を抜けてから観測するまでの間に
+    /// UI 操作が入る状況であり、[`Fault::IgnoreSceneName`] とは別物である——
+    /// あちらは変更そのものが入らない失敗の経路である。
+    RenameSceneAfterSection,
     /// BPM グリッドの置き換えを無言で無視する。
     IgnoreGridBpm,
     /// BPM グリッドを置き換えるが、値をホストが書き換える。
@@ -658,7 +674,12 @@ impl EditHost for FakeEditHost {
     fn observed_scene(&self) -> Result<HostScene, EditError> {
         self.assert_ready("get_edit_info");
         self.record(OBSERVED_SCENE);
-        let scene = self.scene.lock().unwrap();
+        let mut scene = self.scene.lock().unwrap();
+        // 区間を抜けてから観測するまでの間に UI がシーン名を付け直す。区間の
+        // 内側の照合は既に通っており、観測だけが要求値と食い違う。
+        if self.knobs().fault == Some(Fault::RenameSceneAfterSection) {
+            scene.name = RENAMED_SCENE_NAME.to_string();
+        }
         // 解像度とサンプリングレートは編集情報として観測される。区間の内側で
         // 適用した値がここに現れる。
         Ok(HostScene {
@@ -1644,7 +1665,7 @@ impl SceneEditor for FakeSceneEditor<'_> {
         let (width, height) = (width as u32, height as u32);
         // ホストが指定を調整し得る。区間を抜けた後の観測だけがその値を見る。
         let (width, height) = match self.host.knobs().fault {
-            Some(Fault::ClampSceneSize) => {
+            Some(Fault::ClampSceneSettings) => {
                 (width.min(MAX_SCENE_WIDTH), height.min(MAX_SCENE_HEIGHT))
             }
             _ => (width, height),
@@ -1661,7 +1682,12 @@ impl SceneEditor for FakeSceneEditor<'_> {
         sample_rate: usize,
     ) -> Result<(), EditError> {
         self.mutation("set_scene_sample_rate")?;
-        self.host.scene.lock().unwrap().sample_rate = sample_rate as u32;
+        let sample_rate = sample_rate as u32;
+        let sample_rate = match self.host.knobs().fault {
+            Some(Fault::ClampSceneSettings) => sample_rate.min(MAX_SCENE_SAMPLE_RATE),
+            _ => sample_rate,
+        };
+        self.host.scene.lock().unwrap().sample_rate = sample_rate;
         Ok(())
     }
 

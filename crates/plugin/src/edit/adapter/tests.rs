@@ -8,9 +8,9 @@ use super::*;
 use crate::edit::fake::{
     CHOICE_VALUES, CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, EFFECT_LIST, FakeEditHost, FakeLayer,
     FakeObject, FakeReadHost, Fault, ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX,
-    MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER, MAX_SCENE_HEIGHT, MAX_SCENE_WIDTH, MOVE_FRAME_SHIFT,
-    MUTATIONS, PanicPoint, READ_SECTION, SCENE_ID, SCENE_NAME, SECTION_RANGES, SHAPE, shape,
-    shape_catalog_entry,
+    MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER, MAX_SCENE_HEIGHT, MAX_SCENE_SAMPLE_RATE, MAX_SCENE_WIDTH,
+    MOVE_FRAME_SHIFT, MUTATIONS, OBSERVED_SCENE, PanicPoint, READ_SECTION, RENAMED_SCENE_NAME,
+    SCENE_ID, SCENE_NAME, SECTION_RANGES, SHAPE, shape, shape_catalog_entry,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
@@ -4735,30 +4735,80 @@ fn a_scene_name_that_did_not_take_effect_stops_before_the_other_axes() {
 }
 
 #[test]
-fn a_host_that_adjusts_the_scene_size_is_not_a_failure() {
+fn a_host_that_adjusts_the_scene_settings_is_not_a_failure() {
     // 反映値は区間を抜けてから観測する。ホストが調整し得るうえ、観測までの間に
     // UI 操作も入り得る。差異を失敗にすると、成功した変更が失敗として返る。
-    let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::ClampSceneSize)));
+    //
+    // **解像度とサンプリングレートの両方で確かめる。** 片方だけを見ると、もう
+    // 一方が要求値をそのまま返していても通ってしまう。
+    let harness =
+        Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::ClampSceneSettings)));
     let requested = SceneSize {
         width: 3840,
         height: 2160,
     };
+    let requested_sample_rate = 192_000;
     let outcome = harness
         .edit
         .set_scene_settings(&SetSceneSettingsParams {
             size: Some(requested),
+            sample_rate: Some(requested_sample_rate),
             ..set_scene_settings(&harness)
         })
         .expect("要求値との差異が失敗として返りました");
 
+    // 応答が載せるのは観測値である。
     assert_eq!(outcome.scene.width, MAX_SCENE_WIDTH);
     assert_eq!(outcome.scene.height, MAX_SCENE_HEIGHT);
+    assert_eq!(outcome.scene.sample_rate, MAX_SCENE_SAMPLE_RATE);
     assert_ne!(
         outcome.scene.width, requested.width,
         "フェイクが解像度を調整していません"
     );
+    assert_ne!(
+        outcome.scene.height, requested.height,
+        "フェイクが解像度を調整していません"
+    );
+    assert_ne!(
+        outcome.scene.sample_rate, requested_sample_rate,
+        "フェイクがサンプリングレートを調整していません"
+    );
     assert!(outcome.observed_after_edit);
     assert_eq!(outcome.project_revision, 1);
+}
+
+#[test]
+fn a_scene_renamed_after_the_section_is_reported_as_observed() {
+    // 名前の照合は区間の内側で通る。そのうえで、区間を抜けてから観測するまでの
+    // 間に UI が名前を付け直す状況を作る。差異は失敗ではなく、応答が載せるのは
+    // 観測した名前である——要求値をそのまま返す実装ではここが食い違う。
+    let harness =
+        Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::RenameSceneAfterSection)));
+    let requested = "本編";
+    let outcome = harness
+        .edit
+        .set_scene_settings(&SetSceneSettingsParams {
+            name: Some(requested.to_string()),
+            ..set_scene_settings(&harness)
+        })
+        .expect("観測との差異が失敗として返りました");
+
+    assert_eq!(outcome.scene.name.as_deref(), Some(RENAMED_SCENE_NAME));
+    assert_ne!(
+        outcome.scene.name.as_deref(),
+        Some(requested),
+        "応答が要求値をそのまま返しました"
+    );
+    assert!(outcome.observed_after_edit);
+    assert_eq!(outcome.project_revision, 1);
+    // 観測は区間を抜けた後にある。区間の内側で応答を組み立てていれば、記録の
+    // 最後は setter になる。
+    assert_eq!(
+        harness.host.calls().last(),
+        Some(&OBSERVED_SCENE),
+        "シーンの観測が区間を抜けた後に行われていません: {:?}",
+        harness.host.calls()
+    );
 }
 
 #[test]
