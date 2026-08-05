@@ -695,6 +695,44 @@ fn rejected_edit_tool_calls_take_the_same_path() {
     remove_test_registry(&registry_dir);
 }
 
+#[test]
+fn a_batch_naming_a_scene_settings_change_is_rejected_while_decoding() {
+    // 一括適用の sub-operation は 2 種しか列挙していない。除外は拒否リストでは
+    // なく列挙の不在で保証されており、他の判別子は未知 variant として復号の段で
+    // 落ちる。**失敗が invalid_argument であることが、実行時の判定を通って
+    // いないことの証拠である** — 復号を抜けていれば、実在しないインスタンスの
+    // 解決に進んで instance_not_found になる。
+    let registry_dir = temp_registry_dir();
+    std::fs::create_dir_all(&registry_dir).expect("registry を作れる");
+    let instance_id = InstanceId::new_v4().to_string();
+
+    let mut requests = initialize_requests();
+    requests.push(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "apply_batch",
+            "arguments": {
+                "instance_id": instance_id,
+                "operations": [{
+                    "type": "set_scene_settings",
+                    "expected_scene_id": 3,
+                    "size": { "width": 1920, "height": 1080 },
+                    "expected_project_epoch": "78be92d1-c8c9-44c6-ae52-387548971468",
+                }],
+            },
+        },
+    }));
+
+    let session = run_session(&registry_dir, &requests);
+    let response = session.response(2);
+    assert_eq!(response["result"]["isError"], json!(true), "{response}");
+    assert_structured_invalid_argument(&response);
+
+    remove_test_registry(&registry_dir);
+}
+
 /// 型を取り違えて送られた、応答へ反響してはならない値。
 const SECRET_ARGUMENT: &str = "秘密のレイヤー値";
 
