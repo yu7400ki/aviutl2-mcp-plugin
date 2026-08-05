@@ -12,7 +12,7 @@ use crate::mcp::edit_input::{
     AddEffectInput, ApplyBatchInput, CreateObjectInput, CreateObjectSectionInput,
     DeleteEffectInput, DeleteObjectInput, DeleteObjectSectionInput, MoveObjectInput,
     MoveObjectSectionInput, SetEffectEnabledInput, SetGridBpmInput, SetLayerStateInput,
-    SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
+    SetObjectItemInput, SetObjectNameInput, SetSceneSettingsInput, SetSelectionInput,
 };
 use crate::mcp::input::{
     GetEffectItemValuesInput, GetObjectInput, GetSelectionInput, InstanceInput,
@@ -38,8 +38,9 @@ use aviutl2_mcp_core::{
     OPERATION_LIST_PALETTES, OPERATION_MOVE_OBJECT, OPERATION_MOVE_OBJECT_SECTION,
     OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_GRID_BPM,
     OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME,
-    OPERATION_SET_SELECTION, ObjectDetail, ObjectSectionsOutcome, RenderFrameResult,
-    RequestBudgetKind, ScaledBudgets, SelectionSnapshot, SelectionState, request_budget_kind,
+    OPERATION_SET_SCENE_SETTINGS, OPERATION_SET_SELECTION, ObjectDetail, ObjectSectionsOutcome,
+    RenderFrameResult, RequestBudgetKind, ScaledBudgets, SceneSettingsOutcome, SelectionSnapshot,
+    SelectionState, request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -1756,6 +1757,74 @@ impl AviUtl2McpServer {
         .await
     }
 
+    /// この操作は取り消せない。AviUtl2 の取り消し操作ではシーン設定は元へ戻らず、
+    /// 取り消しを行うとその前に行った編集が取り消される。応答の non_undoable は
+    /// 常に true であり、このことを示す。
+    /// この操作は apply_batch に含められない。sub-operation として指定した要求は
+    /// invalid_argument となる。
+    /// シーンの名前・解像度・サンプリングレートを変更する。変更は常に現在シーンへ
+    /// 掛かり、非現在シーンを指定する手段は無い。
+    /// name と size と sample_rate の 3 つ全てを省略した要求は受け付けない。
+    /// name に空の名前は指定できず invalid_argument（empty）となる。オブジェクト名や
+    /// レイヤー名と違い、シーン名には「標準へ戻す」が無く、名前を消す手段も無い。
+    /// size は width と height を組で指定する。ホストは片方だけを変える手段を持たない。
+    /// 解像度は render_frame が描ける大きさに収まる必要がある。width と height の積が
+    /// 1 フレームの非圧縮 RGBA8 の上限（256 MiB）を超える要求は invalid_argument となる。
+    /// フレームレートは変更できない。現在の値は get_current_scene が返す fps_rate と
+    /// fps_scale で読める。
+    /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
+    /// project_epoch をそのまま指定する。省略はできない。シーンは selector も
+    /// fingerprint も持たないため、これがプロジェクト境界を照合する唯一の材料である。
+    /// 要求は project_revision を運ばない。読み取りから変更までに revision が進んで
+    /// いても拒否されない。
+    /// シーンには fingerprint が無いため、読み取った時点から状態が変わっていても
+    /// 検出できない。応答が返す scene には変更後に観測した実際の状態が入るので、
+    /// 意図どおりかはその値で確認する。
+    /// 解像度とサンプリングレートの反映値は編集と原子的に観測したものではない。観測は
+    /// 編集の区間を抜けた後に行い、ホストが値を調整し得るため、要求した値と異なって
+    /// いても失敗にはならない。応答の observed_after_edit がこれを示す。
+    /// シーン名だけは編集の区間の内側で照合する。反映されていなければ
+    /// unsupported_operation（change_not_applied）となり、解像度とサンプリングレートは
+    /// 1 つも変更されない。
+    /// シーン設定には 0 始まりの軸が無く、応答の値は UI の表示と同じ単位である。
+    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
+    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
+    #[tool(
+        name = "set_scene_settings",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::set_scene_settings()
+        )
+    )]
+    pub async fn set_scene_settings(
+        &self,
+        Parameters(input): Parameters<SetSceneSettingsInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits();
+        self.run("set_scene_settings", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: SceneSettingsOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_SET_SCENE_SETTINGS,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::scene_settings(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
     /// どこを見て何を選んでいるかを変更する。cursor はカーソル位置、selected_range は
     /// フレーム範囲選択、focus はフォーカス対象、display はレイヤー編集の表示開始位置である。
     /// cursor と selected_range と focus と display の 4 つ全てを省略した要求は受け付けない。
@@ -2624,6 +2693,9 @@ mod tests {
             // BPM グリッドはシーンに属し、位置は秒で表す。フレーム番号も
             // レイヤー番号も現れない。
             "set_grid_bpm" => false,
+            // シーン設定は名前・解像度・サンプリングレートだけを扱い、0 始まりの
+            // 軸を 1 つも持たない。
+            "set_scene_settings" => false,
             other => panic!("{other} が 0 始まりの番号を扱うかが定義されていません"),
         }
     }
@@ -2711,6 +2783,10 @@ mod tests {
         // 一覧全体が置き換わるが、同じ tool で別の一覧を書ける。同じ一覧を 2 度
         // 送っても追加の変更を起こさない。
         ("set_grid_bpm", false, true),
+        // 破壊的と名乗る根拠は削除ではなく不可逆性である。削除は取り消しで戻るが、
+        // シーン設定は戻らない。同じ値を 2 度設定しても追加の変更は起きないため
+        // 冪等と名乗る。
+        ("set_scene_settings", true, true),
     ];
 
     /// 一括適用の tool 名。
@@ -2772,6 +2848,7 @@ mod tests {
             | "set_layer_state"
             | "set_selection"
             | "set_grid_bpm"
+            | "set_scene_settings"
             | APPLY_BATCH => true,
             "list_instances"
             | "get_edit_info"
@@ -2845,7 +2922,7 @@ mod tests {
         assert_eq!(names, expected);
         // 件数そのものも固定する。router と表の両方から同じ tool を落とすと、
         // 集合の一致だけでは検出できない。
-        assert_eq!(names.len(), 28, "公開する tool の数が変わりました");
+        assert_eq!(names.len(), 29, "公開する tool の数が変わりました");
     }
 
     /// 共有設定を与えたサーバー。
@@ -3049,6 +3126,7 @@ mod tests {
             "set_layer_state" => schema::set_layer_state(),
             "set_selection" => schema::set_selection(),
             "set_grid_bpm" => schema::set_grid_bpm(),
+            "set_scene_settings" => schema::set_scene_settings(),
             "apply_batch" => schema::apply_batch(),
             "render_frame" => schema::render_frame(),
             other => panic!("{other} の outputSchema が定義されていません"),
@@ -3109,6 +3187,7 @@ mod tests {
         "set_layer_state",
         "set_selection",
         "set_grid_bpm",
+        "set_scene_settings",
     ];
 
     #[test]
@@ -3407,6 +3486,12 @@ mod tests {
         OneUnit,
         /// 取り消し単位を作らず、取り消しが 1 つ前の編集へ飛ぶと述べる。
         NoUnitAndJumpsBack,
+        /// 取り消せないことを説明の冒頭で述べ、取り消しが 1 つ前の編集へ飛ぶと
+        /// 述べる。
+        ///
+        /// **冒頭に置くことまでを含めて固定する。** 末尾では、説明を要約する
+        /// 要求元が落とす。
+        NotUndoableAndJumpsBack,
         /// 取り消しについて何も述べない。
         ///
         /// **説明は保証である。** 取り消し単位を作るかを確かめていない operation は
@@ -3424,6 +3509,9 @@ mod tests {
             | "add_effect" | "set_effect_enabled" | "delete_effect" | "delete_object"
             | "set_layer_state" | "apply_batch" => UndoStatement::OneUnit,
             "set_selection" => UndoStatement::NoUnitAndJumpsBack,
+            // SDK は 3 つの setter を Undo 非対応と明記している。取り消せない
+            // ことは、要求を出す前に読まれる場所へ置く。
+            "set_scene_settings" => UndoStatement::NotUndoableAndJumpsBack,
             // 中間点の 3 つと BPM グリッドの置き換えは 1 回の編集区間で実行するが、
             // SDK が取り消し単位を作るかを確かめていない。
             "create_object_section"
@@ -3450,6 +3538,22 @@ mod tests {
                     assert!(
                         description.contains("取り消し単位を作らない"),
                         "{name} の説明に取り消し単位を作らない旨がありません"
+                    );
+                    assert!(
+                        description.contains("その前に行った編集が取り消される"),
+                        "{name} の説明が取り消しの飛び先を述べていません"
+                    );
+                    assert!(
+                        !description.contains("1 つの取り消し単位"),
+                        "{name} の説明が取り消し単位を作ると読めます"
+                    );
+                }
+                UndoStatement::NotUndoableAndJumpsBack => {
+                    // 完了条件の 1 つである。要約する要求元は末尾を落とすため、
+                    // 冒頭に在ることまでを固定する。
+                    assert!(
+                        description.starts_with("この操作は取り消せない"),
+                        "{name} の説明が取り消せないことを冒頭で述べていません"
                     );
                     assert!(
                         description.contains("その前に行った編集が取り消される"),
@@ -3628,8 +3732,10 @@ mod tests {
             | "set_effect_enabled"
             | "delete_effect"
             | "set_selection"
-            // BPM グリッドはシーンに属し、どのレイヤーの対象にも触れない。
-            | "set_grid_bpm" => LayerLockStatement::Silent,
+            // BPM グリッドとシーン設定はシーンに属し、どのレイヤーの対象にも
+            // 触れない。
+            | "set_grid_bpm"
+            | "set_scene_settings" => LayerLockStatement::Silent,
             other => panic!("{other} のレイヤーロックの説明が定義されていません"),
         }
     }
@@ -3696,7 +3802,8 @@ mod tests {
             | "move_object_section" => true,
             // 一括適用は 100 件のうちどれが落ちたかを併せて示す必要があるため、
             // 別のキー（failed_object）で返す。
-            "create_object" | "set_layer_state" | "set_grid_bpm" | "apply_batch" => false,
+            "create_object" | "set_layer_state" | "set_grid_bpm" | "set_scene_settings"
+            | "apply_batch" => false,
             other => panic!("{other} が現在の姿を返すかが定義されていません"),
         }
     }
@@ -3941,6 +4048,135 @@ mod tests {
             assert!(
                 description.contains(keyword),
                 "set_grid_bpm の説明に {keyword} がありません"
+            );
+        }
+    }
+
+    /// 入力 schema の必須フィールドを宣言順に取り出す。
+    fn required_fields(tool: &Tool) -> Vec<&str> {
+        tool.input_schema["required"]
+            .as_array()
+            .expect("必須フィールドが宣言されていません")
+            .iter()
+            .map(|field| field.as_str().expect("フィールド名"))
+            .collect()
+    }
+
+    #[test]
+    fn the_scene_settings_input_declares_three_optional_axes_and_two_preconditions() {
+        // 出力側と違い、入力 schema を丸ごと固定する検査は無い。新設の tool は
+        // 軸の名前・入れ子の形・前提条件の必須指定をここで塞ぐ。軸を落とせば
+        // 既存の要求が invalid_argument になり、前提条件が省略可能へ緩めば
+        // プロジェクト境界を照合する材料が消える。
+        let tool = tool_named("set_scene_settings");
+        let properties = tool.input_schema["properties"]
+            .as_object()
+            .expect("properties がある");
+        let required = required_fields(&tool);
+        for axis in ["name", "size", "sample_rate"] {
+            assert!(properties.contains_key(axis), "{axis} が宣言されていません");
+            assert!(!required.contains(&axis), "{axis} が必須になっています");
+        }
+        assert_eq!(
+            required,
+            vec!["instance_id", "expected_scene_id", "expected_project_epoch"]
+        );
+
+        // 解像度は組でしか綴れない。片方だけの指定は必須欠落として落ちる。
+        let size = tool.input_schema["$defs"]["SceneSizeInput"].clone();
+        assert_eq!(size["type"], serde_json::json!("object"));
+        assert_eq!(
+            size["required"]
+                .as_array()
+                .expect("必須フィールドが宣言されていません")
+                .iter()
+                .map(|field| field.as_str().expect("フィールド名"))
+                .collect::<Vec<_>>(),
+            vec!["width", "height"]
+        );
+
+        // 綴りの誤った軸が黙って無視されないこと。
+        assert_eq!(
+            tool.input_schema.get("additionalProperties"),
+            Some(&serde_json::json!(false))
+        );
+    }
+
+    #[test]
+    fn the_scene_settings_input_does_not_try_to_express_the_at_least_one_rule() {
+        // 「3 つのいずれかを必ず指定する」は schema で表せない。組み合わせを
+        // oneOf で並べると、要求元から見た schema が 7 通りに割れる。判定は
+        // 実行時の検証が担うため、表そうとしていないことを固定する。
+        let tool = tool_named("set_scene_settings");
+        for keyword in [
+            "oneOf",
+            "anyOf",
+            "allOf",
+            "not",
+            "minProperties",
+            "dependentRequired",
+        ] {
+            assert!(
+                tool.input_schema.get(keyword).is_none(),
+                "入力 schema が {keyword} で軸の組み合わせを表そうとしています"
+            );
+        }
+    }
+
+    #[test]
+    fn the_scene_settings_tool_says_it_cannot_be_undone_before_it_is_called() {
+        // 要求を出す前に読まれる口は 2 つある。人と要求を組み立てる LLM が読む
+        // 説明の冒頭と、機械が読む destructiveHint である。要求のあとに読める
+        // 3 つ目の口（応答の non_undoable）は統合テストが確かめる。
+        let tool = tool_named("set_scene_settings");
+        let description = tool.description.as_ref().expect("説明がある");
+        assert!(
+            description.starts_with("この操作は取り消せない"),
+            "説明の冒頭に取り消せない旨がありません: {description}"
+        );
+        // destructiveHint の根拠は削除ではなく不可逆性である。削除系と同じ組を
+        // 採るが、削除は取り消しで戻るのに対しこれは戻らない。
+        assert_eq!(
+            tool.annotations
+                .as_ref()
+                .expect("annotation がある")
+                .destructive_hint,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_scene_settings_description_states_what_costs_the_caller_if_assumed_wrong() {
+        // どれも要求を組み立てる前に要る事項であり、誤った前提で操作すると
+        // 取り消せない変更が残る。
+        let description = description_of("set_scene_settings");
+        for keyword in [
+            // 一括適用に入らない。
+            "apply_batch に含められない",
+            // 何を省略でき、何を省略できないか。
+            "3 つ全てを省略した要求は受け付けない",
+            "空の名前は指定できず",
+            "「標準へ戻す」が無く",
+            "width と height を組で指定する",
+            // 値域と、変更できない軸。
+            "render_frame が描ける大きさ",
+            "フレームレートは変更できない",
+            "get_current_scene",
+            // 読み取り時からの変化を検出できないこと。
+            "fingerprint",
+            "変更後に観測した実際の状態",
+            // 観測が編集と原子的でないこと。
+            "原子的に観測したものではない",
+            "observed_after_edit",
+            // 名前だけは区間の内側で照合すること。
+            "区間の内側で照合",
+            "change_not_applied",
+            // 応答から取り消せないことを読める場所。
+            "non_undoable",
+        ] {
+            assert!(
+                description.contains(keyword),
+                "set_scene_settings の説明に {keyword} がありません"
             );
         }
     }

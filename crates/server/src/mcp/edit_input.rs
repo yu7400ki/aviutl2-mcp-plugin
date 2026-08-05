@@ -36,9 +36,9 @@ use aviutl2_mcp_core::{
     DeleteObjectSectionParams, Destination, DisplayStart, EditInputError, ErrorObject, FiniteF64,
     FocusChange, GridBpm, ItemValue, LayerNameChange, MAX_ALIAS_BYTES, MAX_BATCH_OPERATIONS,
     MAX_GRID_BPM_ENTRIES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MoveObjectParams,
-    MoveObjectSectionParams, ObjectSource, Placement, RangeChange, SetEffectEnabledParams,
-    SetGridBpmParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSelectionParams,
+    MoveObjectSectionParams, ObjectSource, Placement, RangeChange, SceneSize,
+    SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
+    SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -835,6 +835,80 @@ impl SetGridBpmInput {
     }
 }
 
+/// シーンの解像度。
+///
+/// **`width` と `height` を上位の型へ平坦化しない。** ホストは解像度を 1 回の
+/// 呼び出しで受け取り、片方だけを変える手段を持たない。平坦化すると「横幅だけ
+/// 指定」が綴れてしまうため、組にして片方だけの指定を必須欠落として落とす。
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SceneSizeInput {
+    /// 画像の横幅。
+    ///
+    /// 宣言した範囲は [`SetSceneSettingsParams::validate`] が実際に確かめる。
+    #[schemars(range(min = MIN_SCENE_VALUE, max = MAX_POSITION))]
+    pub width: u32,
+    /// 画像の高さ。
+    ///
+    /// 宣言した範囲は [`SetSceneSettingsParams::validate`] が実際に確かめる。
+    #[schemars(range(min = MIN_SCENE_VALUE, max = MAX_POSITION))]
+    pub height: u32,
+}
+
+impl SceneSizeInput {
+    fn to_size(self) -> SceneSize {
+        SceneSize {
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+/// シーンの解像度とサンプリングレートに許す最小値。
+const MIN_SCENE_VALUE: u32 = 1;
+
+/// `set_scene_settings` の入力。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetSceneSettingsInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// 現在シーンの一致確認に使うシーン ID。
+    pub expected_scene_id: i32,
+    /// シーン名。省略時は変更しない。空の名前は受け付けない。
+    #[serde(default)]
+    #[schemars(length(max = MAX_NAME_CHARS))]
+    pub name: Option<String>,
+    /// 解像度。省略時は変更しない。width と height は組で指定する。
+    #[serde(default)]
+    pub size: Option<SceneSizeInput>,
+    /// 音声のサンプリングレート。省略時は変更しない。
+    ///
+    /// 宣言した範囲は [`SetSceneSettingsParams::validate`] が実際に確かめる。
+    #[serde(default)]
+    #[schemars(range(min = MIN_SCENE_VALUE, max = MAX_POSITION))]
+    pub sample_rate: Option<u32>,
+    /// 直前の読み取りまたは編集の応答が返した project_epoch。シーンは selector を持たないため、これがプロジェクト境界を照合する唯一の材料である。
+    #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
+    pub expected_project_epoch: String,
+}
+
+impl SetSceneSettingsInput {
+    /// IPC の params へ変換する。
+    pub fn to_params(&self) -> Result<SetSceneSettingsParams, ErrorObject> {
+        let params = SetSceneSettingsParams {
+            expected_scene_id: self.expected_scene_id,
+            name: self.name.clone(),
+            size: self.size.map(SceneSizeInput::to_size),
+            sample_rate: self.sample_rate,
+            expected_project_epoch: expected_project_epoch(&self.expected_project_epoch)?,
+        };
+        params.validate().map_err(from_input_error)?;
+        Ok(params)
+    }
+}
+
 /// `operations` に指定できる sub-operation の最大件数。
 const MAX_BATCH_OPERATION_COUNT: u32 = MAX_BATCH_OPERATIONS as u32;
 
@@ -1099,9 +1173,14 @@ mod tests {
                 "entries": [{ "tempo": 120.0, "beat": 4, "start": 0.0, "offset": 0.0 }],
                 "expected_project_epoch": SAMPLE_EPOCH,
             }),
-            // シーン設定の変更に対応する入力型はまだ無い。足すときにここへ
-            // 入力の形を書く。
-            EditOperation::SetSceneSettings => return None,
+            EditOperation::SetSceneSettings => json!({
+                "instance_id": SAMPLE_ID,
+                "expected_scene_id": 3,
+                "name": "本編",
+                "size": { "width": 1920, "height": 1080 },
+                "sample_rate": 48000,
+                "expected_project_epoch": SAMPLE_EPOCH,
+            }),
             EditOperation::ApplyBatch => json!({
                 "instance_id": SAMPLE_ID,
                 "operations": [batch_move_json()],
@@ -1145,9 +1224,7 @@ mod tests {
             EditOperation::DeleteObjectSection => decoded!(DeleteObjectSectionInput),
             EditOperation::MoveObjectSection => decoded!(MoveObjectSectionInput),
             EditOperation::SetGridBpm => decoded!(SetGridBpmInput),
-            // 入力型を持たない operation は `current_input` が除外するため、
-            // ここへは到達しない。
-            EditOperation::SetSceneSettings => unreachable!("入力型を持たない operation"),
+            EditOperation::SetSceneSettings => decoded!(SetSceneSettingsInput),
             EditOperation::ApplyBatch => decoded!(ApplyBatchInput),
         })
     }
@@ -2037,6 +2114,75 @@ mod tests {
             input.to_params().expect_err("上限超過は拒否される").code,
             ErrorCode::InvalidArgument
         );
+    }
+
+    /// 3 つの軸を全て省略したシーン設定の要求。
+    fn scene_settings_json() -> Value {
+        json!({
+            "instance_id": SAMPLE_ID,
+            "expected_scene_id": 3,
+            "expected_project_epoch": SAMPLE_EPOCH,
+        })
+    }
+
+    #[test]
+    fn scene_settings_requires_at_least_one_change() {
+        let input: SetSceneSettingsInput =
+            serde_json::from_value(scene_settings_json()).expect("入力型としては受理される");
+        assert_eq!(
+            input.to_params().expect_err("全省略は拒否される").code,
+            ErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn an_empty_scene_name_is_rejected_instead_of_being_ignored() {
+        // ホストは空の名前を「変更しない」として無視する。受け付ければ、何も
+        // 起きなかった要求を成功として返すことになる。
+        let mut value = scene_settings_json();
+        value["name"] = json!("");
+        let input: SetSceneSettingsInput =
+            serde_json::from_value(value).expect("入力型としては受理される");
+        let error = input.to_params().expect_err("空の名前は拒否される");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.details["reason"], json!("empty"));
+    }
+
+    #[test]
+    fn a_scene_size_needs_both_axes() {
+        // 片方だけを変える手段がホストに無いため、組でしか綴れない形にする。
+        for size in [json!({ "width": 1920 }), json!({ "height": 1080 })] {
+            let mut value = scene_settings_json();
+            value["size"] = size.clone();
+            assert!(
+                serde_json::from_value::<SetSceneSettingsInput>(value).is_err(),
+                "{size} が受理されました"
+            );
+        }
+    }
+
+    #[test]
+    fn scene_values_outside_the_declared_range_are_rejected() {
+        let cases = [
+            json!({ "size": { "width": 0, "height": 1080 } }),
+            json!({ "size": { "width": 1920, "height": MAX_POSITION + 1 } }),
+            // 画素数の上限は描画の側と共有する。
+            json!({ "size": { "width": 30_000, "height": 30_000 } }),
+            json!({ "sample_rate": 0 }),
+        ];
+        for case in cases {
+            let mut value = scene_settings_json();
+            for (key, field) in case.as_object().expect("case は object") {
+                value[key] = field.clone();
+            }
+            let input: SetSceneSettingsInput =
+                serde_json::from_value(value).expect("入力型としては受理される");
+            assert_eq!(
+                input.to_params().expect_err("範囲外は拒否される").code,
+                ErrorCode::InvalidArgument,
+                "{case} が受理されました"
+            );
+        }
     }
 
     #[test]

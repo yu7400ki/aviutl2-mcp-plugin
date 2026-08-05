@@ -251,6 +251,22 @@ pub fn set_grid_bpm() -> Value {
     ])
 }
 
+/// `set_scene_settings` の出力。
+///
+/// `scene` には変更後に観測したシーンの状態が入る。シーンは fingerprint を
+/// 持たないため、要求元はこの値で実際の状態を確かめる。`observed_after_edit` は
+/// 解像度とサンプリングレートの観測が編集と原子的でないこと、`non_undoable` は
+/// この変更が取り消せないことを示す。
+pub fn set_scene_settings() -> Value {
+    object(&[
+        ("project_epoch", string()),
+        ("project_revision", unsigned()),
+        ("scene", scene_info()),
+        ("observed_after_edit", boolean()),
+        ("non_undoable", boolean()),
+    ])
+}
+
 /// `apply_batch` の出力。
 ///
 /// `results` は入力と同じ位置で並ぶ。revision は要求全体で 1 つだけ持つ。
@@ -1382,6 +1398,24 @@ mod tests {
     }
 
     #[test]
+    fn set_scene_settings_schema_matches_dto() {
+        let outcome = aviutl2_mcp_core::SceneSettingsOutcome {
+            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            project_revision: 43,
+            scene: sample_scene_info(),
+            observed_after_edit: true,
+            non_undoable: true,
+        };
+        assert_conforms(set_scene_settings(), &to_value(&outcome));
+
+        // 名前もフレームレートも持たないシーンが返り得る。
+        let mut value = to_value(&outcome);
+        value["scene"]["name"] = json!(null);
+        value["scene"]["fps"] = json!(null);
+        assert_conforms(set_scene_settings(), &value);
+    }
+
+    #[test]
     fn object_sections_schemas_match_dto() {
         let outcome = aviutl2_mcp_core::ObjectSectionsOutcome {
             project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
@@ -1424,6 +1458,19 @@ mod tests {
                 .get("alias")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn set_scene_settings_schema_declares_no_alias_path_or_item_value() {
+        // 応答が運ぶのはシーンの状態だけである。schema が alias・パス・設定値を
+        // 宣言していれば、応答へ載せる実装が入っても検出できなくなる。
+        let declared = set_scene_settings().to_string();
+        for forbidden in ["alias", "path", "value"] {
+            assert!(
+                !declared.contains(forbidden),
+                "{forbidden} が宣言されています: {declared}"
+            );
+        }
     }
 
     #[test]

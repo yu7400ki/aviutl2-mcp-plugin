@@ -8,15 +8,16 @@ use aviutl2_mcp_core::{
     FiniteF64, FrameRange, GridBpm, GridBpmOutcome, InstanceId, InstanceState, ItemValue,
     LayerInfo, LayerStateOutcome, MAX_GRID_BPM_ENTRIES, ObjectFingerprintInput,
     ObjectSectionsOutcome, ObjectSelector, ObjectSummary, ObservedSelection, RequestEnvelope,
-    SectionRange, SelectionField, SelectionState,
+    SceneInfo, SceneSettingsOutcome, SectionRange, SelectionField, SelectionState,
 };
 use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, ApplyBatchInput, BatchOperationInput, CreateObjectInput,
     CreateObjectSectionInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
     DeleteObjectSectionInput, DestinationInput, DisplayStartInput, FocusChangeInput, GridBpmInput,
     ItemValueInput, LayerNameChangeInput, MoveObjectInput, MoveObjectSectionInput,
-    ObjectSourceInput, PlacementInput, RangeChangeInput, SetEffectEnabledInput, SetGridBpmInput,
-    SetLayerStateInput, SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
+    ObjectSourceInput, PlacementInput, RangeChangeInput, SceneSizeInput, SetEffectEnabledInput,
+    SetGridBpmInput, SetLayerStateInput, SetObjectItemInput, SetObjectNameInput,
+    SetSceneSettingsInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::{EffectSelectorInput, ObjectSelectorInput};
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
@@ -264,6 +265,29 @@ fn layer_state() -> Value {
             locked: false,
             object_count: 3,
         },
+    })
+    .expect("直列化できる")
+}
+
+/// 3 軸を変更したあとに観測したシーンの状態。
+///
+/// 観測値は要求値と異なる。ホストが調整し得るため、差異は失敗ではない。
+fn scene_settings() -> Value {
+    serde_json::to_value(SceneSettingsOutcome {
+        project_epoch: EPOCH.to_string(),
+        project_revision: APPLIED_REVISION,
+        scene: SceneInfo {
+            id: SCENE_ID,
+            name: Some("本編".to_string()),
+            width: 1920,
+            height: 1080,
+            fps: FiniteF64::try_new(60.0),
+            fps_rate: 60,
+            fps_scale: 1,
+            sample_rate: 48_000,
+        },
+        observed_after_edit: true,
+        non_undoable: true,
     })
     .expect("直列化できる")
 }
@@ -708,6 +732,88 @@ async fn set_layer_state_tool_sends_the_three_axes_and_the_scene_guard() {
     assert!(text.contains("project_revision=43"), "{text}");
     // レイヤーは fingerprint を持たない。応答の値で確認するよう案内する。
     assert!(text.contains("fingerprint"), "{text}");
+}
+
+#[tokio::test]
+async fn set_scene_settings_tool_sends_the_three_axes_and_the_scene_guard() {
+    let expected = scene_settings();
+    let harness = Harness::start(responses("set_scene_settings", expected.clone()));
+
+    let result = harness
+        .server
+        .set_scene_settings(Parameters(SetSceneSettingsInput {
+            instance_id: harness.instance_id(),
+            expected_scene_id: SCENE_ID,
+            name: Some("本編".to_string()),
+            size: Some(SceneSizeInput {
+                width: 1280,
+                height: 720,
+            }),
+            sample_rate: Some(44_100),
+            expected_project_epoch: EPOCH.to_string(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+
+    let request = harness.only_request();
+    assert_eq!(request.operation, "set_scene_settings");
+    assert_eq!(
+        request.params,
+        json!({
+            "expected_scene_id": SCENE_ID,
+            "name": "本編",
+            "size": { "width": 1280, "height": 720 },
+            "sample_rate": 44_100,
+            "expected_project_epoch": EPOCH,
+        }),
+    );
+
+    // 観測値は要求値と異なるが失敗ではない。応答が運ぶのは観測した値である。
+    assert_eq!(structured(&result)["scene"]["width"], json!(1920));
+    let text = text_of(&result);
+    assert!(text.contains("1920x1080"), "{text}");
+    assert!(text.contains("project_revision=43"), "{text}");
+}
+
+#[tokio::test]
+async fn set_scene_settings_tool_reports_a_change_that_cannot_be_undone() {
+    // 取り消せないことを要求のあとから読める唯一の口である。説明と annotation は
+    // 要求を出す前にしか効かず、応答だけを見る経路はそこから性質を拾えない。
+    // 観測が編集と原子的でないことも同じ場所が運ぶ。
+    let harness = Harness::start(responses("set_scene_settings", scene_settings()));
+
+    let result = harness
+        .server
+        .set_scene_settings(Parameters(SetSceneSettingsInput {
+            instance_id: harness.instance_id(),
+            expected_scene_id: SCENE_ID,
+            name: None,
+            size: None,
+            sample_rate: Some(48_000),
+            expected_project_epoch: EPOCH.to_string(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    let structured = structured(&result);
+    assert_eq!(structured["non_undoable"], json!(true));
+    assert_eq!(structured["observed_after_edit"], json!(true));
+    // 省略した軸は要求にも現れない。
+    assert_eq!(
+        harness.only_request().params,
+        json!({
+            "expected_scene_id": SCENE_ID,
+            "name": null,
+            "size": null,
+            "sample_rate": 48_000,
+            "expected_project_epoch": EPOCH,
+        }),
+    );
+
+    let text = text_of(&result);
+    assert!(text.contains("この変更は取り消せません"), "{text}");
 }
 
 /// 編集要求へ載る期限を確かめるために縮めた予算。

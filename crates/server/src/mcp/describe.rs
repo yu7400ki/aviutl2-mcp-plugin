@@ -15,7 +15,7 @@ use aviutl2_mcp_core::{
     GetCurrentSceneResult, GridBpmOutcome, InstanceInfo, LayerStateOutcome,
     ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
     ListObjectsResult, ListPalettesResult, ObjectDetail, ObjectSectionsOutcome, ObjectSummary,
-    PageMeta, SelectionField, SelectionSnapshot, SelectionState,
+    PageMeta, SceneSettingsOutcome, SelectionField, SelectionSnapshot, SelectionState,
 };
 
 /// 名前をそのまま行に載せるときの最大文字数。
@@ -504,6 +504,34 @@ pub fn grid_bpm(outcome: &GridBpmOutcome) -> String {
     text.push_line(format!("project_revision={}", outcome.project_revision));
     text.push_line(
         "entries には置き換え後に読み直した一覧が入ります。ホストは単精度で受け取り並べ替えもするため、要求した値や順序と一致するとは限りません",
+    );
+    text.finish()
+}
+
+/// `set_scene_settings` の text content。
+///
+/// 取り消せないことを先に述べる。応答だけを読む経路にとっては、これが性質を
+/// 知る最後の機会である。
+pub fn scene_settings(outcome: &SceneSettingsOutcome) -> String {
+    let scene = &outcome.scene;
+    let mut text = TextBuilder::new();
+    text.push_line(
+        "シーン設定を変更しました。この変更は取り消せません。取り消し操作を行うと、その前に行った編集が取り消されます",
+    );
+    text.push_line(format!(
+        "scene_id={} name={} {}x{} sample_rate={}",
+        scene.id,
+        optional_name(scene.name.as_deref()),
+        scene.width,
+        scene.height,
+        scene.sample_rate,
+    ));
+    text.push_line(format!("project_revision={}", outcome.project_revision));
+    text.push_line(
+        "上の値は変更後に読み直した実際の状態です。シーンは fingerprint を持たないため、読み取り時からの変化は検出できません",
+    );
+    text.push_line(
+        "解像度とサンプリングレートは編集の区間を抜けた後に観測した値であり、ホストが調整し得ます。シーン名だけは区間の内側で照合済みです",
     );
     text.finish()
 }
@@ -1230,8 +1258,47 @@ mod tests {
                     }],
                 }),
             ),
+            (
+                "set_scene_settings",
+                scene_settings(&sample_scene_settings_outcome()),
+            ),
             ("apply_batch", apply_batch(&sample_batch_outcome())),
         ]
+    }
+
+    /// 3 軸を変更したあとに観測したシーンの状態。
+    fn sample_scene_settings_outcome() -> SceneSettingsOutcome {
+        SceneSettingsOutcome {
+            project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            project_revision: 43,
+            scene: aviutl2_mcp_core::SceneInfo {
+                id: 3,
+                name: Some("本編".to_string()),
+                width: 1920,
+                height: 1080,
+                fps: FiniteF64::try_new(60.0),
+                fps_rate: 60,
+                fps_scale: 1,
+                sample_rate: 48_000,
+            },
+            observed_after_edit: true,
+            non_undoable: true,
+        }
+    }
+
+    #[test]
+    fn scene_settings_text_states_that_the_change_cannot_be_undone() {
+        // 応答だけを読む経路にとって、これが取り消せないことを知る最後の機会で
+        // ある。観測が編集と原子的でないことも併せて述べる。
+        let text = scene_settings(&sample_scene_settings_outcome());
+        assert!(text.contains("この変更は取り消せません"), "{text}");
+        assert!(
+            text.contains("その前に行った編集が取り消されます"),
+            "{text}"
+        );
+        assert!(text.contains("1920x1080"), "{text}");
+        assert!(text.contains("sample_rate=48000"), "{text}");
+        assert!(text.contains("区間を抜けた後に観測した値"), "{text}");
     }
 
     #[test]
@@ -1396,9 +1463,14 @@ mod tests {
 
     /// 応答が対象オブジェクトの位置を運ばない tool。
     ///
-    /// 削除では対象が消えており、レイヤーの状態変更と BPM グリッドの置き換えでは
-    /// そもそも対象がオブジェクトではない。
-    const TOOLS_WITHOUT_AN_OBJECT: &[&str] = &["delete_object", "set_layer_state", "set_grid_bpm"];
+    /// 削除では対象が消えており、レイヤーの状態変更・BPM グリッドの置き換え・
+    /// シーン設定の変更ではそもそも対象がオブジェクトではない。
+    const TOOLS_WITHOUT_AN_OBJECT: &[&str] = &[
+        "delete_object",
+        "set_layer_state",
+        "set_grid_bpm",
+        "set_scene_settings",
+    ];
 
     #[test]
     fn edit_text_states_the_change_the_revision_and_the_next_step() {

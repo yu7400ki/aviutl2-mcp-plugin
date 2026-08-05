@@ -295,6 +295,9 @@ fn expected_annotations(name: &str) -> (bool, bool, bool) {
         | "move_object_section"
         // 同じ一覧を 2 度送っても追加の変更を起こさない。
         | "set_grid_bpm" => (false, false, true),
+        // 破壊的と名乗る根拠は削除ではなく不可逆性である。取り消し操作でシーン
+        // 設定は元へ戻らない。
+        "set_scene_settings" => (false, true, true),
         other => panic!("{other} の annotation が定義されていません"),
     }
 }
@@ -1877,7 +1880,7 @@ fn a_corrupt_settings_file_leaves_every_tool_listed() {
     requests.push(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let session = run_session(&registry_dir, &requests);
 
-    assert_eq!(listed_tool_names(&session.response(2)).len(), 28);
+    assert_eq!(listed_tool_names(&session.response(2)).len(), 29);
     assert!(
         session.stderr.contains("設定を読み込めませんでした"),
         "破損が記録されていません: {}",
@@ -2100,7 +2103,7 @@ fn tools_list_changed_arrives_only_when_the_enabled_set_changes() {
     let session = server.finish();
     let before = listed_tool_names(&session.response(2));
     let after = listed_tool_names(&session.response(3));
-    assert_eq!(before.len(), 28, "{before:?}");
+    assert_eq!(before.len(), 29, "{before:?}");
     assert!(!after.contains(&"delete_object".to_string()), "{after:?}");
     assert_eq!(
         tool_list_changed_count(&session),
