@@ -10,6 +10,15 @@
 //! 真に小さいことを本モジュールのテストで固定する。差分は
 //! [`ScaledBudgets::transport_headroom`] として明示的に残す。
 //!
+//! # 予算定数は本モジュールの外から見えない
+//!
+//! 15 個の予算定数は `pub(crate)` であり、crate の外への入口は [`ScaledBudgets`]
+//! だけである。倍率を掛けない値が要る場所も [`ScaledBudgets::unscaled`] を通す。
+//!
+//! **この可視性が検査そのものである。** 利用側が縮小後の予算と素の定数を突き
+//! 合わせると、片方だけが倍率を採る。定数へ到達する経路を絞れば、その形は
+//! コンパイルできない——確かめる場所を数え上げる必要が無い。
+//!
 //! 要求フェーズの予算は read・edit・batch・render の 4 つが並ぶ。operation 名が
 //! どれに属するかの判定基準は [`crate::operation::KnownOperation`] へ一本化して
 //! あり、[`request_budget_kind`] はその判定を要求予算の区分へ変換するだけの
@@ -22,19 +31,19 @@ use std::time::Duration;
 /// server がインスタンス解決フェーズ全体に許す上限。
 ///
 /// pipe 接続・handshake・ping 往復をこの 1 つの期限で束ねる。
-pub const SERVER_RESOLVE_BUDGET: Duration = Duration::from_secs(5);
+pub(crate) const SERVER_RESOLVE_BUDGET: Duration = Duration::from_secs(5);
 
 /// server が read operation 1 件の要求フェーズ全体に許す上限。
 ///
 /// 要求の送信・plugin 側の実行・応答の受信をこの 1 つの期限で束ね、
 /// 同じ期限を要求の `deadline_unix_ms` として plugin へ伝える。
-pub const SERVER_READ_REQUEST_BUDGET: Duration = Duration::from_secs(5);
+pub(crate) const SERVER_READ_REQUEST_BUDGET: Duration = Duration::from_secs(5);
 
 /// server が編集 operation 1 件の要求フェーズ全体に許す上限。
 ///
 /// [`SERVER_READ_REQUEST_BUDGET`] と同じ役割を編集について持つ。編集は
 /// `call_edit_section` の実行に read より長い上限を要するため、別の値を持つ。
-pub const SERVER_EDIT_REQUEST_BUDGET: Duration = Duration::from_secs(10);
+pub(crate) const SERVER_EDIT_REQUEST_BUDGET: Duration = Duration::from_secs(10);
 
 /// server が一括適用 1 件の要求フェーズ全体に許す上限。
 ///
@@ -44,14 +53,14 @@ pub const SERVER_EDIT_REQUEST_BUDGET: Duration = Duration::from_secs(10);
 ///
 /// **上限であって目標ではない。** 編集区間はホストのメインスレッドを占有する
 /// ため、この上限まで費やす一括適用は同じ時間だけ UI を止める。
-pub const SERVER_BATCH_REQUEST_BUDGET: Duration = Duration::from_secs(20);
+pub(crate) const SERVER_BATCH_REQUEST_BUDGET: Duration = Duration::from_secs(20);
 
 /// server が render operation 1 件の要求フェーズ全体に許す上限。
 ///
 /// 描画の完了はホスト側の非同期タスクを待つため、他のどの operation よりも
 /// 長い。応答を受けたあとの成果物の引き取り
 /// （[`SERVER_ARTIFACT_INGEST_BUDGET`]）もこの予算の内側で起きる。
-pub const SERVER_RENDER_REQUEST_BUDGET: Duration = Duration::from_secs(30);
+pub(crate) const SERVER_RENDER_REQUEST_BUDGET: Duration = Duration::from_secs(30);
 
 /// server が描画成果物の引き取りに許す上限。
 ///
@@ -63,65 +72,65 @@ pub const SERVER_RENDER_REQUEST_BUDGET: Duration = Duration::from_secs(30);
 /// 予算いっぱいまで費やした直後に引き取りが始まり、要求フェーズの予算を
 /// 超えてから成功する経路ができる。したがって render の要求へ載せる期限は
 /// 要求フェーズの予算そのものではなく、本値を差し引いた残りから算出する。
-pub const SERVER_ARTIFACT_INGEST_BUDGET: Duration = Duration::from_secs(4);
+pub(crate) const SERVER_ARTIFACT_INGEST_BUDGET: Duration = Duration::from_secs(4);
 
 /// server が 1 候補の pipe 接続待ちに許す上限。
 ///
 /// 解決フェーズの予算から接続待ちが取り分けられる最大値であり、残りが
 /// handshake と ping の持ち時間になる。接続待ちだけで予算を使い切らせないため、
 /// 残り時間がこれより長くても頭打ちにする。
-pub const SERVER_CONNECT_WAIT_CAP: Duration = Duration::from_secs(1);
+pub(crate) const SERVER_CONNECT_WAIT_CAP: Duration = Duration::from_secs(1);
 
 /// plugin が handshake（M1 受信 〜 M3 検証）に許す上限。
 ///
 /// 解決フェーズのうち plugin が handshake に費やせる時間であり、残りが
 /// ping 往復の持ち時間になる。
-pub const PLUGIN_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const PLUGIN_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// plugin が read operation の実行に許す上限。
 ///
 /// 要求フェーズのうち読み取りに費やせる時間であり、残りが応答送信の持ち時間に
 /// なる。要求が `deadline_unix_ms` を運ぶ場合はその残り時間との短い方を採る。
-pub const PLUGIN_READ_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const PLUGIN_READ_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// plugin が編集 operation の実行に許す上限。
 ///
 /// [`PLUGIN_READ_TIMEOUT`] と同じ役割を編集について持つ。編集区間へ入る前
 /// にしか期限を判定できないため、この上限が効くのは開始前の判定に限られる。
 /// 区間へ入った後の超過は制御できず、ホストが応答するまで待つ。
-pub const PLUGIN_EDIT_TIMEOUT: Duration = Duration::from_secs(8);
+pub(crate) const PLUGIN_EDIT_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// plugin が一括適用の実行に許す上限。
 ///
 /// [`PLUGIN_EDIT_TIMEOUT`] と同じ役割を一括適用について持ち、効くのが編集区間
 /// へ入る前の判定に限られることも同じである。
-pub const PLUGIN_BATCH_TIMEOUT: Duration = Duration::from_secs(18);
+pub(crate) const PLUGIN_BATCH_TIMEOUT: Duration = Duration::from_secs(18);
 
 /// plugin が描画の完了通知を待つ上限。
 ///
 /// 描画はホスト側の別スレッドで進み、取り消す手段も完了の保証も無い。上限を
 /// 過ぎた要求は待機を諦めて失敗を返すため、この値は「戻らない描画に付き合う
 /// 時間」の上限である。
-pub const PLUGIN_RENDER_WAIT_TIMEOUT: Duration = Duration::from_secs(18);
+pub(crate) const PLUGIN_RENDER_WAIT_TIMEOUT: Duration = Duration::from_secs(18);
 
 /// plugin が描画結果の符号化と受け渡しファイルの書き出しに許す上限。
 ///
 /// 完了通知を受けてから応答を送るまでの取り分であり、
 /// [`PLUGIN_RENDER_WAIT_TIMEOUT`] とは別枠で確保する。
-pub const PLUGIN_RENDER_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const PLUGIN_RENDER_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// plugin が応答 1 フレームの送信に許す上限。
 ///
 /// 実行が上限を使い切っても送信の持ち時間が残るよう、実行とは別枠で確保する。
 /// ping の応答送信にも同じ上限を用いる。
-pub const PLUGIN_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+pub(crate) const PLUGIN_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// フェーズ予算のうち、どの段の上限にも配分せず残す余白。
 ///
 /// フレームの直列化、pipe への書き込み、スレッドの起床、2 つの時計を読む間の
 /// 誤差といった段の境界で生じる時間をここで吸収する。段の上限の合計に本値を
 /// 加えてもフェーズ予算を超えないことを、本モジュールのテストで保証する。
-pub const TRANSPORT_HEADROOM: Duration = Duration::from_secs(1);
+pub(crate) const TRANSPORT_HEADROOM: Duration = Duration::from_secs(1);
 
 /// 要求フェーズの予算区分。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
