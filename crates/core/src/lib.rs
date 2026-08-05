@@ -73,9 +73,9 @@ pub use edit::{
     DeleteEffectParams, DeleteObjectParams, DeleteObjectSectionParams, Destination, DisplayStart,
     EditInputError, EditOutcome, FocusChange, GridBpmOutcome, LayerNameChange, LayerStateOutcome,
     MAX_GRID_BPM_ENTRIES, MoveObjectParams, MoveObjectSectionParams, ObjectSectionsOutcome,
-    ObjectSource, ObservedSelection, Placement, RangeChange, SelectionField, SelectionState,
-    SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
-    SetObjectNameParams, SetSelectionParams,
+    ObjectSource, ObservedSelection, Placement, RangeChange, SceneSettingsOutcome, SceneSize,
+    SelectionField, SelectionState, SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams,
+    SetObjectItemParams, SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams,
 };
 pub use edit_info::{
     Cursor, DisplayRange, EditInfo, Extent, FrameRange, GridBpm, SceneInfo, SceneRef,
@@ -127,8 +127,8 @@ pub use operation::{
     OPERATION_LIST_MODULES, OPERATION_LIST_OBJECTS, OPERATION_LIST_PALETTES, OPERATION_MOVE_OBJECT,
     OPERATION_MOVE_OBJECT_SECTION, OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED,
     OPERATION_SET_GRID_BPM, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
-    OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectFilter, ObjectFilterError,
-    ReadOperation, RenderOperation, SelectionSnapshot, TrackGroup,
+    OPERATION_SET_OBJECT_NAME, OPERATION_SET_SCENE_SETTINGS, OPERATION_SET_SELECTION, ObjectFilter,
+    ObjectFilterError, ReadOperation, RenderOperation, SelectionSnapshot, TrackGroup,
 };
 pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
 pub use palette::{PALETTE_COLOR_COUNT, PaletteEntry, Rgba};

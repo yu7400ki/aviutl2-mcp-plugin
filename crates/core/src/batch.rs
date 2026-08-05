@@ -387,6 +387,7 @@ mod tests {
     use crate::number::FiniteF64;
     use crate::validation::{MAX_NAME_UTF16_UNITS, PathSyntaxError, TextSyntaxError};
     use serde_json::{Value, json};
+    use std::collections::BTreeSet;
 
     #[test]
     fn a_sub_operation_keeps_the_reason_of_the_edit_it_wraps() {
@@ -567,12 +568,36 @@ mod tests {
         );
     }
 
+    /// 受け付ける判別子の集合そのものを固定する。
+    ///
+    /// 判別子は型から取り出す。文字列を並べただけの一覧にすると、それが型と
+    /// 一致しているかを誰も確かめない。`discriminator` は網羅 match であり、
+    /// variant を足すとコンパイルが落ちる。
+    ///
+    /// 併せて編集 operation の総数を見る。**編集 operation は 16 あるが、
+    /// 一括適用へ入るのは 2 つだけである**という関係が、拒否リストではなく
+    /// 列挙の不在によって成り立っていることを、この 2 つの数が示す。
     #[test]
     fn operations_carry_the_type_discriminator() {
-        let value = serde_json::to_value(move_object(2)).unwrap();
-        assert_eq!(value["type"], json!("move_object"));
-        let value = serde_json::to_value(set_object_item(2, "X")).unwrap();
-        assert_eq!(value["type"], json!("set_object_item"));
+        fn discriminator(operation: &BatchOperation) -> String {
+            match operation {
+                BatchOperation::MoveObject { .. } | BatchOperation::SetObjectItem { .. } => {}
+            }
+            serde_json::to_value(operation).unwrap()["type"]
+                .as_str()
+                .expect("判別子は文字列である")
+                .to_string()
+        }
+
+        let discriminators: BTreeSet<String> = [move_object(2), set_object_item(2, "X")]
+            .iter()
+            .map(discriminator)
+            .collect();
+        assert_eq!(
+            discriminators,
+            BTreeSet::from(["move_object".to_string(), "set_object_item".to_string()])
+        );
+        assert_eq!(crate::operation::EditOperation::ALL.len(), 16);
     }
 
     /// sub-operation になれない編集 operation が復号の段で落ちることを固定する。
@@ -582,7 +607,7 @@ mod tests {
     /// 一覧の更新を促す。
     #[test]
     fn operation_types_that_cannot_be_sub_operations_are_rejected_by_the_decoder() {
-        // 一括適用の対象から外した 12 種。
+        // 一括適用の対象から外した 13 種。
         //
         // 中間点の 3 つは戻り値から成否を知れるが、削除した中間点の移動
         // パラメータを復元する手段が無く、`delete_object_section` の逆操作を
@@ -591,6 +616,9 @@ mod tests {
         // BPM グリッドの置き換えは戻り値を持たない。成否は読み直して初めて
         // 分かる——選定の基準は「戻り値で成否が分かる」ことであり、例外を
         // 作らない。
+        //
+        // シーン設定の変更も戻り値を持たず、加えて逆操作がそれ自体で取り消せ
+        // ない変更を 1 つ増やす。
         let excluded = [
             crate::operation::OPERATION_CREATE_OBJECT,
             crate::operation::OPERATION_DELETE_OBJECT,
@@ -604,6 +632,7 @@ mod tests {
             crate::operation::OPERATION_DELETE_OBJECT_SECTION,
             crate::operation::OPERATION_MOVE_OBJECT_SECTION,
             crate::operation::OPERATION_SET_GRID_BPM,
+            crate::operation::OPERATION_SET_SCENE_SETTINGS,
         ];
         // 一括適用そのものも sub-operation にはなれない。入れ子にできると、
         // 1 つの取り消し単位に収まる範囲を要求元が入れ子の深さで変えられる。

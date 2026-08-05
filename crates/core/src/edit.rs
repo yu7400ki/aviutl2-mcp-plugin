@@ -18,12 +18,13 @@
 //!
 //! opaque handle は params にも result にも現れない。
 
-use crate::edit_info::{Cursor, DisplayRange, FrameRange, GridBpm};
+use crate::edit_info::{Cursor, DisplayRange, FrameRange, GridBpm, SceneInfo};
 use crate::effect::EffectInfo;
 use crate::error::ErrorCode;
 use crate::item_value::{ItemValue, ItemWriteError, validate_item_value};
 use crate::number::FiniteF64;
 use crate::object::{LayerInfo, ObjectSummary, SectionRange};
+use crate::render::MAX_RENDER_FRAME_BYTES;
 use crate::selector::{EffectSelector, ObjectSelector};
 use crate::validation::{
     PathSyntaxError, TextSyntaxError, validate_alias, validate_control_free, validate_name,
@@ -645,6 +646,112 @@ impl SetGridBpmParams {
     }
 }
 
+/// シーンの解像度。
+///
+/// **横幅と高さを別々のフィールドへ平坦化しない。** ホストは解像度を 1 回の
+/// 呼び出しで受け取り、片方だけを変える手段を持たない。平坦化すると「横幅だけ
+/// 指定」が綴れてしまい、綴れるのに実現できない要求を受け付けることになる。
+/// 組にしておけば、片方だけの指定は必須フィールドの欠落として復号の段で落ちる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SceneSize {
+    /// 画像の横幅。1 以上。
+    pub width: u32,
+    /// 画像の高さ。1 以上。
+    pub height: u32,
+}
+
+impl SceneSize {
+    /// 解像度が受け渡せる範囲と、1 フレームを描ける大きさに収まることを確認する。
+    pub fn validate(&self) -> Result<(), EditInputError> {
+        validate_scene_value(FIELD_SIZE_WIDTH, self.width)?;
+        validate_scene_value(FIELD_SIZE_HEIGHT, self.height)?;
+        // 上限は描画の側と共有する。描けない大きさのシーンを作れてしまうと、
+        // 作った本人がそのシーンを 1 度も描けない。
+        //
+        // 積は必ず 64bit で取る。`u32` 同士の積は容易に溢れ、溢れた値は上限を
+        // 下回るため、判定が通ってしまう。
+        let frame_bytes = u64::from(self.width) * u64::from(self.height) * 4;
+        if frame_bytes > MAX_RENDER_FRAME_BYTES {
+            return Err(EditInputError::SceneFrameTooLarge {
+                bytes: frame_bytes,
+                max: MAX_RENDER_FRAME_BYTES,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// `set_scene_settings` の params。
+///
+/// シーンは selector も fingerprint も持たない。守れるのはプロジェクト境界と
+/// 現在シーンと値の範囲だけであり、「読み取った時点と同じ状態のシーンか」は
+/// 確かめられない。応答は変更後に観測した実際の状態を返すため、要求元はそれを
+/// 見て判断する。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetSceneSettingsParams {
+    /// 現在シーンの一致確認に使う guard。
+    ///
+    /// 変更は常に現在シーンへ掛かる。非現在シーンを操作する手段は無く、この値は
+    /// 探索先ではなく guard である。
+    pub expected_scene_id: i32,
+    /// シーン名。省略時は変更しない。
+    ///
+    /// 空文字は受け付けない。ホストは空文字と未指定をどちらも「変更しない」と
+    /// して無視するため、受け付ければ何も起きなかった要求を成功として返す
+    /// ことになる。オブジェクト名やレイヤー名と違い、シーン名には「標準へ戻す」
+    /// 意味も戻す先も無いため、取り消しを表す指定も持たない。
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 解像度。省略時は変更しない。
+    #[serde(default)]
+    pub size: Option<SceneSize>,
+    /// 音声のサンプリングレート。省略時は変更しない。
+    #[serde(default)]
+    pub sample_rate: Option<u32>,
+    /// 応答が返した `project_epoch`。
+    ///
+    /// シーンは selector を持たないため、プロジェクト境界を照合する唯一の
+    /// 材料である。
+    pub expected_project_epoch: String,
+}
+
+impl SetSceneSettingsParams {
+    /// 要求内容だけで決まる検証を行う。
+    ///
+    /// 3 つ全ての省略は拒否する。何も変更しない編集要求は、成功したのか
+    /// 無視されたのかをクライアントが区別できない。
+    pub fn validate(&self) -> Result<(), EditInputError> {
+        if self.name.is_none() && self.size.is_none() && self.sample_rate.is_none() {
+            return Err(EditInputError::NoChangeRequested {
+                fields: &[FIELD_NAME, FIELD_SIZE, FIELD_SAMPLE_RATE],
+            });
+        }
+        if let Some(name) = &self.name {
+            if name.is_empty() {
+                return Err(EditInputError::Text {
+                    field: FIELD_NAME,
+                    source: TextSyntaxError::Empty,
+                });
+            }
+            validate_name(name).map_err(|source| EditInputError::Text {
+                field: FIELD_NAME,
+                source,
+            })?;
+        }
+        if let Some(size) = &self.size {
+            size.validate()?;
+        }
+        if let Some(sample_rate) = self.sample_rate {
+            // 受理値の一覧は作らない。SDK にも文書にも記述が無く、我々が列挙
+            // すると、ホストが受け付ける値を我々の側で拒むことになる。
+            validate_scene_value(FIELD_SAMPLE_RATE, sample_rate)?;
+        }
+        Ok(())
+    }
+}
+
 /// BPM グリッドの一覧の置き換えの結果。
 ///
 /// 一覧そのものが read-back であり、要求した値がどう正規化されたかはこの一覧が
@@ -662,6 +769,42 @@ pub struct GridBpmOutcome {
     ///
     /// 要求した値と一致するとは限らない。ホストは単精度へ丸め、並べ替えもし得る。
     pub entries: Vec<GridBpm>,
+}
+
+/// シーン設定の変更の結果。
+///
+/// [`SceneInfo`] は読み取りの DTO をそのまま用いる。`get_current_scene` が返す
+/// ものと同じ型であるため、要求元は読みと書きで別の形を覚えなくてよい。
+///
+/// シーンの名前・解像度・サンプリングレートはプロジェクトへ保存される内容で
+/// あるため、この変更は revision を進める。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneSettingsOutcome {
+    /// 変更後のプロジェクトの epoch。
+    pub project_epoch: String,
+    /// 変更を反映したあとの revision。
+    pub project_revision: u64,
+    /// 変更後に観測したシーンの状態。
+    ///
+    /// 要求した値と一致するとは限らない。ホストが値を調整し得るうえ、観測は
+    /// 編集と原子的でない（[`Self::observed_after_edit`]）。差異そのものは
+    /// 失敗ではない。
+    pub scene: SceneInfo,
+    /// 解像度とサンプリングレートが編集の区間の外で観測されたことを示す。
+    ///
+    /// 常に `true` である。反映値は編集情報にしか現れず、区間の内側から読み
+    /// 直す手段が無いため、観測までの間に他所からの変更が入り得る。シーン名
+    /// だけは区間の内側で照合済みである。将来、区間内での再読み取りが可能に
+    /// なったときに原子的な観測へ切り替えられるよう、値の意味をクライアントが
+    /// 解釈できる形で残す。
+    pub observed_after_edit: bool,
+    /// この変更が取り消せないことを示す。
+    ///
+    /// 常に `true` である。AviUtl2 の取り消し操作ではシーン設定は元へ戻らず、
+    /// 取り消すとその前に行った編集が取り消される。**成功したあとにも読める
+    /// 唯一の口である** — tool の説明と annotation は要求を出す前にしか効かず、
+    /// 応答だけを見る経路はそこから性質を拾えない。
+    pub non_undoable: bool,
 }
 
 /// 中間点の変更の結果。
@@ -902,6 +1045,14 @@ const FIELD_PATH: &str = "path";
 const FIELD_ALIAS: &str = "alias";
 /// `name` フィールド名。
 const FIELD_NAME: &str = "name";
+/// `size` フィールド名。
+const FIELD_SIZE: &str = "size";
+/// 解像度の横幅のフィールド名。
+const FIELD_SIZE_WIDTH: &str = "size.width";
+/// 解像度の高さのフィールド名。
+const FIELD_SIZE_HEIGHT: &str = "size.height";
+/// `sample_rate` フィールド名。
+const FIELD_SAMPLE_RATE: &str = "sample_rate";
 /// `item` フィールド名。
 const FIELD_ITEM: &str = "item";
 /// `effect_name` フィールド名。
@@ -977,6 +1128,30 @@ pub enum EditInputError {
     NoChangeRequested {
         /// いずれかの指定が要るフィールド名。
         fields: &'static [&'static str],
+    },
+    /// シーン設定の値が受け付けられる範囲の外にある。
+    ///
+    /// 0 は「変更しない」の意味を持たない——省略がその役目を担う。0 以下と
+    /// 受け渡せない大きさだけを落とし、それ以外の値の当否はホストが決める。
+    #[error("{field} は 1 以上 {max} 以下である必要があります: {value}")]
+    SceneValueOutOfRange {
+        /// 対象フィールド名。
+        field: &'static str,
+        /// 指定された値。
+        value: u32,
+        /// 許容する最大値。
+        max: u32,
+    },
+    /// シーンの解像度が 1 フレームで描ける大きさを超えている。
+    ///
+    /// 上限は描画と共有する。描けない大きさのシーンを作れてしまうと、作った
+    /// 本人がそのシーンを 1 度も描けない。
+    #[error("size は 1 フレームが {max} バイト以下に収まる必要があります: {bytes} バイト")]
+    SceneFrameTooLarge {
+        /// 指定された解像度が要する 1 フレームのバイト数。
+        bytes: u64,
+        /// 許容する最大バイト数。
+        max: u64,
     },
     /// 一覧の要素数が受け付けられる上限を超えている。
     #[error("{field} は {max} 件以下である必要があります: {count}")]
@@ -1063,6 +1238,15 @@ impl EditInputError {
             EditInputError::NoChangeRequested {
                 fields: &[FIELD_NAME, FIELD_ENABLED, FIELD_LOCKED],
             },
+            EditInputError::SceneValueOutOfRange {
+                field: FIELD_SIZE_WIDTH,
+                value: 0,
+                max: MAX_POSITION,
+            },
+            EditInputError::SceneFrameTooLarge {
+                bytes: 0,
+                max: MAX_RENDER_FRAME_BYTES,
+            },
             EditInputError::TooManyEntries {
                 field: FIELD_ENTRIES,
                 count: 0,
@@ -1125,6 +1309,8 @@ impl EditInputError {
             EditInputError::PositionOutOfRange { .. }
             | EditInputError::IndexOutOfRange { .. }
             | EditInputError::TooManyEntries { .. }
+            | EditInputError::SceneValueOutOfRange { .. }
+            | EditInputError::SceneFrameTooLarge { .. }
             | EditInputError::NoChangeRequested { .. } => None,
         }
     }
@@ -1137,6 +1323,8 @@ impl EditInputError {
             | EditInputError::IndexOutOfRange { .. }
             | EditInputError::SectionIndexOutOfRange { .. }
             | EditInputError::NoChangeRequested { .. }
+            | EditInputError::SceneValueOutOfRange { .. }
+            | EditInputError::SceneFrameTooLarge { .. }
             | EditInputError::TooManyEntries { .. }
             | EditInputError::GridBpmOutOfRange { .. }
             | EditInputError::GridBpmBeatNotRepresentable { .. }
@@ -1176,6 +1364,22 @@ fn validate_layer_frame(layer: u32, frame: u32) -> Result<(), EditInputError> {
 fn validate_position(field: &'static str, value: u32) -> Result<(), EditInputError> {
     if value > MAX_POSITION {
         return Err(EditInputError::PositionOutOfRange {
+            field,
+            value,
+            max: MAX_POSITION,
+        });
+    }
+    Ok(())
+}
+
+/// シーン設定の値が受け渡せる範囲に収まることを確認する。
+///
+/// 解像度もサンプリングレートも `i32` で受け渡され、0 以下は意味を持たない。
+/// 上限をこれ以上狭めない——ホストが受け付ける値の一覧は我々の側に無く、
+/// 狭めれば実際には通る指定を我々が拒むことになる。
+fn validate_scene_value(field: &'static str, value: u32) -> Result<(), EditInputError> {
+    if value == 0 || value > MAX_POSITION {
+        return Err(EditInputError::SceneValueOutOfRange {
             field,
             value,
             max: MAX_POSITION,
@@ -1326,6 +1530,8 @@ mod tests {
             EditInputError::IndexOutOfRange { .. } => "IndexOutOfRange",
             EditInputError::SectionIndexOutOfRange { .. } => "SectionIndexOutOfRange",
             EditInputError::NoChangeRequested { .. } => "NoChangeRequested",
+            EditInputError::SceneValueOutOfRange { .. } => "SceneValueOutOfRange",
+            EditInputError::SceneFrameTooLarge { .. } => "SceneFrameTooLarge",
             EditInputError::TooManyEntries { .. } => "TooManyEntries",
             EditInputError::GridBpmOutOfRange { .. } => "GridBpmOutOfRange",
             EditInputError::GridBpmBeatNotRepresentable { .. } => "GridBpmBeatNotRepresentable",
@@ -1343,6 +1549,8 @@ mod tests {
             "IndexOutOfRange",
             "SectionIndexOutOfRange",
             "NoChangeRequested",
+            "SceneValueOutOfRange",
+            "SceneFrameTooLarge",
             "TooManyEntries",
             "GridBpmOutOfRange",
             "GridBpmBeatNotRepresentable",
@@ -3211,6 +3419,395 @@ mod tests {
         };
         let s = serde_json::to_string(&outcome).unwrap();
         let restored: GridBpmOutcome = serde_json::from_str(&s).unwrap();
+        assert_eq!(restored, outcome);
+    }
+
+    fn sample_set_scene_settings() -> SetSceneSettingsParams {
+        SetSceneSettingsParams {
+            expected_scene_id: 0,
+            name: Some("本編".to_string()),
+            size: Some(SceneSize {
+                width: 1920,
+                height: 1080,
+            }),
+            sample_rate: Some(48_000),
+            expected_project_epoch: EPOCH.to_string(),
+        }
+    }
+
+    #[test]
+    fn set_scene_settings_rejects_omitting_every_change() {
+        let params = SetSceneSettingsParams {
+            name: None,
+            size: None,
+            sample_rate: None,
+            ..sample_set_scene_settings()
+        };
+        let error = params.validate().unwrap_err();
+        assert_eq!(
+            error,
+            EditInputError::NoChangeRequested {
+                fields: &["name", "size", "sample_rate"],
+            }
+        );
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+        assert_eq!(error.reason(), None);
+
+        // 3 つの軸は個別にも組み合わせても指定できる。
+        for params in [
+            SetSceneSettingsParams {
+                size: None,
+                sample_rate: None,
+                ..sample_set_scene_settings()
+            },
+            SetSceneSettingsParams {
+                name: None,
+                sample_rate: None,
+                ..sample_set_scene_settings()
+            },
+            SetSceneSettingsParams {
+                name: None,
+                size: None,
+                ..sample_set_scene_settings()
+            },
+            SetSceneSettingsParams {
+                sample_rate: None,
+                ..sample_set_scene_settings()
+            },
+            sample_set_scene_settings(),
+        ] {
+            assert_eq!(params.validate(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn set_scene_settings_rejects_an_empty_scene_name() {
+        // ホストは空文字を「変更しない」として無視する。受け付ければ、何も
+        // 起きなかった要求を成功として返すことになる。
+        let error = SetSceneSettingsParams {
+            name: Some(String::new()),
+            ..sample_set_scene_settings()
+        }
+        .validate()
+        .expect_err("空のシーン名が受理されました");
+        assert_eq!(
+            error,
+            EditInputError::Text {
+                field: FIELD_NAME,
+                source: TextSyntaxError::Empty,
+            }
+        );
+        assert_eq!(error.reason(), Some("empty"));
+        assert!(REASON_VALUES.contains(&"empty"));
+
+        // オブジェクト名は空を標準名へ戻す指定として受け付け続ける。シーン名に
+        // その意味が無いのは、戻す先が存在しないためである。
+        assert_eq!(
+            SetObjectNameParams {
+                selector: sample_object_selector(),
+                name: Some(String::new()),
+            }
+            .validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn set_scene_settings_applies_the_shared_name_rule() {
+        // 名前の規則はオブジェクト名・レイヤー名と共有する。別の規則を書き
+        // 起こすと、同じ名前が経路によって受理されたり拒否されたりする。
+        assert_eq!(
+            SetSceneSettingsParams {
+                name: Some("本\0編".to_string()),
+                ..sample_set_scene_settings()
+            }
+            .validate(),
+            Err(EditInputError::Text {
+                field: FIELD_NAME,
+                source: TextSyntaxError::ContainsNul,
+            })
+        );
+
+        let over = "🎬".repeat(MAX_NAME_UTF16_UNITS / 2 + 1);
+        assert!(matches!(
+            SetSceneSettingsParams {
+                name: Some(over),
+                ..sample_set_scene_settings()
+            }
+            .validate(),
+            Err(EditInputError::Text {
+                field: FIELD_NAME,
+                source: TextSyntaxError::TooLongUtf16 { .. },
+            })
+        ));
+
+        // 制御文字は見ない。名前の規則が経路ごとに分かれる。
+        assert_eq!(
+            SetSceneSettingsParams {
+                name: Some("本\t編".to_string()),
+                ..sample_set_scene_settings()
+            }
+            .validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_scene_size_bound_comes_from_the_render_limit() {
+        let scene_size = |width, height| SetSceneSettingsParams {
+            name: None,
+            size: Some(SceneSize { width, height }),
+            sample_rate: None,
+            ..sample_set_scene_settings()
+        };
+        let max_pixels = (MAX_RENDER_FRAME_BYTES / 4) as u32;
+
+        // ちょうど上限の組は通る。形が違っても境界は画素数だけで決まる。
+        for (width, height) in [(8192, 8192), (1, max_pixels)] {
+            scene_size(width, height)
+                .validate()
+                .expect("上限ちょうどの解像度が拒否されました");
+        }
+
+        // 1 画素超えると落ちる。
+        let error = scene_size(1, max_pixels + 1)
+            .validate()
+            .expect_err("上限を 1 画素超えた解像度が受理されました");
+        assert_eq!(
+            error,
+            EditInputError::SceneFrameTooLarge {
+                bytes: (u64::from(max_pixels) + 1) * 4,
+                max: MAX_RENDER_FRAME_BYTES,
+            }
+        );
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+
+        // 積は 64bit で取る。`u32` の掛け算では 0 へ折り返し、上限を下回る値
+        // として通ってしまう組である。
+        assert!(matches!(
+            scene_size(65536, 65536).validate(),
+            Err(EditInputError::SceneFrameTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn set_scene_settings_rejects_values_outside_the_receivable_range() {
+        let over = MAX_POSITION + 1;
+        let cases: &[(&str, SetSceneSettingsParams, &'static str, u32)] = &[
+            (
+                "横幅 0",
+                SetSceneSettingsParams {
+                    size: Some(SceneSize {
+                        width: 0,
+                        height: 1080,
+                    }),
+                    ..sample_set_scene_settings()
+                },
+                FIELD_SIZE_WIDTH,
+                0,
+            ),
+            (
+                "高さ 0",
+                SetSceneSettingsParams {
+                    size: Some(SceneSize {
+                        width: 1920,
+                        height: 0,
+                    }),
+                    ..sample_set_scene_settings()
+                },
+                FIELD_SIZE_HEIGHT,
+                0,
+            ),
+            (
+                "i32 に収まらない横幅",
+                SetSceneSettingsParams {
+                    size: Some(SceneSize {
+                        width: over,
+                        height: 1,
+                    }),
+                    ..sample_set_scene_settings()
+                },
+                FIELD_SIZE_WIDTH,
+                over,
+            ),
+            (
+                "i32 に収まらない高さ",
+                SetSceneSettingsParams {
+                    size: Some(SceneSize {
+                        width: 1,
+                        height: over,
+                    }),
+                    ..sample_set_scene_settings()
+                },
+                FIELD_SIZE_HEIGHT,
+                over,
+            ),
+            (
+                "サンプリングレート 0",
+                SetSceneSettingsParams {
+                    name: None,
+                    size: None,
+                    sample_rate: Some(0),
+                    ..sample_set_scene_settings()
+                },
+                FIELD_SAMPLE_RATE,
+                0,
+            ),
+            (
+                "i32 に収まらないサンプリングレート",
+                SetSceneSettingsParams {
+                    name: None,
+                    size: None,
+                    sample_rate: Some(over),
+                    ..sample_set_scene_settings()
+                },
+                FIELD_SAMPLE_RATE,
+                over,
+            ),
+        ];
+        for (label, params, field, value) in cases {
+            let error = params.clone().validate().expect_err(label);
+            assert_eq!(
+                error,
+                EditInputError::SceneValueOutOfRange {
+                    field,
+                    value: *value,
+                    max: MAX_POSITION,
+                },
+                "{label}"
+            );
+        }
+
+        // 上限ちょうどのサンプリングレートは通る。受理値の一覧は我々の側に
+        // 無く、受け渡せる範囲だけを課している。
+        assert_eq!(
+            SetSceneSettingsParams {
+                name: None,
+                size: None,
+                sample_rate: Some(MAX_POSITION),
+                ..sample_set_scene_settings()
+            }
+            .validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn scene_setting_range_failures_have_no_reason() {
+        // 範囲外はフィールド名と上限の文面で説明が尽きる。機械可読な種別名を
+        // 足しても要求元が取れる行動は変わらず、値域を広げる理由が無い。
+        for error in [
+            EditInputError::SceneValueOutOfRange {
+                field: FIELD_SIZE_WIDTH,
+                value: 0,
+                max: MAX_POSITION,
+            },
+            EditInputError::SceneValueOutOfRange {
+                field: FIELD_SAMPLE_RATE,
+                value: 0,
+                max: MAX_POSITION,
+            },
+            EditInputError::SceneFrameTooLarge {
+                bytes: MAX_RENDER_FRAME_BYTES + 4,
+                max: MAX_RENDER_FRAME_BYTES,
+            },
+        ] {
+            assert_eq!(error.reason(), None, "{error}");
+            assert_eq!(error.error_code(), ErrorCode::InvalidArgument, "{error}");
+        }
+    }
+
+    #[test]
+    fn set_scene_settings_params_roundtrip() {
+        assert_roundtrip(sample_set_scene_settings());
+        assert_roundtrip(SetSceneSettingsParams {
+            name: None,
+            size: None,
+            ..sample_set_scene_settings()
+        });
+    }
+
+    #[test]
+    fn set_scene_settings_params_reject_unknown_fields() {
+        assert!(
+            serde_json::from_value::<SetSceneSettingsParams>(with_unknown_field(
+                &sample_set_scene_settings()
+            ))
+            .is_err()
+        );
+        let mut value = serde_json::to_value(sample_set_scene_settings()).unwrap();
+        value["size"] = json!({"width": 1920, "height": 1080, "future": 1});
+        assert!(serde_json::from_value::<SetSceneSettingsParams>(value).is_err());
+    }
+
+    #[test]
+    fn set_scene_settings_params_require_the_guards_and_the_whole_size() {
+        for key in ["expected_scene_id", "expected_project_epoch"] {
+            assert!(
+                serde_json::from_value::<SetSceneSettingsParams>(without_field(
+                    &sample_set_scene_settings(),
+                    key
+                ))
+                .is_err(),
+                "{key} の欠落が受理されました"
+            );
+        }
+
+        // 3 つの軸は省略できる。
+        let omitted: SetSceneSettingsParams = serde_json::from_value(json!({
+            "expected_scene_id": 0,
+            "sample_rate": 48_000,
+            "expected_project_epoch": EPOCH,
+        }))
+        .unwrap();
+        assert_eq!(omitted.name, None);
+        assert_eq!(omitted.size, None);
+
+        // 解像度は組であり、片方だけの指定は綴れない。ホストは片方だけを
+        // 変える手段を持たない。
+        let mut value = serde_json::to_value(sample_set_scene_settings()).unwrap();
+        value["size"] = json!({"width": 1920});
+        assert!(serde_json::from_value::<SetSceneSettingsParams>(value).is_err());
+    }
+
+    #[test]
+    fn the_scene_settings_outcome_reuses_the_read_dto() {
+        let outcome = SceneSettingsOutcome {
+            project_epoch: EPOCH.to_string(),
+            project_revision: 43,
+            scene: SceneInfo {
+                id: 0,
+                name: Some("本編".to_string()),
+                width: 1920,
+                height: 1080,
+                fps: Some(finite(60.0)),
+                fps_rate: 60,
+                fps_scale: 1,
+                sample_rate: 48_000,
+            },
+            observed_after_edit: true,
+            non_undoable: true,
+        };
+        let value = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(value["project_epoch"], json!(EPOCH));
+        assert_eq!(value["project_revision"], json!(43));
+        assert_eq!(
+            value["scene"],
+            serde_json::to_value(&outcome.scene).unwrap()
+        );
+        // 取り消せないことと、観測が編集と原子的でないことは、応答だけを見る
+        // 経路が拾える唯一の口である。
+        assert_eq!(value["non_undoable"], json!(true));
+        assert_eq!(value["observed_after_edit"], json!(true));
+
+        let s = serde_json::to_string(&outcome).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SceneSettingsOutcome>(&s).unwrap(),
+            outcome
+        );
+        // 応答型は将来の optional field を受け入れる。
+        let restored: SceneSettingsOutcome =
+            serde_json::from_value(with_unknown_field(&outcome)).unwrap();
         assert_eq!(restored, outcome);
     }
 }

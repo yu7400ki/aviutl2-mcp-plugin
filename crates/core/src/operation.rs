@@ -90,6 +90,9 @@ pub const OPERATION_MOVE_OBJECT_SECTION: &str = "move_object_section";
 /// BPM グリッドの一覧を置き換える operation 名。
 pub const OPERATION_SET_GRID_BPM: &str = "set_grid_bpm";
 
+/// シーンの名前・解像度・サンプリングレートを変更する operation 名。
+pub const OPERATION_SET_SCENE_SETTINGS: &str = "set_scene_settings";
+
 /// 複数の変更を 1 つの取り消し単位で適用する operation 名。
 pub const OPERATION_APPLY_BATCH: &str = "apply_batch";
 
@@ -213,6 +216,12 @@ pub enum EditOperation {
     MoveObjectSection,
     /// [`OPERATION_SET_GRID_BPM`]。
     SetGridBpm,
+    /// [`OPERATION_SET_SCENE_SETTINGS`]。
+    ///
+    /// 取り消せない変更である。ここに並ぶのは、区間の入り方も失敗の写し方も
+    /// 他の編集 operation と同じであるためであり、取り消せることを意味しない。
+    /// 取り消せない性質は応答と tool の annotation が運ぶ。
+    SetSceneSettings,
     /// [`OPERATION_APPLY_BATCH`]。
     ///
     /// 複数の変更をまとめて発行するが、区間の入り方も失敗の写し方も他の編集
@@ -225,7 +234,7 @@ impl EditOperation {
     /// 全 variant。
     ///
     /// 要素数と内容は `edit_operation_all_is_exhaustive` テストで固定する。
-    pub const ALL: [EditOperation; 15] = [
+    pub const ALL: [EditOperation; 16] = [
         EditOperation::CreateObject,
         EditOperation::MoveObject,
         EditOperation::DeleteObject,
@@ -240,6 +249,7 @@ impl EditOperation {
         EditOperation::DeleteObjectSection,
         EditOperation::MoveObjectSection,
         EditOperation::SetGridBpm,
+        EditOperation::SetSceneSettings,
         EditOperation::ApplyBatch,
     ];
 
@@ -260,6 +270,7 @@ impl EditOperation {
             EditOperation::DeleteObjectSection => OPERATION_DELETE_OBJECT_SECTION,
             EditOperation::MoveObjectSection => OPERATION_MOVE_OBJECT_SECTION,
             EditOperation::SetGridBpm => OPERATION_SET_GRID_BPM,
+            EditOperation::SetSceneSettings => OPERATION_SET_SCENE_SETTINGS,
             EditOperation::ApplyBatch => OPERATION_APPLY_BATCH,
         }
     }
@@ -386,7 +397,8 @@ impl KnownOperation {
                 | EditOperation::CreateObjectSection
                 | EditOperation::DeleteObjectSection
                 | EditOperation::MoveObjectSection
-                | EditOperation::SetGridBpm => RequestBudgetKind::Edit,
+                | EditOperation::SetGridBpm
+                | EditOperation::SetSceneSettings => RequestBudgetKind::Edit,
                 EditOperation::ApplyBatch => RequestBudgetKind::Batch,
             },
             KnownOperation::Render(operation) => match operation {
@@ -841,6 +853,7 @@ mod tests {
         assert_eq!(OPERATION_CREATE_OBJECT_SECTION, "create_object_section");
         assert_eq!(OPERATION_DELETE_OBJECT_SECTION, "delete_object_section");
         assert_eq!(OPERATION_MOVE_OBJECT_SECTION, "move_object_section");
+        assert_eq!(OPERATION_SET_SCENE_SETTINGS, "set_scene_settings");
         assert_eq!(OPERATION_APPLY_BATCH, "apply_batch");
     }
 
@@ -891,6 +904,10 @@ mod tests {
         assert_eq!(
             EditOperation::MoveObjectSection.as_str(),
             OPERATION_MOVE_OBJECT_SECTION
+        );
+        assert_eq!(
+            EditOperation::SetSceneSettings.as_str(),
+            OPERATION_SET_SCENE_SETTINGS
         );
         assert_eq!(EditOperation::ApplyBatch.as_str(), OPERATION_APPLY_BATCH);
     }
@@ -983,6 +1000,7 @@ mod tests {
                 | EditOperation::DeleteObjectSection
                 | EditOperation::MoveObjectSection
                 | EditOperation::SetGridBpm
+                | EditOperation::SetSceneSettings
                 | EditOperation::ApplyBatch => {}
             }
             assert!(
@@ -1005,8 +1023,9 @@ mod tests {
         assert_listed(EditOperation::DeleteObjectSection);
         assert_listed(EditOperation::MoveObjectSection);
         assert_listed(EditOperation::SetGridBpm);
+        assert_listed(EditOperation::SetSceneSettings);
         assert_listed(EditOperation::ApplyBatch);
-        assert_eq!(EditOperation::ALL.len(), 15);
+        assert_eq!(EditOperation::ALL.len(), 16);
     }
 
     /// [`ReadOperation::ALL`] が全 variant を含むことを固定する。
@@ -1137,7 +1156,8 @@ mod tests {
                 | EditOperation::CreateObjectSection
                 | EditOperation::DeleteObjectSection
                 | EditOperation::MoveObjectSection
-                | EditOperation::SetGridBpm => RequestBudgetKind::Edit,
+                | EditOperation::SetGridBpm
+                | EditOperation::SetSceneSettings => RequestBudgetKind::Edit,
             };
             assert_eq!(
                 KnownOperation::Edit(op).budget_kind(),
@@ -1219,6 +1239,23 @@ mod tests {
         assert!(EditOperation::ALL.contains(&op));
         assert_eq!(
             EditOperation::from_operation_name(OPERATION_SET_GRID_BPM),
+            Some(op)
+        );
+    }
+
+    #[test]
+    fn changing_the_scene_settings_is_an_ordinary_edit() {
+        // SDK 呼び出しは最大 3 回、読み直しはシーン名と編集情報の 2 回であり、
+        // 費用は単一編集の範囲に収まる。取り消せないことは費用と関係が無く、
+        // 新しい予算区分を作る理由にはならない。
+        let op = EditOperation::SetSceneSettings;
+        assert_eq!(
+            KnownOperation::Edit(op).budget_kind(),
+            RequestBudgetKind::Edit
+        );
+        assert!(EditOperation::ALL.contains(&op));
+        assert_eq!(
+            EditOperation::from_operation_name(OPERATION_SET_SCENE_SETTINGS),
             Some(op)
         );
     }
