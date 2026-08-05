@@ -3630,6 +3630,52 @@ fn moving_a_section_moves_the_boundary_that_starts_it() {
     );
 }
 
+/// フォーカスの区間番号が、対象の詳細が返す区間の列の添字であることを確かめる。
+///
+/// 2 つの tool にまたがる契約であり、片方の応答だけを見ても崩れに気付けない。
+/// 同じ状態に対して両方を呼び、番号が列の範囲に収まること、指した要素が中間点で
+/// 始まること、中間点を動かせば両者が揃って追随することを見る。
+#[test]
+fn the_focused_section_number_indexes_the_sections_of_the_focused_object() {
+    let harness = harness_with_sections();
+    harness.host.focus_object(Some((1, 100)), Some(2));
+
+    let focused_section = |harness: &Harness| {
+        let snapshot = harness
+            .read
+            .get_selection(SCENE_ID, &PageRequest::default())
+            .expect("選択を取得できます")
+            .expect("ページ要求が拒否されました");
+        let focus = snapshot.focus.expect("フォーカス対象がありません");
+        let section = snapshot.focus_section.expect("区間番号がありません");
+        let detail = harness
+            .read
+            .get_object(&focus.selector)
+            .expect("フォーカス対象の詳細を引けません");
+        assert!(
+            section < detail.sections.len(),
+            "区間番号 {section} が区間の列 {:?} の外を指しています",
+            detail.sections
+        );
+        (section, detail.sections[section].start)
+    };
+
+    // 区間 2 の開始位置は 2 番目の中間点である。
+    assert_eq!(focused_section(&harness), (2, 150));
+
+    harness
+        .edit
+        .move_object_section(&MoveObjectSectionParams {
+            selector: harness.selector(1, 100),
+            section: 2,
+            frame: 160,
+        })
+        .expect("区間 2 の移動が拒否されました");
+
+    // 番号は変わらず、指す先だけが動く。
+    assert_eq!(focused_section(&harness), (2, 160));
+}
+
 #[test]
 fn creating_a_section_puts_the_frame_at_the_start_of_a_section() {
     let harness = harness_with_sections();

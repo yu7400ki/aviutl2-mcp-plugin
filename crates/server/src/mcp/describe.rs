@@ -156,13 +156,7 @@ pub fn objects(result: &ListObjectsResult) -> String {
     let mut text = TextBuilder::new();
     text.push_line(format!("オブジェクト {}", page_line(&result.page)));
     for object in &result.items {
-        text.push_line(format!(
-            "- layer={} frame={}..{} name={}",
-            object.layer,
-            object.frame_start,
-            object.frame_end,
-            optional_name(object.name.as_deref()),
-        ));
+        text.push_line(format!("- {}", object_position_line(object)));
     }
     text.push_line(
         "frame / layer は 0 始まりです。詳細は get_object に structuredContent の selector をそのまま渡します",
@@ -263,10 +257,12 @@ pub fn effect_item_values(values: &EffectItemValues) -> String {
 /// 同じものと読まれる。
 pub fn selection(snapshot: &SelectionSnapshot) -> String {
     let mut text = TextBuilder::new();
+    // 番号の起点は末尾で 1 度だけ述べる。フォーカスと選択の双方が番号を持つ
+    // ため、行内で注記すると同じ断り書きが繰り返される。
     text.push_line(match &snapshot.focus {
         Some(object) => format!(
             "フォーカス（オブジェクト設定ウィンドウの選択）{}",
-            object_line(object)
+            object_position_line(object)
         ),
         None => "フォーカス（オブジェクト設定ウィンドウの選択）なし".to_string(),
     });
@@ -279,13 +275,7 @@ pub fn selection(snapshot: &SelectionSnapshot) -> String {
         page_line(&snapshot.page)
     ));
     for object in &snapshot.selected {
-        text.push_line(format!(
-            "- layer={} frame={}..{} name={}",
-            object.layer,
-            object.frame_start,
-            object.frame_end,
-            optional_name(object.name.as_deref()),
-        ));
+        text.push_line(format!("- {}", object_position_line(object)));
     }
     text.push_line(format!("project_revision={}", snapshot.project_revision));
     text.push_line(
@@ -539,10 +529,24 @@ fn target_line(action: &str, object: Option<&ObjectSummary>) -> String {
     }
 }
 
-/// オブジェクトの位置と名前の 1 行表現。
+/// オブジェクトの位置と名前の 1 行表現。番号の起点を行内で注記する。
+///
+/// 対象を 1 件だけ示す text が用いる。番号を持つ行が 1 つしか無いため、末尾に
+/// まとめて注記する場所が無い。
 fn object_line(object: &ObjectSummary) -> String {
     format!(
-        "layer={} frame={}..{} name={}（frame / layer は 0 始まり）",
+        "{}（frame / layer は 0 始まり）",
+        object_position_line(object)
+    )
+}
+
+/// オブジェクトの位置と名前の 1 行表現。番号の起点は注記しない。
+///
+/// 一覧を並べる text が用いる。行ごとに注記すると同じ断り書きが件数分
+/// 繰り返されるため、起点は末尾で 1 度だけ述べる。
+fn object_position_line(object: &ObjectSummary) -> String {
+    format!(
+        "layer={} frame={}..{} name={}",
         object.layer,
         object.frame_start,
         object.frame_end,
@@ -810,6 +814,45 @@ mod tests {
             page: page(100_000, OVERSIZED_COUNT as u32),
         };
         assert_truncated_within_limit(&objects(&result));
+    }
+
+    /// 番号の起点の注記が 1 度しか現れないことを確かめる。
+    ///
+    /// 一覧を並べる text は起点を末尾でまとめて述べる。行内でも述べると、同じ
+    /// 断り書きが対象の件数だけ繰り返される。
+    #[test]
+    fn a_listing_states_the_origin_of_the_numbering_once() {
+        let summary = ObjectSummary::new(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            ObjectFingerprintInput {
+                scene_id: 0,
+                layer: 2,
+                frame_start: 0,
+                frame_end: 10,
+                name: Some("立ち絵"),
+                alias: "alias",
+            },
+        );
+        let texts = [
+            selection(&SelectionSnapshot {
+                project_revision: 42,
+                focus: Some(summary.clone()),
+                focus_section: Some(1),
+                selected: vec![summary.clone(), summary.clone()],
+                page: page(2, 2),
+            }),
+            objects(&ListObjectsResult {
+                items: vec![summary.clone(), summary],
+                page: page(2, 2),
+            }),
+        ];
+        for text in texts {
+            assert_eq!(
+                text.matches("0 始まり").count(),
+                1,
+                "番号の起点が繰り返されています: {text}"
+            );
+        }
     }
 
     #[test]

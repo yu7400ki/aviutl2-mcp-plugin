@@ -212,10 +212,15 @@ pub trait SceneReader {
     /// 読まない。
     fn focused_object(&self) -> Result<Option<HostObject>, ReadError>;
 
-    /// フォーカス対象の区間番号を返す。未選択は `None`。
+    /// フォーカス対象の区間番号を返す。ホストが番号を持たなければ `None`。
     ///
-    /// **実装の義務**: [`Self::focused_object`] が `None` を返す状態では `None` を
-    /// 返す。番号は対象の性質であり、対象が無いのに番号だけが返る組には意味が無い。
+    /// **[`Self::focused_object`] との整合を保証しない。** ホストは対象を返さない
+    /// まま番号だけを返し得る。ここが返すのはホストが名乗った値そのものであり、
+    /// 実装は転送するだけである。
+    ///
+    /// **呼び出し側の責務**: 番号は対象の性質であるため、[`Self::focused_object`]
+    /// と突き合わせ、対象が無ければ番号も落とす。対象と番号が食い違った組を
+    /// 応答へ載せない。
     fn focus_section(&self) -> Result<Option<usize>, ReadError>;
 
     /// 開始フレームが完全一致するオブジェクトの同一性の材料を返す。

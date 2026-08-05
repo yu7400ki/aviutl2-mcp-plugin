@@ -3494,6 +3494,16 @@ mod tests {
         }
     }
 
+    /// 位置の列をレイヤー・開始フレームの昇順へ並べ替えた複製。
+    ///
+    /// 並べ替えを確かめる検査が、フェイクの並びで骨抜きにならないことを表明する
+    /// ために用いる。
+    fn ascending(positions: &[(usize, usize)]) -> Vec<(usize, usize)> {
+        let mut sorted = positions.to_vec();
+        sorted.sort();
+        sorted
+    }
+
     /// ホストが逆順で返しても、選択がレイヤー・開始フレームの昇順で返ることを
     /// 確かめる。
     ///
@@ -3505,10 +3515,9 @@ mod tests {
         let adapter = adapter_with(|_| selecting_host());
         // ホストが既に昇順で返していれば、並べ替えを外した実装でも同じ結果に
         // なる。フェイクの並びが期待と違うことを先に押さえる。
-        let mut ascending = adapter.host.selected.clone();
-        ascending.sort();
         assert_ne!(
-            adapter.host.selected, ascending,
+            adapter.host.selected,
+            ascending(&adapter.host.selected),
             "フェイクが昇順で返しています"
         );
 
@@ -3538,6 +3547,14 @@ mod tests {
     #[test]
     fn the_selection_reads_aliases_only_within_the_page() {
         let adapter = adapter_with(|_| selecting_host());
+        // 窓の位置で並べ替えの有無を見分ける検査である。ホストが既に昇順で
+        // 返していれば、並べ替えを外した実装でも同じ対象が窓に入る。
+        assert_ne!(
+            adapter.host.selected,
+            ascending(&adapter.host.selected),
+            "フェイクが昇順で返しています"
+        );
+
         let snapshot = adapter
             .get_selection(
                 0,
