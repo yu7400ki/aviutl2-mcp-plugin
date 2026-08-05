@@ -817,6 +817,17 @@ impl SceneEditor for CachingEditor<'_> {
             .create_object_from_media_file(ticket, path, layer, frame)
     }
 
+    fn create_object_from_effect(
+        &self,
+        ticket: crate::edit::precondition::MutationTicket<'_>,
+        name: &str,
+        layer: usize,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.inner
+            .create_object_from_effect(ticket, name, layer, frame)
+    }
+
     fn object_position(&self, object: &ResolvedObject<'_>) -> Result<ObjectPosition, EditError> {
         self.inner.object_position(object)
     }

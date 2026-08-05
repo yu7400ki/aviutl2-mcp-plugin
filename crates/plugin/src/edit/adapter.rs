@@ -584,6 +584,12 @@ fn layer_state_applied(
 impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
     fn create_object(&self, params: &CreateObjectParams) -> Result<EditOutcome, EditError> {
         self.ensure_editable()?;
+        // 作成元が effect 名の場合だけ、付与と同じ経路でカタログを確かめる。
+        // 種別による絞り込みは行わない。どの effect が作成の元になれるかは
+        // SDK が述べておらず、絞れば実際に作れる effect を拒み得る。
+        if let ObjectSource::Effect { name } = &params.source {
+            self.ensure_effect_registered(name)?;
+        }
         let project = self.project.as_ref();
         let layer = index(params.placement.layer);
         let frame = index(params.placement.frame);
@@ -622,6 +628,9 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 }
                 ObjectSource::ObjectAlias { alias } => {
                     editor.create_object_from_alias(ticket, alias, layer, frame)
+                }
+                ObjectSource::Effect { name } => {
+                    editor.create_object_from_effect(ticket, name, layer, frame)
                 }
             })?;
 

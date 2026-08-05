@@ -8,7 +8,7 @@
 //! ハンドルの `Debug` は生ポインタを出力するため、書式化に用いない。
 
 use crate::EDIT_HANDLE;
-use crate::edit::error::{EditError, NotIssuedReason};
+use crate::edit::error::{EditError, NotIssuedReason, UnsupportedReason};
 use crate::edit::host::{
     EditHost, EffectSlot, HostSelection, ObjectPosition, ObjectSlot, SceneEditor,
 };
@@ -60,6 +60,21 @@ fn mutation_failure(operation: &'static str, error: &EditSectionError) -> EditEr
         EditSectionError::ApiCallFailed
         | EditSectionError::NonUtf8Data(_)
         | EditSectionError::ParseFailed(_) => sdk(operation),
+    }
+}
+
+/// effect 名からの作成の失敗を、SDK が拒んだ場合とそれ以外に分けて写す。
+///
+/// ラッパーは戻り値が `nullptr` の場合を [`EditSectionError::ApiCallFailed`] として
+/// 返す。ヘッダーは元にできない effect を指定した場合に失敗すると明記しており、
+/// 呼ぶ前に判別する手段が無い。他の SDK 失敗と混ぜず専用の名前で返す。
+/// 届かなかった失敗の分類は [`mutation_failure`] のものをそのまま使う。
+fn creation_failure(operation: &'static str, error: &EditSectionError) -> EditError {
+    match mutation_failure(operation, error) {
+        EditError::Sdk { .. } => EditError::UnsupportedTarget {
+            reason: UnsupportedReason::EffectNotCreatable,
+        },
+        other => other,
     }
 }
 
@@ -371,6 +386,20 @@ impl SceneEditor for SdkSceneEditor<'_> {
             .create_object_from_media_file(path, layer, frame, None)
             .map(|_| ())
             .map_err(|error| mutation_failure("create_object_from_media_file", &error))
+    }
+
+    fn create_object_from_effect(
+        &self,
+        _ticket: MutationTicket<'_>,
+        name: &str,
+        layer: usize,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        // 長さの指定は受け付けない。`None` を渡すとホストが長さと挿入位置を決める。
+        self.section
+            .create_object(name, layer, frame, None)
+            .map(|_| ())
+            .map_err(|error| creation_failure("create_object", &error))
     }
 
     fn object_position(&self, object: &ResolvedObject<'_>) -> Result<ObjectPosition, EditError> {

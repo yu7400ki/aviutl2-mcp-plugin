@@ -42,6 +42,11 @@ impl RetryRequires {
 pub enum UnsupportedReason {
     /// 登録されていない effect 名。
     EffectNotRegistered,
+    /// 登録されてはいるが、その effect 名からはオブジェクトを作成できない。
+    ///
+    /// どの effect が作成の元になれるかは SDK が述べていない。作成の失敗そのもの
+    /// でしか判別できないため、種別による事前の絞り込みは行わない。
+    EffectNotCreatable,
     /// 出力項目で有効・無効を変更できない。
     EffectStateImmutable,
     /// SDK が対応しないメディアファイル。
@@ -68,6 +73,7 @@ impl UnsupportedReason {
     /// [`UnsupportedReason::as_str`] が返し得る名前を数え上げるために用いる。
     pub const ALL: &'static [UnsupportedReason] = &[
         UnsupportedReason::EffectNotRegistered,
+        UnsupportedReason::EffectNotCreatable,
         UnsupportedReason::EffectStateImmutable,
         UnsupportedReason::MediaNotSupported,
         UnsupportedReason::ItemTypeNotWritable,
@@ -79,6 +85,7 @@ impl UnsupportedReason {
     pub fn as_str(self) -> &'static str {
         match self {
             UnsupportedReason::EffectNotRegistered => "effect_not_registered",
+            UnsupportedReason::EffectNotCreatable => "effect_not_creatable",
             UnsupportedReason::EffectStateImmutable => "effect_state_immutable",
             UnsupportedReason::MediaNotSupported => "media_not_supported",
             UnsupportedReason::ItemTypeNotWritable => "item_type_not_writable",
@@ -92,6 +99,9 @@ impl std::fmt::Display for UnsupportedReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let text = match self {
             UnsupportedReason::EffectNotRegistered => "指定された effect は登録されていません",
+            UnsupportedReason::EffectNotCreatable => {
+                "指定された effect からはオブジェクトを作成できません"
+            }
             UnsupportedReason::EffectStateImmutable => "対象 effect の有効・無効は変更できません",
             UnsupportedReason::MediaNotSupported => "対応していないメディアファイルです",
             UnsupportedReason::ItemTypeNotWritable => {
@@ -743,6 +753,9 @@ pub(crate) mod tests {
                 reason: UnsupportedReason::EffectNotRegistered,
             },
             EditError::UnsupportedTarget {
+                reason: UnsupportedReason::EffectNotCreatable,
+            },
+            EditError::UnsupportedTarget {
                 reason: UnsupportedReason::EffectStateImmutable,
             },
             EditError::UnsupportedTarget {
@@ -895,6 +908,7 @@ pub(crate) mod tests {
         // 足りない。網羅 match を添えて、理由を足したときに気付ける形にする。
         let unsupported = [
             UnsupportedReason::EffectNotRegistered,
+            UnsupportedReason::EffectNotCreatable,
             UnsupportedReason::EffectStateImmutable,
             UnsupportedReason::MediaNotSupported,
             UnsupportedReason::ItemTypeNotWritable,
@@ -904,6 +918,7 @@ pub(crate) mod tests {
         for reason in unsupported {
             match reason {
                 UnsupportedReason::EffectNotRegistered
+                | UnsupportedReason::EffectNotCreatable
                 | UnsupportedReason::EffectStateImmutable
                 | UnsupportedReason::MediaNotSupported
                 | UnsupportedReason::ItemTypeNotWritable
@@ -975,6 +990,7 @@ pub(crate) mod tests {
                 ErrorCode::InvalidArgument,
                 ErrorCode::InvalidArgument,
                 ErrorCode::InvalidArgument,
+                ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,

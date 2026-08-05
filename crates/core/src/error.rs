@@ -200,6 +200,7 @@ pub const REASON_VALUES: &[&str] = &[
     "dimension_out_of_range",
     "duplicate_target",
     "edit_info_out_of_range",
+    "effect_not_creatable",
     "effect_not_registered",
     "effect_state_immutable",
     "empty",

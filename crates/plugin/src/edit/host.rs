@@ -155,6 +155,23 @@ pub trait SceneEditor {
         frame: usize,
     ) -> Result<(), EditError>;
 
+    /// effect 名からオブジェクトを作成する。
+    ///
+    /// 作成された対象を返さない理由は [`Self::create_object_from_alias`] と同じ。
+    ///
+    /// SDK は元にできない effect 名に対して失敗を返す。どの effect が元になれるかを
+    /// 呼ぶ前に判別する手段が無いため、この失敗は
+    /// [`UnsupportedReason::EffectNotCreatable`] として返る。
+    ///
+    /// [`UnsupportedReason::EffectNotCreatable`]: crate::edit::error::UnsupportedReason::EffectNotCreatable
+    fn create_object_from_effect(
+        &self,
+        ticket: MutationTicket<'_>,
+        name: &str,
+        layer: usize,
+        frame: usize,
+    ) -> Result<(), EditError>;
+
     /// 解決済みオブジェクトの現在の位置を読み直す。
     ///
     /// 移動は対象を破棄しないためトークンは有効なままであり、位置を直接読める。

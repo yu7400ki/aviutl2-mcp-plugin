@@ -84,6 +84,13 @@ pub enum ObjectSource {
         /// 複数のオブジェクトを含む alias は全てが作成される。
         alias: String,
     },
+    /// エフェクト名から作成する。
+    Effect {
+        /// エイリアスファイルの effect.name の値。
+        ///
+        /// 検証の規則は `add_effect` が受ける effect 名と同じである。
+        name: String,
+    },
 }
 
 impl ObjectSource {
@@ -94,6 +101,12 @@ impl ObjectSource {
             ObjectSource::ObjectAlias { alias } => {
                 validate_alias(alias).map_err(|source| EditInputError::Text {
                     field: FIELD_ALIAS,
+                    source,
+                })
+            }
+            ObjectSource::Effect { name } => {
+                validate_name(name).map_err(|source| EditInputError::Text {
+                    field: FIELD_NAME,
                     source,
                 })
             }
@@ -1830,6 +1843,13 @@ mod tests {
             json!({"type": "object_alias", "alias": "[vo]"})
         );
         assert_eq!(
+            serde_json::to_value(ObjectSource::Effect {
+                name: "テキスト".to_string(),
+            })
+            .unwrap(),
+            json!({"type": "effect", "name": "テキスト"})
+        );
+        assert_eq!(
             serde_json::to_value(RangeChange::Set { start: 1, end: 2 }).unwrap(),
             json!({"type": "set", "start": 1, "end": 2})
         );
@@ -2290,6 +2310,95 @@ mod tests {
             .validate(),
             Ok(())
         );
+    }
+
+    #[test]
+    fn create_validates_the_effect_name_by_the_same_rule_as_add_effect() {
+        // 名前の規則が作成元と effect の付与で食い違うと、同じ名前が片方でだけ
+        // 通る。上限は UTF-16 code unit で数える。
+        let over = "🎬".repeat(MAX_NAME_UTF16_UNITS / 2 + 1);
+        let at_limit = "🎬".repeat(MAX_NAME_UTF16_UNITS / 2);
+        for name in [over.clone(), at_limit.clone(), "図形\0".to_string()] {
+            assert_eq!(
+                CreateObjectParams {
+                    source: ObjectSource::Effect { name: name.clone() },
+                    ..sample_create()
+                }
+                .validate()
+                .map_err(|error| match error {
+                    EditInputError::Text { source, .. } => source,
+                    other => panic!("{other:?}"),
+                }),
+                AddEffectParams {
+                    object: sample_object_selector(),
+                    effect_name: name.clone(),
+                }
+                .validate()
+                .map_err(|error| match error {
+                    EditInputError::Text { source, .. } => source,
+                    other => panic!("{other:?}"),
+                }),
+                "{name:?}"
+            );
+        }
+
+        assert_eq!(
+            CreateObjectParams {
+                source: ObjectSource::Effect {
+                    name: "図形\0".to_string(),
+                },
+                ..sample_create()
+            }
+            .validate(),
+            Err(EditInputError::Text {
+                field: FIELD_NAME,
+                source: TextSyntaxError::ContainsNul,
+            })
+        );
+        assert!(matches!(
+            CreateObjectParams {
+                source: ObjectSource::Effect { name: over },
+                ..sample_create()
+            }
+            .validate(),
+            Err(EditInputError::Text {
+                field: FIELD_NAME,
+                source: TextSyntaxError::TooLongUtf16 { .. },
+            })
+        ));
+        assert_eq!(
+            CreateObjectParams {
+                source: ObjectSource::Effect { name: at_limit },
+                ..sample_create()
+            }
+            .validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_effect_source_is_not_subject_to_the_path_rules() {
+        // 作成元がパスを運ばない以上、パスの規則は掛からない。掛かると、
+        // パスとしては不正な文字列を名前に持つ effect を作成元にできなくなる。
+        for name in [
+            r"..\図形",
+            r"\\.\図形",
+            r"C:\図形:1",
+            r"\\server\share\図形",
+            "図形",
+        ] {
+            assert_eq!(
+                CreateObjectParams {
+                    source: ObjectSource::Effect {
+                        name: name.to_string(),
+                    },
+                    ..sample_create()
+                }
+                .validate(),
+                Ok(()),
+                "{name}"
+            );
+        }
     }
 
     #[test]

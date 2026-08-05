@@ -14,10 +14,11 @@ use crate::edit::fake::{
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::with_silent_panic_hook;
 use aviutl2_mcp_core::{
-    CreateObjectSectionParams, CursorPosition, DeleteObjectSectionParams, Destination,
-    EditOperation, EffectItem, EffectItemType, EffectSelector, ErrorCode, Fingerprint, FiniteF64,
-    GridBpm, ItemValue, LayerNameChange, MAX_GRID_BPM_ENTRIES, MoveObjectSectionParams,
-    ObjectSectionsOutcome, ObjectSelector, PageRequest, Placement,
+    AvailableEffect, CreateObjectSectionParams, CursorPosition, DeleteObjectSectionParams,
+    Destination, EditOperation, EffectFlags, EffectItem, EffectItemType, EffectSelector,
+    EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemValue, LayerNameChange,
+    MAX_GRID_BPM_ENTRIES, MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSelector,
+    PageRequest, Placement,
 };
 use serde_json::json;
 use std::sync::mpsc::channel;
@@ -758,6 +759,220 @@ fn an_unsupported_media_file_is_rejected_before_the_mutation() {
     assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
     assert_eq!(error.details()["reason"], json!("media_not_supported"));
     harness.assert_untouched();
+}
+
+/// effect 名を作成元とする要求を組み立てる。
+fn create_from_effect(harness: &Harness, name: &str, layer: u32, frame: u32) -> CreateObjectParams {
+    CreateObjectParams {
+        source: ObjectSource::Effect {
+            name: name.to_string(),
+        },
+        placement: Placement {
+            scene_id: SCENE_ID,
+            layer,
+            frame,
+        },
+        expected_project_epoch: harness.epoch(),
+    }
+}
+
+#[test]
+fn an_effect_source_calls_the_creation_api_that_takes_an_effect_name() {
+    let harness = Harness::new();
+    harness.host.clear_calls();
+    harness
+        .edit
+        .create_object(&create_from_effect(&harness, "ぼかし", 1, 600))
+        .expect("effect 名から作成できませんでした");
+
+    let calls = harness.host.calls();
+    assert!(
+        calls.contains(&"create_object"),
+        "effect 名を取る作成 API を呼んでいません: {calls:?}"
+    );
+    assert!(
+        !calls.contains(&"create_object_from_alias")
+            && !calls.contains(&"create_object_from_media_file"),
+        "既存 2 種の経路が呼ばれています: {calls:?}"
+    );
+}
+
+#[test]
+fn the_existing_sources_keep_their_own_creation_api() {
+    for (source, expected) in [
+        (
+            ObjectSource::ObjectAlias {
+                alias: "[obj]".to_string(),
+            },
+            "create_object_from_alias",
+        ),
+        (
+            ObjectSource::MediaFile {
+                path: r"C:\media\clip.mp4".to_string(),
+            },
+            "create_object_from_media_file",
+        ),
+    ] {
+        let harness = Harness::new();
+        harness.host.clear_calls();
+        harness
+            .edit
+            .create_object(&CreateObjectParams {
+                source,
+                placement: Placement {
+                    scene_id: SCENE_ID,
+                    layer: 1,
+                    frame: 600,
+                },
+                expected_project_epoch: harness.epoch(),
+            })
+            .expect("作成に失敗しました");
+
+        let calls = harness.host.calls();
+        assert!(calls.contains(&expected), "{expected} を呼んでいません");
+        assert!(
+            !calls.contains(&"create_object"),
+            "{expected} の経路が effect 名の作成 API へ流れています"
+        );
+    }
+}
+
+#[test]
+fn an_effect_source_does_not_go_through_the_media_path_check() {
+    // 作成元がパスを運ばない以上、パスの規則は掛からない。掛けると、パスとしては
+    // 不正な文字列を名前に持つ effect が作成元にできなくなる。
+    let harness = Harness::with(|host| {
+        host.catalog.push(AvailableEffect {
+            name: r"..\図形:1".to_string(),
+            effect_type: EffectType::Filter,
+            flags: EffectFlags::from_raw(1),
+            items: Vec::new(),
+        });
+    });
+    harness.host.clear_calls();
+    harness
+        .edit
+        .create_object(&create_from_effect(&harness, r"..\図形:1", 1, 600))
+        .expect("パスとして不正な effect 名が拒否されました");
+
+    let calls = harness.host.calls();
+    assert!(
+        !calls.contains(&"is_support_media_file"),
+        "メディア対応の確認が effect 名に掛かっています: {calls:?}"
+    );
+}
+
+#[test]
+fn an_unregistered_effect_source_is_rejected_without_entering_the_section() {
+    let harness = Harness::new();
+    let error = harness
+        .edit
+        .create_object(&create_from_effect(
+            &harness,
+            "存在しないエフェクト",
+            1,
+            600,
+        ))
+        .expect_err("未登録の effect 名から作成できました");
+
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(error.details()["reason"], json!("effect_not_registered"));
+    assert_eq!(harness.host.enter_calls(), 0);
+    harness.assert_untouched();
+}
+
+#[test]
+fn an_effect_the_host_refuses_to_create_from_is_reported_apart_from_an_unregistered_one() {
+    // 「登録されていない」と「登録されているが元にできない」は別の事実である。
+    // 畳むと、要求元は名前の誤りと対応の欠如を区別できない。
+    let harness =
+        Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::RejectObjectCreation)));
+    let refused = harness
+        .edit
+        .create_object(&create_from_effect(&harness, "ぼかし", 1, 600))
+        .expect_err("拒否された作成が成功として返りました");
+
+    assert_eq!(refused.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(refused.details()["reason"], json!("effect_not_creatable"));
+
+    let harness = Harness::new();
+    let unregistered = harness
+        .edit
+        .create_object(&create_from_effect(
+            &harness,
+            "存在しないエフェクト",
+            1,
+            600,
+        ))
+        .expect_err("未登録の effect 名から作成できました");
+
+    assert_ne!(
+        refused.details()["reason"],
+        unregistered.details()["reason"],
+        "2 つの失敗が同じ名前で返っています"
+    );
+}
+
+#[test]
+fn an_occupied_creation_target_is_rejected_for_an_effect_source() {
+    let harness = Harness::new();
+    let error = harness
+        .edit
+        .create_object(&create_from_effect(&harness, "ぼかし", 1, 150))
+        .expect_err("既存の対象へ重ねて作成できました");
+
+    assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+    assert_eq!(error.details()["reason"], json!("destination_occupied"));
+    harness.assert_untouched();
+}
+
+#[test]
+fn a_locked_layer_rejects_creating_from_an_effect_name() {
+    let harness = Harness::new();
+    let error = harness
+        .edit
+        .create_object(&create_from_effect(&harness, "ぼかし", 2, 600))
+        .expect_err("ロックされたレイヤーへ作成できました");
+
+    assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+    assert_eq!(error.details()["reason"], json!("layer_locked"));
+    harness.assert_untouched();
+}
+
+#[test]
+fn every_effect_type_in_the_catalog_reaches_the_creation_api() {
+    // どの effect が作成の元になれるかは SDK が述べていない。種別で絞ると、
+    // 実際に作れる effect を呼ぶ前に拒むことになる。カタログに在る名前は
+    // 種別を問わず SDK へ届くことを固定する。
+    let types: Vec<EffectType> = crate::edit::fake::fake_catalog()
+        .into_iter()
+        .map(|effect| effect.effect_type)
+        .collect();
+    assert!(
+        types.len() > 1 && types.iter().any(|kind| *kind != EffectType::Input),
+        "カタログが単一種別では絞り込みの有無を判別できません"
+    );
+
+    for effect in crate::edit::fake::fake_catalog() {
+        let harness = Harness::new();
+        harness.host.clear_calls();
+        harness
+            .edit
+            .create_object(&create_from_effect(&harness, &effect.name, 1, 600))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{} ({:?}) の作成が拒否されました: {error}",
+                    effect.name, effect.effect_type
+                )
+            });
+
+        assert!(
+            harness.host.calls().contains(&"create_object"),
+            "{} ({:?}) が SDK へ届いていません",
+            effect.name,
+            effect.effect_type
+        );
+    }
 }
 
 #[test]

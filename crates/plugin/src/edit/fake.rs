@@ -7,7 +7,7 @@
 //! fingerprint と編集が照合する fingerprint が同じ材料から算出されることを、
 //! 同一のフェイク状態に対して確かめられる。
 
-use crate::edit::error::{EditError, NotIssuedReason};
+use crate::edit::error::{EditError, NotIssuedReason, UnsupportedReason};
 use crate::edit::host::{
     EditHost, EffectSlot, HostSelection, ObjectPosition, ObjectSlot, SceneEditor,
 };
@@ -77,6 +77,10 @@ pub(crate) enum Fault {
     ///
     /// 事前確認を通ったのに `false` が返る状況を作る。
     RejectSectionChange,
+    /// effect 名からの作成 API が理由を伝えずに拒否する。
+    ///
+    /// カタログに在る名前なのに `nullptr` が返る状況を作る。
+    RejectObjectCreation,
     /// 変更を発行した後で中間点の区間を読み直せない。
     ///
     /// 事前確認の読みには掛けない。掛けると変更を発行する前に落ち、read-back の
@@ -471,6 +475,7 @@ impl FakeEditHost {
 pub(crate) const MUTATIONS: &[&str] = &[
     "create_object_from_alias",
     "create_object_from_media_file",
+    "create_object",
     "move_object",
     "delete_object",
     "set_object_name",
@@ -699,6 +704,11 @@ impl FakeSceneEditor<'_> {
             Some(Fault::RejectSectionChange) => {
                 Err(EditError::SectionChangeRejected { operation: call })
             }
+            // effect 名からの作成は `nullptr` を返し得る。SDK 境界の実装はそれを
+            // 専用の理由へ写す。
+            Some(Fault::RejectObjectCreation) => Err(EditError::UnsupportedTarget {
+                reason: UnsupportedReason::EffectNotCreatable,
+            }),
             _ => Ok(()),
         }
     }
@@ -1103,6 +1113,17 @@ impl SceneEditor for FakeSceneEditor<'_> {
     ) -> Result<(), EditError> {
         self.mutation("create_object_from_media_file")?;
         self.create(layer, frame, format!("[{path}]"))
+    }
+
+    fn create_object_from_effect(
+        &self,
+        _ticket: MutationTicket<'_>,
+        name: &str,
+        layer: usize,
+        frame: usize,
+    ) -> Result<(), EditError> {
+        self.mutation("create_object")?;
+        self.create(layer, frame, format!("[{name}]"))
     }
 
     fn object_position(&self, object: &ResolvedObject<'_>) -> Result<ObjectPosition, EditError> {
