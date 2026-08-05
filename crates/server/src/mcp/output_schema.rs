@@ -709,10 +709,11 @@ mod tests {
         EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem, EffectItemType,
         EffectItemValues, EffectType, EvaluatedItem, Extent, FiniteF64, FrameRange,
         GetCurrentSceneResult, GridBpm, InstanceId, InstanceInfo, InstanceProject, InstanceState,
-        ItemValue, LayerInfo, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
+        ItemValue, LayerInfo, ListAvailableEffectsResult, ListFontsResult, ListLayersResult,
+        ListModulesResult, ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType,
         ObjectDetail, ObjectFingerprintInput, ObjectSummary, ObservedSelection, PageMeta,
-        SceneInfo, SceneRef, SectionRange, SelectionField, SelectionSnapshot, SelectionState,
-        TrackGroup, TrackInfo,
+        PaletteEntry, Rgba, SceneInfo, SceneRef, SectionRange, SelectionField, SelectionSnapshot,
+        SelectionState, TrackGroup, TrackInfo,
     };
 
     /// 値が schema に適合するかを再帰的に検査する。
@@ -1133,6 +1134,83 @@ mod tests {
             page: sample_page_meta(),
         };
         assert_conforms(list_available_effects(), &to_value(&result));
+    }
+
+    #[test]
+    fn list_fonts_schema_matches_dto() {
+        let result = ListFontsResult {
+            items: vec!["MS UI Gothic".to_string(), "游ゴシック".to_string()],
+            page: sample_page_meta(),
+        };
+        assert_conforms(list_fonts(), &to_value(&result));
+    }
+
+    #[test]
+    fn list_palettes_schema_matches_dto() {
+        // 現在のパレット名が取れた場合と取れなかった場合の両方を通す。
+        for current in [Some("[標準.既定]".to_string()), None] {
+            let result = ListPalettesResult {
+                current,
+                items: vec![PaletteEntry {
+                    name: "既定".to_string(),
+                    colors: sample_palette_colors(),
+                }],
+                page: sample_page_meta(),
+            };
+            assert_conforms(list_palettes(), &to_value(&result));
+        }
+    }
+
+    #[test]
+    fn the_palette_schema_declares_the_fixed_number_of_colors() {
+        // 固定長として宣言してあることを、件数の足りない値が退けられることで
+        // 確かめる。上限だけを宣言すると、欠けた組が適合したまま通る。
+        let mut colors = sample_palette_colors();
+        colors.pop();
+        let result = ListPalettesResult {
+            current: None,
+            items: vec![PaletteEntry {
+                name: "既定".to_string(),
+                colors,
+            }],
+            page: sample_page_meta(),
+        };
+        assert!(
+            check(&list_palettes(), &to_value(&result), "$").is_err(),
+            "63 件の色が固定長の宣言へ適合しました"
+        );
+    }
+
+    #[test]
+    fn list_modules_schema_matches_dto() {
+        // 既知の種別と、型としては表せる未知の種別の両方を通す。
+        let result = ListModulesResult {
+            items: vec![
+                ModuleEntry {
+                    module_type: ModuleType::ScriptObject,
+                    name: "テキスト".to_string(),
+                    information: "標準搭載".to_string(),
+                },
+                ModuleEntry {
+                    module_type: ModuleType::Unknown(42),
+                    name: "未知".to_string(),
+                    information: "説明".to_string(),
+                },
+            ],
+            page: sample_page_meta(),
+        };
+        assert_conforms(list_modules(), &to_value(&result));
+    }
+
+    fn sample_palette_colors() -> Vec<Rgba> {
+        (0..PALETTE_COLOR_COUNT)
+            .map(|index| Rgba {
+                r: index as u8,
+                g: 0,
+                b: 0,
+                a: 255,
+            })
+            .collect()
     }
 
     #[test]

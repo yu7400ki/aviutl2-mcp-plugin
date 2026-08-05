@@ -2291,6 +2291,9 @@ mod tests {
                 json!({ "expected_scene_id": SCENE_ID }),
             ),
             (ReadOperation::ListAvailableEffects, json!({})),
+            (ReadOperation::ListFonts, json!({})),
+            (ReadOperation::ListPalettes, json!({})),
+            (ReadOperation::ListModules, json!({})),
         ];
 
         for (operation, params) in paged {
@@ -2435,6 +2438,126 @@ mod tests {
 
         assert_eq!(result["page"]["snapshot_revision"], 7);
         assert_eq!(result["page"]["snapshot_revision"], REVISION);
+    }
+
+    /// ページ間の revision 照合を行わない列挙。
+    ///
+    /// いずれも登録物の集合であり、プロジェクトの編集内容から独立している。
+    const CATALOG_OPERATIONS: [ReadOperation; 4] = [
+        ReadOperation::ListAvailableEffects,
+        ReadOperation::ListFonts,
+        ReadOperation::ListPalettes,
+        ReadOperation::ListModules,
+    ];
+
+    #[test]
+    fn catalog_pages_ignore_snapshot_revision() {
+        // 無関係な編集で revision が進んでも、2 ページ目以降は拒否されない。
+        // 照合すると、一覧と関わりの無い編集で先頭からの取り直しを強いる一方、
+        // 一覧自身の変化はその値に現れないため取りこぼしも防げない。
+        for operation in CATALOG_OPERATIONS {
+            let adapter = FakeAdapter::new();
+            let result = read(
+                &adapter,
+                operation,
+                json!({ "offset": 1, "limit": 1, "snapshot_revision": REVISION - 1 }),
+            )
+            .unwrap_or_else(|error| panic!("{operation:?} が拒否されました: {error:?}"));
+
+            assert_eq!(
+                result["page"]["offset"], 1,
+                "{operation:?} が 2 ページ目を返していません"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_pages_report_the_revision_of_the_enumeration() {
+        // 照合しないことと、ページのメタ情報へ何を載せるかは別である。0 のような
+        // 固定値は実在し得る revision と区別が付かない。
+        for operation in CATALOG_OPERATIONS {
+            let adapter = FakeAdapter::new();
+            let result = read(&adapter, operation, json!({})).unwrap();
+            assert_eq!(
+                result["page"]["snapshot_revision"], REVISION,
+                "{operation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_fonts_returns_the_registered_names() {
+        let adapter = FakeAdapter::new();
+        let result = read(&adapter, ReadOperation::ListFonts, json!({})).unwrap();
+
+        assert_eq!(result["items"], json!(fake_fonts()));
+        assert_eq!(result["page"]["total_count"], fake_fonts().len());
+    }
+
+    #[test]
+    fn list_palettes_returns_the_current_name_and_the_colors() {
+        let adapter = FakeAdapter::new();
+        let result = read(&adapter, ReadOperation::ListPalettes, json!({})).unwrap();
+
+        assert_eq!(result["current"], "[標準.既定]");
+        assert_eq!(
+            result["items"][0]["colors"].as_array().unwrap().len(),
+            PALETTE_COLOR_COUNT
+        );
+        assert_eq!(result["items"][0]["colors"][0]["a"], 255);
+    }
+
+    #[test]
+    fn list_modules_filters_by_type() {
+        let adapter = FakeAdapter::new();
+        let result = read(
+            &adapter,
+            ReadOperation::ListModules,
+            json!({ "module_type": "plugin_input" }),
+        )
+        .unwrap();
+
+        assert_eq!(result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(result["items"][0]["name"], "入力プラグイン");
+        assert_eq!(result["items"][0]["module_type"], "plugin_input");
+        assert_eq!(result["page"]["total_count"], 1);
+    }
+
+    #[test]
+    fn list_modules_rejects_a_type_it_cannot_name() {
+        // 絞り込みは閉じた集合に対する等値判定である。名乗れない値を受けると、
+        // 0 件が「そういう種別が無い」のか「綴りを間違えた」のか区別できない。
+        let adapter = FakeAdapter::new();
+        let error = read(
+            &adapter,
+            ReadOperation::ListModules,
+            json!({ "module_type": "script_unknown" }),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(adapter.calls().is_empty());
+    }
+
+    #[test]
+    fn the_module_information_never_reaches_the_log() {
+        // 説明文は秘匿の対象ではないが、ローカルのログへは残さない。応答の
+        // 組み立てを記録へ写す変更が入れば、ここで現れる。
+        let logs = crate::test_support::capture_logs(|| {
+            let adapter = FakeAdapter::new();
+            let result = read(&adapter, ReadOperation::ListModules, json!({})).unwrap();
+            assert_eq!(
+                result["items"][0]["information"], "標準搭載",
+                "説明文が応答へ載っていません"
+            );
+        });
+
+        for module in fake_modules() {
+            assert!(
+                !logs.contains(&module.information),
+                "説明文がログへ出ています: {logs}"
+            );
+        }
     }
 
     #[test]

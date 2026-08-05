@@ -7,15 +7,17 @@ use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
     EffectItemValues, EffectType, ErrorCode, ErrorObject, EvaluatedItem, Extent, FiniteF64,
     FrameRange, GetCurrentSceneResult, GridBpm, InstanceId, InstanceState, LayerInfo,
-    ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, ObjectDetail,
-    ObjectFingerprintInput, ObjectSummary, PageMeta, RequestEnvelope, SceneInfo, SectionRange,
-    SelectionSnapshot, TrackGroup,
+    ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
+    ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType, ObjectDetail,
+    ObjectFingerprintInput, ObjectSummary, PALETTE_COLOR_COUNT, PageMeta, PaletteEntry,
+    RequestEnvelope, Rgba, SceneInfo, SectionRange, SelectionSnapshot, TrackGroup,
 };
 
 use aviutl2_mcp_server::mcp::input::{
     CatalogPageInput, EffectSelectorInput, GetEffectItemValuesInput, GetObjectInput,
-    GetSelectionInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput,
-    ListLayersInput, ListObjectsInput, ObjectFilterInput, ObjectSelectorInput, PageInput,
+    GetSelectionInput, InstanceInput, ListAvailableEffectsInput, ListFontsInput,
+    ListInstancesInput, ListLayersInput, ListModulesInput, ListObjectsInput, ListPalettesInput,
+    ModuleTypeInput, ObjectFilterInput, ObjectSelectorInput, PageInput,
 };
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
 use rmcp::handler::server::wrapper::Parameters;
@@ -542,6 +544,121 @@ async fn list_available_effects_tool_sends_effect_type() {
         requests[0].params,
         json!({
             "effect_type": "filter",
+            "offset": 0,
+            "limit": 50,
+            "snapshot_revision": null,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn list_fonts_tool_sends_only_the_page() {
+    let expected = serde_json::to_value(ListFontsResult {
+        items: vec!["MS UI Gothic".to_string()],
+        page: sample_page_meta(),
+    })
+    .expect("直列化できる");
+    let harness = Harness::start(responses("list_fonts", expected.clone()));
+
+    let result = harness
+        .server
+        .list_fonts(Parameters(ListFontsInput {
+            instance_id: harness.instance_id(),
+            page: effects_page_input(0, 50, None),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+    let requests = harness.read_requests();
+    assert_eq!(requests[0].operation, "list_fonts");
+    assert_eq!(
+        requests[0].params,
+        json!({ "offset": 0, "limit": 50, "snapshot_revision": null }),
+    );
+}
+
+#[tokio::test]
+async fn list_palettes_tool_carries_the_current_name_and_every_colour() {
+    let expected = serde_json::to_value(ListPalettesResult {
+        current: Some("[標準.既定]".to_string()),
+        items: vec![PaletteEntry {
+            name: "既定".to_string(),
+            colors: vec![
+                Rgba {
+                    r: 1,
+                    g: 2,
+                    b: 3,
+                    a: 255
+                };
+                PALETTE_COLOR_COUNT
+            ],
+        }],
+        page: sample_page_meta(),
+    })
+    .expect("直列化できる");
+    let harness = Harness::start(responses("list_palettes", expected.clone()));
+
+    let result = harness
+        .server
+        .list_palettes(Parameters(ListPalettesInput {
+            instance_id: harness.instance_id(),
+            page: effects_page_input(0, 50, None),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+    let structured = structured(&result);
+    assert_eq!(
+        structured["items"][0]["colors"].as_array().unwrap().len(),
+        64
+    );
+    assert_eq!(structured["items"][0]["colors"][0]["a"], 255);
+
+    let requests = harness.read_requests();
+    assert_eq!(requests[0].operation, "list_palettes");
+    assert_eq!(
+        requests[0].params,
+        json!({ "offset": 0, "limit": 50, "snapshot_revision": null }),
+    );
+}
+
+#[tokio::test]
+async fn list_modules_tool_sends_the_type_filter() {
+    let expected = serde_json::to_value(ListModulesResult {
+        items: vec![ModuleEntry {
+            module_type: ModuleType::PluginInput,
+            name: "入力プラグイン".to_string(),
+            information: "動画の読み込み".to_string(),
+        }],
+        page: sample_page_meta(),
+    })
+    .expect("直列化できる");
+    let harness = Harness::start(responses("list_modules", expected.clone()));
+
+    let result = harness
+        .server
+        .list_modules(Parameters(ListModulesInput {
+            instance_id: harness.instance_id(),
+            module_type: Some(ModuleTypeInput::PluginInput),
+            page: effects_page_input(0, 50, None),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+    // 説明文は structuredContent が運び、text へは載せない。
+    let text = text_of(&result);
+    assert!(text.contains("入力プラグイン"), "{text}");
+    assert!(!text.contains("動画の読み込み"), "{text}");
+
+    let requests = harness.read_requests();
+    assert_eq!(requests[0].operation, "list_modules");
+    assert_eq!(
+        requests[0].params,
+        json!({
+            "module_type": "plugin_input",
             "offset": 0,
             "limit": 50,
             "snapshot_revision": null,

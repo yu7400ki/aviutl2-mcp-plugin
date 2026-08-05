@@ -694,8 +694,9 @@ mod tests {
     use aviutl2_mcp_core::{
         AvailableEffect, Cursor, DisplayRange, EffectFingerprintInput, EffectFlags, EffectInfo,
         EffectItem, EffectItemType, EffectType, FiniteF64, FrameRange, InstanceId, InstanceProject,
-        InstanceState, ItemValue, LayerInfo, ObjectFingerprintInput, ObjectSummary,
-        ObservedSelection, SceneInfo, SectionRange, TrackGroup,
+        InstanceState, ItemValue, LayerInfo, ModuleEntry, ModuleType, ObjectFingerprintInput,
+        ObjectSummary, ObservedSelection, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SceneInfo,
+        SectionRange, TrackGroup,
     };
 
     /// 上限を必ず超える件数。要求上限を無視した応答でも打ち切られることを確かめる。
@@ -1573,6 +1574,88 @@ mod tests {
             layers_text.contains("snapshot_revision=42"),
             "{layers_text}"
         );
+    }
+
+    #[test]
+    fn the_catalog_texts_do_not_show_snapshot_revision() {
+        // 照合に使えない値を次のページ要求へ促さない。
+        let texts = [
+            (
+                "list_fonts",
+                fonts(&ListFontsResult {
+                    items: Vec::new(),
+                    page: page(1_000, 200),
+                }),
+            ),
+            (
+                "list_palettes",
+                palettes(&ListPalettesResult {
+                    current: None,
+                    items: Vec::new(),
+                    page: page(1_000, 200),
+                }),
+            ),
+            (
+                "list_modules",
+                modules(&ListModulesResult {
+                    items: Vec::new(),
+                    page: page(1_000, 200),
+                }),
+            ),
+        ];
+        for (tool, text) in texts {
+            assert!(!text.contains("snapshot_revision"), "{tool}: {text}");
+            assert!(text.contains("続きは offset=200"), "{tool}: {text}");
+        }
+    }
+
+    #[test]
+    fn palette_text_reports_the_colour_count_without_the_colours() {
+        let text = palettes(&ListPalettesResult {
+            current: Some("[標準.既定]".to_string()),
+            items: vec![PaletteEntry {
+                name: "既定".to_string(),
+                colors: vec![
+                    Rgba {
+                        r: 18,
+                        g: 52,
+                        b: 86,
+                        a: 255
+                    };
+                    PALETTE_COLOR_COUNT
+                ],
+            }],
+            page: page(1, 1),
+        });
+        assert!(text.contains("[標準.既定]"), "{text}");
+        assert!(text.contains("colors=64"), "{text}");
+    }
+
+    #[test]
+    fn palette_text_says_the_current_name_is_missing() {
+        let text = palettes(&ListPalettesResult {
+            current: None,
+            items: Vec::new(),
+            page: page(0, 0),
+        });
+        assert!(text.contains("取得できませんでした"), "{text}");
+    }
+
+    #[test]
+    fn module_text_does_not_carry_the_information() {
+        // 秘匿の対象ではないが、1 件あたりの長さが定まらない。行に載せると
+        // 一覧の大きさが説明文の長さで決まってしまう。
+        let text = modules(&ListModulesResult {
+            items: vec![ModuleEntry {
+                module_type: ModuleType::PluginInput,
+                name: "入力プラグイン".to_string(),
+                information: SECRET_VALUE.to_string(),
+            }],
+            page: page(1, 1),
+        });
+        assert!(text.contains("入力プラグイン"), "{text}");
+        assert!(text.contains("plugin_input"), "{text}");
+        assert!(!text.contains(SECRET_VALUE), "{text}");
     }
 
     #[test]

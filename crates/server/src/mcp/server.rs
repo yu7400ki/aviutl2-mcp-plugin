@@ -3210,6 +3210,104 @@ mod tests {
     }
 
     #[test]
+    fn the_catalog_tools_do_not_ask_for_a_scene_id() {
+        // フォント・パレット・モジュールはシーンに紐づかない。何も守らない値を
+        // 必須にすると、要求元は意味の無い値を用意することになる。
+        for name in ["list_fonts", "list_palettes", "list_modules"] {
+            let tool = tool_named(name);
+            let schema = Value::Object(tool.input_schema.as_ref().clone()).to_string();
+            assert!(
+                !schema.contains("expected_scene_id"),
+                "{name} がシーン ID を宣言しています"
+            );
+            assert_eq!(
+                tool.input_schema["required"],
+                serde_json::json!(["instance_id"]),
+                "{name} の必須項目"
+            );
+        }
+    }
+
+    #[test]
+    fn the_list_modules_input_declares_exactly_the_types_it_accepts() {
+        // 種別は SDK が定めた閉じた集合である。値を落とせば既存の要求が
+        // invalid_argument になり、綴りを変えれば同じ要求が通らなくなる。
+        // どちらも要求元から見れば契約の破壊である。
+        let tool = tool_named("list_modules");
+        let names = tool.input_schema["$defs"]["ModuleTypeInput"]["enum"]
+            .as_array()
+            .expect("種別が値の集合として宣言されていません");
+        let names: Vec<&str> = names
+            .iter()
+            .map(|name| name.as_str().expect("種別名は文字列である"))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "script_filter",
+                "script_object",
+                "script_camera",
+                "script_track",
+                "script_module",
+                "plugin_input",
+                "plugin_output",
+                "plugin_filter",
+                "plugin_generic",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_catalog_tools_say_that_the_revision_is_not_matched() {
+        // 受理するが照合しない値である。黙っていると、要求元は 2 ページ目が
+        // 落ちない理由も、添えても取りこぼしが防げない理由も分からない。
+        for name in [
+            "list_available_effects",
+            "list_fonts",
+            "list_palettes",
+            "list_modules",
+        ] {
+            let description = description_of(name);
+            assert!(
+                description.contains("snapshot_revision は受理するがページ間の照合には用いない"),
+                "{name} の説明が照合しないことを述べていません"
+            );
+        }
+    }
+
+    #[test]
+    fn list_palettes_states_what_the_colours_and_the_current_name_are() {
+        // 色数と不透明度、現在のパレット名の形式、読めなかったパレットの扱い。
+        // いずれも応答を受け取る前に知っている必要がある。
+        let description = description_of("list_palettes");
+        for phrase in [
+            "64 件",
+            "a は常に 255",
+            "透明度の情報を持たない",
+            "[ラベル名.パレット名]",
+            "total_count",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "list_palettes の説明が {phrase} に触れていません"
+            );
+        }
+    }
+
+    #[test]
+    fn list_modules_admits_that_the_list_can_be_incomplete() {
+        // 種別を解釈できないモジュールは一覧へ現れない。黙っていると、要求元は
+        // 一覧を登録物の全体だと読む。
+        let description = description_of("list_modules");
+        for phrase in ["既知の 9 種別", "欠落し得る"] {
+            assert!(
+                description.contains(phrase),
+                "list_modules の説明が {phrase} に触れていません"
+            );
+        }
+    }
+
+    #[test]
     fn the_create_object_input_declares_exactly_the_sources_it_accepts() {
         // 作成元は判別子つきの union であり、未知フィールドを拒否する。variant を
         // 落とせば既存の要求が invalid_argument になり、タグ名を変えれば同じ要求が

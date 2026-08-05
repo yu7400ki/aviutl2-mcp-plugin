@@ -796,7 +796,7 @@ fn parse_check(raw: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::ErrorCode;
+    use aviutl2_mcp_core::{ErrorCode, PALETTE_COLOR_COUNT};
 
     fn placement(frame_start: usize, frame_end: usize) -> HostObjectPlacement {
         HostObjectPlacement {
@@ -1329,6 +1329,80 @@ mod tests {
             ),
         ] {
             assert_eq!(EffectItemType::from_raw(i32::from(wrapper)), expected);
+        }
+    }
+
+    #[test]
+    fn palette_colors_keeps_every_color_and_the_alpha() {
+        // 写像はフェイクの外側にあり、読み取り口を差し替えた検査では 1 度も
+        // 通らない。SDK の型から直接呼んで固定する。
+        let colors = std::array::from_fn(|index| aviutl2::generic::PaletteColor {
+            r: index as u8,
+            g: 1,
+            b: 2,
+            a: 255,
+        });
+        let mapped = palette_colors(aviutl2::generic::PaletteInfo { colors });
+
+        assert_eq!(mapped.len(), PALETTE_COLOR_COUNT);
+        assert_eq!(mapped.len(), 64);
+        for (index, color) in mapped.iter().enumerate() {
+            assert_eq!(color.r, index as u8, "{index} 番目の色が並び替わっています");
+            assert_eq!((color.g, color.b), (1, 2), "{index}");
+            assert_eq!(color.a, 255, "{index} 番目の不透明度が落ちています");
+        }
+    }
+
+    #[test]
+    fn module_entries_map_every_known_type() {
+        // 種別の写像は raw 値を経由する。既知の種別が増えたときに写し先を
+        // 足し忘れると、ここが未知の種別として落とす。
+        for (wrapper, expected) in [
+            (
+                aviutl2::generic::ModuleType::ScriptFilter,
+                ModuleType::ScriptFilter,
+            ),
+            (
+                aviutl2::generic::ModuleType::ScriptObject,
+                ModuleType::ScriptObject,
+            ),
+            (
+                aviutl2::generic::ModuleType::ScriptCamera,
+                ModuleType::ScriptCamera,
+            ),
+            (
+                aviutl2::generic::ModuleType::ScriptTrack,
+                ModuleType::ScriptTrack,
+            ),
+            (
+                aviutl2::generic::ModuleType::ScriptModule,
+                ModuleType::ScriptModule,
+            ),
+            (
+                aviutl2::generic::ModuleType::PluginInput,
+                ModuleType::PluginInput,
+            ),
+            (
+                aviutl2::generic::ModuleType::PluginOutput,
+                ModuleType::PluginOutput,
+            ),
+            (
+                aviutl2::generic::ModuleType::PluginFilter,
+                ModuleType::PluginFilter,
+            ),
+            (
+                aviutl2::generic::ModuleType::PluginGeneric,
+                ModuleType::PluginGeneric,
+            ),
+        ] {
+            let entry = module_entry(aviutl2::generic::ModuleInfo {
+                module_type: wrapper,
+                name: "名前".to_string(),
+                information: "説明".to_string(),
+            });
+            assert_eq!(entry.module_type, expected, "{wrapper:?}");
+            assert_eq!(entry.name, "名前");
+            assert_eq!(entry.information, "説明");
         }
     }
 
