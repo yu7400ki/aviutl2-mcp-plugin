@@ -9,7 +9,7 @@ use serde::de::{self, MapAccess};
 use serde::ser::SerializeMap;
 
 /// 未知種別を表すオブジェクトの判別子。
-pub(crate) const UNKNOWN_TAG: &str = "unknown";
+const UNKNOWN_TAG: &str = "unknown";
 
 /// 未知種別オブジェクトが持つフィールド。
 const UNKNOWN_FIELDS: &[&str] = &["type", "raw"];

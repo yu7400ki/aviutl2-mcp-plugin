@@ -878,7 +878,11 @@ impl AviUtl2McpServer {
     /// つまりパレットは透明度の情報を持たない。
     /// current は現在のパレット名であり、ラベル付きの場合は [ラベル名.パレット名] の形式になる。
     /// 取得できない場合は null となるが、一覧はそのまま返る。
-    /// 色を読み取れなかったパレットは一覧から除かれ、その分は total_count にも反映される。
+    /// 色を読み取れなかったパレットは一覧から除かれる。
+    /// total_count から引かれるのは本ページで落とした分だけであり、
+    /// 落ちたページとそうでないページで値が違い得る。全体の件数として扱わないこと。
+    /// ページ内のすべてが落ちると items が空のまま has_more が true になり得る。
+    /// 反復は items が空になったことではなく has_more と next_offset で終端すること。
     /// offset と limit（1〜200、既定 50）でページを指定する。
     /// snapshot_revision は受理するがページ間の照合には用いない。
     /// パレットは登録済みの集合であり、プロジェクトの revision に連動しないためである。
@@ -3279,13 +3283,21 @@ mod tests {
     fn list_palettes_states_what_the_colours_and_the_current_name_are() {
         // 色数と不透明度、現在のパレット名の形式、読めなかったパレットの扱い。
         // いずれも応答を受け取る前に知っている必要がある。
+        //
+        // total_count は本ページで落とした分だけを引いた値であり、ページごとに
+        // 違い得る。全体の件数として読んで反復を組むと、集まりきらないまま
+        // 終わらないループになる。落ちた分だけ短いページも空のページも起こり
+        // 得るため、終端の材料が has_more と next_offset であることも述べる。
         let description = description_of("list_palettes");
         for phrase in [
             "64 件",
             "a は常に 255",
             "透明度の情報を持たない",
             "[ラベル名.パレット名]",
-            "total_count",
+            "total_count から引かれるのは本ページで落とした分だけ",
+            "全体の件数として扱わないこと",
+            "items が空のまま has_more が true になり得る",
+            "has_more と next_offset で終端すること",
         ] {
             assert!(
                 description.contains(phrase),

@@ -110,6 +110,9 @@ impl PageInput {
 /// プロジェクトの revision に連動しない。照合すると、カタログと無関係な編集で
 /// revision が進んだだけで 2 ページ目以降が失敗する誤検知になる一方、カタログ
 /// 自身の変化は revision に現れないため取りこぼしも防げない。
+///
+/// この型そのものの説明は入力 schema に現れない。展開して埋め込まれるため、
+/// schema へ出るのはフィールドの説明だけである。
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogPageInput {
@@ -120,7 +123,7 @@ pub struct CatalogPageInput {
     #[serde(default = "default_limit")]
     #[schemars(range(min = 1, max = 200))]
     pub limit: u32,
-    /// 先頭ページが返した snapshot_revision。この tool では照合に用いない。カタログは登録物の集合でありプロジェクトの revision に連動しないためである。
+    /// 先頭ページが返した snapshot_revision。この tool では照合に用いない。effect カタログは登録済みプラグインの集合でありプロジェクトの revision に連動しないためである。
     #[serde(default)]
     pub snapshot_revision: Option<u64>,
 }
