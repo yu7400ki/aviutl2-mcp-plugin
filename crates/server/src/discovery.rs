@@ -207,19 +207,16 @@ impl ExclusionReason {
 ///
 /// 解決フェーズの配分をまとめて運ぶ。**3 つは同じ予算一式から採らなければ
 /// ならない**——期限だけが縮み、接続待ちの取り分が縮まなければ、接続を 1 度も
-/// 試みないまま期限超過として返る。[`DiscoveryConfig::from_budgets`] を唯一の
-/// 組み立て口にすることで、その組を作れないようにしている。
+/// 試みないまま期限超過として返る。
+///
+/// **フィールドは公開しない。** 組み立て口を [`DiscoveryConfig::from_budgets`]
+/// だけに絞ることで、別々の出所から採った組を作れないようにしている。値を読む
+/// 側はアクセサを通す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiscoveryConfig {
-    /// 1 候補あたりの discovery 期限。
-    ///
-    /// pipe 接続・handshake・ping 往復をこの 1 つの期限で束ねる。接続先は
-    /// 自身の各段の上限をこの予算の内側に収める。
-    pub per_candidate_deadline: Duration,
-    /// 接続待ちが食い潰してはならない handshake と ping の取り分。
-    pub connect_reserve: Duration,
-    /// 1 回の接続待ちの上限。
-    pub connect_wait_cap: Duration,
+    per_candidate_deadline: Duration,
+    connect_reserve: Duration,
+    connect_wait_cap: Duration,
 }
 
 impl DiscoveryConfig {
@@ -230,6 +227,24 @@ impl DiscoveryConfig {
             connect_reserve: budgets.server_connect_reserve(),
             connect_wait_cap: budgets.server_connect_wait_cap(),
         }
+    }
+
+    /// 1 候補あたりの discovery 期限。
+    ///
+    /// pipe 接続・handshake・ping 往復をこの 1 つの期限で束ねる。接続先は
+    /// 自身の各段の上限をこの予算の内側に収める。
+    pub fn per_candidate_deadline(self) -> Duration {
+        self.per_candidate_deadline
+    }
+
+    /// 接続待ちが食い潰してはならない handshake と ping の取り分。
+    pub fn connect_reserve(self) -> Duration {
+        self.connect_reserve
+    }
+
+    /// 1 回の接続待ちの上限。
+    pub fn connect_wait_cap(self) -> Duration {
+        self.connect_wait_cap
     }
 }
 
@@ -453,7 +468,7 @@ fn verify_candidate(
     path: &Path,
     config: DiscoveryConfig,
 ) -> Result<VerifiedCandidate, ExcludedCandidate> {
-    let deadline = Instant::now() + config.per_candidate_deadline;
+    let deadline = Instant::now() + config.per_candidate_deadline();
 
     // descriptor 検証。
     let descriptor =
@@ -534,8 +549,8 @@ fn run_pipe_handshake_and_ping(
         &descriptor.process_created_at,
         &descriptor.auth_secret,
         deadline,
-        config.connect_reserve,
-        config.connect_wait_cap,
+        config.connect_reserve(),
+        config.connect_wait_cap(),
     )?;
 
     let pong = client.ping(deadline)?;

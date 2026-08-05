@@ -548,8 +548,8 @@ mod tests {
         let result = connect_pipe(
             &pipe_name_for(&id),
             deadline,
-            config.connect_reserve,
-            config.connect_wait_cap,
+            config.connect_reserve(),
+            config.connect_wait_cap(),
         );
         assert!(matches!(result, Err(PipeClientError::Timeout)));
         assert!(started.elapsed() < Duration::from_millis(100));
@@ -567,9 +567,9 @@ mod tests {
             let started = Instant::now();
             let result = connect_pipe(
                 &pipe_name_for(&id),
-                started + config.per_candidate_deadline,
-                config.connect_reserve,
-                config.connect_wait_cap,
+                started + config.per_candidate_deadline(),
+                config.connect_reserve(),
+                config.connect_wait_cap(),
             );
             assert!(
                 matches!(result, Err(PipeClientError::ConnectFailed)),
@@ -617,6 +617,16 @@ mod tests {
 
     #[test]
     fn connect_retries_while_every_pipe_instance_is_busy() {
+        // 縮めた配分でも再試行が働くこと。**1 回の待ちの上限も期限も同じ配分から
+        // 採る**ため、素の予約を使う実装は縮めた期限に対して接続を 1 度も
+        // 試みずに期限超過を返し、ここで落ちる。
+        for percent in [50, 100] {
+            assert_connect_retries_while_busy(discovery_config(percent), percent);
+        }
+    }
+
+    /// 上限を超えて塞がった pipe へ、期限内に再試行で接続できることを確かめる。
+    fn assert_connect_retries_while_busy(config: DiscoveryConfig, percent: u32) {
         // 接続先は同時 1 接続しか受け付けない。先行する要求が処理中の間は
         // 待受が無く、1 回の待ちの上限を超えて塞がることが設計上あり得る。
         // そこで諦めると、生きている相手を到達不能として扱ってしまう。
@@ -644,10 +654,9 @@ mod tests {
         // SAFETY: `server` は直前に作成した有効な pipe ハンドル。
         let _ = unsafe { ConnectNamedPipe(server, None) };
 
-        // 1 回の待ちの上限を超えて塞ぎ、その後に待受を張り直す。上限は配分から
-        // 採る。定数を直に読むと、上限が倍率に連動しない実装でも通ってしまう。
-        let config = DiscoveryConfig::default();
-        let busy_for = config.connect_wait_cap + Duration::from_millis(300);
+        // 1 回の待ちの上限を超えて塞ぎ、その後に待受を張り直す。塞ぐ時間は上限
+        // より長く、待ち直せる窓（期限 − 予約）より短く採る。
+        let busy_for = config.connect_wait_cap() + Duration::from_millis(200);
         let pipe = BusyPipe { server, occupier };
         let releaser = std::thread::spawn(move || {
             let pipe = pipe;
@@ -664,14 +673,14 @@ mod tests {
         let started = Instant::now();
         let handle = connect_pipe(
             &name,
-            started + config.per_candidate_deadline,
-            config.connect_reserve,
-            config.connect_wait_cap,
+            started + config.per_candidate_deadline(),
+            config.connect_reserve(),
+            config.connect_wait_cap(),
         )
-        .expect("塞がっていた pipe へ再試行で接続できる");
+        .unwrap_or_else(|err| panic!("倍率 {percent}% で再試行できていません: {err:?}"));
         assert!(
-            started.elapsed() >= config.connect_wait_cap,
-            "1 回の待ちで接続できており、再試行を確かめられていません"
+            started.elapsed() >= config.connect_wait_cap(),
+            "倍率 {percent}% で 1 回の待ちで接続できており、再試行を確かめられていません"
         );
 
         releaser.join().expect("待受の張り直しが完了する");
