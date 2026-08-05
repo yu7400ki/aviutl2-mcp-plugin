@@ -44,7 +44,7 @@ use crate::read::host::{
 };
 use aviutl2_mcp_core::{
     AvailableEffectItem, BatchOperation, BatchOutcome, BatchStepOutcome, FiniteF64, FrameRange,
-    GridBpm, ItemWriteError, ObjectSelector, ObjectSummary, prepare_item_write,
+    GridBpm, ItemWriteError, ObjectSelector, ObjectSummary, Rgba, prepare_item_write,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -635,6 +635,18 @@ impl SceneReader for CachingEditor<'_> {
 
     fn grid_bpm(&self) -> Result<Vec<GridBpm>, ReadError> {
         self.inner.reader().grid_bpm()
+    }
+
+    fn palette_names(&self) -> Result<Vec<String>, ReadError> {
+        self.inner.reader().palette_names()
+    }
+
+    fn current_palette_name(&self) -> Option<String> {
+        self.inner.reader().current_palette_name()
+    }
+
+    fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>> {
+        self.inner.reader().palette_colors(name)
     }
 
     fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {

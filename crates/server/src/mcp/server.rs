@@ -16,8 +16,8 @@ use crate::mcp::edit_input::{
 };
 use crate::mcp::input::{
     GetEffectItemValuesInput, GetObjectInput, GetSelectionInput, InstanceInput,
-    ListAvailableEffectsInput, ListInstancesInput, ListLayersInput, ListObjectsInput,
-    parse_instance_id,
+    ListAvailableEffectsInput, ListFontsInput, ListInstancesInput, ListLayersInput,
+    ListModulesInput, ListObjectsInput, ListPalettesInput, parse_instance_id,
 };
 use crate::mcp::render::{RenderFrameInput, RenderFrameOutput};
 use crate::mcp::summary::{MAX_TEXT_CHARS, clamp_chars};
@@ -28,17 +28,18 @@ use crate::settings::SettingsSource;
 use aviutl2_mcp_core::{
     BatchOutcome, EditInfo, EditOutcome, EffectItemValues, ErrorCode, ErrorObject,
     GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GridBpmOutcome, InstanceId,
-    LayerStateOutcome, ListAvailableEffectsResult, ListLayersResult, ListObjectsResult,
-    MAX_PAGE_LIMIT, OPERATION_ADD_EFFECT, OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT,
-    OPERATION_CREATE_OBJECT_SECTION, OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT,
-    OPERATION_DELETE_OBJECT_SECTION, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
-    OPERATION_GET_EFFECT_ITEM_VALUES, OPERATION_GET_OBJECT, OPERATION_GET_SELECTION,
-    OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_LAYERS, OPERATION_LIST_OBJECTS,
-    OPERATION_MOVE_OBJECT, OPERATION_MOVE_OBJECT_SECTION, OPERATION_RENDER_FRAME,
-    OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_GRID_BPM, OPERATION_SET_LAYER_STATE,
-    OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME, OPERATION_SET_SELECTION, ObjectDetail,
-    ObjectSectionsOutcome, RenderFrameResult, RequestBudgetKind, ScaledBudgets, SelectionSnapshot,
-    SelectionState, request_budget_kind,
+    LayerStateOutcome, ListAvailableEffectsResult, ListFontsResult, ListLayersResult,
+    ListModulesResult, ListObjectsResult, ListPalettesResult, MAX_PAGE_LIMIT, OPERATION_ADD_EFFECT,
+    OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT, OPERATION_CREATE_OBJECT_SECTION,
+    OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT, OPERATION_DELETE_OBJECT_SECTION,
+    OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_EFFECT_ITEM_VALUES,
+    OPERATION_GET_OBJECT, OPERATION_GET_SELECTION, OPERATION_LIST_AVAILABLE_EFFECTS,
+    OPERATION_LIST_FONTS, OPERATION_LIST_LAYERS, OPERATION_LIST_MODULES, OPERATION_LIST_OBJECTS,
+    OPERATION_LIST_PALETTES, OPERATION_MOVE_OBJECT, OPERATION_MOVE_OBJECT_SECTION,
+    OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_GRID_BPM,
+    OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME,
+    OPERATION_SET_SELECTION, ObjectDetail, ObjectSectionsOutcome, RenderFrameResult,
+    RequestBudgetKind, ScaledBudgets, SelectionSnapshot, SelectionState, request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -824,6 +825,137 @@ impl AviUtl2McpServer {
             )?;
             Ok(ToolSuccess {
                 text: describe::available_effects(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// インスタンスが利用できるフォント名の一覧を取得する。
+    /// いずれも font 種別の設定項目へそのまま指定できる名前である。
+    /// 名前による絞り込みは持たない。offset と limit（1〜200、既定 50）で
+    /// ページを指定し、total_count で全体の件数が分かる。
+    /// snapshot_revision は受理するがページ間の照合には用いない。
+    /// フォントは登録済みの集合であり、プロジェクトの revision に連動しないためである。
+    #[tool(
+        name = "list_fonts",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::list_fonts()
+        )
+    )]
+    pub async fn list_fonts(
+        &self,
+        Parameters(input): Parameters<ListFontsInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits();
+        self.run("list_fonts", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: ListFontsResult = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_LIST_FONTS,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::fonts(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// インスタンスが利用できるパレットの一覧と、各パレットの色を取得する。
+    /// colors は常に 64 件であり、a は常に 255 である。
+    /// つまりパレットは透明度の情報を持たない。
+    /// current は現在のパレット名であり、ラベル付きの場合は [ラベル名.パレット名] の形式になる。
+    /// 取得できない場合は null となるが、一覧はそのまま返る。
+    /// 色を読み取れなかったパレットは一覧から除かれ、その分は total_count にも反映される。
+    /// offset と limit（1〜200、既定 50）でページを指定する。
+    /// snapshot_revision は受理するがページ間の照合には用いない。
+    /// パレットは登録済みの集合であり、プロジェクトの revision に連動しないためである。
+    #[tool(
+        name = "list_palettes",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::list_palettes()
+        )
+    )]
+    pub async fn list_palettes(
+        &self,
+        Parameters(input): Parameters<ListPalettesInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits();
+        self.run("list_palettes", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: ListPalettesResult = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_LIST_PALETTES,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::palettes(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// インスタンスへ登録されているスクリプトとプラグインの一覧を取得する。
+    /// module_type を指定すると種別で絞り込める。
+    /// information はホストが利用者へ表示する説明文である。
+    /// 一覧には既知の 9 種別だけが現れる。
+    /// 種別を解釈できないモジュールは一覧から欠落し得る。
+    /// offset と limit（1〜200、既定 50）でページを指定する。
+    /// snapshot_revision は受理するがページ間の照合には用いない。
+    /// モジュールは登録済みの集合であり、プロジェクトの revision に連動しないためである。
+    #[tool(
+        name = "list_modules",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::list_modules()
+        )
+    )]
+    pub async fn list_modules(
+        &self,
+        Parameters(input): Parameters<ListModulesInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits();
+        self.run("list_modules", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: ListModulesResult = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_LIST_MODULES,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::modules(&result),
                 structured: to_structured(&result)?,
             })
         })
@@ -2478,6 +2610,8 @@ mod tests {
             | "render_frame" => true,
             // effect カタログだけを扱い、frame も layer も現れない。
             "list_available_effects" => false,
+            // 登録物の一覧だけを扱い、frame も layer も現れない。
+            "list_fonts" | "list_palettes" | "list_modules" => false,
             // BPM グリッドはシーンに属し、位置は秒で表す。フレーム番号も
             // レイヤー番号も現れない。
             "set_grid_bpm" => false,
@@ -2533,6 +2667,9 @@ mod tests {
         "list_available_effects",
         "get_effect_item_values",
         "get_selection",
+        "list_fonts",
+        "list_palettes",
+        "list_modules",
     ];
 
     /// 編集 tool と、宣言する annotation。
@@ -2636,6 +2773,9 @@ mod tests {
             | "list_available_effects"
             | "get_effect_item_values"
             | "get_selection"
+            | "list_fonts"
+            | "list_palettes"
+            | "list_modules"
             | RENDER_FRAME => false,
             other => panic!("{other} が編集の説明規約に従うかが定義されていません"),
         }
@@ -2696,7 +2836,7 @@ mod tests {
         assert_eq!(names, expected);
         // 件数そのものも固定する。router と表の両方から同じ tool を落とすと、
         // 集合の一致だけでは検出できない。
-        assert_eq!(names.len(), 25, "公開する tool の数が変わりました");
+        assert_eq!(names.len(), 28, "公開する tool の数が変わりました");
     }
 
     /// 共有設定を与えたサーバー。
@@ -2881,6 +3021,9 @@ mod tests {
             "list_objects" => schema::list_objects(),
             "get_object" => schema::object_detail(),
             "list_available_effects" => schema::list_available_effects(),
+            "list_fonts" => schema::list_fonts(),
+            "list_palettes" => schema::list_palettes(),
+            "list_modules" => schema::list_modules(),
             "get_effect_item_values" => schema::effect_item_values(),
             "get_selection" => schema::get_selection(),
             "create_object" => schema::create_object(),

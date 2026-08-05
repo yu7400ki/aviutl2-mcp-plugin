@@ -6,7 +6,9 @@
 //! 再解決するのは実装側の責務である。
 
 use crate::read::error::ReadError;
-use aviutl2_mcp_core::{AvailableEffect, EffectItem, FiniteF64, GridBpm, SectionRange};
+use aviutl2_mcp_core::{
+    AvailableEffect, EffectItem, FiniteF64, GridBpm, ModuleEntry, Rgba, SectionRange,
+};
 use std::fmt;
 
 /// ホストの編集状態。
@@ -162,6 +164,29 @@ pub trait SceneReader {
     /// 4 つのフィールドを揃えて返す。一部だけを返すと、読み取った一覧をそのまま
     /// 書き戻す経路で残りが失われる。
     fn grid_bpm(&self) -> Result<Vec<GridBpm>, ReadError>;
+
+    /// 登録済みパレット名を全件返す。
+    ///
+    /// 列挙そのものは参照区間を要しないが、ここへ置くことで名前と色を同じ区間の
+    /// 内側で読める。分ければ、名前を集めてから色を読むまでの間にパレットが
+    /// 差し替わり、食い違った組を返し得る。
+    fn palette_names(&self) -> Result<Vec<String>, ReadError>;
+
+    /// 現在のパレット名。取得できない場合は `None`。
+    ///
+    /// ラベル付きの場合は `[ラベル名.パレット名]` の形式で返る。分解しない。
+    ///
+    /// 一覧に対する付随情報であり、取れないことは一覧の失敗ではない。
+    fn current_palette_name(&self) -> Option<String>;
+
+    /// パレットの色を返す。情報を取得できない名前は `None`。
+    ///
+    /// 件数は常に [`aviutl2_mcp_core::PALETTE_COLOR_COUNT`] である。
+    ///
+    /// **`None` は失敗ではない。** 列挙が返した名前で情報が取れないのは異常だが、
+    /// その 1 件のために一覧全体を落とさない。呼び出し側は該当の名前を一覧から
+    /// 落とす。
+    fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>>;
 
     /// レイヤーの属性。
     ///
@@ -326,6 +351,18 @@ pub trait ReadHost: Send + Sync {
 
     /// 登録済み effect のカタログ。参照区間を必要としない。
     fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError>;
+
+    /// 登録済みフォント名を全件返す。参照区間を必要としない。
+    ///
+    /// **列挙を打ち切れない。** ホストの列挙は途中で止める手段を持たないため、
+    /// 1 ページを返す要求でも毎回全件が返る。
+    fn font_names(&self) -> Result<Vec<String>, ReadError>;
+
+    /// 登録済みモジュールを全件返す。参照区間を必要としない。
+    ///
+    /// **既知の種別だけが返る。** 種別値の解釈はより低い層が行い、解釈できない
+    /// 値を持つ項目はそこで落ちる。欠落し得ることは tool の説明が述べる。
+    fn modules(&self) -> Result<Vec<ModuleEntry>, ReadError>;
 
     /// 参照区間へ 1 度だけ入り、クロージャの結果を持ち出す。
     fn enter_read_section<T, F>(&self, f: F) -> Result<T, ReadError>

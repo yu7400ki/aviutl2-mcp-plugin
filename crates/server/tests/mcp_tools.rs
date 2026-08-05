@@ -13,7 +13,7 @@ use aviutl2_mcp_core::{
 };
 
 use aviutl2_mcp_server::mcp::input::{
-    AvailableEffectsPageInput, EffectSelectorInput, GetEffectItemValuesInput, GetObjectInput,
+    CatalogPageInput, EffectSelectorInput, GetEffectItemValuesInput, GetObjectInput,
     GetSelectionInput, InstanceInput, ListAvailableEffectsInput, ListInstancesInput,
     ListLayersInput, ListObjectsInput, ObjectFilterInput, ObjectSelectorInput, PageInput,
 };
@@ -193,12 +193,8 @@ fn page_input(offset: u32, limit: u32, snapshot_revision: Option<u64>) -> PageIn
     }
 }
 
-fn effects_page_input(
-    offset: u32,
-    limit: u32,
-    snapshot_revision: Option<u64>,
-) -> AvailableEffectsPageInput {
-    AvailableEffectsPageInput {
+fn effects_page_input(offset: u32, limit: u32, snapshot_revision: Option<u64>) -> CatalogPageInput {
+    CatalogPageInput {
         offset,
         limit,
         snapshot_revision,

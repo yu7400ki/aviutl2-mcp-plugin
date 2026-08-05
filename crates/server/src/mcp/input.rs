@@ -27,8 +27,9 @@ use crate::mcp::failure::{from_code, invalid_argument};
 use aviutl2_mcp_core::{
     DEFAULT_PAGE_LIMIT, EffectSelector, EffectType, ErrorCode, ErrorObject, FiniteF64,
     GetEffectItemValuesParams, GetObjectParams, GetSelectionParams, InstanceId,
-    ListAvailableEffectsParams, ListLayersParams, ListObjectsParams, MAX_EVALUATED_FRAMES,
-    MAX_EVALUATED_ITEMS, MAX_PAGE_LIMIT, ObjectFilter, ObjectSelector, PageRequest,
+    ListAvailableEffectsParams, ListFontsParams, ListLayersParams, ListModulesParams,
+    ListObjectsParams, ListPalettesParams, MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS,
+    MAX_PAGE_LIMIT, ModuleType, ObjectFilter, ObjectSelector, PageRequest,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -102,16 +103,16 @@ impl PageInput {
     }
 }
 
-/// effect カタログ列挙のページ指定。
+/// カタログ列挙のページ指定。
 ///
 /// 形は [`PageInput`] と同じだが、`snapshot_revision` の意味づけだけが異なる。
-/// effect カタログは登録済みプラグインの集合であり、プロジェクトの revision に
-/// 連動しない。照合すると、カタログと無関係な編集で revision が進んだだけで
-/// 2 ページ目以降が失敗する誤検知になる一方、カタログ自身の変化は revision に
-/// 現れないため取りこぼしも防げない。
+/// 登録済み effect・フォント・パレット・モジュールはいずれも登録物の集合であり、
+/// プロジェクトの revision に連動しない。照合すると、カタログと無関係な編集で
+/// revision が進んだだけで 2 ページ目以降が失敗する誤検知になる一方、カタログ
+/// 自身の変化は revision に現れないため取りこぼしも防げない。
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct AvailableEffectsPageInput {
+pub struct CatalogPageInput {
     /// 取得を開始する 0 始まりの位置。
     #[serde(default)]
     pub offset: u32,
@@ -119,12 +120,12 @@ pub struct AvailableEffectsPageInput {
     #[serde(default = "default_limit")]
     #[schemars(range(min = 1, max = 200))]
     pub limit: u32,
-    /// 先頭ページが返した snapshot_revision。この tool では照合に用いない。effect カタログは登録済みプラグインの集合でありプロジェクトの revision に連動しないためである。
+    /// 先頭ページが返した snapshot_revision。この tool では照合に用いない。カタログは登録物の集合でありプロジェクトの revision に連動しないためである。
     #[serde(default)]
     pub snapshot_revision: Option<u64>,
 }
 
-impl AvailableEffectsPageInput {
+impl CatalogPageInput {
     /// 共通のページ要求へ変換する。
     fn to_page_request(self) -> Result<PageRequest, ErrorObject> {
         build_page_request(self.offset, self.limit, self.snapshot_revision)
@@ -256,7 +257,52 @@ pub struct ListAvailableEffectsInput {
     pub effect_type: Option<EffectTypeInput>,
     /// ページ指定。
     #[serde(flatten)]
-    pub page: AvailableEffectsPageInput,
+    pub page: CatalogPageInput,
+}
+
+/// `list_fonts` の入力。
+///
+/// シーン ID を取らない。フォントはシーンに紐づかない。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListFontsInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// ページ指定。
+    #[serde(flatten)]
+    pub page: CatalogPageInput,
+}
+
+/// `list_palettes` の入力。
+///
+/// シーン ID を取らない。パレットはシーンに紐づかない。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListPalettesInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// ページ指定。
+    #[serde(flatten)]
+    pub page: CatalogPageInput,
+}
+
+/// `list_modules` の入力。
+///
+/// シーン ID を取らない。モジュールはシーンに紐づかない。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListModulesInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// 種別による絞り込み。
+    #[serde(default)]
+    pub module_type: Option<ModuleTypeInput>,
+    /// ページ指定。
+    #[serde(flatten)]
+    pub page: CatalogPageInput,
 }
 
 /// オブジェクト内の effect を再指定するセレクター。
@@ -370,6 +416,40 @@ impl From<EffectTypeInput> for EffectType {
             EffectTypeInput::Transition => EffectType::Transition,
             EffectTypeInput::Control => EffectType::Control,
             EffectTypeInput::Output => EffectType::Output,
+        }
+    }
+}
+
+/// 絞り込みに指定できるモジュールの種別。
+///
+/// 未知の種別を受け付けない。絞り込みは登録済みモジュールの一覧に対する等値
+/// 判定であり、一覧へ現れ得ない値を受けても 0 件しか返らない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModuleTypeInput {
+    ScriptFilter,
+    ScriptObject,
+    ScriptCamera,
+    ScriptTrack,
+    ScriptModule,
+    PluginInput,
+    PluginOutput,
+    PluginFilter,
+    PluginGeneric,
+}
+
+impl From<ModuleTypeInput> for ModuleType {
+    fn from(value: ModuleTypeInput) -> Self {
+        match value {
+            ModuleTypeInput::ScriptFilter => ModuleType::ScriptFilter,
+            ModuleTypeInput::ScriptObject => ModuleType::ScriptObject,
+            ModuleTypeInput::ScriptCamera => ModuleType::ScriptCamera,
+            ModuleTypeInput::ScriptTrack => ModuleType::ScriptTrack,
+            ModuleTypeInput::ScriptModule => ModuleType::ScriptModule,
+            ModuleTypeInput::PluginInput => ModuleType::PluginInput,
+            ModuleTypeInput::PluginOutput => ModuleType::PluginOutput,
+            ModuleTypeInput::PluginFilter => ModuleType::PluginFilter,
+            ModuleTypeInput::PluginGeneric => ModuleType::PluginGeneric,
         }
     }
 }
@@ -530,6 +610,34 @@ impl ListAvailableEffectsInput {
     pub fn to_params(&self) -> Result<ListAvailableEffectsParams, ErrorObject> {
         Ok(ListAvailableEffectsParams {
             effect_type: self.effect_type.map(EffectType::from),
+            page: self.page.to_page_request()?,
+        })
+    }
+}
+
+impl ListFontsInput {
+    /// IPC の params へ変換する。
+    pub fn to_params(&self) -> Result<ListFontsParams, ErrorObject> {
+        Ok(ListFontsParams {
+            page: self.page.to_page_request()?,
+        })
+    }
+}
+
+impl ListPalettesInput {
+    /// IPC の params へ変換する。
+    pub fn to_params(&self) -> Result<ListPalettesParams, ErrorObject> {
+        Ok(ListPalettesParams {
+            page: self.page.to_page_request()?,
+        })
+    }
+}
+
+impl ListModulesInput {
+    /// IPC の params へ変換する。
+    pub fn to_params(&self) -> Result<ListModulesParams, ErrorObject> {
+        Ok(ListModulesParams {
+            module_type: self.module_type.map(ModuleType::from),
             page: self.page.to_page_request()?,
         })
     }

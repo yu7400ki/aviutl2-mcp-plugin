@@ -4,6 +4,7 @@
 //! 直列化したものであり、本モジュールの schema はその形を記述する。
 //! 応答型は将来の MINOR 追加を受け入れるため、追加プロパティは禁じない。
 
+use aviutl2_mcp_core::PALETTE_COLOR_COUNT;
 use rmcp::model::JsonObject;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -86,6 +87,25 @@ pub fn object_detail() -> Value {
 /// `list_available_effects` の出力。
 pub fn list_available_effects() -> Value {
     page_of(available_effect())
+}
+
+/// `list_fonts` の出力。
+pub fn list_fonts() -> Value {
+    page_of(string())
+}
+
+/// `list_palettes` の出力。
+pub fn list_palettes() -> Value {
+    object(&[
+        ("current", nullable_string()),
+        ("items", array(palette_entry())),
+        ("page", page_meta()),
+    ])
+}
+
+/// `list_modules` の出力。
+pub fn list_modules() -> Value {
+    page_of(module_entry())
 }
 
 /// `get_effect_item_values` の出力。
@@ -522,6 +542,47 @@ fn effect_type() -> Value {
     kind(&["filter", "input", "transition", "control", "output"])
 }
 
+fn palette_entry() -> Value {
+    object(&[("name", string()), ("colors", palette_colors())])
+}
+
+/// パレットの色。件数はアプリケーションが固定しており増減しない。
+fn palette_colors() -> Value {
+    json!({
+        "type": "array",
+        "items": rgba(),
+        "minItems": PALETTE_COLOR_COUNT,
+        "maxItems": PALETTE_COLOR_COUNT,
+    })
+}
+
+fn rgba() -> Value {
+    object(&[("r", byte()), ("g", byte()), ("b", byte()), ("a", byte())])
+}
+
+fn module_entry() -> Value {
+    object(&[
+        ("module_type", module_type()),
+        ("name", string()),
+        ("information", string()),
+    ])
+}
+
+/// モジュールの種別。既知は名前、未知は raw 保持のオブジェクト。
+fn module_type() -> Value {
+    kind(&[
+        "script_filter",
+        "script_object",
+        "script_camera",
+        "script_track",
+        "script_module",
+        "plugin_input",
+        "plugin_output",
+        "plugin_filter",
+        "plugin_generic",
+    ])
+}
+
 /// effect 設定項目の種別。既知は名前、未知は raw 保持のオブジェクト。
 fn effect_item_type() -> Value {
     kind(&[
@@ -610,6 +671,11 @@ fn integer() -> Value {
 
 fn unsigned() -> Value {
     json!({ "type": "integer", "minimum": 0 })
+}
+
+/// 0..=255 の整数。
+fn byte() -> Value {
+    json!({ "type": "integer", "minimum": 0, "maximum": 255 })
 }
 
 fn nullable_unsigned() -> Value {
@@ -717,6 +783,16 @@ mod tests {
                 {
                     return Err(format!(
                         "{path}: 要素数が {max} 件を超えています: {}",
+                        items.len()
+                    ));
+                }
+                // 下限も検査する。上限だけを見ると、固定長として宣言した配列に
+                // 足りない件数を返しても適合してしまう。
+                if let Some(min) = schema.get("minItems").and_then(Value::as_u64)
+                    && (items.len() as u64) < min
+                {
+                    return Err(format!(
+                        "{path}: 要素数が {min} 件に足りません: {}",
                         items.len()
                     ));
                 }

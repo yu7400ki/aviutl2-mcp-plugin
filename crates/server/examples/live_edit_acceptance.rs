@@ -70,7 +70,7 @@ use aviutl2_mcp_server::mcp::edit_input::{
     SetLayerStateInput, SetObjectItemInput, SetObjectNameInput, SetSelectionInput,
 };
 use aviutl2_mcp_server::mcp::input::{
-    AvailableEffectsPageInput, EffectSelectorInput, GetObjectInput, InstanceInput,
+    CatalogPageInput, EffectSelectorInput, GetObjectInput, InstanceInput,
     ListAvailableEffectsInput, ListInstancesInput, ListLayersInput, ListObjectsInput,
     ObjectFilterInput, ObjectSelectorInput, PageInput,
 };
@@ -859,7 +859,7 @@ impl Harness {
                     ListAvailableEffectsInput {
                         instance_id: instance.to_string(),
                         effect_type: None,
-                        page: AvailableEffectsPageInput {
+                        page: CatalogPageInput {
                             offset,
                             limit: PAGE_LIMIT,
                             snapshot_revision: None,

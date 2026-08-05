@@ -21,8 +21,9 @@ use aviutl2_mcp_core::{
     DeleteObjectSectionParams, EditInputError, EditOperation, EffectItemValuesInputError,
     ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams,
     GetEffectItemValuesParams, GetObjectParams, GetSelectionParams, InstanceId, InstanceState,
-    KnownOperation, ListAvailableEffectsParams, ListAvailableEffectsResult, ListLayersParams,
-    ListLayersResult, ListObjectsParams, ListObjectsResult, MoveObjectParams,
+    KnownOperation, ListAvailableEffectsParams, ListAvailableEffectsResult, ListFontsParams,
+    ListFontsResult, ListLayersParams, ListLayersResult, ListModulesParams, ListModulesResult,
+    ListObjectsParams, ListObjectsResult, ListPalettesParams, MoveObjectParams,
     MoveObjectSectionParams, Nonce, ObjectFilterError, PageError, PageRequest, PongProject,
     PongResult, ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult,
     RenderInputError, RenderOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind,
@@ -854,6 +855,9 @@ enum ReadRequest {
     ListAvailableEffects(ListAvailableEffectsParams),
     GetEffectItemValues(Box<GetEffectItemValuesParams>),
     GetSelection(GetSelectionParams),
+    ListFonts(ListFontsParams),
+    ListPalettes(ListPalettesParams),
+    ListModules(ListModulesParams),
 }
 
 /// operation 別の params を復号し、要求内容だけで決まる検証を済ませる。
@@ -900,6 +904,21 @@ fn decode_request(operation: ReadOperation, params: &Value) -> Result<ReadReques
             let params: GetSelectionParams = decode_params(params)?;
             params.page.validate().map_err(page_error)?;
             ReadRequest::GetSelection(params)
+        }
+        ReadOperation::ListFonts => {
+            let params: ListFontsParams = decode_params(params)?;
+            params.page.validate().map_err(page_error)?;
+            ReadRequest::ListFonts(params)
+        }
+        ReadOperation::ListPalettes => {
+            let params: ListPalettesParams = decode_params(params)?;
+            params.page.validate().map_err(page_error)?;
+            ReadRequest::ListPalettes(params)
+        }
+        ReadOperation::ListModules => {
+            let params: ListModulesParams = decode_params(params)?;
+            params.page.validate().map_err(page_error)?;
+            ReadRequest::ListModules(params)
         }
     })
 }
@@ -976,16 +995,47 @@ fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Valu
                 .map_err(page_error)?;
             to_result(&snapshot)
         }
+        ReadRequest::ListFonts(params) => {
+            let snapshot = adapter.list_fonts().map_err(read_error)?;
+            let (items, page) = take_page(
+                &snapshot.items,
+                &catalog_page_request(&params.page),
+                snapshot.snapshot_revision,
+            )
+            .map_err(page_error)?;
+            to_result(&ListFontsResult { items, page })
+        }
+        ReadRequest::ListPalettes(params) => {
+            // 切り出しは読み取り口が済ませている。色を読むのが窓に入った分だけで
+            // あることを、参照区間の内側で保証する必要がある。
+            let result = adapter
+                .list_palettes(&catalog_page_request(&params.page))
+                .map_err(read_error)?
+                .map_err(page_error)?;
+            to_result(&result)
+        }
+        ReadRequest::ListModules(params) => {
+            let snapshot = adapter
+                .list_modules(params.module_type.as_ref())
+                .map_err(read_error)?;
+            let (items, page) = take_page(
+                &snapshot.items,
+                &catalog_page_request(&params.page),
+                snapshot.snapshot_revision,
+            )
+            .map_err(page_error)?;
+            to_result(&ListModulesResult { items, page })
+        }
     }
 }
 
-/// 登録済み effect の一覧に対するページ要求から revision の照合指定を落とす。
+/// カタログの一覧に対するページ要求から revision の照合指定を落とす。
 ///
-/// この一覧は登録済みプラグインの集合であり、プロジェクトの編集内容から独立して
-/// いる。要求元が前ページの revision を送り返しても照合しない。照合すると、一覧と
-/// 無関係な編集で値が進んだだけでページ間の照合が食い違い、要求元は先頭からの
-/// 取り直しを強いられる。一方でカタログ自身の変化はその値に現れないため、照合
-/// しても取りこぼしは防げない。
+/// 登録済み effect・フォント・パレット・モジュールはいずれも、プロジェクトの
+/// 編集内容から独立した登録物の集合である。要求元が前ページの revision を送り
+/// 返しても照合しない。照合すると、一覧と無関係な編集で値が進んだだけでページ間の
+/// 照合が食い違い、要求元は先頭からの取り直しを強いられる。一方でカタログ自身の
+/// 変化はその値に現れないため、照合しても取りこぼしは防げない。
 ///
 /// 応答へ載せる revision は落とさない。それは列挙を始めた時点のプロジェクト
 /// revision であり、ページのメタ情報が表す意味そのものである。照合に使えない
@@ -1460,10 +1510,11 @@ mod tests {
     use aviutl2_mcp_core::{
         AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
         EffectItemType, EffectItemValues, EffectSelector, EffectType, EvaluatedItem, Extent,
-        FiniteF64, FrameRange, LayerInfo, MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, ObjectDetail,
-        ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary,
-        SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET, SceneInfo,
-        SectionRange, TRANSPORT_HEADROOM,
+        FiniteF64, FrameRange, LayerInfo, ListPalettesResult, MAX_EVALUATED_FRAMES,
+        MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectDetail, ObjectFilter,
+        ObjectFingerprintInput, ObjectSelector, ObjectSummary, PALETTE_COLOR_COUNT, PaletteEntry,
+        Rgba, SERVER_EDIT_REQUEST_BUDGET, SERVER_READ_REQUEST_BUDGET, SERVER_RESOLVE_BUDGET,
+        SceneInfo, SectionRange, TRANSPORT_HEADROOM,
     };
     use std::sync::Mutex;
 
@@ -1672,6 +1723,58 @@ mod tests {
             })
         }
 
+        fn list_fonts(&self) -> Result<Snapshot<String>, ReadError> {
+            self.enter("list_fonts")?;
+            Ok(Snapshot {
+                items: fake_fonts(),
+                snapshot_revision: REVISION,
+            })
+        }
+
+        fn list_palettes(
+            &self,
+            page: &PageRequest,
+        ) -> Result<Result<ListPalettesResult, PageError>, ReadError> {
+            self.enter("list_palettes")?;
+            let names = fake_palette_names();
+            Ok(
+                take_page(&names, page, REVISION).map(|(window, meta)| ListPalettesResult {
+                    current: Some("[標準.既定]".to_string()),
+                    items: window
+                        .into_iter()
+                        .map(|name| PaletteEntry {
+                            name,
+                            colors: vec![
+                                Rgba {
+                                    r: 0,
+                                    g: 0,
+                                    b: 0,
+                                    a: 255
+                                };
+                                PALETTE_COLOR_COUNT
+                            ],
+                        })
+                        .collect(),
+                    page: meta,
+                }),
+            )
+        }
+
+        fn list_modules(
+            &self,
+            module_type: Option<&ModuleType>,
+        ) -> Result<Snapshot<ModuleEntry>, ReadError> {
+            self.enter("list_modules")?;
+            let mut items = fake_modules();
+            if let Some(module_type) = module_type {
+                items.retain(|module| module.module_type == *module_type);
+            }
+            Ok(Snapshot {
+                items,
+                snapshot_revision: REVISION,
+            })
+        }
+
         fn get_effect_item_values(
             &self,
             params: &GetEffectItemValuesParams,
@@ -1832,6 +1935,33 @@ mod tests {
         ]
     }
 
+    fn fake_fonts() -> Vec<String> {
+        vec![
+            "MS UI Gothic".to_string(),
+            "游ゴシック".to_string(),
+            "Segoe UI".to_string(),
+        ]
+    }
+
+    fn fake_palette_names() -> Vec<String> {
+        vec!["既定".to_string(), "暖色".to_string(), "寒色".to_string()]
+    }
+
+    fn fake_modules() -> Vec<ModuleEntry> {
+        vec![
+            ModuleEntry {
+                module_type: ModuleType::ScriptObject,
+                name: "テキスト".to_string(),
+                information: "標準搭載".to_string(),
+            },
+            ModuleEntry {
+                module_type: ModuleType::PluginInput,
+                name: "入力プラグイン".to_string(),
+                information: "動画の読み込み".to_string(),
+            },
+        ]
+    }
+
     /// 受付可能な状態・期限内で読み取りを実行する。
     fn read(
         adapter: &FakeAdapter,
@@ -1873,6 +2003,9 @@ mod tests {
                 ReadOperation::GetSelection,
                 json!({ "expected_scene_id": SCENE_ID }),
             ),
+            (ReadOperation::ListFonts, json!({})),
+            (ReadOperation::ListPalettes, json!({})),
+            (ReadOperation::ListModules, json!({})),
         ]
     }
 
@@ -1908,6 +2041,9 @@ mod tests {
             ),
             ("get_effect_item_values", ReadOperation::GetEffectItemValues),
             ("get_selection", ReadOperation::GetSelection),
+            ("list_fonts", ReadOperation::ListFonts),
+            ("list_palettes", ReadOperation::ListPalettes),
+            ("list_modules", ReadOperation::ListModules),
         ] {
             assert_eq!(
                 classify_operation(name).unwrap(),

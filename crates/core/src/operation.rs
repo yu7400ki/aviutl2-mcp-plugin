@@ -6,9 +6,11 @@
 use crate::budget::RequestBudgetKind;
 use crate::edit_info::SceneInfo;
 use crate::effect::{AvailableEffect, EffectType};
+use crate::module::{ModuleEntry, ModuleType};
 use crate::number::FiniteF64;
 use crate::object::{LayerInfo, ObjectSummary};
 use crate::page::{PageMeta, PageRequest};
+use crate::palette::PaletteEntry;
 use crate::selector::{EffectSelector, ObjectSelector};
 use crate::validation::{TextSyntaxError, validate_name};
 use serde::{Deserialize, Serialize};
@@ -36,6 +38,15 @@ pub const OPERATION_GET_EFFECT_ITEM_VALUES: &str = "get_effect_item_values";
 
 /// 選択中・フォーカス中のオブジェクトを取得する operation 名。
 pub const OPERATION_GET_SELECTION: &str = "get_selection";
+
+/// 登録済みフォント名を列挙する operation 名。
+pub const OPERATION_LIST_FONTS: &str = "list_fonts";
+
+/// 登録済みパレットを列挙する operation 名。
+pub const OPERATION_LIST_PALETTES: &str = "list_palettes";
+
+/// 登録済みモジュールを列挙する operation 名。
+pub const OPERATION_LIST_MODULES: &str = "list_modules";
 
 /// media file / alias からオブジェクトを作成する operation 名。
 pub const OPERATION_CREATE_OBJECT: &str = "create_object";
@@ -109,13 +120,19 @@ pub enum ReadOperation {
     GetEffectItemValues,
     /// [`OPERATION_GET_SELECTION`]。
     GetSelection,
+    /// [`OPERATION_LIST_FONTS`]。
+    ListFonts,
+    /// [`OPERATION_LIST_PALETTES`]。
+    ListPalettes,
+    /// [`OPERATION_LIST_MODULES`]。
+    ListModules,
 }
 
 impl ReadOperation {
     /// 全 variant。
     ///
     /// 要素数と内容は `read_operation_all_is_exhaustive` テストで固定する。
-    pub const ALL: [ReadOperation; 8] = [
+    pub const ALL: [ReadOperation; 11] = [
         ReadOperation::GetEditInfo,
         ReadOperation::GetCurrentScene,
         ReadOperation::ListLayers,
@@ -124,6 +141,9 @@ impl ReadOperation {
         ReadOperation::ListAvailableEffects,
         ReadOperation::GetEffectItemValues,
         ReadOperation::GetSelection,
+        ReadOperation::ListFonts,
+        ReadOperation::ListPalettes,
+        ReadOperation::ListModules,
     ];
 
     /// operation 名の文字列表現を返す。
@@ -137,6 +157,9 @@ impl ReadOperation {
             ReadOperation::ListAvailableEffects => OPERATION_LIST_AVAILABLE_EFFECTS,
             ReadOperation::GetEffectItemValues => OPERATION_GET_EFFECT_ITEM_VALUES,
             ReadOperation::GetSelection => OPERATION_GET_SELECTION,
+            ReadOperation::ListFonts => OPERATION_LIST_FONTS,
+            ReadOperation::ListPalettes => OPERATION_LIST_PALETTES,
+            ReadOperation::ListModules => OPERATION_LIST_MODULES,
         }
     }
 
@@ -344,7 +367,10 @@ impl KnownOperation {
                 | ReadOperation::GetObject
                 | ReadOperation::ListAvailableEffects
                 | ReadOperation::GetEffectItemValues
-                | ReadOperation::GetSelection => RequestBudgetKind::Read,
+                | ReadOperation::GetSelection
+                | ReadOperation::ListFonts
+                | ReadOperation::ListPalettes
+                | ReadOperation::ListModules => RequestBudgetKind::Read,
             },
             KnownOperation::Edit(operation) => match operation {
                 EditOperation::CreateObject
@@ -480,6 +506,43 @@ pub struct GetSelectionParams {
     pub page: PageRequest,
 }
 
+/// `list_fonts` の params。
+///
+/// シーン ID の guard を持たない。フォントはシーンに紐づく値ではなく、
+/// 何も守らない値を必須にすると要求元は意味の無い値を用意することになる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListFontsParams {
+    /// ページ指定。要求では offset / limit / snapshot_revision として展開される。
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+/// `list_palettes` の params。
+///
+/// シーン ID の guard を持たない理由は [`ListFontsParams`] と同じである。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListPalettesParams {
+    /// ページ指定。要求では offset / limit / snapshot_revision として展開される。
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+/// `list_modules` の params。
+///
+/// シーン ID の guard を持たない理由は [`ListFontsParams`] と同じである。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListModulesParams {
+    /// 種別で絞り込む。省略時は全件。
+    #[serde(default)]
+    pub module_type: Option<ModuleType>,
+    /// ページ指定。要求では offset / limit / snapshot_revision として展開される。
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
 /// 1 度の要求で評価できるフレームの最大件数。
 pub const MAX_EVALUATED_FRAMES: usize = 16;
 
@@ -592,6 +655,40 @@ pub struct ListAvailableEffectsResult {
     pub page: PageMeta,
 }
 
+/// `list_fonts` の result。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListFontsResult {
+    /// 切り出されたページの要素。アプリケーション内の登録名であり、`Font` 種別の
+    /// 設定項目が受け付ける名前と同じものである。
+    pub items: Vec<String>,
+    /// ページのメタ情報。
+    pub page: PageMeta,
+}
+
+/// `list_palettes` の result。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListPalettesResult {
+    /// 現在のパレット名。取得できない場合は null。
+    ///
+    /// ラベル付きの場合は `[ラベル名.パレット名]` の形式になる。分解せずに
+    /// そのまま返す。分解の規則を定めると、ラベル名にドットを含む場合の扱いが
+    /// 契約になる。
+    pub current: Option<String>,
+    /// 切り出されたページの要素。
+    pub items: Vec<PaletteEntry>,
+    /// ページのメタ情報。
+    pub page: PageMeta,
+}
+
+/// `list_modules` の result。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListModulesResult {
+    /// 切り出されたページの要素。
+    pub items: Vec<ModuleEntry>,
+    /// ページのメタ情報。
+    pub page: PageMeta,
+}
+
 /// `get_selection` の result。
 ///
 /// 編集カーソルとフレーム範囲選択は載せない。どちらも [`crate::EditInfo`] が
@@ -676,6 +773,7 @@ mod tests {
     use crate::fingerprint::ObjectFingerprintInput;
     use crate::object::ObjectSummary;
     use crate::page::DEFAULT_PAGE_LIMIT;
+    use crate::palette::{PALETTE_COLOR_COUNT, Rgba};
     use crate::validation::MAX_NAME_UTF16_UNITS;
 
     fn sample_object_summary() -> ObjectSummary {
@@ -717,6 +815,9 @@ mod tests {
         assert_eq!(OPERATION_LIST_AVAILABLE_EFFECTS, "list_available_effects");
         assert_eq!(OPERATION_GET_EFFECT_ITEM_VALUES, "get_effect_item_values");
         assert_eq!(OPERATION_GET_SELECTION, "get_selection");
+        assert_eq!(OPERATION_LIST_FONTS, "list_fonts");
+        assert_eq!(OPERATION_LIST_PALETTES, "list_palettes");
+        assert_eq!(OPERATION_LIST_MODULES, "list_modules");
     }
 
     #[test]
@@ -922,7 +1023,10 @@ mod tests {
                 | ReadOperation::GetObject
                 | ReadOperation::ListAvailableEffects
                 | ReadOperation::GetEffectItemValues
-                | ReadOperation::GetSelection => {}
+                | ReadOperation::GetSelection
+                | ReadOperation::ListFonts
+                | ReadOperation::ListPalettes
+                | ReadOperation::ListModules => {}
             }
             assert!(
                 ReadOperation::ALL.contains(&op),
@@ -938,7 +1042,10 @@ mod tests {
         assert_listed(ReadOperation::ListAvailableEffects);
         assert_listed(ReadOperation::GetEffectItemValues);
         assert_listed(ReadOperation::GetSelection);
-        assert_eq!(ReadOperation::ALL.len(), 8);
+        assert_listed(ReadOperation::ListFonts);
+        assert_listed(ReadOperation::ListPalettes);
+        assert_listed(ReadOperation::ListModules);
+        assert_eq!(ReadOperation::ALL.len(), 11);
     }
 
     /// [`RenderOperation::ALL`] が全 variant を含むことを固定する。
@@ -1079,6 +1186,25 @@ mod tests {
             ReadOperation::from_operation_name(OPERATION_GET_SELECTION),
             Some(op)
         );
+    }
+
+    #[test]
+    fn listing_the_catalogs_is_an_ordinary_read() {
+        // 3 つとも 1 度の列挙で完結し、費用は既存の列挙と同じ形である。新しい
+        // 予算区分を作る理由が無い。
+        for (op, name) in [
+            (ReadOperation::ListFonts, OPERATION_LIST_FONTS),
+            (ReadOperation::ListPalettes, OPERATION_LIST_PALETTES),
+            (ReadOperation::ListModules, OPERATION_LIST_MODULES),
+        ] {
+            assert_eq!(
+                KnownOperation::Read(op).budget_kind(),
+                RequestBudgetKind::Read,
+                "{op:?}"
+            );
+            assert!(ReadOperation::ALL.contains(&op), "{op:?}");
+            assert_eq!(ReadOperation::from_operation_name(name), Some(op));
+        }
     }
 
     #[test]
@@ -1465,6 +1591,115 @@ mod tests {
     #[test]
     fn list_available_effects_params_reject_unknown_field() {
         assert!(serde_json::from_str::<ListAvailableEffectsParams>(r#"{"future":1}"#).is_err());
+    }
+
+    #[test]
+    fn catalog_params_accept_flat_page_fields() {
+        let fonts: ListFontsParams = serde_json::from_str(r#"{"offset":2,"limit":5}"#).unwrap();
+        assert_eq!((fonts.page.offset, fonts.page.limit), (2, 5));
+        let palettes: ListPalettesParams =
+            serde_json::from_str(r#"{"offset":3,"limit":6}"#).unwrap();
+        assert_eq!((palettes.page.offset, palettes.page.limit), (3, 6));
+        let modules: ListModulesParams =
+            serde_json::from_str(r#"{"module_type":"plugin_input","offset":4,"limit":7}"#).unwrap();
+        assert_eq!(modules.module_type, Some(ModuleType::PluginInput));
+        assert_eq!((modules.page.offset, modules.page.limit), (4, 7));
+    }
+
+    #[test]
+    fn catalog_params_reject_unknown_field() {
+        assert!(serde_json::from_str::<ListFontsParams>(r#"{"future":1}"#).is_err());
+        assert!(serde_json::from_str::<ListPalettesParams>(r#"{"future":1}"#).is_err());
+        assert!(serde_json::from_str::<ListModulesParams>(r#"{"future":1}"#).is_err());
+    }
+
+    #[test]
+    fn catalog_params_do_not_take_a_scene_id() {
+        // シーンに紐づかない一覧であり、guard として何も守らない値を必須にしない。
+        for value in [
+            serde_json::to_value(ListFontsParams::default()).unwrap(),
+            serde_json::to_value(ListPalettesParams::default()).unwrap(),
+            serde_json::to_value(ListModulesParams::default()).unwrap(),
+        ] {
+            let keys: std::collections::BTreeSet<&str> = value
+                .as_object()
+                .expect("オブジェクト")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert!(
+                !keys.contains("expected_scene_id"),
+                "シーン ID を要求しています: {keys:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_modules_params_default_the_filter_to_none() {
+        let params: ListModulesParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(params.module_type, None);
+    }
+
+    #[test]
+    fn list_fonts_result_roundtrip() {
+        let result = ListFontsResult {
+            items: vec!["MS UI Gothic".to_string(), "游ゴシック".to_string()],
+            page: sample_page_meta(),
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        assert_eq!(serde_json::from_str::<ListFontsResult>(&s).unwrap(), result);
+    }
+
+    #[test]
+    fn list_palettes_result_roundtrip() {
+        let result = ListPalettesResult {
+            current: Some("[標準.既定]".to_string()),
+            items: vec![PaletteEntry {
+                name: "既定".to_string(),
+                colors: vec![
+                    Rgba {
+                        r: 1,
+                        g: 2,
+                        b: 3,
+                        a: 255
+                    };
+                    PALETTE_COLOR_COUNT
+                ],
+            }],
+            page: sample_page_meta(),
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        let restored: ListPalettesResult = serde_json::from_str(&s).unwrap();
+        assert_eq!(restored, result);
+        assert_eq!(restored.items[0].colors.len(), 64);
+    }
+
+    #[test]
+    fn list_palettes_result_keeps_a_missing_current_name_as_null() {
+        let result = ListPalettesResult {
+            current: None,
+            items: Vec::new(),
+            page: sample_page_meta(),
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["current"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn list_modules_result_roundtrip() {
+        let result = ListModulesResult {
+            items: vec![ModuleEntry {
+                module_type: ModuleType::ScriptObject,
+                name: "テキスト".to_string(),
+                information: "標準搭載".to_string(),
+            }],
+            page: sample_page_meta(),
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ListModulesResult>(&s).unwrap(),
+            result
+        );
     }
 
     #[test]

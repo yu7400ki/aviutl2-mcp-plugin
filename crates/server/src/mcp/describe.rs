@@ -13,9 +13,9 @@ use crate::mcp::summary::{TextBuilder, clamp_chars};
 use aviutl2_mcp_core::{
     BatchOutcome, BatchStepOutcome, EditInfo, EditOutcome, EffectItemValues, EvaluatedItem,
     GetCurrentSceneResult, GridBpmOutcome, InstanceInfo, LayerStateOutcome,
-    ListAvailableEffectsResult, ListLayersResult, ListObjectsResult, ObjectDetail,
-    ObjectSectionsOutcome, ObjectSummary, PageMeta, SelectionField, SelectionSnapshot,
-    SelectionState,
+    ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
+    ListObjectsResult, ListPalettesResult, ObjectDetail, ObjectSectionsOutcome, ObjectSummary,
+    PageMeta, SelectionField, SelectionSnapshot, SelectionState,
 };
 
 /// 名前をそのまま行に載せるときの最大文字数。
@@ -212,6 +212,59 @@ pub fn available_effects(result: &ListAvailableEffectsResult) -> String {
     }
     text.push_line(
         "effect_type を指定すると種別で絞り込めます。設定項目の定義は structuredContent を参照してください",
+    );
+    text.finish()
+}
+
+/// `list_fonts` の text content。
+pub fn fonts(result: &ListFontsResult) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(format!("フォント {}", catalog_page_line(&result.page)));
+    for name in &result.items {
+        text.push_line(format!("- {}", clamp_chars(name, MAX_NAME_CHARS)));
+    }
+    text.push_line("いずれも font 種別の設定項目へそのまま指定できます");
+    text.finish()
+}
+
+/// `list_palettes` の text content。
+///
+/// **色そのものは載せない。** 64 件の組を行へ並べても読めるものにならず、完全な
+/// 機械可読値は `structuredContent` が運ぶ。
+pub fn palettes(result: &ListPalettesResult) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(match &result.current {
+        Some(name) => format!("現在のパレット {}", clamp_chars(name, MAX_NAME_CHARS)),
+        None => "現在のパレット 取得できませんでした".to_string(),
+    });
+    text.push_line(format!("パレット {}", catalog_page_line(&result.page)));
+    for palette in &result.items {
+        text.push_line(format!(
+            "- {} colors={}",
+            clamp_chars(&palette.name, MAX_NAME_CHARS),
+            palette.colors.len(),
+        ));
+    }
+    text.push_line("色は structuredContent を参照してください");
+    text.finish()
+}
+
+/// `list_modules` の text content。
+///
+/// **説明文は載せない。** 秘匿の対象ではないが、1 件あたりの長さが定まらず、
+/// 一覧の行が説明文の長さで決まってしまう。
+pub fn modules(result: &ListModulesResult) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(format!("モジュール {}", catalog_page_line(&result.page)));
+    for module in &result.items {
+        text.push_line(format!(
+            "- {} type={}",
+            clamp_chars(&module.name, MAX_NAME_CHARS),
+            module.module_type.kind_name(),
+        ));
+    }
+    text.push_line(
+        "module_type を指定すると種別で絞り込めます。説明文は structuredContent を参照してください",
     );
     text.finish()
 }

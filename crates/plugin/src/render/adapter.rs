@@ -574,6 +574,14 @@ mod tests {
             Ok(Vec::new())
         }
 
+        fn font_names(&self) -> Result<Vec<String>, ReadError> {
+            Ok(Vec::new())
+        }
+
+        fn modules(&self) -> Result<Vec<aviutl2_mcp_core::ModuleEntry>, ReadError> {
+            Ok(Vec::new())
+        }
+
         fn enter_read_section<T, F>(&self, _f: F) -> Result<T, ReadError>
         where
             T: Send + 'static,

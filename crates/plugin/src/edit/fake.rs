@@ -22,7 +22,8 @@ use crate::read::host::{
 use crate::test_support::alias_with_effects;
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EffectFlags, EffectItem,
-    EffectItemType, EffectType, FiniteF64, FrameRange, GridBpm, ItemValue, SectionRange,
+    EffectItemType, EffectType, FiniteF64, FrameRange, GridBpm, ItemValue, ModuleEntry, ModuleType,
+    PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange,
 };
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -367,6 +368,14 @@ impl Default for Knobs {
 pub(crate) struct FakeEditHost {
     pub(crate) info: HostEditInfo,
     pub(crate) catalog: Vec<AvailableEffect>,
+    /// 登録済みフォント名。
+    pub(crate) fonts: Vec<String>,
+    /// 登録済みモジュール。
+    pub(crate) modules: Vec<ModuleEntry>,
+    /// 登録済みパレット。
+    pub(crate) palettes: Vec<PaletteEntry>,
+    /// 現在のパレット名。
+    pub(crate) current_palette: Option<String>,
     pub(crate) scene: Mutex<FakeScene>,
     pub(crate) project: Option<Arc<ProjectState>>,
     knobs: Mutex<Knobs>,
@@ -386,6 +395,25 @@ impl FakeEditHost {
         Self {
             info: fake_edit_info(),
             catalog: fake_catalog(),
+            fonts: vec!["MS UI Gothic".to_string(), "游ゴシック".to_string()],
+            modules: vec![ModuleEntry {
+                module_type: ModuleType::ScriptObject,
+                name: "テキスト".to_string(),
+                information: "標準搭載".to_string(),
+            }],
+            palettes: vec![PaletteEntry {
+                name: "既定".to_string(),
+                colors: vec![
+                    Rgba {
+                        r: 0,
+                        g: 0,
+                        b: 0,
+                        a: 255
+                    };
+                    PALETTE_COLOR_COUNT
+                ],
+            }],
+            current_palette: Some("[標準.既定]".to_string()),
             scene: Mutex::new(fake_scene()),
             project: None,
             knobs: Mutex::new(Knobs::default()),
@@ -692,6 +720,14 @@ impl ReadHost for FakeReadHost {
         Ok(self.0.catalog.clone())
     }
 
+    fn font_names(&self) -> Result<Vec<String>, ReadError> {
+        Ok(self.0.fonts.clone())
+    }
+
+    fn modules(&self) -> Result<Vec<ModuleEntry>, ReadError> {
+        Ok(self.0.modules.clone())
+    }
+
     fn enter_read_section<T, F>(&self, f: F) -> Result<T, ReadError>
     where
         T: Send + 'static,
@@ -790,6 +826,27 @@ impl SceneReader for FakeSceneEditor<'_> {
 
     fn grid_bpm(&self) -> Result<Vec<GridBpm>, ReadError> {
         Ok(self.host.scene.lock().unwrap().grid_bpm.clone())
+    }
+
+    fn palette_names(&self) -> Result<Vec<String>, ReadError> {
+        Ok(self
+            .host
+            .palettes
+            .iter()
+            .map(|palette| palette.name.clone())
+            .collect())
+    }
+
+    fn current_palette_name(&self) -> Option<String> {
+        self.host.current_palette.clone()
+    }
+
+    fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>> {
+        self.host
+            .palettes
+            .iter()
+            .find(|palette| palette.name == name)
+            .map(|palette| palette.colors.clone())
     }
 
     fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {

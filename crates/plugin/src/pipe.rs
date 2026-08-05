@@ -836,6 +836,28 @@ mod tests {
             Err(crate::read::ReadError::NotReady)
         }
 
+        fn list_fonts(&self) -> Result<crate::read::Snapshot<String>, crate::read::ReadError> {
+            Err(crate::read::ReadError::NotReady)
+        }
+
+        fn list_palettes(
+            &self,
+            _page: &aviutl2_mcp_core::PageRequest,
+        ) -> Result<
+            Result<aviutl2_mcp_core::ListPalettesResult, aviutl2_mcp_core::PageError>,
+            crate::read::ReadError,
+        > {
+            Err(crate::read::ReadError::NotReady)
+        }
+
+        fn list_modules(
+            &self,
+            _module_type: Option<&aviutl2_mcp_core::ModuleType>,
+        ) -> Result<crate::read::Snapshot<aviutl2_mcp_core::ModuleEntry>, crate::read::ReadError>
+        {
+            Err(crate::read::ReadError::NotReady)
+        }
+
         fn get_effect_item_values(
             &self,
             _params: &aviutl2_mcp_core::GetEffectItemValuesParams,
@@ -911,6 +933,14 @@ mod tests {
             Ok(Vec::new())
         }
 
+        fn font_names(&self) -> Result<Vec<String>, crate::read::ReadError> {
+            Ok(Vec::new())
+        }
+
+        fn modules(&self) -> Result<Vec<aviutl2_mcp_core::ModuleEntry>, crate::read::ReadError> {
+            Ok(Vec::new())
+        }
+
         fn enter_read_section<T, F>(&self, f: F) -> Result<T, crate::read::ReadError>
         where
             T: Send + 'static,
@@ -930,6 +960,18 @@ mod tests {
 
         fn grid_bpm(&self) -> Result<Vec<aviutl2_mcp_core::GridBpm>, crate::read::ReadError> {
             Ok(Vec::new())
+        }
+
+        fn palette_names(&self) -> Result<Vec<String>, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn current_palette_name(&self) -> Option<String> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn palette_colors(&self, _name: &str) -> Option<Vec<aviutl2_mcp_core::Rgba>> {
+            panic!("参照区間の内側で panic させます")
         }
 
         fn layer(
@@ -2089,6 +2131,28 @@ mod tests {
         ) -> Result<crate::read::Snapshot<aviutl2_mcp_core::AvailableEffect>, crate::read::ReadError>
         {
             StubReadAdapter.list_available_effects(effect_type)
+        }
+
+        fn list_fonts(&self) -> Result<crate::read::Snapshot<String>, crate::read::ReadError> {
+            StubReadAdapter.list_fonts()
+        }
+
+        fn list_palettes(
+            &self,
+            page: &aviutl2_mcp_core::PageRequest,
+        ) -> Result<
+            Result<aviutl2_mcp_core::ListPalettesResult, aviutl2_mcp_core::PageError>,
+            crate::read::ReadError,
+        > {
+            StubReadAdapter.list_palettes(page)
+        }
+
+        fn list_modules(
+            &self,
+            module_type: Option<&aviutl2_mcp_core::ModuleType>,
+        ) -> Result<crate::read::Snapshot<aviutl2_mcp_core::ModuleEntry>, crate::read::ReadError>
+        {
+            StubReadAdapter.list_modules(module_type)
         }
 
         fn get_effect_item_values(

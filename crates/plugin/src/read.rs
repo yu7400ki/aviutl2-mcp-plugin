@@ -19,8 +19,8 @@ pub mod sdk;
 use crate::project::ProjectState;
 use aviutl2_mcp_core::{
     AvailableEffect, EditInfo, EffectItemValues, EffectType, GetEffectItemValuesParams, LayerInfo,
-    ObjectDetail, ObjectFilter, ObjectSelector, ObjectSummary, PageError, PageMeta, PageRequest,
-    SceneInfo, SelectionSnapshot,
+    ListPalettesResult, ModuleEntry, ModuleType, ObjectDetail, ObjectFilter, ObjectSelector,
+    ObjectSummary, PageError, PageMeta, PageRequest, SceneInfo, SelectionSnapshot,
 };
 use std::sync::Arc;
 
@@ -145,6 +145,44 @@ pub trait ReadAdapter: Send + Sync {
         &self,
         effect_type: Option<&EffectType>,
     ) -> Result<Snapshot<AvailableEffect>, ReadError>;
+
+    /// 登録済みフォント名を全件列挙する。
+    ///
+    /// 参照区間へ入らない。フォント名の列挙は編集ハンドルの機能であり、
+    /// プロジェクトデータの参照を要しない。同じ理由でシーンの guard も掛けない。
+    ///
+    /// revision の扱いは [`Self::list_available_effects`] と同じである。返す
+    /// `snapshot_revision` は列挙時点のプロジェクト revision だが、一覧の内容は
+    /// この値に連動しない。
+    fn list_fonts(&self) -> Result<Snapshot<String>, ReadError>;
+
+    /// 登録済みパレットを列挙し、要求ページを切り出して返す。
+    ///
+    /// 名前の列挙と色の取得を 1 度の参照区間の内側で行う。分けると、名前を
+    /// 集めてから色を読むまでの間にパレットが差し替わり、食い違った組を返し得る。
+    ///
+    /// 切り出しをここで行うのは [`Self::list_objects`] と同じ理由である。色は
+    /// パレット 1 件あたり [`aviutl2_mcp_core::PALETTE_COLOR_COUNT`] 件あり、
+    /// 応答へ載せない分まで読むと参照区間の保持時間が登録数で決まってしまう。
+    ///
+    /// 参照区間へ入るが、シーンの guard は掛けない。区間へ入ることと、シーンに
+    /// 紐づく値であることは別である。
+    ///
+    /// スナップショット revision の不一致は参照区間の失敗ではないため、畳まずに
+    /// 返す。
+    fn list_palettes(
+        &self,
+        page: &PageRequest,
+    ) -> Result<Result<ListPalettesResult, PageError>, ReadError>;
+
+    /// 登録済みモジュールを全件列挙する。
+    ///
+    /// 参照区間へ入らない理由も revision の扱いも [`Self::list_fonts`] と同じ
+    /// である。
+    fn list_modules(
+        &self,
+        module_type: Option<&ModuleType>,
+    ) -> Result<Snapshot<ModuleEntry>, ReadError>;
 
     /// effect の設定項目を、要求されたフレームで評価した値を返す。
     ///

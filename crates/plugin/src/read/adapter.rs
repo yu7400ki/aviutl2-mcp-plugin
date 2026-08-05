@@ -13,9 +13,10 @@ use crate::read::{Page, ProjectStatus, ReadAdapter, Snapshot};
 use aviutl2_mcp_core::{
     AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFingerprintInput, EffectInfo,
     EffectItem, EffectItemValues, EffectSelector, EffectType, EvaluatedItem, EvaluatedItemKind,
-    Extent, FiniteF64, FrameRange, GetEffectItemValuesParams, LayerInfo, MAX_EVALUATED_ITEMS,
-    ObjectDetail, ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary, PageError,
-    PageRequest, SceneInfo, SelectionSnapshot, TrackGroup, take_page,
+    Extent, FiniteF64, FrameRange, GetEffectItemValuesParams, LayerInfo, ListPalettesResult,
+    MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectDetail, ObjectFilter,
+    ObjectFingerprintInput, ObjectSelector, ObjectSummary, PageError, PageMeta, PageRequest,
+    PaletteEntry, SceneInfo, SelectionSnapshot, TrackGroup, take_page,
 };
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -123,6 +124,22 @@ fn catch<T>(f: impl FnOnce() -> T) -> Result<T, ReadError> {
 /// 失敗を返し得るクロージャの panic を型付きの失敗へ変換する。
 fn guard<T>(f: impl FnOnce() -> Result<T, ReadError>) -> Result<T, ReadError> {
     catch(f).and_then(|result| result)
+}
+
+/// 切り出した後に落とした件数をページのメタ情報へ反映する。
+///
+/// 総件数と本ページの件数だけを減らし、次ページの位置は動かさない。位置は
+/// 列挙が返した並びに対する添字であり、落とした分だけ詰めると、次の要求が同じ
+/// 対象を読み直して先へ進まなくなる。
+///
+/// 総件数へ反映するのは本ページで落とした分だけである。他のページで落ちるかは
+/// そのページを切り出すまで分からず、読まずに数えることはできない。
+fn dropped_from_page(meta: PageMeta, dropped: usize, count: usize) -> PageMeta {
+    PageMeta {
+        total_count: meta.total_count.saturating_sub(dropped as u32),
+        count: count as u32,
+        ..meta
+    }
 }
 
 impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
@@ -350,6 +367,74 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
         let mut items = self.effect_catalog()?;
         if let Some(effect_type) = effect_type {
             items.retain(|effect| effect.effect_type == *effect_type);
+        }
+        Ok(Snapshot {
+            items,
+            snapshot_revision,
+        })
+    }
+
+    fn list_fonts(&self) -> Result<Snapshot<String>, ReadError> {
+        self.ensure_readable()?;
+        // 参照区間を必要としないため、列挙の直前の revision を採る。
+        let snapshot_revision = self.project.revision();
+        let items = guard(|| self.host.font_names())?;
+        Ok(Snapshot {
+            items,
+            snapshot_revision,
+        })
+    }
+
+    fn list_palettes(
+        &self,
+        page: &PageRequest,
+    ) -> Result<Result<ListPalettesResult, PageError>, ReadError> {
+        self.ensure_readable()?;
+        let project = self.project.as_ref();
+        let page = *page;
+
+        self.read_section(move |scene| {
+            let revision = project.revision();
+
+            // 名前だけを先に集める。色は窓に入った分だけ読む。
+            let names = scene.palette_names()?;
+            let (window, meta) = match take_page(&names, &page, revision) {
+                Ok(page) => page,
+                Err(error) => return Ok(Err(error)),
+            };
+
+            let mut items = Vec::with_capacity(window.len());
+            let mut dropped = 0usize;
+            for name in window {
+                match scene.palette_colors(&name) {
+                    Some(colors) => items.push(PaletteEntry { name, colors }),
+                    // 列挙が返した名前で色が取れないのは異常だが、その 1 件の
+                    // ために一覧全体を落とさない。落とした件数は総件数へ反映する。
+                    None => dropped += 1,
+                }
+            }
+
+            // 現在のパレット名は付随情報である。取れなくても一覧は返す。
+            let current = scene.current_palette_name();
+
+            Ok(Ok(ListPalettesResult {
+                current,
+                page: dropped_from_page(meta, dropped, items.len()),
+                items,
+            }))
+        })
+    }
+
+    fn list_modules(
+        &self,
+        module_type: Option<&ModuleType>,
+    ) -> Result<Snapshot<ModuleEntry>, ReadError> {
+        self.ensure_readable()?;
+        // 参照区間を必要としないため、列挙の直前の revision を採る。
+        let snapshot_revision = self.project.revision();
+        let mut items = guard(|| self.host.modules())?;
+        if let Some(module_type) = module_type {
+            items.retain(|module| module.module_type == *module_type);
         }
         Ok(Snapshot {
             items,
@@ -862,7 +947,7 @@ mod tests {
     use crate::test_support::{alias_with_effects, with_silent_panic_hook};
     use aviutl2_mcp_core::{
         AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
-        GridBpm, ItemValue, MAX_PAGE_LIMIT, SectionRange, TrackInfo,
+        GridBpm, ItemValue, MAX_PAGE_LIMIT, PALETTE_COLOR_COUNT, Rgba, SectionRange, TrackInfo,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -976,6 +1061,18 @@ mod tests {
         /// レイヤー番号と開始フレーム番号の組で指す。並び順は規定されて
         /// いないため、与えた順序をそのまま返す。
         selected: Vec<(usize, usize)>,
+        /// 登録済みフォント名。
+        fonts: Vec<String>,
+        /// 登録済みモジュール。
+        modules: Vec<ModuleEntry>,
+        /// 登録済みパレット名を、ホストが返す順序で並べたもの。
+        palettes: Vec<String>,
+        /// 色を取得できないパレット名。
+        ///
+        /// 列挙が返した名前で情報が取れない状況を作る。
+        palettes_without_colors: Vec<String>,
+        /// 現在のパレット名。名乗らないホストは `None`。
+        current_palette: Option<String>,
         /// オブジェクト設定ウィンドウで選択されている対象。
         focus: Option<(usize, usize)>,
         /// フォーカス対象の区間番号。
@@ -1040,6 +1137,11 @@ mod tests {
                 values_unavailable_for: None,
                 group_item_names: Vec::new(),
                 selected: Vec::new(),
+                fonts: fake_fonts(),
+                modules: fake_modules(),
+                palettes: fake_palette_names(),
+                palettes_without_colors: Vec::new(),
+                current_palette: Some("[標準.既定]".to_string()),
                 focus: None,
                 focus_section: None,
                 project: None,
@@ -1109,6 +1211,18 @@ mod tests {
             Ok(self.catalog.clone())
         }
 
+        fn font_names(&self) -> Result<Vec<String>, ReadError> {
+            self.assert_ready("enum_font_name");
+            self.record("font_names");
+            Ok(self.fonts.clone())
+        }
+
+        fn modules(&self) -> Result<Vec<ModuleEntry>, ReadError> {
+            self.assert_ready("enum_module_info");
+            self.record("modules");
+            Ok(self.modules.clone())
+        }
+
         fn enter_read_section<T, F>(&self, f: F) -> Result<T, ReadError>
         where
             T: Send + 'static,
@@ -1157,6 +1271,24 @@ mod tests {
 
         fn grid_bpm(&self) -> Result<Vec<GridBpm>, ReadError> {
             Ok(self.host.grid_bpm.clone())
+        }
+
+        fn palette_names(&self) -> Result<Vec<String>, ReadError> {
+            self.host.record("palette_names");
+            Ok(self.host.palettes.clone())
+        }
+
+        fn current_palette_name(&self) -> Option<String> {
+            self.host.record("current_palette_name");
+            self.host.current_palette.clone()
+        }
+
+        fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>> {
+            self.host.record("palette_colors");
+            if self.host.palettes_without_colors.iter().any(|n| n == name) {
+                return None;
+            }
+            Some(fake_palette_colors(name))
         }
 
         fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {
@@ -1550,6 +1682,58 @@ mod tests {
                 items: Vec::new(),
             },
         ]
+    }
+
+    fn fake_fonts() -> Vec<String> {
+        vec![
+            "MS UI Gothic".to_string(),
+            "游ゴシック".to_string(),
+            "Segoe UI".to_string(),
+        ]
+    }
+
+    fn fake_modules() -> Vec<ModuleEntry> {
+        vec![
+            ModuleEntry {
+                module_type: ModuleType::ScriptObject,
+                name: "テキスト".to_string(),
+                information: "標準搭載のオブジェクトスクリプト".to_string(),
+            },
+            ModuleEntry {
+                module_type: ModuleType::PluginInput,
+                name: "入力プラグイン".to_string(),
+                information: "動画の読み込み".to_string(),
+            },
+            ModuleEntry {
+                module_type: ModuleType::PluginOutput,
+                name: "出力プラグイン".to_string(),
+                information: "動画の書き出し".to_string(),
+            },
+        ]
+    }
+
+    fn fake_palette_names() -> Vec<String> {
+        vec![
+            "既定".to_string(),
+            "暖色".to_string(),
+            "寒色".to_string(),
+            "単色".to_string(),
+        ]
+    }
+
+    /// パレット名から色を作る。
+    ///
+    /// 名前ごとに違う色にしてあり、別のパレットの色を返した実装は結果に現れる。
+    fn fake_palette_colors(name: &str) -> Vec<Rgba> {
+        let seed = name.chars().count() as u8;
+        (0..PALETTE_COLOR_COUNT)
+            .map(|index| Rgba {
+                r: seed,
+                g: index as u8,
+                b: 0,
+                a: 255,
+            })
+            .collect()
     }
 
     impl<H: ReadHost> HostReadAdapter<H> {

@@ -15,7 +15,7 @@ use crate::read::host::{
 use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection};
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, EffectType,
-    FiniteF64, GridBpm, ItemValue, SectionRange,
+    FiniteF64, GridBpm, ItemValue, ModuleEntry, ModuleType, Rgba, SectionRange,
 };
 use std::collections::HashMap;
 use std::ops::Range;
@@ -84,6 +84,20 @@ impl ReadHost for SdkReadHost {
         Ok(catalog)
     }
 
+    fn font_names(&self) -> Result<Vec<String>, ReadError> {
+        // 列挙は打ち切れない。コールバックは戻り値を持たず、途中で止める手段が
+        // 無いため、1 ページを返す要求でも全件が返る。
+        Ok(EDIT_HANDLE.get_font_names())
+    }
+
+    fn modules(&self) -> Result<Vec<ModuleEntry>, ReadError> {
+        Ok(EDIT_HANDLE
+            .get_modules()
+            .into_iter()
+            .map(module_entry)
+            .collect())
+    }
+
     fn enter_read_section<T, F>(&self, f: F) -> Result<T, ReadError>
     where
         T: Send + 'static,
@@ -118,6 +132,21 @@ impl SceneReader for SdkSceneReader<'_> {
             .get_grid_bpm_list()
             .map_err(|_| sdk("get_grid_bpm_list"))?;
         list.into_iter().map(grid_bpm).collect()
+    }
+
+    fn palette_names(&self) -> Result<Vec<String>, ReadError> {
+        // 列挙は編集ハンドルの機能だが、色と同じ区間の内側で呼ぶ。分けると、
+        // 名前を集めてから色を読むまでの間にパレットが差し替わり得る。
+        Ok(EDIT_HANDLE.get_palette_names())
+    }
+
+    fn current_palette_name(&self) -> Option<String> {
+        // 一覧に対する付随情報であり、取得できないこともある。
+        self.section.get_palette_name().ok()
+    }
+
+    fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>> {
+        self.section.get_palette_info(name).ok().map(palette_colors)
     }
 
     fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {
@@ -668,6 +697,37 @@ fn grid_bpm(info: aviutl2::generic::BpmInfo) -> Result<GridBpm, ReadError> {
         start: finite_value(info.start, OPERATION)?,
         offset: finite_value(f64::from(info.offset), OPERATION)?,
     })
+}
+
+/// パレット情報を所有型の色の列へ写す。
+///
+/// 件数は SDK が固定長で定めており、写した結果も常に
+/// [`aviutl2_mcp_core::PALETTE_COLOR_COUNT`] 件になる。不透明度は常に 255 だが
+/// 落とさない。
+/// 落とすと、SDK が返す形と応答の形が別物になる。
+fn palette_colors(info: aviutl2::generic::PaletteInfo) -> Vec<Rgba> {
+    info.colors
+        .into_iter()
+        .map(|color| Rgba {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+            a: color.a,
+        })
+        .collect()
+}
+
+/// モジュール情報を所有型へ写す。
+///
+/// 名前と説明文はラッパーが所有文字列として渡してくるため、ここでの複製は
+/// 要らない。種別は raw 値を経由して写す——名前で対応付けると、既知の種別が
+/// 増えたときに写し先を足し忘れても静かに通る。
+fn module_entry(info: aviutl2::generic::ModuleInfo) -> ModuleEntry {
+    ModuleEntry {
+        module_type: ModuleType::from_raw(i32::from(info.module_type)),
+        name: info.name,
+        information: info.information,
+    }
 }
 
 /// トラックバーの移動情報を所有型へ写す。
