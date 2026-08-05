@@ -382,11 +382,11 @@ pub struct GetEffectItemValuesInput {
     /// 評価対象の effect のセレクター。get_object が返した effect の selector をそのまま指定する。
     pub effect: EffectSelectorInput,
     /// 評価するフレーム番号。シーンの絶対フレーム番号で 0 始まり。小数を指定するとフレーム間の位置を指す。
-    #[schemars(length(min = 1, max = MAX_FRAME_COUNT))]
+    #[schemars(length(min = 1, max = MAX_FRAME_COUNT), extend("uniqueItems" = true))]
     pub frames: Vec<f64>,
     /// 評価する設定項目名。省略すると effect のトラックバー項目とチェックボックス項目すべてが対象になる。
     #[serde(default)]
-    #[schemars(length(min = 1, max = MAX_ITEM_COUNT))]
+    #[schemars(length(min = 1, max = MAX_ITEM_COUNT), extend("uniqueItems" = true))]
     pub items: Option<Vec<String>>,
 }
 

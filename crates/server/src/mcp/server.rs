@@ -4336,6 +4336,29 @@ mod tests {
     }
 
     #[test]
+    fn the_effect_item_values_input_schema_declares_the_uniqueness_it_enforces() {
+        // 重複した要求は `invalid_argument` で落ちる。件数の境界だけを宣言して
+        // 一意性を伏せると、同じ 1 つのフィールドについて契約の一部だけが
+        // 要求元から見えなくなる。検証の実体は core の validate である。
+        let tool = tool_named("get_effect_item_values");
+        for (field, max) in [
+            ("frames", aviutl2_mcp_core::MAX_EVALUATED_FRAMES),
+            ("items", aviutl2_mcp_core::MAX_EVALUATED_ITEMS),
+        ] {
+            let property = tool.input_schema["properties"][field].clone();
+            assert_eq!(
+                property["uniqueItems"],
+                serde_json::json!(true),
+                "{field} が一意性を宣言していません: {property}"
+            );
+            // 一意性が件数の宣言と同じ位置に付いていることまで見る。位置が
+            // ずれると、宣言は在るのに要求元の検証器が読まない。
+            assert_eq!(property["minItems"], serde_json::json!(1), "{field}");
+            assert_eq!(property["maxItems"], serde_json::json!(max), "{field}");
+        }
+    }
+
+    #[test]
     fn the_grid_bpm_input_schema_declares_the_limits_it_enforces() {
         // 宣言した制約は server 側で実際に検証する。検証していない宣言を
         // schema に残さない。検証の実体は core の validate である。
