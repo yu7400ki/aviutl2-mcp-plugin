@@ -1405,13 +1405,14 @@ pub(crate) fn attribute<T>(
 
 /// 適用を試みた結果。
 ///
-/// 要求された項目は必ず `applied` に入るか、`requested` から `applied` を
-/// 除いた残りに入る。どちらにも入らない項目は無い。
+/// ここが持つのは**変更 API を呼んだ結果だけ**であり、応答の `applied` とは
+/// 別である。要求どおりに反映されたかまで見る軸があるため、応答の一覧は
+/// [`selection_state`] が観測と突き合わせてから組み立てる。
 struct SelectionOutcome {
     /// 変更を要求された項目。応答での並び順を決める。
     requested: Vec<SelectionField>,
     /// 変更 API の呼び出しが成功した項目。
-    applied: Vec<SelectionField>,
+    succeeded: Vec<SelectionField>,
 }
 
 /// カーソル・選択範囲・表示開始位置・フォーカスを固定の順序で適用する。
@@ -1440,7 +1441,7 @@ fn apply_selection(
     focus: Option<&ResolvedObject<'_>>,
 ) -> SelectionOutcome {
     let mut requested = Vec::new();
-    let mut applied = Vec::new();
+    let mut succeeded = Vec::new();
     let mut failure = None;
 
     if let Some(cursor) = &params.cursor {
@@ -1448,7 +1449,7 @@ fn apply_selection(
         let layer = index(cursor.layer);
         let frame = index(cursor.frame);
         match permit.issue(boundary, |ticket| editor.set_cursor(ticket, layer, frame)) {
-            Ok(()) => applied.push(SelectionField::Cursor),
+            Ok(()) => succeeded.push(SelectionField::Cursor),
             Err(error) => failure = Some(error),
         }
     }
@@ -1463,7 +1464,7 @@ fn apply_selection(
         };
         if failure.is_none() {
             match permit.issue(boundary, |ticket| editor.set_select_range(ticket, range)) {
-                Ok(()) => applied.push(SelectionField::SelectedRange),
+                Ok(()) => succeeded.push(SelectionField::SelectedRange),
                 Err(error) => failure = Some(error),
             }
         }
@@ -1476,7 +1477,7 @@ fn apply_selection(
             match permit.issue(boundary, |ticket| {
                 editor.set_display_start(ticket, layer, frame)
             }) {
-                Ok(()) => applied.push(SelectionField::Display),
+                Ok(()) => succeeded.push(SelectionField::Display),
                 Err(error) => failure = Some(error),
             }
         }
@@ -1489,7 +1490,7 @@ fn apply_selection(
         };
         if failure.is_none() {
             match permit.issue(boundary, |ticket| editor.set_focus_object(ticket, target)) {
-                Ok(()) => applied.push(SelectionField::Focus),
+                Ok(()) => succeeded.push(SelectionField::Focus),
                 Err(error) => failure = Some(error),
             }
         }
@@ -1501,7 +1502,10 @@ fn apply_selection(
             "選択状態の一部を適用できませんでした"
         );
     }
-    SelectionOutcome { requested, applied }
+    SelectionOutcome {
+        requested,
+        succeeded,
+    }
 }
 
 /// 表示開始位置が要求どおりに反映されたか。
@@ -1512,10 +1516,40 @@ fn display_start_applied(observed: &DisplayRange, requested: &DisplayStart) -> b
     observed.frame_start == index(requested.frame) && observed.layer_start == index(requested.layer)
 }
 
+/// 軸ごとに、何をもって「適用できた」と呼ぶかを決める。
+///
+/// [`SelectionField`] に対する網羅 `match` であり `_` を使わない。**軸を足すと
+/// ここが落ち、その軸の判定を決めるまでコンパイルできない。**
+///
+/// **判定が軸によって違うのは、反映値を伝える手段が違うためである。** カーソル・
+/// 選択範囲・フォーカスは反映値そのものが応答に載るため、範囲へ丸められたか
+/// どうかは要求元が応答を読めば分かる。ここで観測一致まで求めると、範囲外を
+/// 送るたびに `not_applied` が立ち、一覧が「何かが失敗した」の合図として
+/// 読めなくなる。
+///
+/// 表示開始位置だけは反映値から判定できない。応答が運ぶ [`DisplayRange`] は
+/// 開始位置以外が概数であり、要求どおりかを要求元が決められない。判定できない
+/// この 1 軸だけを、観測と突き合わせてから伝える。
+fn selection_applied(
+    field: SelectionField,
+    succeeded: bool,
+    observed: &HostSelection,
+    display: Option<&DisplayStart>,
+) -> bool {
+    match field {
+        SelectionField::Cursor | SelectionField::SelectedRange | SelectionField::Focus => succeeded,
+        SelectionField::Display => {
+            succeeded
+                && display
+                    .is_some_and(|requested| display_start_applied(&observed.display, requested))
+        }
+    }
+}
+
 /// 観測した選択状態から応答を組み立てる。
 ///
-/// 表示開始位置はホストが設定できる範囲へ調整するため、変更 API が成功しても
-/// 要求値が入るとは限らない。観測した値と食い違えば適用できなかった側へ移す。
+/// 要求した軸は [`selection_applied`] の判定に従って `applied` と `not_applied`
+/// のどちらか一方へ入る。どちらにも入らない軸は無い。
 fn selection_state(
     epoch: String,
     revision: u64,
@@ -1527,12 +1561,19 @@ fn selection_state(
         .focus
         .as_ref()
         .map(|object| object_summary(&epoch, observed.scene_id, object));
-    let mut applied = outcome.applied;
-    if let Some(requested) = display
-        && !display_start_applied(&observed.display, requested)
-    {
-        applied.retain(|field| *field != SelectionField::Display);
-    }
+    let applied: Vec<SelectionField> = outcome
+        .requested
+        .iter()
+        .copied()
+        .filter(|field| {
+            selection_applied(
+                *field,
+                outcome.succeeded.contains(field),
+                &observed,
+                display,
+            )
+        })
+        .collect();
     let not_applied = outcome
         .requested
         .into_iter()

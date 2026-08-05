@@ -2601,6 +2601,99 @@ fn the_display_span_does_not_decide_whether_the_start_was_applied() {
     assert!(state.not_applied.is_empty());
 }
 
+/// 表示開始位置を含む要求を組み立てる。
+fn set_display(
+    harness: &Harness,
+    layer: u32,
+    frame: u32,
+    focus: Option<FocusChange>,
+) -> SetSelectionParams {
+    SetSelectionParams {
+        expected_scene_id: SCENE_ID,
+        cursor: None,
+        selected_range: None,
+        focus,
+        display: Some(DisplayStart { layer, frame }),
+        expected_project_epoch: harness.epoch(),
+    }
+}
+
+#[test]
+fn the_display_start_decides_its_own_membership_by_the_observed_position() {
+    // 表示開始位置は「呼び出しが通ったか」ではなく「要求どおりの位置に入ったか」
+    // で振り分ける。3 通りを 1 つの表として並べる。
+    let harness = Harness::new();
+    let focused = harness.selector(1, 100);
+
+    // 範囲を超えた要求はクランプされ、適用できなかった側へ入る。
+    let clamped = harness
+        .edit
+        .set_selection(&set_display(&harness, 30, 3_000, None))
+        .expect("クランプが失敗として返りました");
+    assert!(clamped.applied.is_empty());
+    assert_eq!(clamped.not_applied, vec![SelectionField::Display]);
+    assert_ne!(clamped.display.frame_start, 3_000);
+    assert_ne!(clamped.display.layer_start, 30);
+
+    // 範囲内の要求はそのまま入る。
+    let exact = harness
+        .edit
+        .set_selection(&set_display(&harness, 0, 0, None))
+        .expect("範囲内の表示開始位置が拒否されました");
+    assert_eq!(exact.applied, vec![SelectionField::Display]);
+    assert!(exact.not_applied.is_empty());
+    assert_eq!(exact.display.frame_start, 0);
+    assert_eq!(exact.display.layer_start, 0);
+
+    // フォーカスを同時に指定しても、表示開始位置は要求どおりに残る。
+    let with_focus = harness
+        .edit
+        .set_selection(&set_display(
+            &harness,
+            0,
+            5,
+            Some(FocusChange::Set { object: focused }),
+        ))
+        .expect("フォーカスを伴う要求が拒否されました");
+    assert_eq!(
+        with_focus.applied,
+        vec![SelectionField::Display, SelectionField::Focus]
+    );
+    assert!(with_focus.not_applied.is_empty());
+    assert_eq!(with_focus.display.frame_start, 5);
+    assert_eq!(with_focus.display.layer_start, 0);
+}
+
+#[test]
+fn a_clamped_cursor_stays_applied_while_a_clamped_display_start_does_not() {
+    // 非対称は軸の性質の違いから来る。カーソルは反映値そのものが応答に載るため
+    // 丸められたかを要求元が読める。表示範囲は開始位置以外が概数であり、載せた
+    // 値から要求との一致を判定できないため、こちらだけを plugin が振り分ける。
+    let harness = Harness::new();
+    let state = harness
+        .edit
+        .set_selection(&SetSelectionParams {
+            expected_scene_id: SCENE_ID,
+            cursor: Some(CursorPosition {
+                layer: 30,
+                frame: 3_000,
+            }),
+            selected_range: None,
+            focus: None,
+            display: Some(DisplayStart {
+                layer: 30,
+                frame: 3_000,
+            }),
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect("クランプが失敗として返りました");
+
+    assert_eq!(state.applied, vec![SelectionField::Cursor]);
+    assert_eq!(state.not_applied, vec![SelectionField::Display]);
+    assert_ne!(state.cursor.frame, 3_000);
+    assert_ne!(state.display.frame_start, 3_000);
+}
+
 #[test]
 fn a_focus_target_is_resolved_before_it_is_set() {
     let harness = Harness::new();
