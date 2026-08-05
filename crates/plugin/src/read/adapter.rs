@@ -3533,7 +3533,7 @@ mod tests {
             .get_selection(
                 0,
                 &PageRequest {
-                    offset: 1,
+                    offset: 0,
                     limit: 1,
                     snapshot_revision: None,
                 },
@@ -3543,14 +3543,14 @@ mod tests {
 
         // 総件数は選択全体の件数であり、窓の件数ではない。
         assert_eq!(snapshot.page.total_count, 3);
-        assert_eq!(snapshot.page.offset, 1);
+        assert_eq!(snapshot.page.offset, 0);
         assert!(snapshot.page.has_more);
         assert_eq!(snapshot.selected.len(), 1);
-        // 並べ替えた後の 2 件目である。切り出しが並べ替えの前に走れば別の
-        // 対象が返る。
+        // 並べ替えた後の先頭である。ホストが返す順序のまま切り出せば、末尾に
+        // 居るはずの対象が返る。
         assert_eq!(
             (snapshot.selected[0].layer, snapshot.selected[0].frame_start),
-            (1, 100)
+            (0, 0)
         );
 
         assert_eq!(
