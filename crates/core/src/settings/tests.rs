@@ -1,5 +1,11 @@
 use super::*;
 use crate::budget::RequestBudgetKind;
+use std::time::SystemTime;
+
+/// 更新時刻を揃えて書くときに用いる時刻。
+///
+/// 値そのものに意味は無い。**書き込みごとに変わらないことだけが要る。**
+const FIXED_MODIFIED: SystemTime = SystemTime::UNIX_EPOCH;
 
 /// テスト用の一時ファイルのパス。同名の衝突を避けるため uuid を挟む。
 fn temp_settings_path() -> PathBuf {
@@ -12,6 +18,17 @@ fn temp_settings_path() -> PathBuf {
 /// `path` へ内容を書く。
 fn write_settings(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
+}
+
+/// `path` へ内容を書き、更新時刻を [`FIXED_MODIFIED`] へ揃える。
+///
+/// **更新時刻を固定するのが要である。** 印が更新時刻と大きさの組であれば、
+/// 大きさの等しい内容をここで書き分けても同じ印になる。時計の分解能に頼ると
+/// 再現が確率的になるため、更新時刻そのものを揃える。
+fn write_settings_at_fixed_time(path: &Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    let file = std::fs::File::options().write(true).open(path).unwrap();
+    file.set_modified(FIXED_MODIFIED).unwrap();
 }
 
 fn document(text: &str) -> SettingsDocument {
@@ -389,7 +406,10 @@ fn a_missing_file_resolves_to_the_defaults() {
 }
 
 #[test]
-fn an_unchanged_stamp_does_not_reparse() {
+fn unchanged_content_is_read_but_not_reparsed() {
+    // 印を作るためにファイルは毎回読む。**読むことと解析することは別である**
+    // ——内容が同じなら解析も snapshot の確保も行わない。同じ内容を書き直しても
+    // 同じであり、印は内容だけで決まる。
     let path = temp_settings_path();
     write_settings(&path, r#"{"log_level":"debug"}"#);
     let mut reader = SettingsReader::new(path.clone());
@@ -399,8 +419,48 @@ fn an_unchanged_stamp_does_not_reparse() {
     for _ in 0..5 {
         assert!(matches!(reader.refresh(), SettingsRefresh::Unchanged));
     }
-    assert_eq!(reader.loads(), 1, "印が同じなのに読み直しました");
+    assert_eq!(reader.loads(), 1, "内容が同じなのに解析し直しました");
+
+    write_settings(&path, r#"{"log_level":"debug"}"#);
+    assert!(matches!(reader.refresh(), SettingsRefresh::Unchanged));
+    assert_eq!(reader.loads(), 1, "同じ内容の書き直しで解析し直しました");
     assert_eq!(reader.settings().log_level(), Some("debug"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_same_length_replacement_at_the_same_modified_time_is_seen() {
+    // **印が更新時刻と大きさの組であれば、ここで取りこぼす。** 大きさの等しい
+    // 内容が時計の分解能の内に 2 度置換される形は、`log_level` の
+    // `"debug"` → `"trace"` のように実運用で普通に起きる。取りこぼすと次の
+    // 書き込みまで反映されず、`Unchanged` は無言で返るため記録にも残らない。
+    let path = temp_settings_path();
+    let before = r#"{"log_level":"debug"}"#;
+    let after = r#"{"log_level":"trace"}"#;
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "大きさが違えば取りこぼしの検査になりません"
+    );
+
+    write_settings_at_fixed_time(&path, before);
+    let mut reader = SettingsReader::new(path.clone());
+    assert!(matches!(reader.refresh(), SettingsRefresh::Reloaded(_)));
+    assert_eq!(reader.settings().log_level(), Some("debug"));
+
+    write_settings_at_fixed_time(&path, after);
+
+    let refresh = reader.refresh();
+    assert!(
+        matches!(refresh, SettingsRefresh::Reloaded(_)),
+        "大きさも更新時刻も同じ置換を変更なしと判定しました: {refresh:?}"
+    );
+    assert_eq!(
+        reader.settings().log_level(),
+        Some("trace"),
+        "置換後の内容が反映されていません"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -433,15 +493,19 @@ fn a_replaced_file_is_seen_on_the_next_refresh() {
 fn several_writes_between_refreshes_apply_once_as_the_last_state() {
     // 契機と契機の間に何度書き込まれても、読み直しは 1 回であり、見えるのは
     // 最後の状態である。debounce を持たなくても中間の状態は残らない。
+    //
+    // **畳まれることは書き込みの間隔に依らない。** 更新時刻を揃えて書くことで、
+    // 最初と最後が同じ時刻・同じ大きさになる形（取りこぼしが起きた形）でも
+    // 最後の状態が見えることを併せて固定する。
     let path = temp_settings_path();
-    write_settings(&path, r#"{"log_level":"debug"}"#);
+    write_settings_at_fixed_time(&path, r#"{"log_level":"debug"}"#);
     let mut reader = SettingsReader::new(path.clone());
     reader.refresh();
     let loads = reader.loads();
 
-    write_settings(&path, r#"{"log_level":"warn"}"#);
-    write_settings(&path, r#"{"log_level":"error"}"#);
-    write_settings(&path, r#"{"log_level":"trace"}"#);
+    write_settings_at_fixed_time(&path, r#"{"log_level":"warn"}"#);
+    write_settings_at_fixed_time(&path, r#"{"log_level":"error"}"#);
+    write_settings_at_fixed_time(&path, r#"{"log_level":"trace"}"#);
 
     assert!(matches!(reader.refresh(), SettingsRefresh::Reloaded(_)));
     assert_eq!(

@@ -372,6 +372,9 @@ fn a_subscriber_is_woken_by_the_watch_thread_without_polling() {
 fn a_write_that_changes_nothing_does_not_wake_a_subscriber() {
     // 原子的置換は一時ファイルの作成と rename で複数の記録を生む。記録の数だけ
     // 知らせると、変化していない通知が並ぶ。
+    //
+    // **同じ内容の書き直しは印の段で止まる。** 印は内容から決まるため、解析まで
+    // 進まずに `Unchanged` となる。
     let dir = TempDir::new();
     dir.replace_settings(r#"{"log_level":"debug"}"#);
     let mut reader = reader_for(&dir);
@@ -379,7 +382,7 @@ fn a_write_that_changes_nothing_does_not_wake_a_subscriber() {
     let receiver = source.subscribe();
 
     dir.replace_settings(r#"{"log_level":"debug"}"#);
-    assert_eq!(reload(&mut reader, &source), ReloadOutcome::Same);
+    assert_eq!(reload(&mut reader, &source), ReloadOutcome::Unchanged);
     assert!(
         !receiver.has_changed().unwrap(),
         "値が変わっていないのに起床しました"
@@ -453,23 +456,24 @@ fn settings_with_log_level(level: &str) -> Settings {
 
 #[test]
 fn the_snapshot_is_replaced_only_when_the_value_changes() {
-    // 同じ内容を書き直しても差し替えない。通知が重複しても、有効集合が実際に
-    // 変わったときだけ下流へ伝わる根拠になる。
+    // **内容が変わっても値が変わらなければ差し替えない。** 書式の違いや未知の
+    // 項目の追加は解析まで進むが、解決した設定は同じである。通知が重複しても、
+    // 有効集合が実際に変わったときだけ下流へ伝わる根拠になる。
     let dir = TempDir::new();
     dir.replace_settings(r#"{"log_level":"debug"}"#);
     let mut reader = reader_for(&dir);
     let source = SettingsSource::fixed((*reader.settings()).clone());
     let changes = source.subscribe();
 
-    dir.replace_settings(r#"{"log_level":"debug"}"#);
+    dir.replace_settings(r#"{"log_level":"debug","future_field":42}"#);
     assert_eq!(
         reload(&mut reader, &source),
         ReloadOutcome::Same,
-        "同じ内容で差し替えました"
+        "解決した値が同じなのに差し替えました"
     );
     assert!(
         !changes.has_changed().expect("供給元は生きています"),
-        "同じ内容で購読者を起こしました"
+        "解決した値が同じなのに購読者を起こしました"
     );
 
     dir.replace_settings(r#"{"log_level":"trace"}"#);

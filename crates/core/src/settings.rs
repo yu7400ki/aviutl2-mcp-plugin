@@ -13,14 +13,25 @@
 //! 範囲外の値は拒否せず境界へ丸め、型が違う項目だけを既定値へ戻す。1 項目の
 //! ために全体を破損扱いにすると、設定画面がファイルを読めなくなり、画面から
 //! 直せなくなる。丸めと差し戻しは [`SettingsIssue`] として呼び出し元へ返る。
+//!
+//! # 変更の検出は内容から行う
+//!
+//! 読み直すかどうかは、ファイルの内容から作る印（[`SettingsStamp`]）で決める。
+//! **更新時刻と大きさの組では足りない。** 大きさの等しい内容が時計の分解能より
+//! 短い間隔で 2 度置換されると同じ組になり、後の内容を次の書き込みまで取り
+//! こぼす。取りこぼしは無言であり、記録にも残らない。
+//!
+//! 印を作るには毎回ファイルを読む必要がある。**読むことと解析することは別で
+//! ある**——内容が前回と同じなら、解析も snapshot の確保も行わない。
 
 use crate::budget::{BudgetInequality, ScaledBudgets};
 use crate::render::ARTIFACT_MAX_BYTES;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 /// 設定ファイルの場所を上書きする環境変数の名前。
 ///
@@ -711,15 +722,23 @@ impl SettingsDocument {
     }
 }
 
-/// 設定ファイルの更新時刻と大きさの組。
+/// 設定ファイルの内容から作る印。
 ///
-/// **再パースするかどうかの判定にだけ使う。** 同一秒内に置換され、かつ大きさが
-/// 同じであれば取りこぼす。取りこぼしても次の変更で追いつくため、古い設定＝
-/// 直前まで有効だった設定で動くという保守側に倒れている。
+/// **再パースするかどうかの判定にだけ使う。** 内容が変われば必ず変わる——
+/// 更新時刻と大きさの組であった頃は、大きさの等しい内容が時計の分解能より短い
+/// 間隔で 2 度置換されると同じ印になり、後の内容を次の書き込みまで取りこぼした。
+/// 取りこぼしは [`SettingsRefresh::Unchanged`] として無言で返るため、記録にも
+/// 現れない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SettingsStamp {
-    modified: Option<SystemTime>,
-    len: u64,
+pub struct SettingsStamp([u8; 32]);
+
+impl SettingsStamp {
+    /// 内容から印を作る。
+    fn of(text: &str) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(text.as_bytes());
+        Self(hasher.finalize().into())
+    }
 }
 
 /// 設定ファイルの読み取りに失敗した理由。
@@ -736,7 +755,7 @@ pub enum SettingsReadError {
 /// [`SettingsReader::refresh`] の結果。
 #[derive(Debug)]
 pub enum SettingsRefresh {
-    /// 更新時刻と大きさが前回と同じであった。**読み直していない。**
+    /// 内容が前回と同じであった。**解析していない。**
     Unchanged,
     /// 読み直し、snapshot を差し替えた。
     Reloaded(Vec<SettingsIssue>),
@@ -785,39 +804,36 @@ impl SettingsReader {
 
     /// ファイルを解析した回数。
     ///
-    /// **更新時刻と大きさが変わらなければ増えない。** 要求 1 件あたりの費用が
-    /// `stat` 1 回に留まることを、呼び出し元の試験がこの値で確かめる。
+    /// **内容が変わらなければ増えない。** 印を作るためにファイルは毎回読むが、
+    /// 解析と snapshot の確保はそこで止まる。呼び出し元の試験がこの値でその
+    /// 切り分けを確かめる。
     pub fn loads(&self) -> u64 {
         self.loads
     }
 
-    /// 更新時刻と大きさが前回と違えば読み直す。
+    /// 内容が前回と違えば解析し直す。
+    ///
+    /// 印を作るためにファイルは毎回読む。**同じ内容であれば読むだけで止まり、
+    /// 解析も snapshot の確保も行わない。**
     pub fn refresh(&mut self) -> SettingsRefresh {
-        let stamp = match std::fs::metadata(&self.path) {
-            Ok(metadata) => Some(SettingsStamp {
-                modified: metadata.modified().ok(),
-                len: metadata.len(),
-            }),
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => Some(text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return SettingsRefresh::Failed(SettingsReadError::Io(e)),
         };
+        let stamp = text.as_deref().map(SettingsStamp::of);
         if self.stamp == stamp && self.loads > 0 {
             return SettingsRefresh::Unchanged;
         }
 
-        let Some(_) = stamp else {
+        let Some(text) = text else {
             // ファイルが無い状態は破損ではない。全項目を既定値へ戻す。
             self.stamp = None;
             self.loads += 1;
             self.settings = Arc::new(Settings::default());
             return SettingsRefresh::Reloaded(Vec::new());
         };
-
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(e) => return SettingsRefresh::Failed(SettingsReadError::Io(e)),
-        };
-        // 読めた以上、同じ内容を毎回読み直す理由は無い。解析に失敗しても
+        // 読めた以上、同じ内容を毎回解析し直す理由は無い。解析に失敗しても
         // 印は進め、直前の snapshot を維持する。
         self.stamp = stamp;
         self.loads += 1;
@@ -833,17 +849,14 @@ impl SettingsReader {
 
     /// 自分が書いた内容をその場で反映する。
     ///
-    /// **ファイルを読み直さない。** 書いた内容をそのまま解決し、次の
-    /// [`SettingsReader::refresh`] が同じ内容を読み直さないよう印も更新する。
+    /// **ファイルに触れない。** 書いた内容をそのまま解決し、次の
+    /// [`SettingsReader::refresh`] が同じ内容を解析し直さないよう、印も書いた
+    /// 内容から作る。書き込みが失敗していれば印はファイルと食い違うが、その
+    /// 食い違いは次の [`SettingsReader::refresh`] を読み直しへ倒すだけである。
     pub fn adopt(&mut self, document: &SettingsDocument) -> Vec<SettingsIssue> {
         let (settings, issues) = document.resolve(&self.settings);
         self.settings = Arc::new(settings);
-        self.stamp = std::fs::metadata(&self.path)
-            .ok()
-            .map(|metadata| SettingsStamp {
-                modified: metadata.modified().ok(),
-                len: metadata.len(),
-            });
+        self.stamp = Some(SettingsStamp::of(&document.to_json()));
         self.loads += 1;
         issues
     }
