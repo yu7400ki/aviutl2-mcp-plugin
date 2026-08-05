@@ -888,7 +888,7 @@ async fn the_evaluated_values_reach_the_structured_content_but_not_the_text() {
 async fn out_of_range_frame_and_item_counts_never_reach_the_instance() {
     // 件数は要求内容だけで決まる。接続前に落とさなければ、要求の誤りが転送の
     // 失敗として報告される。
-    let over_frames: Vec<f64> = vec![120.0; 17];
+    let over_frames: Vec<f64> = (0..17).map(f64::from).collect();
     let over_items: Vec<String> = (0..33).map(|index| format!("項目{index}")).collect();
     for (frames, items) in [
         (Vec::new(), None),
@@ -911,6 +911,36 @@ async fn out_of_range_frame_and_item_counts_never_reach_the_instance() {
         assert!(
             harness.read_requests().is_empty(),
             "件数の誤りが接続先へ送られました"
+        );
+    }
+}
+
+#[tokio::test]
+async fn duplicated_frames_and_items_never_reach_the_instance() {
+    // 重複も要求内容だけで決まる。畳まずに落とすため、応答に並ぶ件数は要求に
+    // 並べた件数と対応したままになる。
+    for (frames, items) in [
+        (vec![120.0, 120.0], None),
+        (
+            vec![120.0],
+            Some(vec!["範囲".to_string(), "範囲".to_string()]),
+        ),
+    ] {
+        let harness = Harness::start(OperationResponses::new());
+        let result = harness
+            .server
+            .get_effect_item_values(Parameters(GetEffectItemValuesInput {
+                instance_id: harness.instance_id(),
+                effect: effect_selector_input(),
+                frames,
+                items,
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true), "{}", text_of(&result));
+        assert!(
+            harness.read_requests().is_empty(),
+            "重複した要求が接続先へ送られました"
         );
     }
 }

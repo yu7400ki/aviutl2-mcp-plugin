@@ -607,27 +607,35 @@ pub struct GetEffectItemValuesParams {
     /// project epoch・シーン ID・fingerprint を運ぶ。
     pub effect: EffectSelector,
     /// 評価するフレーム番号。シーンの絶対フレームで 0 始まり。1 件以上
-    /// [`MAX_EVALUATED_FRAMES`] 件以下。
+    /// [`MAX_EVALUATED_FRAMES`] 件以下で、同じ値を 2 度並べられない。
     ///
     /// トラックバー項目は小数部をそのまま使い、チェックボックス項目は整数部を
     /// 使う。
     pub frames: Vec<FiniteF64>,
     /// 評価する設定項目名。省略時は effect のトラックバー項目とチェックボックス
     /// 項目すべてを対象とする。明示するときは 1 件以上 [`MAX_EVALUATED_ITEMS`]
-    /// 件以下。
+    /// 件以下で、同じ名前を 2 度並べられない。
     #[serde(default)]
     pub items: Option<Vec<String>>,
 }
 
 impl GetEffectItemValuesParams {
-    /// 要求内容だけで決まる件数と項目名を検証する。
+    /// 要求内容だけで決まる件数・重複・項目名を検証する。
     ///
     /// 0 件のフレーム指定は「何を聞いているのか」が定まらないため受け付けない。
+    /// 重複は黙って畳まずに拒否する。畳めば応答の件数が要求の件数と食い違い、
+    /// 要求元は応答の項目と要求の項目を突き合わせられなくなる。
+    ///
+    /// 重複は件数の判定より後に見る。先に見ると、上限ちょうどの要求が上限を
+    /// 超えているかどうかを重複の有無が左右する。
     pub fn validate(&self) -> Result<(), EffectItemValuesInputError> {
         if self.frames.is_empty() || self.frames.len() > MAX_EVALUATED_FRAMES {
             return Err(EffectItemValuesInputError::FrameCountOutOfRange {
                 count: self.frames.len(),
             });
+        }
+        if let Some(index) = first_duplicate(&self.frames) {
+            return Err(EffectItemValuesInputError::DuplicateFrame { index });
         }
         let Some(items) = &self.items else {
             return Ok(());
@@ -639,8 +647,19 @@ impl GetEffectItemValuesParams {
             validate_name(name)
                 .map_err(|source| EffectItemValuesInputError::ItemName { source })?;
         }
+        if let Some(index) = first_duplicate(items) {
+            return Err(EffectItemValuesInputError::DuplicateItem { index });
+        }
         Ok(())
     }
+}
+
+/// 先に現れた要素と等しくなる最初の位置を返す。
+///
+/// [`FiniteF64`] は丸めずに完全一致で比べる。補間位置は値そのものが意味を
+/// 持つため、近い 2 つの値を同じ 1 つとして扱えない。
+fn first_duplicate<T: PartialEq>(values: &[T]) -> Option<usize> {
+    (1..values.len()).find(|index| values[..*index].contains(&values[*index]))
 }
 
 /// 補間後の値の要求内容の検証失敗。
@@ -652,11 +671,23 @@ pub enum EffectItemValuesInputError {
         /// 指定された件数。
         count: usize,
     },
+    /// 同じフレーム番号が 2 度指定されている。
+    #[error("frames[{index}] が一覧の中で重複しています")]
+    DuplicateFrame {
+        /// 重複した側の、一覧の中での位置。
+        index: usize,
+    },
     /// 設定項目の件数が受け付ける範囲に無い。
     #[error("items は 1 件以上 {MAX_EVALUATED_ITEMS} 件以下である必要があります: {count} 件")]
     ItemCountOutOfRange {
         /// 指定された件数。
         count: usize,
+    },
+    /// 同じ設定項目名が 2 度指定されている。
+    #[error("items[{index}] が一覧の中で重複しています")]
+    DuplicateItem {
+        /// 重複した側の、一覧の中での位置。
+        index: usize,
     },
     /// 設定項目名が名前の規則に反する。
     #[error("設定項目名が不正です: {source}")]
@@ -1399,6 +1430,67 @@ mod tests {
                 "{count} 件の項目が受理されました"
             );
         }
+    }
+
+    #[test]
+    fn get_effect_item_values_params_reject_duplicates() {
+        // 重複を黙って畳むと応答の件数が要求の件数と食い違い、要求元は応答の
+        // 項目を要求の項目へ突き合わせられない。要求の誤りとして落とす。
+        let duplicated_frames = GetEffectItemValuesParams {
+            frames: vec![
+                FiniteF64::try_new(10.0).expect("有限値"),
+                FiniteF64::try_new(10.0).expect("有限値"),
+            ],
+            ..sample_item_values_params(1, None)
+        };
+        assert_eq!(
+            duplicated_frames.validate(),
+            Err(EffectItemValuesInputError::DuplicateFrame { index: 1 })
+        );
+
+        let duplicated_items = GetEffectItemValuesParams {
+            items: Some(vec!["範囲".to_string(), "範囲".to_string()]),
+            ..sample_item_values_params(1, None)
+        };
+        assert_eq!(
+            duplicated_items.validate(),
+            Err(EffectItemValuesInputError::DuplicateItem { index: 1 })
+        );
+    }
+
+    #[test]
+    fn get_effect_item_values_params_compare_frames_without_rounding() {
+        // 補間位置は値そのものが意味を持つ。近い 2 つを同じ 1 つとして扱うと、
+        // 要求元が区別して聞いた位置が拒否される。
+        let params = GetEffectItemValuesParams {
+            frames: vec![
+                FiniteF64::try_new(10.0).expect("有限値"),
+                FiniteF64::try_new(10.5).expect("有限値"),
+            ],
+            ..sample_item_values_params(1, None)
+        };
+        assert_eq!(params.validate(), Ok(()));
+    }
+
+    #[test]
+    fn get_effect_item_values_params_bound_the_count_before_looking_for_duplicates() {
+        // 上限ちょうどの要求は重複を持たない。重複を先に見ると、件数の上限が
+        // 「重複を除いた件数」の上限へすり替わる。
+        assert_eq!(
+            sample_item_values_params(MAX_EVALUATED_FRAMES, Some(MAX_EVALUATED_ITEMS)).validate(),
+            Ok(())
+        );
+        // 上限を超えたうえで重複もある要求は、件数の失敗を名乗る。
+        let over = GetEffectItemValuesParams {
+            frames: vec![FiniteF64::try_new(0.0).expect("有限値"); MAX_EVALUATED_FRAMES + 1],
+            ..sample_item_values_params(1, None)
+        };
+        assert_eq!(
+            over.validate(),
+            Err(EffectItemValuesInputError::FrameCountOutOfRange {
+                count: MAX_EVALUATED_FRAMES + 1
+            })
+        );
     }
 
     #[test]

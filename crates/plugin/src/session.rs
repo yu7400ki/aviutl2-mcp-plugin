@@ -2258,7 +2258,9 @@ mod tests {
     fn effect_item_values_bound_the_frame_and_item_counts_before_reading() {
         // 件数は要求内容だけで決まる。読み取りへ進む前に落とす。
         let selector = fake_effect_selector();
-        let over_frames: Vec<f64> = vec![100.0; MAX_EVALUATED_FRAMES + 1];
+        let over_frames: Vec<f64> = (0..=MAX_EVALUATED_FRAMES)
+            .map(|index| index as f64)
+            .collect();
         let over_items: Vec<String> = (0..=MAX_EVALUATED_ITEMS)
             .map(|index| format!("項目{index}"))
             .collect();
@@ -2286,7 +2288,9 @@ mod tests {
     #[test]
     fn effect_item_values_accept_the_counts_at_the_bounds() {
         let selector = fake_effect_selector();
-        let frames: Vec<f64> = vec![100.0; MAX_EVALUATED_FRAMES];
+        let frames: Vec<f64> = (0..MAX_EVALUATED_FRAMES)
+            .map(|index| index as f64)
+            .collect();
         let items: Vec<String> = (0..MAX_EVALUATED_ITEMS)
             .map(|index| format!("項目{index}"))
             .collect();
@@ -2302,6 +2306,30 @@ mod tests {
             MAX_EVALUATED_FRAMES
         );
         assert_eq!(adapter.calls(), vec!["get_effect_item_values"]);
+    }
+
+    #[test]
+    fn effect_item_values_reject_duplicates_before_reading() {
+        // 重複も要求内容だけで決まる。同じ値を 2 度評価させず、応答の件数が
+        // 要求の件数と対応したままになる。
+        let selector = fake_effect_selector();
+        for params in [
+            json!({ "effect": selector, "frames": [100.0, 100.0] }),
+            json!({ "effect": selector, "frames": [100.0], "items": ["範囲", "範囲"] }),
+        ] {
+            let adapter = FakeAdapter::new();
+            let error =
+                read(&adapter, ReadOperation::GetEffectItemValues, params.clone()).unwrap_err();
+            assert_eq!(
+                error.code,
+                ErrorCode::InvalidArgument,
+                "{params} が受理されました"
+            );
+            assert!(
+                adapter.calls().is_empty(),
+                "{params} が読み取りへ進みました"
+            );
+        }
     }
 
     #[test]
