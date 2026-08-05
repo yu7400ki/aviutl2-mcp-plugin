@@ -35,6 +35,11 @@ pub(crate) const SCENE_ID: i32 = 0;
 /// フェイクの初期状態のシーン名。
 pub(crate) const SCENE_NAME: &str = "Scene 1";
 
+/// ホストがシーンの解像度を切り詰める上限。
+pub(crate) const MAX_SCENE_WIDTH: u32 = 1280;
+/// ホストがシーンの解像度を切り詰める上限。
+pub(crate) const MAX_SCENE_HEIGHT: u32 = 720;
+
 /// 差し込む失敗。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fault {
@@ -90,6 +95,14 @@ pub(crate) enum Fault {
     /// 事前確認の読みには掛けない。掛けると変更を発行する前に落ち、read-back の
     /// 検証にならない。
     SectionsUnreadable,
+    /// シーン名の変更を無言で無視する。
+    ///
+    /// 区間の内側の読み直しが要求値と違う状態を作る。
+    IgnoreSceneName,
+    /// シーンの解像度を要求より小さい値へ切り詰める。
+    ///
+    /// ホストが指定を調整する状況を作る。区間を抜けた後の観測が要求値と食い違う。
+    ClampSceneSize,
     /// BPM グリッドの置き換えを無言で無視する。
     IgnoreGridBpm,
     /// BPM グリッドを置き換えるが、値をホストが書き換える。
@@ -1613,6 +1626,10 @@ impl SceneEditor for FakeSceneEditor<'_> {
 
     fn set_scene_name(&self, _ticket: MutationTicket<'_>, name: &str) -> Result<(), EditError> {
         self.mutation("set_scene_name")?;
+        // ホストが要求を黙って捨てる。区間の内側の読み直しだけが気付ける。
+        if self.host.knobs().fault == Some(Fault::IgnoreSceneName) {
+            return Ok(());
+        }
         self.host.scene.lock().unwrap().name = name.to_string();
         Ok(())
     }
@@ -1624,9 +1641,17 @@ impl SceneEditor for FakeSceneEditor<'_> {
         height: usize,
     ) -> Result<(), EditError> {
         self.mutation("set_scene_size")?;
+        let (width, height) = (width as u32, height as u32);
+        // ホストが指定を調整し得る。区間を抜けた後の観測だけがその値を見る。
+        let (width, height) = match self.host.knobs().fault {
+            Some(Fault::ClampSceneSize) => {
+                (width.min(MAX_SCENE_WIDTH), height.min(MAX_SCENE_HEIGHT))
+            }
+            _ => (width, height),
+        };
         let mut scene = self.host.scene.lock().unwrap();
-        scene.width = width as u32;
-        scene.height = height as u32;
+        scene.width = width;
+        scene.height = height;
         Ok(())
     }
 
