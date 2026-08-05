@@ -28,8 +28,8 @@ use aviutl2_mcp_core::{
     DEFAULT_PAGE_LIMIT, EffectSelector, EffectType, ErrorCode, ErrorObject, FiniteF64,
     GetEffectItemValuesParams, GetObjectParams, GetSelectionParams, InstanceId,
     ListAvailableEffectsParams, ListFontsParams, ListLayersParams, ListModulesParams,
-    ListObjectsParams, ListPalettesParams, MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS,
-    MAX_PAGE_LIMIT, ModuleType, ObjectFilter, ObjectSelector, PageRequest,
+    ListObjectAliasesParams, ListObjectsParams, ListPalettesParams, MAX_EVALUATED_FRAMES,
+    MAX_EVALUATED_ITEMS, MAX_PAGE_LIMIT, ModuleType, ObjectFilter, ObjectSelector, PageRequest,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -106,9 +106,9 @@ impl PageInput {
 /// カタログ列挙のページ指定。
 ///
 /// 形は [`PageInput`] と同じだが、`snapshot_revision` の意味づけだけが異なる。
-/// 登録済み effect・フォント・パレット・モジュールはいずれも登録物の集合であり、
-/// プロジェクトの revision に連動しない。照合すると、カタログと無関係な編集で
-/// revision が進んだだけで 2 ページ目以降が失敗する誤検知になる一方、カタログ
+/// この型を用いる tool の一覧の対象はいずれもプロジェクトの内容ではなく、
+/// プロジェクトの revision に連動しない。照合すると、対象と無関係な編集で
+/// revision が進んだだけで 2 ページ目以降が失敗する誤検知になる一方、対象
 /// 自身の変化は revision に現れないため取りこぼしも防げない。
 ///
 /// この型そのものの説明は入力 schema に現れない。展開して埋め込まれるため、
@@ -123,7 +123,7 @@ pub struct CatalogPageInput {
     #[serde(default = "default_limit")]
     #[schemars(range(min = 1, max = 200))]
     pub limit: u32,
-    /// 先頭ページが返した snapshot_revision。この tool では照合に用いない。effect カタログは登録済みプラグインの集合でありプロジェクトの revision に連動しないためである。
+    /// 先頭ページが返した snapshot_revision。この tool では照合に用いない。一覧の対象はプロジェクトの内容ではなく、プロジェクトの revision に連動しないためである。
     #[serde(default)]
     pub snapshot_revision: Option<u64>,
 }
@@ -303,6 +303,24 @@ pub struct ListModulesInput {
     /// 種別による絞り込み。
     #[serde(default)]
     pub module_type: Option<ModuleTypeInput>,
+    /// ページ指定。
+    #[serde(flatten)]
+    pub page: CatalogPageInput,
+}
+
+/// `list_object_aliases` の入力。
+///
+/// シーン ID を取らない。オブジェクトエイリアスはシーンに紐づかない。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListObjectAliasesInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// 指定すると、この label を持つエントリだけを返す。
+    #[serde(default)]
+    #[schemars(length(max = MAX_NAME_CHARS))]
+    pub label: Option<String>,
     /// ページ指定。
     #[serde(flatten)]
     pub page: CatalogPageInput,
@@ -643,6 +661,25 @@ impl ListModulesInput {
             module_type: self.module_type.map(ModuleType::from),
             page: self.page.to_page_request()?,
         })
+    }
+}
+
+impl ListObjectAliasesInput {
+    /// IPC の params へ変換する。
+    ///
+    /// `label` の構文検証は core の実装を呼ぶ。要求元と実行側が同じ判定を共有し、
+    /// 宣言した制約を接続前に実際へ確かめる。落ちた規則の名前を機械可読な形で
+    /// 添える一方、検証に失敗した値そのものは説明にも補助情報にも含めない。
+    pub fn to_params(&self) -> Result<ListObjectAliasesParams, ErrorObject> {
+        let params = ListObjectAliasesParams {
+            page: self.page.to_page_request()?,
+            label: self.label.clone(),
+        };
+        params.validate().map_err(|error| {
+            invalid_argument(error.to_string())
+                .with_details(serde_json::json!({ "reason": error.reason() }))
+        })?;
+        Ok(params)
     }
 }
 

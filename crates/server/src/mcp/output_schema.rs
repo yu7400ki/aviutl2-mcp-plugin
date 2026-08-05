@@ -108,6 +108,11 @@ pub fn list_modules() -> Value {
     page_of(module_entry())
 }
 
+/// `list_object_aliases` の出力。
+pub fn list_object_aliases() -> Value {
+    page_of(object_alias_summary())
+}
+
 /// `get_effect_item_values` の出力。
 ///
 /// `frames` は要求のエコーであり、`items` の各 `values` はこれと同じ長さ・同じ
@@ -584,6 +589,19 @@ fn module_entry() -> Value {
     ])
 }
 
+/// 登録済みオブジェクトエイリアス 1 件の要約。
+///
+/// **エイリアスの中身を持たない。** 載るのは名前・ラベル・オブジェクト数と、
+/// 含まれる effect 名だけである。
+fn object_alias_summary() -> Value {
+    object(&[
+        ("name", string()),
+        ("label", nullable_string()),
+        ("object_count", nullable_unsigned()),
+        ("effects", array(string())),
+    ])
+}
+
 /// モジュールの種別。既知は名前、未知は raw 保持のオブジェクト。
 fn module_type() -> Value {
     kind(&[
@@ -726,10 +744,10 @@ mod tests {
         EffectItemValues, EffectType, EvaluatedItem, Extent, FiniteF64, FrameRange,
         GetCurrentSceneResult, GridBpm, InstanceId, InstanceInfo, InstanceProject, InstanceState,
         ItemValue, LayerInfo, ListAvailableEffectsResult, ListFontsResult, ListLayersResult,
-        ListModulesResult, ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType,
-        ObjectDetail, ObjectFingerprintInput, ObjectSummary, ObservedSelection, PageMeta,
-        PaletteEntry, Rgba, SceneInfo, SceneRef, SectionRange, SelectionField, SelectionSnapshot,
-        SelectionState, TrackGroup, TrackInfo,
+        ListModulesResult, ListObjectAliasesResult, ListObjectsResult, ListPalettesResult,
+        ModuleEntry, ModuleType, ObjectAliasSummary, ObjectDetail, ObjectFingerprintInput,
+        ObjectSummary, ObservedSelection, PageMeta, PaletteEntry, Rgba, SceneInfo, SceneRef,
+        SectionRange, SelectionField, SelectionSnapshot, SelectionState, TrackGroup, TrackInfo,
     };
 
     /// 値が schema に適合するかを再帰的に検査する。
@@ -1216,6 +1234,30 @@ mod tests {
             page: sample_page_meta(),
         };
         assert_conforms(list_modules(), &to_value(&result));
+    }
+
+    #[test]
+    fn list_object_aliases_schema_matches_dto() {
+        // ラベルとオブジェクト数はどちらも欠け得る。欠けた側と揃った側の両方を
+        // 通す。
+        let result = ListObjectAliasesResult {
+            items: vec![
+                ObjectAliasSummary {
+                    name: "立ち絵".to_string(),
+                    label: Some("キャラ".to_string()),
+                    object_count: Some(2),
+                    effects: vec!["テキスト".to_string(), "標準描画".to_string()],
+                },
+                ObjectAliasSummary {
+                    name: "手置き".to_string(),
+                    label: None,
+                    object_count: None,
+                    effects: Vec::new(),
+                },
+            ],
+            page: sample_page_meta(),
+        };
+        assert_conforms(list_object_aliases(), &to_value(&result));
     }
 
     fn sample_palette_colors() -> Vec<Rgba> {

@@ -8,16 +8,18 @@ use aviutl2_mcp_core::{
     EffectItemValues, EffectType, ErrorCode, ErrorObject, EvaluatedItem, Extent, FiniteF64,
     FrameRange, GetCurrentSceneResult, GridBpm, InstanceId, InstanceState, LayerInfo,
     ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
-    ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType, ObjectDetail,
-    ObjectFingerprintInput, ObjectSummary, PALETTE_COLOR_COUNT, PageMeta, PaletteEntry,
-    RequestEnvelope, Rgba, SceneInfo, SectionRange, SelectionSnapshot, TrackGroup,
+    ListObjectAliasesResult, ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType,
+    ObjectAliasSummary, ObjectDetail, ObjectFingerprintInput, ObjectSummary, PALETTE_COLOR_COUNT,
+    PageMeta, PaletteEntry, RequestEnvelope, Rgba, SceneInfo, SectionRange, SelectionSnapshot,
+    TrackGroup,
 };
 
 use aviutl2_mcp_server::mcp::input::{
     CatalogPageInput, EffectSelectorInput, GetEffectItemValuesInput, GetObjectInput,
     GetSelectionInput, InstanceInput, ListAvailableEffectsInput, ListFontsInput,
-    ListInstancesInput, ListLayersInput, ListModulesInput, ListObjectsInput, ListPalettesInput,
-    ModuleTypeInput, ObjectFilterInput, ObjectSelectorInput, PageInput,
+    ListInstancesInput, ListLayersInput, ListModulesInput, ListObjectAliasesInput,
+    ListObjectsInput, ListPalettesInput, ModuleTypeInput, ObjectFilterInput, ObjectSelectorInput,
+    PageInput,
 };
 use aviutl2_mcp_server::mcp::{AviUtl2McpServer, CallLimits};
 use rmcp::handler::server::wrapper::Parameters;
@@ -664,6 +666,108 @@ async fn list_modules_tool_sends_the_type_filter() {
             "snapshot_revision": null,
         }),
     );
+}
+
+/// エイリアスの生テキスト。応答のどこにも現れてはならない。
+const SECRET_ALIAS_TEXT: &str = "[vo]\n_name=秘密の立ち絵\n";
+
+fn sample_object_aliases() -> ListObjectAliasesResult {
+    ListObjectAliasesResult {
+        items: vec![ObjectAliasSummary {
+            name: "立ち絵".to_string(),
+            label: Some("キャラ".to_string()),
+            object_count: Some(2),
+            effects: vec!["テキスト".to_string(), "標準描画".to_string()],
+        }],
+        page: sample_page_meta(),
+    }
+}
+
+#[tokio::test]
+async fn list_object_aliases_tool_sends_the_label_and_the_flat_page() {
+    let expected = serde_json::to_value(sample_object_aliases()).expect("直列化できる");
+    let harness = Harness::start(responses("list_object_aliases", expected.clone()));
+
+    let result = harness
+        .server
+        .list_object_aliases(Parameters(ListObjectAliasesInput {
+            instance_id: harness.instance_id(),
+            label: Some("キャラ".to_string()),
+            page: effects_page_input(0, 50, Some(42)),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+    let requests = harness.read_requests();
+    assert_eq!(requests[0].operation, "list_object_aliases");
+    assert_eq!(
+        requests[0].params,
+        json!({
+            "label": "キャラ",
+            "offset": 0,
+            "limit": 50,
+            "snapshot_revision": 42,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn an_object_alias_listing_carries_neither_the_alias_text_nor_a_path() {
+    // 要約に生テキストの置き場は無い。接続先が余分な欄で送ってきても、
+    // text にも structuredContent にも現れない。
+    let mut expected = serde_json::to_value(sample_object_aliases()).expect("直列化できる");
+    expected["items"][0]["raw"] = json!(SECRET_ALIAS_TEXT);
+    expected["items"][0]["path"] = json!(r"C:\Users\tester\Alias\立ち絵.object");
+    let harness = Harness::start(responses("list_object_aliases", expected));
+
+    let result = harness
+        .server
+        .list_object_aliases(Parameters(ListObjectAliasesInput {
+            instance_id: harness.instance_id(),
+            label: None,
+            page: effects_page_input(0, 50, None),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    let text = text_of(&result);
+    let structured = structured(&result).to_string();
+    // 利用者が付けた名前は返す。
+    assert!(text.contains("立ち絵"), "{text}");
+    assert!(text.contains("label=キャラ"), "{text}");
+    for forbidden in [SECRET_ALIAS_TEXT, "[vo]", "_name=", "tester", ".object"] {
+        assert!(!text.contains(forbidden), "text: {text}");
+        assert!(!structured.contains(forbidden), "structured: {structured}");
+    }
+}
+
+#[tokio::test]
+async fn a_label_that_breaks_the_name_rule_never_reaches_the_instance() {
+    // label の構文は要求内容だけで決まる。接続前に落とさなければ、要求の誤りが
+    // 転送の失敗として報告される。
+    for label in ["ラベル\u{0}".to_string(), "あ".repeat(1_025)] {
+        let harness = Harness::start(OperationResponses::new());
+
+        let result = harness
+            .server
+            .list_object_aliases(Parameters(ListObjectAliasesInput {
+                instance_id: harness.instance_id(),
+                label: Some(label),
+                page: effects_page_input(0, 50, None),
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true), "{}", text_of(&result));
+        let structured = structured(&result);
+        assert_eq!(structured["code"], json!("invalid_argument"));
+        // どの規則で落ちたかを機械可読な形で添える。
+        assert!(
+            structured["details"]["reason"].is_string(),
+            "落ちた規則の名前がありません: {structured}"
+        );
+        assert!(harness.read_requests().is_empty());
+    }
 }
 
 /// 立ち絵オブジェクトの effect を指すセレクター。

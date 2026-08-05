@@ -14,8 +14,9 @@ use aviutl2_mcp_core::{
     BatchOutcome, BatchStepOutcome, EditInfo, EditOutcome, EffectItemValues, EvaluatedItem,
     GetCurrentSceneResult, GridBpmOutcome, InstanceInfo, LayerStateOutcome,
     ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
-    ListObjectsResult, ListPalettesResult, ObjectDetail, ObjectSectionsOutcome, ObjectSummary,
-    PageMeta, SceneSettingsOutcome, SelectionField, SelectionSnapshot, SelectionState,
+    ListObjectAliasesResult, ListObjectsResult, ListPalettesResult, ObjectDetail,
+    ObjectSectionsOutcome, ObjectSummary, PageMeta, SceneSettingsOutcome, SelectionField,
+    SelectionSnapshot, SelectionState,
 };
 
 /// 名前をそのまま行に載せるときの最大文字数。
@@ -265,6 +266,29 @@ pub fn modules(result: &ListModulesResult) -> String {
     }
     text.push_line(
         "module_type を指定すると種別で絞り込めます。説明文は structuredContent を参照してください",
+    );
+    text.finish()
+}
+
+/// `list_object_aliases` の text content。
+///
+/// **エイリアスの中身も要約も載せない。** 行に並べるのは名前とラベルだけであり、
+/// オブジェクト数と effect 名は `structuredContent` が運ぶ。
+pub fn object_aliases(result: &ListObjectAliasesResult) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(format!(
+        "オブジェクトエイリアス {}",
+        catalog_page_line(&result.page)
+    ));
+    for alias in &result.items {
+        let name = clamp_chars(&alias.name, MAX_NAME_CHARS);
+        text.push_line(match &alias.label {
+            Some(label) => format!("- {name} label={}", clamp_chars(label, MAX_NAME_CHARS)),
+            None => format!("- {name}"),
+        });
+    }
+    text.push_line(
+        "name は create_object の alias_name へそのまま指定できます。オブジェクト数と effect 名は structuredContent を参照してください",
     );
     text.finish()
 }
@@ -722,9 +746,9 @@ mod tests {
     use aviutl2_mcp_core::{
         AvailableEffect, Cursor, DisplayRange, EffectFingerprintInput, EffectFlags, EffectInfo,
         EffectItem, EffectItemType, EffectType, FiniteF64, FrameRange, InstanceId, InstanceProject,
-        InstanceState, ItemValue, LayerInfo, ModuleEntry, ModuleType, ObjectFingerprintInput,
-        ObjectSummary, ObservedSelection, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SceneInfo,
-        SectionRange, TrackGroup,
+        InstanceState, ItemValue, LayerInfo, ModuleEntry, ModuleType, ObjectAliasSummary,
+        ObjectFingerprintInput, ObjectSummary, ObservedSelection, PALETTE_COLOR_COUNT,
+        PaletteEntry, Rgba, SceneInfo, SectionRange, TrackGroup,
     };
 
     /// 上限を必ず超える件数。要求上限を無視した応答でも打ち切られることを確かめる。
@@ -1674,11 +1698,44 @@ mod tests {
                     page: page(1_000, 200),
                 }),
             ),
+            (
+                "list_object_aliases",
+                object_aliases(&ListObjectAliasesResult {
+                    items: Vec::new(),
+                    page: page(1_000, 200),
+                }),
+            ),
         ];
         for (tool, text) in texts {
             assert!(!text.contains("snapshot_revision"), "{tool}: {text}");
             assert!(text.contains("続きは offset=200"), "{tool}: {text}");
         }
+    }
+
+    #[test]
+    fn object_alias_text_names_the_entries_without_their_contents() {
+        // 名前とラベルは利用者が付けた名前であり載せてよい。中身と要約は載せない。
+        let text = object_aliases(&ListObjectAliasesResult {
+            items: vec![
+                ObjectAliasSummary {
+                    name: "立ち絵".to_string(),
+                    label: Some("キャラ".to_string()),
+                    object_count: Some(2),
+                    effects: vec!["テキスト".to_string(), "標準描画".to_string()],
+                },
+                ObjectAliasSummary {
+                    name: "手置き".to_string(),
+                    label: None,
+                    object_count: None,
+                    effects: Vec::new(),
+                },
+            ],
+            page: page(2, 2),
+        });
+        assert!(text.contains("- 立ち絵 label=キャラ"), "{text}");
+        assert!(text.contains("- 手置き"), "{text}");
+        assert!(!text.contains("標準描画"), "{text}");
+        assert!(!text.contains("object_count"), "{text}");
     }
 
     #[test]

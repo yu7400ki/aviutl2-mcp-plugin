@@ -17,7 +17,8 @@ use crate::mcp::edit_input::{
 use crate::mcp::input::{
     GetEffectItemValuesInput, GetObjectInput, GetSelectionInput, InstanceInput,
     ListAvailableEffectsInput, ListFontsInput, ListInstancesInput, ListLayersInput,
-    ListModulesInput, ListObjectsInput, ListPalettesInput, parse_instance_id,
+    ListModulesInput, ListObjectAliasesInput, ListObjectsInput, ListPalettesInput,
+    parse_instance_id,
 };
 use crate::mcp::render::{RenderFrameInput, RenderFrameOutput};
 use crate::mcp::summary::{MAX_TEXT_CHARS, clamp_chars};
@@ -29,12 +30,13 @@ use aviutl2_mcp_core::{
     BatchOutcome, EditInfo, EditOutcome, EffectItemValues, ErrorCode, ErrorObject,
     GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GridBpmOutcome, InstanceId,
     LayerStateOutcome, ListAvailableEffectsResult, ListFontsResult, ListLayersResult,
-    ListModulesResult, ListObjectsResult, ListPalettesResult, MAX_PAGE_LIMIT, OPERATION_ADD_EFFECT,
-    OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT, OPERATION_CREATE_OBJECT_SECTION,
-    OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT, OPERATION_DELETE_OBJECT_SECTION,
-    OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_EFFECT_ITEM_VALUES,
-    OPERATION_GET_OBJECT, OPERATION_GET_SELECTION, OPERATION_LIST_AVAILABLE_EFFECTS,
-    OPERATION_LIST_FONTS, OPERATION_LIST_LAYERS, OPERATION_LIST_MODULES, OPERATION_LIST_OBJECTS,
+    ListModulesResult, ListObjectAliasesResult, ListObjectsResult, ListPalettesResult,
+    MAX_PAGE_LIMIT, OPERATION_ADD_EFFECT, OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT,
+    OPERATION_CREATE_OBJECT_SECTION, OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT,
+    OPERATION_DELETE_OBJECT_SECTION, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
+    OPERATION_GET_EFFECT_ITEM_VALUES, OPERATION_GET_OBJECT, OPERATION_GET_SELECTION,
+    OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_FONTS, OPERATION_LIST_LAYERS,
+    OPERATION_LIST_MODULES, OPERATION_LIST_OBJECT_ALIASES, OPERATION_LIST_OBJECTS,
     OPERATION_LIST_PALETTES, OPERATION_MOVE_OBJECT, OPERATION_MOVE_OBJECT_SECTION,
     OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_GRID_BPM,
     OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME,
@@ -961,6 +963,61 @@ impl AviUtl2McpServer {
             )?;
             Ok(ToolSuccess {
                 text: describe::modules(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// インスタンスへ登録されているオブジェクトエイリアスの一覧を取得する。
+    /// name はエイリアスの名前であり、create_object の alias_name へそのまま渡す値である。
+    /// 一覧に出た名前は必ず作成できる。逆は保証しない。
+    /// エイリアスの中身は返さない。返すのは name・label・object_count・effects だけである。
+    /// label は AviUtl2 の UI 状態ファイル由来であり、欠けることがあり、
+    /// 実行中の表示と一致しないことがある。
+    /// label は識別子ではなく、複数のエイリアスが同じ label を共有し得る。
+    /// label を指定すると、その label を持つエントリだけに絞り込める。
+    /// 読み取れなかったエイリアスは一覧から除かれる。
+    /// total_count から引かれるのは本ページで落とした分だけであり、
+    /// 落ちたページとそうでないページで値が違い得る。全体の件数として扱わないこと。
+    /// ページ内のすべてが落ちると items が空のまま has_more が true になり得る。
+    /// 反復は items が空になったことではなく has_more と next_offset で終端すること。
+    /// offset と limit（1〜200、既定 50）でページを指定する。
+    /// snapshot_revision は受理するがページ間の照合には用いない。
+    /// 前のページが返した値をそのまま送り返しても拒否されない。
+    /// エイリアスは登録済みの集合であり、プロジェクトの revision に連動しないためである。
+    /// エイリアスの登録・削除・編集は AviUtl2 の UI で行う。この server は読み取りだけを提供する。
+    /// AviUtl2 のデータディレクトリを解決できない環境では unsupported_operation となる。
+    #[tool(
+        name = "list_object_aliases",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::list_object_aliases()
+        )
+    )]
+    pub async fn list_object_aliases(
+        &self,
+        Parameters(input): Parameters<ListObjectAliasesInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let limits = self.limits();
+        self.run("list_object_aliases", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: ListObjectAliasesResult = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                OPERATION_LIST_OBJECT_ALIASES,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::object_aliases(&result),
                 structured: to_structured(&result)?,
             })
         })
@@ -2689,7 +2746,7 @@ mod tests {
             // effect カタログだけを扱い、frame も layer も現れない。
             "list_available_effects" => false,
             // 登録物の一覧だけを扱い、frame も layer も現れない。
-            "list_fonts" | "list_palettes" | "list_modules" => false,
+            "list_fonts" | "list_palettes" | "list_modules" | "list_object_aliases" => false,
             // BPM グリッドはシーンに属し、位置は秒で表す。フレーム番号も
             // レイヤー番号も現れない。
             "set_grid_bpm" => false,
@@ -2751,6 +2808,7 @@ mod tests {
         "list_fonts",
         "list_palettes",
         "list_modules",
+        "list_object_aliases",
     ];
 
     /// 編集 tool と、宣言する annotation。
@@ -2862,6 +2920,7 @@ mod tests {
             | "list_fonts"
             | "list_palettes"
             | "list_modules"
+            | "list_object_aliases"
             | RENDER_FRAME => false,
             other => panic!("{other} が編集の説明規約に従うかが定義されていません"),
         }
@@ -2922,7 +2981,7 @@ mod tests {
         assert_eq!(names, expected);
         // 件数そのものも固定する。router と表の両方から同じ tool を落とすと、
         // 集合の一致だけでは検出できない。
-        assert_eq!(names.len(), 29, "公開する tool の数が変わりました");
+        assert_eq!(names.len(), 30, "公開する tool の数が変わりました");
     }
 
     /// 共有設定を与えたサーバー。
@@ -3110,6 +3169,7 @@ mod tests {
             "list_fonts" => schema::list_fonts(),
             "list_palettes" => schema::list_palettes(),
             "list_modules" => schema::list_modules(),
+            "list_object_aliases" => schema::list_object_aliases(),
             "get_effect_item_values" => schema::effect_item_values(),
             "get_selection" => schema::get_selection(),
             "create_object" => schema::create_object(),
@@ -3299,9 +3359,14 @@ mod tests {
 
     #[test]
     fn the_catalog_tools_do_not_ask_for_a_scene_id() {
-        // フォント・パレット・モジュールはシーンに紐づかない。何も守らない値を
-        // 必須にすると、要求元は意味の無い値を用意することになる。
-        for name in ["list_fonts", "list_palettes", "list_modules"] {
+        // フォント・パレット・モジュール・エイリアスはシーンに紐づかない。何も
+        // 守らない値を必須にすると、要求元は意味の無い値を用意することになる。
+        for name in [
+            "list_fonts",
+            "list_palettes",
+            "list_modules",
+            "list_object_aliases",
+        ] {
             let tool = tool_named(name);
             let schema = Value::Object(tool.input_schema.as_ref().clone()).to_string();
             assert!(
@@ -3349,12 +3414,7 @@ mod tests {
     fn the_catalog_tools_say_that_the_revision_is_not_matched() {
         // 受理するが照合しない値である。黙っていると、要求元は 2 ページ目が
         // 落ちない理由も、添えても取りこぼしが防げない理由も分からない。
-        for name in [
-            "list_available_effects",
-            "list_fonts",
-            "list_palettes",
-            "list_modules",
-        ] {
+        for name in CATALOG_PAGE_TOOLS {
             let description = description_of(name);
             assert!(
                 description.contains("snapshot_revision は受理するがページ間の照合には用いない"),
@@ -3386,6 +3446,102 @@ mod tests {
             assert!(
                 description.contains(phrase),
                 "list_palettes の説明が {phrase} に触れていません"
+            );
+        }
+    }
+
+    /// ページ指定を 1 つの入力型から受ける tool。
+    ///
+    /// 型を共有しているため、`snapshot_revision` の説明は 5 つで同じ文になる。
+    const CATALOG_PAGE_TOOLS: &[&str] = &[
+        "list_available_effects",
+        "list_fonts",
+        "list_palettes",
+        "list_modules",
+        "list_object_aliases",
+    ];
+
+    #[test]
+    fn the_catalog_tools_share_one_wording_for_the_unmatched_revision() {
+        // 入力型を分けると一致が崩れる。文言を特定の対象へ寄せると、5 つのうち
+        // 1 つにしか当てはまらない説明が残りの 4 tool の schema へ載る。
+        let wordings: Vec<String> = CATALOG_PAGE_TOOLS
+            .iter()
+            .map(|name| {
+                tool_named(name).input_schema["properties"]["snapshot_revision"]["description"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{name} が snapshot_revision の説明を持ちません"))
+                    .to_string()
+            })
+            .collect();
+        for (name, wording) in CATALOG_PAGE_TOOLS.iter().zip(&wordings) {
+            assert_eq!(
+                wording, &wordings[0],
+                "{name} の snapshot_revision の説明が他の tool と違います"
+            );
+            for target in ["effect", "フォント", "パレット", "モジュール", "エイリアス"]
+            {
+                assert!(
+                    !wording.contains(target),
+                    "{name} の snapshot_revision の説明が {target} を名指ししています"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_list_object_aliases_input_flattens_the_page_and_asks_only_for_the_instance() {
+        // ページ指定は他の列挙 tool と同じ平坦な形で受ける。入れ子で現れると、
+        // 同じ意味の要求が tool ごとに違う形になる。
+        let tool = tool_named("list_object_aliases");
+        let properties = tool.input_schema["properties"]
+            .as_object()
+            .expect("入力が properties を宣言していません");
+        for field in ["offset", "limit", "snapshot_revision", "label"] {
+            assert!(
+                properties.contains_key(field),
+                "{field} が宣言されていません"
+            );
+        }
+        assert!(
+            !Value::Object(tool.input_schema.as_ref().clone())
+                .to_string()
+                .contains(r#""page""#),
+            "ページ指定が入れ子として現れています"
+        );
+        assert_eq!(
+            tool.input_schema["required"],
+            serde_json::json!(["instance_id"]),
+            "list_object_aliases の必須項目"
+        );
+    }
+
+    #[test]
+    fn list_object_aliases_states_what_it_returns_and_what_it_refuses() {
+        // 名前が作成へそのまま渡る値であること、中身を返さないこと、label が
+        // 当てにならないこと、total_count の限定、読み取り専用であること。
+        // いずれも応答を受け取る前に知っている必要がある。
+        let description = description_of("list_object_aliases");
+        for phrase in [
+            "create_object の alias_name へそのまま渡す値",
+            "一覧に出た名前は必ず作成できる。逆は保証しない",
+            "エイリアスの中身は返さない",
+            "UI 状態ファイル由来",
+            "欠けることがあり",
+            "実行中の表示と一致しないことがある",
+            "label は識別子ではなく",
+            "同じ label を共有し得る",
+            "total_count から引かれるのは本ページで落とした分だけ",
+            "全体の件数として扱わないこと",
+            "has_more と next_offset で終端すること",
+            "前のページが返した値をそのまま送り返しても拒否されない",
+            "AviUtl2 の UI で行う",
+            "読み取りだけを提供する",
+            "unsupported_operation",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "list_object_aliases の説明が {phrase} に触れていません"
             );
         }
     }
