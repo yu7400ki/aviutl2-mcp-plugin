@@ -189,7 +189,7 @@ enum PlannedStep<'sec> {
         /// 計画の配列が最大の枝に合わせて膨らまないよう間接参照にする。
         effect: Box<ResolvedEffect<'sec>>,
         item: String,
-        /// 要求された値を SDK の形式へ写したものと、書き込み後の照合の要否。
+        /// 要求された値を SDK の形式へ写したものと、書き込み後の照合のしかた。
         write: ItemWrite,
         /// 変更前の、SDK が返した生の文字列。
         origin_value: String,

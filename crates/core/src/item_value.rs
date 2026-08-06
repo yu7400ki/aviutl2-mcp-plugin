@@ -317,13 +317,21 @@ impl ItemWrite {
         self.read_back
     }
 
-    /// 読み直した文字列が、SDK へ渡した文字列と一致するか。
+    /// 読み直した文字列が、SDK へ渡した文字列と一致するか。照合しない種別では
+    /// `None` を返す。
     ///
-    /// `comparison` には [`ItemWrite::read_back`] が返した
-    /// [`ReadBackCheck::Compare`] の中身を渡す。照合しない種別からは比較そのもの
-    /// が得られないため、「照合しない」が「一致した」として通る経路が無い。
-    pub fn read_back_matches(&self, comparison: ReadBackComparison, observed: &str) -> bool {
-        comparison.matches(&self.value, observed)
+    /// 比較の規則も比較する文字列も、この [`ItemWrite`] が自分で持つものだけを
+    /// 使う。**引数で規則を受け取らない。** 受け取ると、種別に対応しない規則を
+    /// 渡す呼び出しが型検査を通ってしまい、照合の規則を種別が決めるという
+    /// 前提が呼び出し側の書き方に依存する。
+    ///
+    /// 「照合しない」を `None` で返すのは、「照合して一致した」と同じ値に
+    /// ならないようにするためである。
+    pub fn read_back_matches(&self, observed: &str) -> Option<bool> {
+        match self.read_back {
+            ReadBackCheck::Compare(comparison) => Some(comparison.matches(&self.value, observed)),
+            ReadBackCheck::Declared { .. } => None,
+        }
     }
 }
 
@@ -508,7 +516,13 @@ fn accepts(item_type: &EffectItemType, value: &ItemValue) -> bool {
 /// 符号化する（[`encode_multiline_text`]）。改行を拒否すると複数行のテキストを
 /// 書く直接の手段が無くなり、符号化しないとクライアントの `\` がホストの
 /// エスケープとして解釈される。色・フォント名・選択肢の値に改行が現れる余地は
-/// 無く、ホストもこれらを正規化しないため、どちらも緩和しない。
+/// 無く、ホストもこれらをエスケープ表記で扱わないため、どちらも緩和しない。
+///
+/// **色の書式も、フォント名が登録済みかも、ここでは検査しない。** ホストが
+/// 受理する表記の全体像を観測できていないため、事前に弾く規則を置くと、通る
+/// はずの値を我々の側が拒むことになる。受け付けられなかったことは、書き込んだ
+/// 直後の読み直しが要求と違う値を返すことで分かる（[`read_back_check`]）。
+/// 観測に基づく規則だけで判定できる場所へ判定を置く、ということである。
 fn encode_value(value: &ItemValue) -> Result<String, ItemWriteError> {
     match value {
         ItemValue::Unknown { .. } => Err(ItemWriteError::UnknownValue),
@@ -1610,8 +1624,8 @@ mod tests {
             choice.read_back(),
             ReadBackCheck::Compare(ReadBackComparison::Exact)
         );
-        assert!(choice.read_back_matches(ReadBackComparison::Exact, "四角形"));
-        assert!(!choice.read_back_matches(ReadBackComparison::Exact, "円"));
+        assert_eq!(choice.read_back_matches("四角形"), Some(true));
+        assert_eq!(choice.read_back_matches("円"), Some(false));
 
         let color = prepare_item_write(
             &items,
@@ -1625,8 +1639,9 @@ mod tests {
             color.read_back(),
             ReadBackCheck::Compare(ReadBackComparison::IgnoreAsciiCase)
         );
-        assert!(color.read_back_matches(ReadBackComparison::IgnoreAsciiCase, "ffaa00"));
-        assert!(!color.read_back_matches(ReadBackComparison::IgnoreAsciiCase, "ffffff"));
+        // 比較の規則は書き込みが自分で持つ。呼び出し側は規則を選べない。
+        assert_eq!(color.read_back_matches("ffaa00"), Some(true));
+        assert_eq!(color.read_back_matches("ffffff"), Some(false));
     }
 
     #[test]
@@ -1648,10 +1663,10 @@ mod tests {
             write.read_back(),
             ReadBackCheck::Compare(ReadBackComparison::Boolean)
         );
-        assert!(write.read_back_matches(ReadBackComparison::Boolean, "1"));
+        assert_eq!(write.read_back_matches("1"), Some(true));
         // 真偽値としての比較であるため、ホストが別の表記で返しても一致する。
-        assert!(write.read_back_matches(ReadBackComparison::Boolean, "true"));
-        assert!(!write.read_back_matches(ReadBackComparison::Boolean, "0"));
+        assert_eq!(write.read_back_matches("true"), Some(true));
+        assert_eq!(write.read_back_matches("0"), Some(false));
     }
 
     #[test]

@@ -12,7 +12,7 @@ use crate::edit::fake::{
     LAYER_LOCK, LAYER_MAX, MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER, MAX_SCENE_HEIGHT,
     MAX_SCENE_SAMPLE_RATE, MAX_SCENE_WIDTH, MOVE_FRAME_SHIFT, MUTATIONS, OBSERVED_SCENE,
     PanicPoint, READ_SECTION, RENAMED_SCENE_NAME, SCENE_ID, SCENE_NAME, SECTION_RANGES, SHAPE,
-    shape, shape_catalog_entry,
+    raw_item_value, shape, shape_catalog_entry,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::{default_page_request, default_page_window, with_silent_panic_hook};
@@ -1912,31 +1912,31 @@ fn an_item_value_the_host_clamps_is_reported_as_a_failure() {
 #[test]
 fn an_item_value_within_the_host_limits_is_reported_as_read_back() {
     // 応答が返すのはホストが保持している値である。要求値をそのまま返すと、
-    // 照合を通った後でも応答が実態を表さなくなる。
-    let harness = Harness::new();
+    // 照合を通った後でも応答が実態を表さなくなる。**標本は要求値と実値が
+    // 異なるものでなければならない。** 同じ値だと、要求を反響させるだけの実装
+    // でも通る。
+    let requested = ItemValue::Color {
+        value: "FFAA00".to_string(),
+    };
+    let stored = ItemValue::Color {
+        value: "ffaa00".to_string(),
+    };
+    assert_ne!(
+        requested, stored,
+        "標本の要求値と実値が同じで、反響しているだけの実装と区別できません"
+    );
+
+    let harness = harness_with_choice_effect();
     let outcome = harness
         .edit
         .set_object_item(&SetObjectItemParams {
-            selector: harness.effect_selector(1, 100, "ぼかし", 0),
-            item: "範囲".to_string(),
-            value: ItemValue::Integer {
-                value: MAX_ITEM_VALUE,
-            },
+            selector: harness.effect_selector(1, 300, SHAPE, 0),
+            item: "色".to_string(),
+            value: requested,
         })
-        .expect("値域の内側の値が失敗として扱われました");
+        .expect("ホストが受理する値が失敗として扱われました");
 
-    let effect = outcome.effect.expect("変更後の effect");
-    let item = effect
-        .items
-        .iter()
-        .find(|item| item.name == "範囲")
-        .expect("設定項目");
-    assert_eq!(
-        item.value,
-        ItemValue::Integer {
-            value: MAX_ITEM_VALUE
-        }
-    );
+    assert_eq!(changed_item(&outcome, "色"), stored);
 }
 
 #[test]
@@ -2362,11 +2362,22 @@ fn a_value_the_host_writes_back_in_another_notation_is_not_a_mismatch() {
             .set_object_item(&SetObjectItemParams {
                 selector: harness.effect_selector(1, 300, SHAPE, 0),
                 item: item.to_string(),
-                value: requested,
+                value: requested.clone(),
             })
             .unwrap_or_else(|error| panic!("{item} の書き込みが失敗として扱われました: {error}"));
 
         assert_eq!(changed_item(&outcome, item), stored, "{item}");
+
+        // **標本が食い違いを含むことを確かめる。** 要求とホストの間に何の違いも
+        // 無い標本は、バイト比較のままの実装でも通ってしまい、種別ごとの比較を
+        // 定めた意味を試せていない。違いの現れ方は種別で分かれる——色とテキスト
+        // は値の表現が、実数は表記だけが違う。
+        let written = harness.host.item_value_arguments();
+        assert_eq!(written.len(), 1, "{item} の書き込みが 1 回ではありません");
+        assert!(
+            requested != stored || raw_item_value(&stored) != written[0],
+            "{item} の標本は要求とホストの間に違いが無く、比較の違いを試せていません"
+        );
     }
 }
 

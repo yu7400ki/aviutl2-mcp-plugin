@@ -1963,7 +1963,7 @@ pub(crate) const DEFAULT_FONT: &str = FONT_NAMES[0];
 /// **テキスト種別はエスケープ表記へ包んで返す。** ホストは `\` と改行を包んだ
 /// 表記でしか値を返さない。[`host_write`] が同じ表記を解いて保持するため、2 つは
 /// 対になっており、包みが増えることも減ることもない。
-fn raw_item_value(value: &ItemValue) -> String {
+pub(crate) fn raw_item_value(value: &ItemValue) -> String {
     match value {
         ItemValue::Unknown { raw } => raw.clone(),
         ItemValue::Integer { value } => value.to_string(),
@@ -2352,7 +2352,7 @@ pub(crate) fn fake_catalog() -> Vec<AvailableEffect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::{ReadBackCheck, prepare_item_write};
+    use aviutl2_mcp_core::prepare_item_write;
 
     /// テキスト種別の設定項目を 1 つだけ公開する一覧。
     fn text_item() -> Vec<AvailableEffectItem> {
@@ -2485,11 +2485,9 @@ mod tests {
                 },
                 "{value:?} がホストの保持で崩れました"
             );
-            let ReadBackCheck::Compare(comparison) = write.read_back() else {
-                panic!("テキスト種別が照合されません");
-            };
-            assert!(
-                write.read_back_matches(comparison, &raw_item_value(&stored)),
+            assert_eq!(
+                write.read_back_matches(&raw_item_value(&stored)),
+                Some(true),
                 "{value:?} の読み直しが渡した文字列と一致しません"
             );
         }

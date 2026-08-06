@@ -385,14 +385,19 @@ pub enum EditError {
     /// [`UnsupportedReason::ChangeNotApplied`] とは畳まない。あちらは変更を拒む
     /// 旨をヘッダーが記していない API で起きる想定外の不一致であり、こちらは
     /// 値域も選択肢も知る手段が無い以上、当て推量が外れて頻発する。要求元が取る
-    /// 行動も違う——前者は異常として報告し、後者は読み直した実値を見て別の値を
-    /// 送り直す。
+    /// 行動も違う——前者は異常として報告し、後者は要求した値が受け付けられ
+    /// なかったものとして値を選び直す。
+    ///
+    /// **書き込みは既に発行済みである。** ホストが別の値へ倒した場合、対象は
+    /// 既に変わっており、変更前の値へ戻ってもいない。
     #[error("書き込んだ設定値が読み直した値と一致しません")]
     ItemValueNotApplied {
-        /// 読み直したホストの現在の値。
+        /// ホストが現在保持している値。
         ///
-        /// **要求された値ではない。** ホストの現在の状態であり、そのまま送り
-        /// 直せば 1 往復で解決する。
+        /// **要求された値ではない。** 要求の代わりにこれを送り直せば書き込みは
+        /// 成功するが、設定項目は要求した値にならないままである。解決するのは
+        /// 失敗の応答であって、要求の意図ではない。要求元が決めるのは、
+        /// 受け付けられる値を選び直すか、この値を受け入れるかである。
         observed: String,
     },
     /// 対象または SDK が変更に対応しない。
@@ -647,7 +652,7 @@ impl EditError {
             EditError::ItemWrite(error) => fill_item_write_details(details, error),
             // 載せるのはホストが返した実値だけである。**要求された値は反響させ
             // ない。** 読み直した値はホストの現在の状態であって要求元の内容では
-            // ないため、そのまま次の要求へ使える材料として載せてよい。
+            // なく、同じ値は成功した書き込みの応答にも載る。
             EditError::ItemValueNotApplied { observed } => {
                 details.insert("reason".to_string(), json!("item_value_not_applied"));
                 details.insert("current_value".to_string(), json!(truncate(observed)));
@@ -829,8 +834,14 @@ pub(crate) mod tests {
             EditError::UnsupportedTarget {
                 reason: UnsupportedReason::InverseUnavailable,
             },
+            // 読み直したホストの値を運ぶ。**パスを運ぶ標本も置く。** 種別に
+            // よってはホストが保持する値が利用者のファイルパスであり、色だけを
+            // 置くと補助情報の検査がその形を素通りする。
             EditError::ItemValueNotApplied {
                 observed: "ffffff".to_string(),
+            },
+            EditError::ItemValueNotApplied {
+                observed: r"C:\assets\bgm.wav".to_string(),
             },
             // 受け入れ規則の 4 条件は、名前を持つものと持たないものの双方を通す。
             EditError::AliasRejected(AliasRejection::NotFound),
@@ -1065,9 +1076,11 @@ pub(crate) mod tests {
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
-                // 選択肢に無い値が黙って無視された。読み直しても有効にならない。
-                ErrorCode::UnsupportedOperation,
                 // 逆操作の材料を読めなかった。
+                ErrorCode::UnsupportedOperation,
+                // 書き込んだ値が要求どおりに入らなかった。読み直しても有効に
+                // ならない。色を運ぶ標本とパスを運ぶ標本の 2 つ。
+                ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 // 名前で指定されたエイリアスが受け入れ規則を通らなかった。落ちた
                 // 条件がコードを決めるため、不在と構造の欠陥で別の値になる。
@@ -1420,8 +1433,14 @@ pub(crate) mod tests {
     fn details_only_use_allowed_keys() {
         // 補助情報のキーはここで列挙したものに限る。入れ子の内側まで見る。
         // トップレベルだけを見ると、値をオブジェクトで包んだ瞬間に検査が
-        // 素通りする。新しいキーを足す際はハンドル・生ポインタ・設定値・
-        // alias・パスでないことを確かめる。
+        // 素通りする。
+        //
+        // 新しいキーを足す際は、ハンドル・生ポインタでないこと、そして
+        // **要求元が与えた内容をそのまま返すものでないこと**を確かめる。
+        // 反響させないのは要求元の内容であって、ホストの状態ではない——
+        // ホストから読み直した設定値は、同じ値が成功応答にも載るものであり、
+        // 失敗の応答でだけ伏せる理由が無い。要求元が書いた設定値・alias・
+        // パスをそのまま返すキーは足さない。
         const ALLOWED: &[&str] = &[
             "frame_start",
             "frame_end",
@@ -1455,8 +1474,8 @@ pub(crate) mod tests {
             // 読み直した対象の概要と、それが内包するセレクター。概要は要約で
             // あり alias も設定値もパスも持たない。
             "current_object",
-            // 書き込みの照合で読み直したホストの現在の設定値。要求された値では
-            // なく、そのまま送り直せる材料である。
+            // 書き込みの照合で読み直した、ホストが現在保持している設定値。
+            // 要求元が与えた値ではなく、成功した書き込みが返すものと同じである。
             "current_value",
             "name",
             "selector",
@@ -1530,11 +1549,34 @@ pub(crate) mod tests {
             })])
             .collect();
         for error in all_errors().into_iter().chain(secrets) {
-            let text = format!("{} {}", error, error.details());
+            let mut details = error.details();
+            // ホストから読み直した設定値だけは取り除いてから見る。**この検査が
+            // 守るのは「要求元が与えた内容を反響させない」ことであり、ホストの
+            // 現在の状態はその対象ではない。** パス種別の設定項目では、ここに
+            // 利用者のファイルパスが現れるのが正しい姿である。
+            let host_value = details
+                .as_object_mut()
+                .expect("補助情報はオブジェクトです")
+                .remove("current_value");
+            let text = format!("{} {}", error, details);
             assert!(!text.contains("0x"), "{text}");
             assert!(!text.to_lowercase().contains("handle"), "{text}");
             assert!(!text.to_lowercase().contains("pointer"), "{text}");
             assert!(!text.contains(r"C:\"), "{text}");
+            // 取り除く口が別の内容の抜け道にならないことを、失敗そのものが持つ
+            // 値と突き合わせて確かめる。
+            let expected = match &error {
+                EditError::ItemValueNotApplied { observed } => Some(observed.clone()),
+                _ => None,
+            };
+            assert_eq!(
+                host_value
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                expected,
+                "current_value がホストから読み直した値以外を運んでいます: {error}"
+            );
         }
     }
 

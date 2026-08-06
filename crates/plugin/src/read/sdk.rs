@@ -761,7 +761,9 @@ fn track_info(
 /// テキスト種別だけは、ホストが返すエスケープ表記を [`decode_host_text`] で
 /// 解いてから載せる。書き込みが同じ表記へ符号化するため、解かなければ読みと
 /// 書きが非対称になり、読み取った値を書き戻すたびに包みが育つ。ホストが
-/// 正規化しない種別（パス・色・フォント名・選択肢）には掛けない。
+/// エスケープ表記で扱わない種別（パス・色・フォント名・選択肢）には掛けない。
+/// **これらの値をホストが一切書き換えないという意味ではない**——色は受理した
+/// 表記を小文字へ揃えて返す。掛けないのは、包みが最初から無いからである。
 fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
     match item_type {
         EffectItemType::Integer => match raw.trim().parse::<i64>() {
@@ -1241,8 +1243,8 @@ mod tests {
 
     #[test]
     fn text_values_are_decoded_and_other_types_are_left_alone() {
-        // テキスト種別だけがエスケープ表記を解く。ホストが正規化しない種別へ
-        // 掛けると、`\` を含む値が壊れる。
+        // テキスト種別だけがエスケープ表記を解く。ホストがエスケープ表記で
+        // 扱わない種別へ掛けると、`\` を含む値が壊れる。
         for item_type in [EffectItemType::Text, EffectItemType::String] {
             assert_eq!(
                 item_value(&item_type, r"C:\\temp\nの先".to_string()),

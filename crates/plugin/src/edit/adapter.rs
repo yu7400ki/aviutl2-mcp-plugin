@@ -468,11 +468,12 @@ pub(crate) fn verify_written_item(
     item: &str,
     write: &ItemWrite,
 ) -> Result<(), EditError> {
-    let ReadBackCheck::Compare(comparison) = write.read_back() else {
+    let ReadBackCheck::Compare(_) = write.read_back() else {
         return Ok(());
     };
     let observed = attribute(permit, boundary, editor.effect_item_value(effect, item))?;
-    if write.read_back_matches(comparison, &observed) {
+    // 照合しない種別はこの位置へ来ない。来たとしても `None` は一致を名乗らない。
+    if write.read_back_matches(&observed) == Some(true) {
         return Ok(());
     }
     Err(permit.attribute(boundary, EditError::ItemValueNotApplied { observed }))
