@@ -697,6 +697,27 @@ mod tests {
                 twopoint: true,
                 ..base.clone()
             },
+            // 要素数だけが違う組。内容が違う組だけを並べると、並びの長さの
+            // 違いが digest に現れるかを 1 度も試さないまま通る。
+            crate::track_value::TrackValue {
+                values: vec![
+                    FiniteF64::try_new(0.0).unwrap(),
+                    FiniteF64::try_new(100.0).unwrap(),
+                    FiniteF64::try_new(100.0).unwrap(),
+                ],
+                ..base.clone()
+            },
+            crate::track_value::TrackValue {
+                params: vec![
+                    FiniteF64::try_new(15.0).unwrap(),
+                    FiniteF64::try_new(15.0).unwrap(),
+                ],
+                ..base.clone()
+            },
+            crate::track_value::TrackValue {
+                params: Vec::new(),
+                ..base.clone()
+            },
         ];
         let baseline = make(base.clone());
         for variant in variants {
