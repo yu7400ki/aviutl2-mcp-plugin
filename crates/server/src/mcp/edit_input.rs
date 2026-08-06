@@ -35,19 +35,13 @@ use aviutl2_mcp_core::{
     CreateObjectSectionParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
     DeleteObjectSectionParams, Destination, DisplayStart, EditInputError, ErrorObject, FiniteF64,
     FocusChange, GridBpm, ItemValue, LayerNameChange, MAX_ALIAS_BYTES, MAX_BATCH_OPERATIONS,
-    MAX_GRID_BPM_ENTRIES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MoveObjectParams,
-    MoveObjectSectionParams, ObjectSource, Placement, RangeChange, SceneSize,
+    MAX_GRID_BPM_ENTRIES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MAX_POSITION,
+    MoveObjectParams, MoveObjectSectionParams, ObjectSource, Placement, RangeChange, SceneSize,
     SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
     SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
-
-/// レイヤー番号・フレーム番号に許す最大値。
-///
-/// ホストは位置を 32bit 符号付き整数で受け渡すため、それに収まることだけを
-/// 課す。実際に配置できるかはホストが判定する。
-const MAX_POSITION: u32 = i32::MAX as u32;
 
 /// 区間番号に許す最小値。
 ///

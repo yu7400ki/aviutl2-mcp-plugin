@@ -65,10 +65,11 @@ pub use edit::{
     AddEffectParams, CreateObjectParams, CreateObjectSectionParams, CursorPosition,
     DeleteEffectParams, DeleteObjectParams, DeleteObjectSectionParams, Destination, DisplayStart,
     EditInputError, EditOutcome, FocusChange, GridBpmOutcome, LayerNameChange, LayerStateOutcome,
-    MAX_GRID_BPM_ENTRIES, MoveObjectParams, MoveObjectSectionParams, ObjectSectionsOutcome,
-    ObjectSource, ObservedSelection, Placement, RangeChange, SceneSettingsOutcome, SceneSize,
-    SelectionField, SelectionState, SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams,
-    SetObjectItemParams, SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams,
+    MAX_GRID_BPM_ENTRIES, MAX_POSITION, MoveObjectParams, MoveObjectSectionParams,
+    ObjectSectionsOutcome, ObjectSource, ObservedSelection, Placement, RangeChange,
+    SceneSettingsOutcome, SceneSize, SelectionField, SelectionState, SetEffectEnabledParams,
+    SetGridBpmParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
+    SetSceneSettingsParams, SetSelectionParams,
 };
 pub use edit_info::{
     Cursor, DisplayRange, EditInfo, Extent, FrameRange, GridBpm, SceneInfo, SceneRef,
