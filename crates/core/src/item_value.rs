@@ -3,9 +3,10 @@
 use crate::effect::{AvailableEffectItem, EffectItemType};
 use crate::error::ErrorCode;
 use crate::number::FiniteF64;
+use crate::text_codec::encode_host_text;
 use crate::validation::{
-    PathSyntaxError, TextSyntaxError, validate_item_text, validate_multiline_item_text,
-    validate_path,
+    PathSyntaxError, TextSyntaxError, limit_item_value_bytes, validate_item_text,
+    validate_multiline_item_text, validate_path,
 };
 use serde::{Deserialize, Serialize};
 
@@ -390,9 +391,11 @@ fn accepts(item_type: &EffectItemType, value: &ItemValue) -> bool {
 /// 整数は十進整数、実数は指数表記を用いない十進小数、真偽値は `0` / `1` と
 /// する。実数は元の値へ戻せる最短の桁数で書き出す。
 ///
-/// [`ItemValue::Text`] だけは改行とタブを許す。これらを拒否すると、複数行の
-/// テキストを書く直接の手段が無くなる。色・フォント名・選択肢の値に改行が
-/// 現れる余地は無いため、緩和しない。
+/// [`ItemValue::Text`] だけは改行とタブを許し、ホストのエスケープ表記へ
+/// 符号化する（[`encode_multiline_text`]）。改行を拒否すると複数行のテキストを
+/// 書く直接の手段が無くなり、符号化しないとクライアントの `\` がホストの
+/// エスケープとして解釈される。色・フォント名・選択肢の値に改行が現れる余地は
+/// 無く、ホストもこれらを正規化しないため、どちらも緩和しない。
 fn encode_value(value: &ItemValue) -> Result<String, ItemWriteError> {
     match value {
         ItemValue::Unknown { .. } => Err(ItemWriteError::UnknownValue),
@@ -412,10 +415,27 @@ fn encode_text(value: &str) -> Result<String, ItemWriteError> {
     Ok(value.to_string())
 }
 
-/// 複数行を取り得る文字列値をそのまま渡せる形か確認する。
+/// 複数行を取り得る文字列値を、ホストへ渡すエスケープ表記へ符号化する。
+///
+/// 段は次の順に掛かり、それぞれが次の段の前提を保証する。
+///
+/// 1. [`validate_multiline_item_text`] が NUL・行の折り返しと字下げ以外の
+///    制御文字・単独の CR を落とす。以降に残る制御文字は LF・CRLF・タブだけになる
+/// 2. CRLF を LF へ正規化する。ホストは両者を区別せず、読み直しも描画も同じに
+///    なるため、往復が安定する形へ寄せる
+/// 3. [`encode_host_text`] が `\` と LF をホストのエスケープ表記へ包む。ここで
+///    初めて、クライアントが与えた `\` がホストのエスケープとして解釈されなく
+///    なる
+/// 4. [`limit_item_value_bytes`] が上限を課す
+///
+/// **上限は符号化の後に掛ける。** 上限が守るのは応答と設定項目の大きさであり、
+/// ホストへ実際に渡って保存されるのは符号化後の文字列である。符号化の前に
+/// 掛けると、`\` と改行だけ上限を超えて通る。
 fn encode_multiline_text(value: &str) -> Result<String, ItemWriteError> {
     validate_multiline_item_text(value)?;
-    Ok(value.to_string())
+    let encoded = encode_host_text(&value.replace("\r\n", "\n"));
+    limit_item_value_bytes(&encoded)?;
+    Ok(encoded)
 }
 
 /// パス値をそのまま渡せる形か確認する。
@@ -1060,26 +1080,90 @@ mod tests {
 
     #[test]
     fn text_values_may_span_multiple_lines() {
-        // 複数行のテキストを 1 回の書き込みで設定できる。
+        // 複数行のテキストを 1 回の書き込みで設定できる。改行はホストの
+        // エスケープ表記へ包まれ、CRLF は LF と同じ表記になる。タブは素通しする。
         let value = "1 行目\r\n2 行目\n\t字下げ".to_string();
+        let encoded = "1 行目\\n2 行目\\n\t字下げ".to_string();
+        for item_type in [EffectItemType::Text, EffectItemType::String] {
+            assert_eq!(
+                encode_item_value(
+                    &item_type,
+                    &ItemValue::Text {
+                        value: value.clone()
+                    }
+                ),
+                Ok(encoded.clone()),
+                "{item_type}"
+            );
+        }
+        assert_eq!(validate_item_value(&ItemValue::Text { value }), Ok(()));
+    }
+
+    #[test]
+    fn text_values_keep_backslashes_through_the_host_escape() {
+        // クライアントが与えた `\` はホストのエスケープとして解釈されない。
+        for (value, encoded) in [
+            (r"C:\temp\note", r"C:\\temp\\note"),
+            (r"^\d+\.txt$", r"^\\d+\\.txt$"),
+            (r"\", r"\\"),
+        ] {
+            assert_eq!(
+                encode_item_value(
+                    &EffectItemType::Text,
+                    &ItemValue::Text {
+                        value: value.to_string(),
+                    }
+                ),
+                Ok(encoded.to_string()),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_values_reject_a_lone_carriage_return() {
+        // 読み取りは改行だと報告するのに描画では消えるため、意図を推測せずに
+        // 落とす。CRLF は LF として受ける。
+        let rejected = ItemValue::Text {
+            value: "1 行目\r2 行目".to_string(),
+        };
+        let error = ItemWriteError::Text(TextSyntaxError::LoneCarriageReturn);
+        assert_eq!(
+            encode_item_value(&EffectItemType::Text, &rejected),
+            Err(error.clone())
+        );
+        assert_eq!(validate_item_value(&rejected), Err(error.clone()));
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+        assert_eq!(error.reason(), Some("lone_carriage_return"));
+
         assert_eq!(
             encode_item_value(
                 &EffectItemType::Text,
                 &ItemValue::Text {
-                    value: value.clone()
+                    value: "1 行目\r\n2 行目".to_string(),
                 }
             ),
-            Ok(value.clone())
+            Ok("1 行目\\n2 行目".to_string())
         );
+    }
+
+    #[test]
+    fn the_item_value_limit_applies_to_the_encoded_form() {
+        // ホストへ渡るのは符号化後の文字列である。符号化の前に掛けると、`\` と
+        // 改行だけ上限を超えて通る。
+        let value = "\\".repeat(MAX_ITEM_VALUE_BYTES / 2 + 1);
+        assert!(value.len() <= MAX_ITEM_VALUE_BYTES);
         assert_eq!(
-            encode_item_value(
-                &EffectItemType::String,
-                &ItemValue::Text {
-                    value: value.clone()
-                }
-            ),
-            Ok(value.clone())
+            validate_item_value(&ItemValue::Text {
+                value: value.clone()
+            }),
+            Err(ItemWriteError::Text(TextSyntaxError::TooLongBytes {
+                bytes: value.len() * 2,
+                max: MAX_ITEM_VALUE_BYTES,
+            }))
         );
+        // 符号化しても上限に収まる長さは通る。
+        let value = "\\".repeat(MAX_ITEM_VALUE_BYTES / 2);
         assert_eq!(validate_item_value(&ItemValue::Text { value }), Ok(()));
     }
 

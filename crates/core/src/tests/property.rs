@@ -21,6 +21,7 @@ use crate::json::{JsonStrictError, parse_json};
 use crate::number::FiniteF64;
 use crate::render::RenderFrameParams;
 use crate::selector::ObjectSelector;
+use crate::text_codec::{decode_host_text, encode_host_text};
 use crate::validation::{
     MAX_PATH_UTF16_UNITS, PathSyntaxError, validate_object_alias_name, validate_path,
 };
@@ -767,10 +768,10 @@ proptest! {
                 if let Ok(encoded) = encoded {
                     // 書き込む文字列に NUL は残らない。
                     prop_assert!(!encoded.contains('\0'));
-                    // 改行・復帰・水平タブは複数行を取り得る値でのみ残る。
-                    // 他の値ではどの制御文字も残らない。
+                    // 水平タブは複数行を取り得る値でのみ残る。改行はエスケープ
+                    // 表記へ包まれるため、どの値でも制御文字としては残らない。
                     let multiline = matches!(value, ItemValue::Text { .. });
-                    let allowed = |c: char| multiline && matches!(c, '\n' | '\r' | '\t');
+                    let allowed = |c: char| multiline && c == '\t';
                     let unexpected = encoded.chars().any(|c| c.is_control() && !allowed(c));
                     prop_assert!(!unexpected);
                     prop_assert!(validate_item_value(&value).is_ok());
@@ -996,4 +997,120 @@ proptest! {
             Component::CurDir | Component::ParentDir
         )));
     }
+}
+
+// ============================================================================
+// テキスト設定値の codec
+// ============================================================================
+
+/// エスケープの規則に当たる断片を混ぜた文字列。
+///
+/// 一様乱数の文字列はバックスラッシュも改行もほとんど生成しないため、規則の
+/// 境界に当たる断片を組み合わせる。
+fn host_text_strategy() -> impl Strategy<Value = String> {
+    let fragment = prop_oneof![
+        6 => string_regex(r"[a-zA-Z0-9_ 字幕]{0,8}").unwrap(),
+        2 => Just(r"\".to_string()),
+        2 => Just(r"\\".to_string()),
+        2 => Just(r"\n".to_string()),
+        2 => Just("\n".to_string()),
+        1 => Just("\t".to_string()),
+        1 => Just(r"C:\temp\note".to_string()),
+    ];
+    prop::collection::vec(fragment, 0..8).prop_map(|fragments| fragments.concat())
+}
+
+proptest! {
+    /// 符号化した文字列は必ず元へ復号できる。
+    #[test]
+    fn the_text_codec_round_trips_any_value(
+        value in prop_oneof![1 => ".*", 9 => host_text_strategy()],
+    ) {
+        prop_assert_eq!(decode_host_text(&encode_host_text(&value)), value);
+    }
+
+    /// 符号化と復号を繰り返しても包みは育たない。
+    #[test]
+    fn the_text_codec_does_not_grow_the_escapes(
+        value in prop_oneof![1 => ".*", 9 => host_text_strategy()],
+    ) {
+        let once = encode_host_text(&value);
+        let mut current = once.clone();
+        for _ in 0..3 {
+            current = encode_host_text(&decode_host_text(&current));
+            prop_assert_eq!(&current, &once);
+        }
+    }
+
+    /// 符号化した文字列にはバックスラッシュを伴わない `n` の綴りしか残らない。
+    ///
+    /// 改行がエスケープ表記へ包まれ、バックスラッシュが必ず 2 つ組になる。
+    /// タブはどちらの規則にも当たらず素通しする。
+    #[test]
+    fn the_encoded_form_has_no_bare_line_feed_and_pairs_every_backslash(
+        value in prop_oneof![1 => ".*", 9 => host_text_strategy()],
+    ) {
+        let encoded = encode_host_text(&value);
+        prop_assert!(!encoded.contains('\n'));
+        prop_assert_eq!(
+            encoded.matches('\t').count(),
+            value.matches('\t').count()
+        );
+
+        // 先頭から 2 文字ずつ食えば、`\` は必ず `\\` か `\n` の一部になる。
+        let chars: Vec<char> = encoded.chars().collect();
+        let mut index = 0;
+        while index < chars.len() {
+            if chars[index] == '\\' {
+                prop_assert!(matches!(chars.get(index + 1), Some('\\') | Some('n')));
+                index += 2;
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    /// 書き込みが渡す文字列は、ホストが解いた時点で要求の値そのものになる。
+    ///
+    /// ホストの解釈を模した関数を通す。描画に使われるのは解いた後の値であり、
+    /// ここが一致しなければ Windows パスも正規表現も崩れる。
+    #[test]
+    fn the_value_the_host_stores_is_the_value_that_was_requested(
+        value in prop_oneof![1 => ".*", 9 => host_text_strategy()],
+    ) {
+        let requested = ItemValue::Text { value: value.clone() };
+        prop_assume!(validate_item_value(&requested).is_ok());
+
+        let encoded = encode_item_value(&EffectItemType::Text, &requested)
+            .expect("検証を通った値は符号化できる");
+        prop_assert_eq!(host_store(&encoded), value.replace("\r\n", "\n"));
+    }
+}
+
+/// ホストが書き込まれた表記を解いて保存する規則を模す。
+///
+/// `\\` を `\` へ、`\n` を LF へ戻し、それ以外の `\` は次の文字ごとそのまま
+/// 保つ。**codec を呼ばずに書く。** 呼ぶと、codec が規則からずれたときに
+/// 検査も一緒にずれる。
+fn host_store(written: &str) -> String {
+    let chars: Vec<char> = written.chars().collect();
+    let mut stored = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        match (chars[index], chars.get(index + 1)) {
+            ('\\', Some('\\')) => {
+                stored.push('\\');
+                index += 2;
+            }
+            ('\\', Some('n')) => {
+                stored.push('\n');
+                index += 2;
+            }
+            (c, _) => {
+                stored.push(c);
+                index += 1;
+            }
+        }
+    }
+    stored
 }

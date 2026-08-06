@@ -235,6 +235,7 @@ pub const REASON_VALUES: &[&str] = &[
     "item_not_found",
     "item_type_not_writable",
     "layer_locked",
+    "lone_carriage_return",
     "media_not_supported",
     "not_absolute",
     "path_too_long",

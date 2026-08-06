@@ -47,6 +47,9 @@ fn text_syntax_case(variant: &TextSyntaxError) -> Vec<TextSyntaxError> {
         TextSyntaxError::ForbiddenCharacter => {
             vec![rejected(validate_object_alias_name("立ち絵/通常"))]
         }
+        TextSyntaxError::LoneCarriageReturn => {
+            vec![rejected(validate_multiline_item_text("1 行目\r2 行目"))]
+        }
         TextSyntaxError::TooLongUtf16 { .. } => {
             vec![rejected(validate_name(
                 &"a".repeat(MAX_NAME_UTF16_UNITS + 1),

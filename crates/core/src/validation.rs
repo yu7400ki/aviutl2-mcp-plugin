@@ -23,6 +23,10 @@ pub const MAX_NAME_UTF16_UNITS: usize = 1024;
 /// 行の折り返しと字下げを表す制御文字。
 ///
 /// 複数行を取る値にはこれらが現れる。
+///
+/// **CR を残すのは CRLF を通すためだけである。** CRLF の CR まで「制御文字を
+/// 含む」として落とすと、行区切りが CRLF の環境で書いたテキストが理由の読めない
+/// 失敗になる。単独の CR は別の規則が専用の理由で落とす。
 const LAYOUT_CONTROLS: [char; 3] = ['\n', '\r', '\t'];
 
 /// オブジェクトエイリアス名として使えない文字。
@@ -52,6 +56,9 @@ pub enum TextSyntaxError {
     /// その用途で使えない文字を含む。
     #[error("使用できない文字を含む文字列は指定できません")]
     ForbiddenCharacter,
+    /// 後ろに LF が続かない CR を含む。
+    #[error("単独の復帰 (CR) を含む文字列は指定できません")]
+    LoneCarriageReturn,
     /// UTF-16 code unit 数の上限を超えた。
     #[error("文字列が長すぎます: {units} UTF-16 code units (上限 {max})")]
     TooLongUtf16 {
@@ -80,6 +87,7 @@ impl TextSyntaxError {
         TextSyntaxError::ContainsNul,
         TextSyntaxError::ContainsControl,
         TextSyntaxError::ForbiddenCharacter,
+        TextSyntaxError::LoneCarriageReturn,
         TextSyntaxError::TooLongUtf16 {
             units: MAX_NAME_UTF16_UNITS + 1,
             max: MAX_NAME_UTF16_UNITS,
@@ -99,6 +107,7 @@ impl TextSyntaxError {
             TextSyntaxError::ContainsNul => "contains_nul",
             TextSyntaxError::ContainsControl => "contains_control",
             TextSyntaxError::ForbiddenCharacter => "forbidden_character",
+            TextSyntaxError::LoneCarriageReturn => "lone_carriage_return",
             TextSyntaxError::TooLongUtf16 { .. } | TextSyntaxError::TooLongBytes { .. } => {
                 "too_long"
             }
@@ -204,18 +213,46 @@ pub fn validate_control_free_except_layout(text: &str) -> Result<(), TextSyntaxE
 /// NUL と制御文字を拒否し、[`MAX_ITEM_VALUE_BYTES`] を上限とする。
 pub fn validate_item_text(value: &str) -> Result<(), TextSyntaxError> {
     validate_control_free(value)?;
+    limit_item_value_bytes(value)
+}
+
+/// 複数行を取り得る設定項目の文字列値の構文を検証する。
+///
+/// 改行とタブを許すほかは [`validate_item_text`] と同じ制御文字の規則を課し、
+/// 加えて単独の CR（後ろに LF が続かない CR）を拒否する。
+///
+/// 改行を許すのは、複数行のテキストを書く直接の手段を残すためである。改行を
+/// 拒否すると、複数行の値は要求元がエスケープ表記を自分で組み立てるしか書け
+/// なくなる。
+///
+/// 単独の CR を拒否するのは、ホストが改行として保存しながら描画では行を分け
+/// ないためである。CRLF は LF へ正規化して受けられるが、単独の CR にはどちらの
+/// 意図とも読める余地があり、黙って読み替えると描画の行数が変わる。
+///
+/// **バイト数の上限はここでは課さない。** 上限が守るのはホストへ実際に渡る
+/// 文字列であり、その長さは符号化するまで決まらない。上限は
+/// [`limit_item_value_bytes`] が符号化後の文字列へ課す。
+pub fn validate_multiline_item_text(value: &str) -> Result<(), TextSyntaxError> {
+    validate_control_free_except_layout(value)?;
+    reject_lone_carriage_return(value)
+}
+
+/// 設定項目の文字列値としてのバイト数の上限を課す。
+///
+/// 単一の設定項目が応答サイズを圧迫しないための上限であり、単位はバイトである。
+pub fn limit_item_value_bytes(value: &str) -> Result<(), TextSyntaxError> {
     limit_bytes(value, MAX_ITEM_VALUE_BYTES)
 }
 
-/// 複数行を取り得る設定項目の文字列値を検証する。
-///
-/// 改行とタブを許すほかは [`validate_item_text`] と同じである。
-///
-/// 複数行のテキストを書く直接の手段を残すための緩和である。改行を拒否すると、
-/// 複数行の値は要求元がエスケープ表記を自分で組み立てるしか書けなくなる。
-pub fn validate_multiline_item_text(value: &str) -> Result<(), TextSyntaxError> {
-    validate_control_free_except_layout(value)?;
-    limit_bytes(value, MAX_ITEM_VALUE_BYTES)
+/// 後ろに LF が続かない CR を含まないことを確認する。
+fn reject_lone_carriage_return(value: &str) -> Result<(), TextSyntaxError> {
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' && chars.peek() != Some(&'\n') {
+            return Err(TextSyntaxError::LoneCarriageReturn);
+        }
+    }
+    Ok(())
 }
 
 /// 名前（effect 名・設定項目名・オブジェクト名）を検証する。
@@ -431,6 +468,7 @@ mod tests {
             TextSyntaxError::ContainsNul => "ContainsNul",
             TextSyntaxError::ContainsControl => "ContainsControl",
             TextSyntaxError::ForbiddenCharacter => "ForbiddenCharacter",
+            TextSyntaxError::LoneCarriageReturn => "LoneCarriageReturn",
             TextSyntaxError::TooLongUtf16 { .. } => "TooLongUtf16",
             TextSyntaxError::TooLongBytes { .. } => "TooLongBytes",
         }
@@ -456,6 +494,7 @@ mod tests {
             "ContainsNul",
             "ContainsControl",
             "ForbiddenCharacter",
+            "LoneCarriageReturn",
             "TooLongUtf16",
             "TooLongBytes",
         ];
@@ -663,10 +702,26 @@ mod tests {
     }
 
     #[test]
-    fn multiline_item_text_keeps_the_byte_limit() {
+    fn multiline_item_text_rejects_a_lone_carriage_return() {
+        // CRLF は行区切りとして通し、単独の CR だけを落とす。
+        assert_eq!(validate_multiline_item_text("1 行目\r\n2 行目"), Ok(()));
+        for value in ["1 行目\r2 行目", "末尾\r", "\r", "\n\r"] {
+            assert_eq!(
+                validate_multiline_item_text(value),
+                Err(TextSyntaxError::LoneCarriageReturn),
+                "{value:?} が受理されました"
+            );
+        }
+    }
+
+    #[test]
+    fn multiline_item_text_leaves_the_byte_limit_to_the_encoded_form() {
+        // 上限が守るのはホストへ渡る文字列であり、その長さは符号化するまで
+        // 決まらない。構文の検証は長さを見ない。
         let value = "\n".repeat(MAX_ITEM_VALUE_BYTES + 1);
+        assert_eq!(validate_multiline_item_text(&value), Ok(()));
         assert_eq!(
-            validate_multiline_item_text(&value),
+            limit_item_value_bytes(&value),
             Err(TextSyntaxError::TooLongBytes {
                 bytes: MAX_ITEM_VALUE_BYTES + 1,
                 max: MAX_ITEM_VALUE_BYTES,
