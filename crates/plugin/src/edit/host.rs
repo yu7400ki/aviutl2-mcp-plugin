@@ -91,7 +91,13 @@ pub trait SceneEditor {
     /// 解決・read-back・応答の組み立てを同一区間内で完結できる。
     ///
     /// 渡すのは [`SceneReader`] だけである。応答へ載せる値を読む
-    /// [`crate::read::host::SceneValueReader`] は編集経路のどこからも呼ばれない。
+    /// [`crate::read::host::SceneValueReader`] を**ここ経由で呼ぶ経路は無い。**
+    ///
+    /// **編集 operation が値の読み取りを一切しないという意味ではない。**
+    /// `set_selection` の観測は編集区間を抜けた後に
+    /// [`crate::read::host::ReadHost`] の参照区間へ改めて入り、そちらで
+    /// フォーカス対象を読む。区間が別なので、この口が値の読み取りを備える
+    /// 理由にはならない。
     fn reader(&self) -> &dyn SceneReader;
 
     /// 区間へ入った時点の編集情報。

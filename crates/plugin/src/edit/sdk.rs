@@ -148,6 +148,10 @@ impl EditHost for SdkEditHost {
         let info = SdkReadHost.edit_info()?;
         // フォーカス対象は参照区間の内側でしか読めない。編集区間を抜けた後で
         // なければ反映されないため、ここで改めて区間へ入る。
+        //
+        // 読むのは `SceneValueReader` の口である。編集区間の読み取り口
+        // （`SceneEditor::reader`）はこれを備えないが、ここは編集区間の外に
+        // 開いた参照区間であり、区間の実装へ直接問える。
         let focus = EDIT_HANDLE
             .call_read_section(|section| SdkSceneReader { section }.focused_object())
             .map_err(|_| sdk("call_read_section"))??;
