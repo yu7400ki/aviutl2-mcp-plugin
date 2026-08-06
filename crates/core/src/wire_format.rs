@@ -1,6 +1,6 @@
 //! descriptor と handshake が共有するワイヤ表現の生成・解釈。
 //!
-//! 時刻と HWND は plugin が書き、server が読む。両端が同一の関数を通ることで、
+//! 時刻は plugin が書き、server が読む。両端が同一の関数を通ることで、
 //! 書式の齟齬による同一性検証の取りこぼしを防ぐ。
 
 use chrono::{DateTime, ParseError, Utc};
@@ -44,19 +44,6 @@ pub fn format_utc_timestamp(value: DateTime<Utc>) -> String {
 /// 正準書式以外の RFC3339 表現も受理し、UTC へ正規化する。
 pub fn parse_utc_timestamp(value: &str) -> Result<DateTime<Utc>, ParseError> {
     DateTime::parse_from_rfc3339(value).map(|dt| dt.with_timezone(&Utc))
-}
-
-/// ウィンドウハンドルを descriptor の正準書式へ整形する。
-///
-/// 書式は `0x` + 16 桁ゼロ埋め十六進（大文字）。桁数は 64bit 幅で固定し、
-/// ハンドル幅が狭い環境では上位が 0 で埋まるだけで値は失われない。
-///
-/// ```
-/// # use aviutl2_mcp_core::format_hwnd;
-/// assert_eq!(format_hwnd(0x12345), "0x0000000000012345");
-/// ```
-pub fn format_hwnd(handle: u64) -> String {
-    format!("0x{handle:016X}")
 }
 
 #[cfg(test)]
@@ -116,12 +103,5 @@ mod tests {
     fn parse_rejects_non_rfc3339() {
         assert!(parse_utc_timestamp("2026-01-01 00:00:00").is_err());
         assert!(parse_utc_timestamp("").is_err());
-    }
-
-    #[test]
-    fn hwnd_is_zero_padded_to_sixteen_digits() {
-        assert_eq!(format_hwnd(0), "0x0000000000000000");
-        assert_eq!(format_hwnd(0x12345), "0x0000000000012345");
-        assert_eq!(format_hwnd(u64::MAX), "0xFFFFFFFFFFFFFFFF");
     }
 }

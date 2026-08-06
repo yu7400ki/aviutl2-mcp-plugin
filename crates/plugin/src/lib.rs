@@ -220,7 +220,6 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
                 aviutl2_mcp_core::format_utc_timestamp(chrono::Utc::now())
             }
         };
-        let hwnd = identity::current_hwnd();
         let started_at = aviutl2_mcp_core::format_utc_timestamp(chrono::Utc::now());
 
         let writer = match registry::RegistryWriter::new() {
@@ -236,7 +235,6 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
             auth_secret,
             pid,
             process_created_at,
-            hwnd,
             started_at,
             writer,
         ) {
@@ -695,7 +693,6 @@ mod tests {
             aviutl2_mcp_core::AuthSecret::generate(),
             std::process::id(),
             "2026-01-01T00:00:00.0000000Z".to_string(),
-            Some("0x0".to_string()),
             "2026-01-01T00:00:00.0000000Z".to_string(),
             registry::RegistryWriter::for_dir(dir.clone()),
         )
@@ -894,7 +891,6 @@ mod tests {
                 aviutl2_mcp_core::AuthSecret::generate(),
                 std::process::id(),
                 "2026-01-01T00:00:00.0000000Z".to_string(),
-                Some("0x0".to_string()),
                 "2026-01-01T00:00:00.0000000Z".to_string(),
                 registry::RegistryWriter::for_dir(root.clone()),
             )

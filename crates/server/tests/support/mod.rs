@@ -226,7 +226,6 @@ impl MockPipeServer {
             auth_secret: self.auth_secret.clone(),
             pid: self.pid,
             process_created_at: self.process_created_at.clone(),
-            hwnd: None,
             started_at: self.process_created_at.clone(),
             state: self.state,
             project: Some(DescriptorProject {
@@ -277,7 +276,6 @@ pub fn write_bare_descriptor(registry_dir: &std::path::Path) -> InstanceId {
         auth_secret: AuthSecret::generate(),
         pid: std::process::id(),
         process_created_at: created_at.clone(),
-        hwnd: None,
         started_at: created_at,
         state: InstanceState::Ready,
         project: None,
@@ -333,7 +331,6 @@ impl SilentPipe {
             auth_secret: AuthSecret::generate(),
             pid: std::process::id(),
             process_created_at: created_at.clone(),
-            hwnd: None,
             started_at: created_at,
             state: InstanceState::Ready,
             project: None,

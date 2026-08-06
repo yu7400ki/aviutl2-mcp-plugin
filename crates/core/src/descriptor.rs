@@ -91,8 +91,6 @@ pub struct InstanceDescriptor {
     pub pid: u32,
     /// プロセス作成時刻。書式は [`crate::format_utc_timestamp`]。
     pub process_created_at: String,
-    /// HWND。書式は [`crate::format_hwnd`]。取得不能時は None。
-    pub hwnd: Option<String>,
     /// 起動時刻。書式は [`crate::format_utc_timestamp`]。
     pub started_at: String,
     pub state: InstanceState,
@@ -176,7 +174,6 @@ mod tests {
             auth_secret: AuthSecret::generate(),
             pid: 1234,
             process_created_at: "2026-01-01T00:00:00.0000000Z".to_string(),
-            hwnd: Some("0x0000000012345678".to_string()),
             started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
             state: InstanceState::Ready,
             project: Some(DescriptorProject {
@@ -193,7 +190,7 @@ mod tests {
 
     #[test]
     fn descriptor_rejects_unknown_fields() {
-        let s = r#"{"schema_version":1,"protocol_version":"1.0","instance_id":"8df98c04-e7c2-4f98-b3ce-fc1c39d76414","pipe_name":"x","auth_secret":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","pid":1,"process_created_at":"x","hwnd":null,"started_at":"x","state":"ready","project":null,"extra":1}"#;
+        let s = r#"{"schema_version":1,"protocol_version":"1.0","instance_id":"8df98c04-e7c2-4f98-b3ce-fc1c39d76414","pipe_name":"x","auth_secret":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","pid":1,"process_created_at":"x","started_at":"x","state":"ready","project":null,"extra":1}"#;
         let result: Result<InstanceDescriptor, _> = serde_json::from_str(s);
         assert!(result.is_err());
     }

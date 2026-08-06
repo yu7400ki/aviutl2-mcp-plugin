@@ -1,11 +1,9 @@
 //! プロセス識別情報の収集。
 //!
-//! PID・プロセス作成時刻・HWND は OS 固有の adapter 層に隔離し、
+//! PID とプロセス作成時刻は OS 固有の adapter 層に隔離し、
 //! core crate へ SDK/Windows 型を漏らさない。
 
-use crate::EDIT_HANDLE;
 use anyhow::{Context, Result};
-use aviutl2_mcp_core::format_hwnd;
 use chrono::{DateTime, Utc};
 use windows::Win32::Foundation::{FILETIME, GetLastError};
 use windows::Win32::System::Threading::GetProcessTimes;
@@ -30,18 +28,6 @@ pub fn current_process_created_at() -> Result<DateTime<Utc>> {
             .context("プロセス作成時刻の取得に失敗しました")?;
         filetime_to_datetime(creation)
     }
-}
-
-/// ホストアプリケーションの HWND を descriptor の正準書式で返す。
-///
-/// `register` 完了前は `GlobalEditHandle` が初期化済みであれば取得可能。
-/// 取得不能時は `None` を返す。
-pub fn current_hwnd() -> Option<String> {
-    EDIT_HANDLE
-        .get_host_app_window_raw()
-        // ハンドルはポインタ幅の不透明値であり符号を持たない。`isize` として
-        // 符号拡張されないよう、いったんビット幅を保ったまま `u64` へ広げる。
-        .map(|handle| format_hwnd(handle.hwnd.get() as usize as u64))
 }
 
 fn filetime_to_datetime(ft: FILETIME) -> Result<DateTime<Utc>> {

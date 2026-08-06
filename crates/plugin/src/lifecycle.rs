@@ -29,7 +29,6 @@ impl Lifecycle {
         auth_secret: AuthSecret,
         pid: u32,
         process_created_at: String,
-        hwnd: Option<String>,
         started_at: String,
         writer: RegistryWriter,
     ) -> Result<Self> {
@@ -41,7 +40,6 @@ impl Lifecycle {
             auth_secret: auth_secret.clone(),
             pid,
             process_created_at,
-            hwnd,
             started_at,
             state: InstanceState::Starting,
             project: None,
@@ -208,13 +206,12 @@ mod tests {
         root.join("instances").join(format!("{}.json", id))
     }
 
-    fn sample_identity() -> (InstanceId, AuthSecret, u32, String, Option<String>, String) {
+    fn sample_identity() -> (InstanceId, AuthSecret, u32, String, String) {
         (
             InstanceId::new_v4(),
             AuthSecret::generate(),
             std::process::id(),
             "2026-01-01T00:00:00.0000000Z".to_string(),
-            Some("0x0".to_string()),
             "2026-01-01T00:00:00.0000000Z".to_string(),
         )
     }
@@ -222,9 +219,8 @@ mod tests {
     #[test]
     fn lifecycle_starts_in_starting_state() {
         let (writer, dir) = temp_writer();
-        let (id, secret, pid, created_at, hwnd, started_at) = sample_identity();
-        let lifecycle =
-            Lifecycle::new(id, secret, pid, created_at, hwnd, started_at, writer).unwrap();
+        let (id, secret, pid, created_at, started_at) = sample_identity();
+        let lifecycle = Lifecycle::new(id, secret, pid, created_at, started_at, writer).unwrap();
 
         assert_eq!(lifecycle.state(), InstanceState::Starting);
         assert!(descriptor_path(&dir, id).exists());
@@ -235,9 +231,8 @@ mod tests {
     #[test]
     fn transition_starting_to_ready() {
         let (writer, dir) = temp_writer();
-        let (id, secret, pid, created_at, hwnd, started_at) = sample_identity();
-        let lifecycle =
-            Lifecycle::new(id, secret, pid, created_at, hwnd, started_at, writer).unwrap();
+        let (id, secret, pid, created_at, started_at) = sample_identity();
+        let lifecycle = Lifecycle::new(id, secret, pid, created_at, started_at, writer).unwrap();
 
         lifecycle.transition_to(InstanceState::Ready).unwrap();
         assert_eq!(lifecycle.state(), InstanceState::Ready);
@@ -252,9 +247,8 @@ mod tests {
     #[test]
     fn transition_ready_busy_roundtrip() {
         let (writer, dir) = temp_writer();
-        let (id, secret, pid, created_at, hwnd, started_at) = sample_identity();
-        let lifecycle =
-            Lifecycle::new(id, secret, pid, created_at, hwnd, started_at, writer).unwrap();
+        let (id, secret, pid, created_at, started_at) = sample_identity();
+        let lifecycle = Lifecycle::new(id, secret, pid, created_at, started_at, writer).unwrap();
         lifecycle.transition_to(InstanceState::Ready).unwrap();
 
         lifecycle.transition_to(InstanceState::Busy).unwrap();
@@ -269,9 +263,8 @@ mod tests {
     #[test]
     fn shutdown_transitions_to_draining() {
         let (writer, dir) = temp_writer();
-        let (id, secret, pid, created_at, hwnd, started_at) = sample_identity();
-        let lifecycle =
-            Lifecycle::new(id, secret, pid, created_at, hwnd, started_at, writer).unwrap();
+        let (id, secret, pid, created_at, started_at) = sample_identity();
+        let lifecycle = Lifecycle::new(id, secret, pid, created_at, started_at, writer).unwrap();
         lifecycle.transition_to(InstanceState::Ready).unwrap();
 
         lifecycle.shutdown().unwrap();
@@ -283,9 +276,8 @@ mod tests {
     #[test]
     fn shutdown_before_first_project_load_transitions_to_draining() {
         let (writer, dir) = temp_writer();
-        let (id, secret, pid, created_at, hwnd, started_at) = sample_identity();
-        let lifecycle =
-            Lifecycle::new(id, secret, pid, created_at, hwnd, started_at, writer).unwrap();
+        let (id, secret, pid, created_at, started_at) = sample_identity();
+        let lifecycle = Lifecycle::new(id, secret, pid, created_at, started_at, writer).unwrap();
         assert_eq!(lifecycle.state(), InstanceState::Starting);
 
         lifecycle.shutdown().unwrap();
@@ -297,9 +289,8 @@ mod tests {
     #[test]
     fn mark_gone_removes_descriptor() {
         let (writer, dir) = temp_writer();
-        let (id, secret, pid, created_at, hwnd, started_at) = sample_identity();
-        let lifecycle =
-            Lifecycle::new(id, secret, pid, created_at, hwnd, started_at, writer).unwrap();
+        let (id, secret, pid, created_at, started_at) = sample_identity();
+        let lifecycle = Lifecycle::new(id, secret, pid, created_at, started_at, writer).unwrap();
         lifecycle.transition_to(InstanceState::Ready).unwrap();
 
         lifecycle.mark_gone().unwrap();
@@ -312,9 +303,8 @@ mod tests {
     #[test]
     fn update_project_reflects_to_descriptor() {
         let (writer, dir) = temp_writer();
-        let (id, secret, pid, created_at, hwnd, started_at) = sample_identity();
-        let lifecycle =
-            Lifecycle::new(id, secret, pid, created_at, hwnd, started_at, writer).unwrap();
+        let (id, secret, pid, created_at, started_at) = sample_identity();
+        let lifecycle = Lifecycle::new(id, secret, pid, created_at, started_at, writer).unwrap();
         lifecycle.transition_to(InstanceState::Ready).unwrap();
 
         let project = DescriptorProject {
@@ -332,9 +322,8 @@ mod tests {
     #[test]
     fn invalid_transition_fails() {
         let (writer, dir) = temp_writer();
-        let (id, secret, pid, created_at, hwnd, started_at) = sample_identity();
-        let lifecycle =
-            Lifecycle::new(id, secret, pid, created_at, hwnd, started_at, writer).unwrap();
+        let (id, secret, pid, created_at, started_at) = sample_identity();
+        let lifecycle = Lifecycle::new(id, secret, pid, created_at, started_at, writer).unwrap();
 
         assert!(lifecycle.transition_to(InstanceState::Busy).is_err());
         assert!(lifecycle.transition_to(InstanceState::Gone).is_err());

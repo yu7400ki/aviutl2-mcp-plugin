@@ -172,7 +172,6 @@ mod tests {
             auth_secret: AuthSecret::generate(),
             pid,
             process_created_at: fixed_timestamp(),
-            hwnd: None,
             started_at: fixed_timestamp(),
             state: InstanceState::Ready,
             project: Some(DescriptorProject {

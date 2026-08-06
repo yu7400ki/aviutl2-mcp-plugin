@@ -728,7 +728,6 @@ mod tests {
             auth_secret: AuthSecret::generate(),
             pid: std::process::id(),
             process_created_at: format_utc_timestamp(identity.created_at),
-            hwnd: None,
             started_at: format_utc_timestamp(identity.created_at),
             state: InstanceState::Ready,
             project: Some(DescriptorProject {
