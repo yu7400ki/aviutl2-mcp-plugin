@@ -25,11 +25,12 @@
 
 use crate::mcp::failure::{from_code, invalid_argument};
 use aviutl2_mcp_core::{
-    DEFAULT_PAGE_LIMIT, EffectSelector, EffectType, ErrorCode, ErrorObject, FiniteF64,
-    GetEffectItemValuesParams, GetObjectParams, GetSelectionParams, InstanceId,
+    DEFAULT_PAGE_LIMIT, DescribeEffectsParams, EffectSelector, EffectType, ErrorCode, ErrorObject,
+    FiniteF64, GetEffectItemValuesParams, GetObjectParams, GetSelectionParams, InstanceId,
     ListAvailableEffectsParams, ListFontsParams, ListLayersParams, ListModulesParams,
-    ListObjectAliasesParams, ListObjectsParams, ListPalettesParams, MAX_EVALUATED_FRAMES,
-    MAX_EVALUATED_ITEMS, MAX_PAGE_LIMIT, ModuleType, ObjectFilter, ObjectSelector, PageRequest,
+    ListObjectAliasesParams, ListObjectsParams, ListPalettesParams, MAX_DESCRIBED_EFFECTS,
+    MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, MAX_PAGE_LIMIT, ModuleType, ObjectFilter,
+    ObjectSelector, PageRequest,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -269,6 +270,45 @@ pub struct ListAvailableEffectsInput {
     /// ページ指定。
     #[serde(flatten)]
     pub page: CatalogPageInput,
+}
+
+/// `describe_effects` の入力。
+///
+/// **ページ指定を持たない。** 返すのは要求が名指しした effect だけであり、
+/// 続きのページという概念が無い。`snapshot_revision` の運びどころも無い。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DescribeEffectsInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// 中身を取得する effect 名。list_available_effects が返す名前をそのまま指定する。
+    #[schemars(
+        length(min = 1, max = MAX_DESCRIBED_EFFECT_COUNT),
+        extend("uniqueItems" = true)
+    )]
+    pub effect_names: Vec<String>,
+}
+
+/// 1 度に中身を引ける effect の最大件数。
+const MAX_DESCRIBED_EFFECT_COUNT: u32 = MAX_DESCRIBED_EFFECTS as u32;
+
+impl DescribeEffectsInput {
+    /// IPC の params へ変換する。
+    ///
+    /// 件数と重複と名前の検証は core の実装を呼ぶ。要求元と実行側が同じ判定を
+    /// 共有し、宣言した制約を接続前に実際へ確かめる。落ちた規則の名前を機械
+    /// 可読な形で添える一方、検証に失敗した値そのものは応答へ含めない。
+    pub fn to_params(&self) -> Result<DescribeEffectsParams, ErrorObject> {
+        let params = DescribeEffectsParams {
+            effect_names: self.effect_names.clone(),
+        };
+        params.validate().map_err(|error| {
+            invalid_argument(error.to_string())
+                .with_details(serde_json::json!({ "reason": error.reason() }))
+        })?;
+        Ok(params)
+    }
 }
 
 /// `list_fonts` の入力。

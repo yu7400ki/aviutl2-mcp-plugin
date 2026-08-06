@@ -75,8 +75,8 @@ pub use edit::{
 };
 pub use edit_info::{Cursor, DisplayRange, EditInfo, Extent, FrameRange, GridBpm, SceneInfo};
 pub use effect::{
-    AvailableEffect, AvailableEffectItem, EffectFlags, EffectInfo, EffectItem, EffectItemType,
-    EffectType, EvaluatedItemKind, TrackInfo,
+    AvailableEffect, AvailableEffectItem, EffectDescription, EffectFlags, EffectInfo, EffectItem,
+    EffectItemDescription, EffectItemType, EffectType, EvaluatedItemKind, TrackInfo,
 };
 pub use envelope::{
     PongProject, PongResult, RequestEnvelope, RequestKind, ResponseEnvelope, ResponseKind,
@@ -109,15 +109,16 @@ pub use module::{ModuleEntry, ModuleType};
 pub use number::FiniteF64;
 pub use object::{LayerInfo, ObjectDetail, ObjectSummary, SectionRange};
 pub use operation::{
-    EditOperation, EffectItemValues, EffectItemValuesInputError, EvaluatedItem,
-    GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GetEffectItemValuesParams,
-    GetObjectParams, GetSelectionParams, KnownOperation, ListAvailableEffectsParams,
-    ListAvailableEffectsResult, ListFontsParams, ListFontsResult, ListLayersParams,
-    ListLayersResult, ListModulesParams, ListModulesResult, ListObjectAliasesParams,
-    ListObjectAliasesResult, ListObjectsParams, ListObjectsResult, ListPalettesParams,
-    ListPalettesResult, MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, OPERATION_ADD_EFFECT,
-    OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT, OPERATION_CREATE_OBJECT_SECTION,
-    OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT, OPERATION_DELETE_OBJECT_SECTION,
+    DescribeEffectsInputError, DescribeEffectsParams, DescribeEffectsResult, EditOperation,
+    EffectItemValues, EffectItemValuesInputError, EvaluatedItem, GetCurrentSceneParams,
+    GetCurrentSceneResult, GetEditInfoParams, GetEffectItemValuesParams, GetObjectParams,
+    GetSelectionParams, KnownOperation, ListAvailableEffectsParams, ListAvailableEffectsResult,
+    ListFontsParams, ListFontsResult, ListLayersParams, ListLayersResult, ListModulesParams,
+    ListModulesResult, ListObjectAliasesParams, ListObjectAliasesResult, ListObjectsParams,
+    ListObjectsResult, ListPalettesParams, ListPalettesResult, MAX_DESCRIBED_EFFECTS,
+    MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, OPERATION_ADD_EFFECT, OPERATION_APPLY_BATCH,
+    OPERATION_CREATE_OBJECT, OPERATION_CREATE_OBJECT_SECTION, OPERATION_DELETE_EFFECT,
+    OPERATION_DELETE_OBJECT, OPERATION_DELETE_OBJECT_SECTION, OPERATION_DESCRIBE_EFFECTS,
     OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_EFFECT_ITEM_VALUES,
     OPERATION_GET_OBJECT, OPERATION_GET_SELECTION, OPERATION_LIST_AVAILABLE_EFFECTS,
     OPERATION_LIST_FONTS, OPERATION_LIST_LAYERS, OPERATION_LIST_MODULES,

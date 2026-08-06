@@ -838,6 +838,13 @@ mod tests {
             Err(crate::read::ReadError::NotReady)
         }
 
+        fn describe_effects(
+            &self,
+            _params: &aviutl2_mcp_core::DescribeEffectsParams,
+        ) -> Result<aviutl2_mcp_core::DescribeEffectsResult, crate::read::ReadError> {
+            Err(crate::read::ReadError::NotReady)
+        }
+
         fn list_fonts(&self) -> Result<crate::read::Snapshot<String>, crate::read::ReadError> {
             Err(crate::read::ReadError::NotReady)
         }
@@ -944,8 +951,15 @@ mod tests {
             Ok(0)
         }
 
-        fn effect_description(&self, _effect_name: &str) -> Option<String> {
-            None
+        fn effect_items(
+            &self,
+            _effect_name: &str,
+        ) -> Result<Vec<aviutl2_mcp_core::AvailableEffectItem>, crate::read::ReadError> {
+            Ok(Vec::new())
+        }
+
+        fn effect_help(&self, _effect_name: &str) -> crate::read::host::HostEffectHelp {
+            crate::read::host::HostEffectHelp::default()
         }
 
         fn font_names(&self) -> Result<Vec<String>, crate::read::ReadError> {
@@ -2151,6 +2165,13 @@ mod tests {
             page: &aviutl2_mcp_core::PageWindow,
         ) -> Result<aviutl2_mcp_core::ListAvailableEffectsResult, crate::read::ReadError> {
             StubReadAdapter.list_available_effects(effect_type, page)
+        }
+
+        fn describe_effects(
+            &self,
+            params: &aviutl2_mcp_core::DescribeEffectsParams,
+        ) -> Result<aviutl2_mcp_core::DescribeEffectsResult, crate::read::ReadError> {
+            StubReadAdapter.describe_effects(params)
         }
 
         fn list_fonts(&self) -> Result<crate::read::Snapshot<String>, crate::read::ReadError> {

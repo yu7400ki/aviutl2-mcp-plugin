@@ -11,8 +11,8 @@ use crate::api::ListInstancesResponse;
 use crate::mcp::render::RenderFrameOutput;
 use crate::mcp::summary::{TextBuilder, clamp_chars};
 use aviutl2_mcp_core::{
-    BatchOutcome, BatchStepOutcome, EditInfo, EditOutcome, EffectItemValues, EvaluatedItem,
-    GetCurrentSceneResult, GridBpmOutcome, InstanceInfo, LayerStateOutcome,
+    BatchOutcome, BatchStepOutcome, DescribeEffectsResult, EditInfo, EditOutcome, EffectItemValues,
+    EvaluatedItem, GetCurrentSceneResult, GridBpmOutcome, InstanceInfo, LayerStateOutcome,
     ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
     ListObjectAliasesResult, ListObjectsResult, ListPalettesResult, ObjectDetail,
     ObjectSectionsOutcome, ObjectSummary, PageMeta, SceneSettingsOutcome, SelectionField,
@@ -213,6 +213,62 @@ pub fn available_effects(result: &ListAvailableEffectsResult) -> String {
     }
     text.push_line(
         "effect_type を指定すると種別で絞り込めます。説明はホストが同梱するものだけで、無い effect は null になります。設定項目の名前は、対象へ付与したあと get_object が現在値付きで返します",
+    );
+    text.finish()
+}
+
+/// `describe_effects` の text content。
+///
+/// **設定項目の説明は載せない。** 1 件あたりの長さが定まらず、行の数も項目の
+/// 数で決まるため、text が説明文の量で決まってしまう。行に並べるのは名前の
+/// 顔ぶれであり、名前の似た effect の使い分けはそれで足りる。完全な機械可読値は
+/// `structuredContent` が運ぶ。
+pub fn effect_descriptions(result: &DescribeEffectsResult) -> String {
+    let mut text = TextBuilder::new();
+    text.push_line(format!(
+        "effect {} 件の中身を取得しました",
+        result.effects.len()
+    ));
+    for effect in &result.effects {
+        let mut line = format!(
+            "- {} items={}",
+            clamp_chars(&effect.name, MAX_NAME_CHARS),
+            effect.items.len(),
+        );
+        let names: Vec<String> = effect
+            .items
+            .iter()
+            .map(|item| clamp_chars(&item.name, MAX_NAME_CHARS))
+            .collect();
+        if !names.is_empty() {
+            line.push(' ');
+            line.push_str(&names.join(" / "));
+        }
+        text.push_line(line);
+        // 説明はホストが持つ effect にしか付かない。他の項と同じ `key=value` の
+        // 形で境界を示し、行の末尾に置く。改行の畳み込みと行の切り詰めは行の
+        // 追加が行う。
+        if let Some(description) = &effect.description {
+            text.push_line(format!("  desc={description}"));
+        }
+    }
+    if !result.not_found.is_empty() {
+        text.push_line(format!(
+            "登録されていない名前 {} 件: {}",
+            result.not_found.len(),
+            result
+                .not_found
+                .iter()
+                .map(|name| clamp_chars(name, MAX_NAME_CHARS))
+                .collect::<Vec<String>>()
+                .join(" / "),
+        ));
+        text.push_line(
+            "登録されていない名前は list_available_effects で確かめてください。名前が違うだけで、設定項目を持たないわけではありません",
+        );
+    }
+    text.push_line(
+        "説明はホストが同梱するものだけで、無い effect と無い項目は null になります。設定項目の説明と種別は structuredContent を参照してください",
     );
     text.finish()
 }

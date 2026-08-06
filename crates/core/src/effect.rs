@@ -121,6 +121,43 @@ pub struct AvailableEffectItem {
     pub item_type: EffectItemType,
 }
 
+/// effect 1 件の中身。
+///
+/// **設定項目を持つのがこの型と [`EffectInfo`] の違いである。** [`EffectInfo`] は
+/// 特定のオブジェクトに付与された effect の現在値を運ぶ。こちらはオブジェクトを
+/// 持たない effect 種別そのものの顔ぶれであり、値を 1 つも含まない。
+///
+/// 名前の似た effect の使い分けは、散文ではなく設定項目の顔ぶれで解ける。
+/// 項目の一覧はホストの列挙から実時に得られるため、供給源の記述と食い違わない。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectDescription {
+    /// effect 名。
+    pub name: String,
+    /// 効果の説明。ホストが説明を持たない effect は null。
+    ///
+    /// 文言はホストが同梱するものをそのまま運ぶ。**説明が無いことを推測で
+    /// 埋めない。** 検証できない説明は、無い場合より悪い——受け取った側はそれを
+    /// 信じて使う。
+    pub description: Option<String>,
+    /// 設定項目を、ホストが列挙した順に並べたもの。
+    pub items: Vec<EffectItemDescription>,
+}
+
+/// effect の設定項目 1 件の定義と説明。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectItemDescription {
+    /// 設定項目名。
+    pub name: String,
+    /// 設定項目の種別。
+    pub item_type: EffectItemType,
+    /// 設定項目の説明。ホストが説明を持たない項目は null。
+    ///
+    /// 効果の説明と同じ供給源から来るが、別のキーである。**効果の説明をここへ
+    /// 写さない**——項目の説明として効果の説明が出れば、受け取った側は誤った
+    /// 文言を確信を持って使う。
+    pub description: Option<String>,
+}
+
 /// effect が対応する内容を表すフラグ。
 ///
 /// 既知ビットを bool で展開する。**ビット列そのものは載せない**——生成元が
@@ -881,5 +918,63 @@ mod tests {
                 "{forbidden} が応答に現れました: {value}"
             );
         }
+    }
+
+    fn sample_effect_description() -> EffectDescription {
+        EffectDescription {
+            name: "図形".to_string(),
+            description: Some(
+                "単色の図形を作成します\nsvgファイルから読み込むことも出来ます".to_string(),
+            ),
+            items: vec![
+                EffectItemDescription {
+                    name: "図形の種類".to_string(),
+                    item_type: EffectItemType::Figure,
+                    description: Some(
+                        "図形の種類を選択します\nボタンクリックでsvgファイルを選択出来ます"
+                            .to_string(),
+                    ),
+                },
+                EffectItemDescription {
+                    name: "ライン幅".to_string(),
+                    item_type: EffectItemType::Integer,
+                    description: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn effect_description_roundtrip() {
+        let effect = sample_effect_description();
+        let s = serde_json::to_string(&effect).unwrap();
+        let restored: EffectDescription = serde_json::from_str(&s).unwrap();
+        assert_eq!(restored, effect);
+    }
+
+    #[test]
+    fn an_effect_description_keeps_every_line_of_the_text() {
+        // 発見の鍵が 2 行目に置かれている説明が実在する。効果の説明も項目の
+        // 説明も、先頭行だけに切ると載せる意味そのものが失われる。
+        let value = serde_json::to_value(sample_effect_description()).unwrap();
+        assert!(
+            value["description"].as_str().unwrap().contains("svg"),
+            "{value}"
+        );
+        assert!(
+            value["items"][0]["description"]
+                .as_str()
+                .unwrap()
+                .contains("svg"),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn an_item_without_a_description_carries_null() {
+        // 説明の無い項目は null で名乗る。空文字列で代えると、説明が空である
+        // ことと説明を持たないことの区別が付かない。
+        let value = serde_json::to_value(sample_effect_description()).unwrap();
+        assert!(value["items"][1]["description"].is_null(), "{value}");
     }
 }

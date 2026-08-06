@@ -15,14 +15,15 @@ use crate::read::resolve::{
 };
 use crate::read::{Page, ProjectStatus, ReadAdapter, Snapshot};
 use aviutl2_mcp_core::{
-    AvailableEffect, Cursor, DisplayRange, EditInfo, EffectInfo, EffectItem, EffectItemValues,
+    AvailableEffect, Cursor, DescribeEffectsParams, DescribeEffectsResult, DisplayRange, EditInfo,
+    EffectDescription, EffectInfo, EffectItem, EffectItemDescription, EffectItemValues,
     EffectSelector, EffectType, EvaluatedItem, EvaluatedItemKind, Extent, FrameRange,
     GetEffectItemValuesParams, LayerInfo, ListAvailableEffectsResult, ListObjectAliasesResult,
     ListPalettesResult, MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectDetail, ObjectFilter,
     ObjectSelector, ObjectSummary, PageWindow, PaletteEntry, SceneInfo, SelectionSnapshot,
     SnapshotRevisionMismatch, TrackGroup, ValidatedPageRequest, take_page, take_window,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -367,7 +368,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
             items.push(AvailableEffect {
                 // 説明はホストが同梱するものだけを運ぶ。無い effect は null に
                 // なり、供給源を読めない環境では全件が null になる。
-                description: catch(|| self.host.effect_description(&effect.name))?,
+                description: catch(|| self.host.effect_help(&effect.name))?.description,
                 name: effect.name,
                 effect_type: effect.effect_type,
                 flags: effect.flags,
@@ -375,6 +376,47 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
             });
         }
         Ok(ListAvailableEffectsResult { items, page: meta })
+    }
+
+    fn describe_effects(
+        &self,
+        params: &DescribeEffectsParams,
+    ) -> Result<DescribeEffectsResult, ReadError> {
+        self.ensure_readable()?;
+
+        // 登録の有無はカタログで決める。設定項目の列挙は「登録されていない」と
+        // 「列挙に失敗した」を同じ失敗で返すため、それだけでは分けられない。
+        let registered: HashSet<String> = self
+            .effect_catalog()?
+            .into_iter()
+            .map(|effect| effect.name)
+            .collect();
+
+        let mut effects = Vec::new();
+        let mut not_found = Vec::new();
+        for name in &params.effect_names {
+            if !registered.contains(name) {
+                not_found.push(name.clone());
+                continue;
+            }
+            let items = guard(|| self.host.effect_items(name))?;
+            let help = catch(|| self.host.effect_help(name))?;
+            effects.push(EffectDescription {
+                name: name.clone(),
+                description: help.description,
+                items: items
+                    .into_iter()
+                    .map(|item| EffectItemDescription {
+                        // 説明は項目名で引く。ホストの列挙に無い項目は現れず、
+                        // 説明の無い項目は null になる。
+                        description: help.items.get(&item.name).cloned(),
+                        name: item.name,
+                        item_type: item.item_type,
+                    })
+                    .collect(),
+            });
+        }
+        Ok(DescribeEffectsResult { effects, not_found })
     }
 
     fn list_fonts(&self) -> Result<Snapshot<String>, ReadError> {
@@ -760,14 +802,17 @@ fn selected_range(info: &HostEditInfo) -> Option<FrameRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::read::host::{HostEffect, HostLayer, HostObject, HostObjectPlacement, SceneReader};
+    use crate::read::host::{
+        HostEffect, HostEffectHelp, HostLayer, HostObject, HostObjectPlacement, SceneReader,
+    };
     use crate::test_support::{
         alias_with_effects, default_page_request, default_page_window, page_request,
         with_silent_panic_hook,
     };
     use aviutl2_mcp_core::{
-        EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint, FiniteF64, GridBpm,
-        ItemValue, PALETTE_COLOR_COUNT, Rgba, SectionRange, TrackInfo, TrackValue,
+        AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
+        FiniteF64, GridBpm, ItemValue, PALETTE_COLOR_COUNT, Rgba, SectionRange, TrackInfo,
+        TrackValue,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -839,11 +884,11 @@ mod tests {
         grid_bpm: Vec<GridBpm>,
         layers: Vec<FakeLayer>,
         catalog: Vec<FakeCatalogEntry>,
-        /// ホスト環境が持つ effect の説明。
+        /// ホスト環境が持つ effect ごとの説明。
         ///
         /// **既定は空である。** 供給源を読めない環境がそのまま既定であり、説明が
         /// 得られることを前提にした経路を作らない。
-        descriptions: Vec<(String, String)>,
+        help: Vec<(String, HostEffectHelp)>,
         /// 設定項目の数を問い合わせた effect 名を、問い合わせた順に覚える。
         ///
         /// 窓の外の effect について問い合わせていないことを、件数でも名前でも
@@ -956,7 +1001,7 @@ mod tests {
                 grid_bpm: vec![sample_grid_bpm()],
                 layers: fake_layers(),
                 catalog: fake_catalog(),
-                descriptions: Vec::new(),
+                help: Vec::new(),
                 item_count_queries: Mutex::new(Vec::new()),
                 panic_at: None,
                 object_read_fails_at: None,
@@ -1062,19 +1107,32 @@ mod tests {
             self.catalog
                 .iter()
                 .find(|entry| entry.summary.name == effect_name)
-                .map(|entry| entry.item_count)
+                .map(|entry| entry.items.len())
                 .ok_or(ReadError::Sdk {
                     operation: "enum_effect_item",
                 })
         }
 
-        fn effect_description(&self, effect_name: &str) -> Option<String> {
-            self.assert_ready("effect_description");
-            self.record("effect_description");
-            self.descriptions
+        fn effect_items(&self, effect_name: &str) -> Result<Vec<AvailableEffectItem>, ReadError> {
+            self.assert_ready("enum_effect_item");
+            self.record("effect_items");
+            self.catalog
+                .iter()
+                .find(|entry| entry.summary.name == effect_name)
+                .map(|entry| entry.items.clone())
+                .ok_or(ReadError::Sdk {
+                    operation: "enum_effect_item",
+                })
+        }
+
+        fn effect_help(&self, effect_name: &str) -> HostEffectHelp {
+            self.assert_ready("effect_help");
+            self.record("effect_help");
+            self.help
                 .iter()
                 .find(|(name, _)| name == effect_name)
-                .map(|(_, description)| description.clone())
+                .map(|(_, help)| help.clone())
+                .unwrap_or_default()
         }
 
         fn font_names(&self) -> Result<Vec<String>, ReadError> {
@@ -1539,7 +1597,25 @@ mod tests {
     #[derive(Debug, Clone)]
     struct FakeCatalogEntry {
         summary: HostEffectSummary,
-        item_count: usize,
+        items: Vec<AvailableEffectItem>,
+    }
+
+    /// 件数から設定項目の定義を作る。
+    ///
+    /// 名前を effect 名と位置の単射にしてある。別の effect の項目を返した実装も、
+    /// 並びを崩した実装も結果に現れる。種別を交互にするのは、種別が名前と一緒に
+    /// 運ばれることを確かめるためである。
+    fn catalog_items(effect: &str, count: usize) -> Vec<AvailableEffectItem> {
+        (0..count)
+            .map(|index| AvailableEffectItem {
+                name: format!("{effect}の項目{index}"),
+                item_type: if index.is_multiple_of(2) {
+                    EffectItemType::Integer
+                } else {
+                    EffectItemType::Check
+                },
+            })
+            .collect()
     }
 
     fn catalog_entry(
@@ -1554,7 +1630,7 @@ mod tests {
                 effect_type,
                 flags: EffectFlags::from_raw(flags),
             },
-            item_count,
+            items: catalog_items(name, item_count),
         }
     }
 
@@ -1562,6 +1638,20 @@ mod tests {
     ///
     /// 種別ごとに複数件を並べる。1 件ずつしか無いと、種別で絞ってから窓を切る
     /// 順序と、窓を切ってから絞る順序の区別が付かない。
+    /// ホストが同梱する説明の 1 節を組み立てる。
+    ///
+    /// 効果の説明と項目の説明を別の引数で受ける。片方を他方へ渡す取り違えは、
+    /// 組み立ての時点では起こり得ない形にしてある。
+    fn effect_help(description: Option<&str>, items: &[(&str, &str)]) -> HostEffectHelp {
+        HostEffectHelp {
+            description: description.map(str::to_string),
+            items: items
+                .iter()
+                .map(|(name, text)| (name.to_string(), text.to_string()))
+                .collect(),
+        }
+    }
+
     fn fake_catalog() -> Vec<FakeCatalogEntry> {
         vec![
             catalog_entry("ぼかし", EffectType::Filter, 1, 1),
@@ -1660,6 +1750,15 @@ mod tests {
         }
     }
 
+    /// 検証を通した effect の中身の要求を組み立てる。
+    fn describe_params(names: &[&str]) -> DescribeEffectsParams {
+        let params = DescribeEffectsParams {
+            effect_names: names.iter().map(|name| name.to_string()).collect(),
+        };
+        params.validate().expect("要求内容の検証を通る");
+        params
+    }
+
     /// adapter とプロジェクト状態を組み立てる。
     fn adapter_with(
         host: impl FnOnce(&Arc<ProjectState>) -> FakeHost,
@@ -1687,6 +1786,10 @@ mod tests {
             adapter.get_object(&selector).err().map(|e| e.error_code()),
             adapter
                 .list_available_effects_page(None)
+                .err()
+                .map(|e| e.error_code()),
+            adapter
+                .describe_effects(&describe_params(&["ぼかし"]))
                 .err()
                 .map(|e| e.error_code()),
             adapter
@@ -3362,9 +3465,15 @@ mod tests {
         // 説明は全文で運ぶ——2 行目に発見の鍵がある説明が実在する。
         let glow = "光を拡散させます\n発光量を指定します";
         let adapter = adapter_with(|_| FakeHost {
-            descriptions: vec![
-                ("グロー".to_string(), glow.to_string()),
-                ("標準描画".to_string(), "描画のしかたを決めます".to_string()),
+            help: vec![
+                (
+                    "グロー".to_string(),
+                    effect_help(Some(glow), &[("グローの項目0", "拡散の量です")]),
+                ),
+                (
+                    "標準描画".to_string(),
+                    effect_help(Some("描画のしかたを決めます"), &[]),
+                ),
             ],
             ..FakeHost::new()
         });
@@ -3400,7 +3509,7 @@ mod tests {
             .host
             .calls()
             .iter()
-            .filter(|call| **call == "effect_description")
+            .filter(|call| **call == "effect_help")
             .count();
         assert_eq!(asked, 1, "窓の外の effect について説明を引いています");
     }
@@ -3418,7 +3527,7 @@ mod tests {
             counts,
             fake_catalog()
                 .iter()
-                .map(|entry| entry.item_count)
+                .map(|entry| entry.items.len())
                 .collect::<Vec<usize>>()
         );
     }
@@ -3465,6 +3574,197 @@ mod tests {
             vec!["ぼかし".to_string()],
             "窓の外の effect について設定項目を数えています"
         );
+    }
+
+    #[test]
+    fn describe_effects_returns_every_requested_effect_in_the_requested_order() {
+        // 名前の似た effect の使い分けは設定項目の顔ぶれで解ける。並べて引ける
+        // ことと、要求の順が保たれることがその前提である。
+        let adapter = adapter();
+        let result = adapter
+            .describe_effects(&describe_params(&["グロー", "ぼかし"]))
+            .unwrap();
+
+        let names: Vec<&str> = result
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["グロー", "ぼかし"]);
+        assert!(result.not_found.is_empty());
+
+        // 項目の名前と種別はホストの列挙から来る。件数も並びもそのままである。
+        let glow: Vec<(&str, &EffectItemType)> = result.effects[0]
+            .items
+            .iter()
+            .map(|item| (item.name.as_str(), &item.item_type))
+            .collect();
+        assert_eq!(
+            glow,
+            vec![
+                ("グローの項目0", &EffectItemType::Integer),
+                ("グローの項目1", &EffectItemType::Check),
+                ("グローの項目2", &EffectItemType::Integer),
+                ("グローの項目3", &EffectItemType::Check),
+            ],
+            "項目の一覧が別の effect のものになっているか、並びが崩れています"
+        );
+        assert_eq!(result.effects[1].items.len(), 1);
+    }
+
+    #[test]
+    fn describe_effects_tells_a_described_effect_apart_from_an_undescribed_one() {
+        // 説明を持つ effect と持たない effect は同じ応答に混ざる。持たない側を
+        // 推測で埋めない。
+        let adapter = adapter_with(|_| FakeHost {
+            help: vec![(
+                "グロー".to_string(),
+                effect_help(
+                    Some("光を拡散させます"),
+                    &[("グローの項目0", "拡散の量を指定します")],
+                ),
+            )],
+            ..FakeHost::new()
+        });
+        let result = adapter
+            .describe_effects(&describe_params(&["グロー", "ぼかし"]))
+            .unwrap();
+
+        assert_eq!(
+            result.effects[0].description.as_deref(),
+            Some("光を拡散させます")
+        );
+        assert_eq!(
+            result.effects[0].items[0].description.as_deref(),
+            Some("拡散の量を指定します")
+        );
+        // 説明の無い項目は同じ effect の中でも null になる。
+        assert_eq!(result.effects[0].items[1].description, None);
+
+        assert_eq!(result.effects[1].name, "ぼかし");
+        assert_eq!(result.effects[1].description, None);
+        assert_eq!(result.effects[1].items[0].description, None);
+    }
+
+    #[test]
+    fn describe_effects_never_reports_the_effect_description_as_an_item_description() {
+        // 効果の説明が項目の説明として出れば、要求元は誤った文言を確信を持って
+        // 使う。供給源はどちらも同じ節に並ぶため、区別を実際に確かめる。
+        let adapter = adapter_with(|_| FakeHost {
+            help: vec![(
+                "ぼかし".to_string(),
+                effect_help(
+                    Some("効果そのものの説明です"),
+                    &[("ぼかしの項目0", "項目の説明です")],
+                ),
+            )],
+            ..FakeHost::new()
+        });
+        let result = adapter
+            .describe_effects(&describe_params(&["ぼかし"]))
+            .unwrap();
+
+        let effect = &result.effects[0];
+        assert_eq!(
+            effect.description.as_deref(),
+            Some("効果そのものの説明です")
+        );
+        assert_eq!(
+            effect.items[0].description.as_deref(),
+            Some("項目の説明です")
+        );
+        assert!(
+            !effect
+                .items
+                .iter()
+                .any(|item| item.description == effect.description),
+            "項目の説明として効果の説明が出ています"
+        );
+    }
+
+    #[test]
+    fn describe_effects_names_what_it_could_not_find_instead_of_dropping_it() {
+        // 落ちた名前に気付けなければ、要求元は「その effect には設定項目が無い」
+        // と誤読する。見つかった分は返しつつ、見つからなかった名前を明示する。
+        let adapter = adapter();
+        let result = adapter
+            .describe_effects(&describe_params(&["ぐろー", "ぼかし", "存在しない効果"]))
+            .unwrap();
+
+        let names: Vec<&str> = result
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["ぼかし"]);
+        assert_eq!(
+            result.not_found,
+            vec!["ぐろー".to_string(), "存在しない効果".to_string()],
+            "見つからなかった名前が要求の順で並んでいません"
+        );
+        // 登録の無い名前について設定項目を列挙しない。列挙の失敗は「登録が無い」
+        // と区別できず、要求全体を落としてしまう。
+        assert_eq!(
+            adapter
+                .host
+                .calls()
+                .iter()
+                .filter(|call| **call == "effect_items")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn describe_effects_keeps_every_line_of_the_help_text() {
+        // 発見の鍵が 2 行目にある説明が実在する。効果の説明も項目の説明も
+        // 先頭行だけに切らない。
+        let adapter = adapter_with(|_| FakeHost {
+            help: vec![(
+                "ぼかし".to_string(),
+                effect_help(
+                    Some("単色の図形を作成します\nsvgファイルから読み込むことも出来ます"),
+                    &[(
+                        "ぼかしの項目0",
+                        "図形の種類を選択します\nボタンクリックでsvgファイルを選択出来ます",
+                    )],
+                ),
+            )],
+            ..FakeHost::new()
+        });
+        let result = adapter
+            .describe_effects(&describe_params(&["ぼかし"]))
+            .unwrap();
+
+        let effect = &result.effects[0];
+        let description = effect.description.as_deref().expect("効果の説明がある");
+        assert_eq!(description.lines().count(), 2);
+        assert!(description.lines().nth(1).unwrap().contains("svg"));
+
+        let item = effect.items[0]
+            .description
+            .as_deref()
+            .expect("項目の説明がある");
+        assert_eq!(item.lines().count(), 2);
+        assert!(item.lines().nth(1).unwrap().contains("svg"));
+    }
+
+    #[test]
+    fn describe_effects_asks_the_host_once_per_effect() {
+        // 説明は効果ごとに 1 度で節全体を引く。項目ごとに引くと、同じ節を項目の
+        // 数だけ引き直すうえ、効果の説明を指すキーを項目名として渡せてしまう。
+        let adapter = adapter();
+        adapter
+            .describe_effects(&describe_params(&["グロー", "標準描画"]))
+            .unwrap();
+
+        let asked = adapter
+            .host
+            .calls()
+            .iter()
+            .filter(|call| **call == "effect_help")
+            .count();
+        assert_eq!(asked, 2, "効果の数と説明を引いた回数が食い違っています");
     }
 
     #[test]

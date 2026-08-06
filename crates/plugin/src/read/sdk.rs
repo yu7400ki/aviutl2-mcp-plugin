@@ -9,13 +9,13 @@
 use crate::EDIT_HANDLE;
 use crate::read::error::ReadError;
 use crate::read::host::{
-    EditState, HostEditInfo, HostEffect, HostEffectSummary, HostLayer, HostObject,
+    EditState, HostEditInfo, HostEffect, HostEffectHelp, HostEffectSummary, HostLayer, HostObject,
     HostObjectDetail, HostObjectPlacement, ReadHost, SceneReader, SceneValueReader,
 };
 use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection};
 use aviutl2_mcp_core::{
-    EffectFlags, EffectItem, EffectItemType, EffectType, FiniteF64, GridBpm, ItemValue,
-    ModuleEntry, ModuleType, Rgba, SectionRange, decode_host_text, decode_track_value,
+    AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, EffectType, FiniteF64, GridBpm,
+    ItemValue, ModuleEntry, ModuleType, Rgba, SectionRange, decode_host_text, decode_track_value,
     parse_check_value,
 };
 use std::collections::HashMap;
@@ -75,15 +75,28 @@ impl ReadHost for SdkReadHost {
     }
 
     fn effect_item_count(&self, effect_name: &str) -> Result<usize, ReadError> {
+        Ok(self.effect_items(effect_name)?.len())
+    }
+
+    fn effect_items(&self, effect_name: &str) -> Result<Vec<AvailableEffectItem>, ReadError> {
+        // 件数だけを引く経路と同じ列挙を通る。別の呼び出しにすると、一覧が
+        // 名乗った件数と中身の件数が食い違い得る。
         Ok(EDIT_HANDLE
             .get_effect_items(effect_name)
             .map_err(|_| sdk("enum_effect_item"))?
-            .len())
+            .into_iter()
+            .map(|item| AvailableEffectItem {
+                name: item.name,
+                item_type: EffectItemType::from_raw(i32::from(item.item_type)),
+            })
+            .collect())
     }
 
-    fn effect_description(&self, effect_name: &str) -> Option<String> {
+    fn effect_help(&self, effect_name: &str) -> HostEffectHelp {
         // 編集ハンドルを通らない。供給源はホストが同梱するファイルだけである。
-        crate::effect_help::description_of(effect_name).map(str::to_string)
+        crate::effect_help::help_of(effect_name)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn font_names(&self) -> Result<Vec<String>, ReadError> {
@@ -844,19 +857,21 @@ mod tests {
     };
 
     #[test]
-    fn the_effect_description_comes_from_the_host_help_file() {
+    fn the_effect_help_comes_from_the_host_help_file() {
         // 説明は編集ハンドルからは得られない。供給源はホストが同梱するファイル
         // だけであり、この境界はそれを引き写すだけである。
         for name in ["図形", "ぼかし", "存在しない効果"] {
             assert_eq!(
-                SdkReadHost.effect_description(name),
-                crate::effect_help::description_of(name).map(str::to_string),
+                SdkReadHost.effect_help(name),
+                crate::effect_help::help_of(name)
+                    .cloned()
+                    .unwrap_or_default(),
                 "{name} の説明が供給源と別のところから来ています"
             );
         }
         // 実行ファイルの隣に供給源が無い環境では説明が出ない。読み取り側の
         // フェイクが説明の無い環境を既定にしている根拠である。
-        assert!(SdkReadHost.effect_description("図形").is_none());
+        assert_eq!(SdkReadHost.effect_help("図形"), HostEffectHelp::default());
     }
 
     /// 移動を持たない項目の読み取り。

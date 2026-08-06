@@ -18,16 +18,17 @@ use anyhow::{Context, Result};
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchInputError, ClientAuth, ClientHello,
     CreateObjectParams, CreateObjectSectionParams, DeleteEffectParams, DeleteObjectParams,
-    DeleteObjectSectionParams, EditInputError, EditOperation, EffectItemValuesInputError,
-    ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams,
-    GetEffectItemValuesParams, GetObjectParams, GetSelectionParams, InstanceId, InstanceState,
-    KnownOperation, LimitOutOfRange, ListAvailableEffectsParams, ListFontsParams, ListFontsResult,
-    ListLayersParams, ListLayersResult, ListModulesParams, ListModulesResult,
-    ListObjectAliasesParams, ListObjectsParams, ListObjectsResult, ListPalettesParams,
-    MoveObjectParams, MoveObjectSectionParams, Nonce, ObjectFilterError, PageWindow, PongProject,
-    PongResult, ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult,
-    RenderInputError, RenderOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind,
-    ResponseResult, ScaledBudgets, SelectionSnapshot, SetEffectEnabledParams, SetGridBpmParams,
+    DeleteObjectSectionParams, DescribeEffectsInputError, DescribeEffectsParams, EditInputError,
+    EditOperation, EffectItemValuesInputError, ErrorCode, ErrorObject, GetCurrentSceneParams,
+    GetCurrentSceneResult, GetEditInfoParams, GetEffectItemValuesParams, GetObjectParams,
+    GetSelectionParams, InstanceId, InstanceState, KnownOperation, LimitOutOfRange,
+    ListAvailableEffectsParams, ListFontsParams, ListFontsResult, ListLayersParams,
+    ListLayersResult, ListModulesParams, ListModulesResult, ListObjectAliasesParams,
+    ListObjectsParams, ListObjectsResult, ListPalettesParams, MoveObjectParams,
+    MoveObjectSectionParams, Nonce, ObjectFilterError, PageWindow, PongProject, PongResult,
+    ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult, RenderInputError,
+    RenderOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult,
+    ScaledBudgets, SelectionSnapshot, SetEffectEnabledParams, SetGridBpmParams,
     SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSceneSettingsParams,
     SetSelectionParams, SnapshotRevisionMismatch, TextSyntaxError, ValidatedPageRequest,
     compute_client_mac, compute_server_mac, deserialize_json, take_page, take_window, verify_mac,
@@ -859,6 +860,7 @@ enum ReadRequest {
     ListObjects(ListObjectsParams, ValidatedPageRequest),
     GetObject(Box<GetObjectParams>),
     ListAvailableEffects(ListAvailableEffectsParams, ValidatedPageRequest),
+    DescribeEffects(DescribeEffectsParams),
     GetEffectItemValues(Box<GetEffectItemValuesParams>),
     GetSelection(GetSelectionParams, ValidatedPageRequest),
     ListFonts(ValidatedPageRequest),
@@ -901,6 +903,11 @@ fn decode_request(operation: ReadOperation, params: &Value) -> Result<ReadReques
             let params: ListAvailableEffectsParams = decode_params(params)?;
             let page = params.page.validate().map_err(page_limit_error)?;
             ReadRequest::ListAvailableEffects(params, page)
+        }
+        ReadOperation::DescribeEffects => {
+            let params: DescribeEffectsParams = decode_params(params)?;
+            params.validate().map_err(describe_effects_error)?;
+            ReadRequest::DescribeEffects(params)
         }
         ReadOperation::GetEffectItemValues => {
             let params: GetEffectItemValuesParams = decode_params(params)?;
@@ -985,6 +992,9 @@ fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Valu
                 )
                 .map_err(read_error)?;
             to_result(&result)
+        }
+        ReadRequest::DescribeEffects(params) => {
+            to_result(&adapter.describe_effects(&params).map_err(read_error)?)
         }
         ReadRequest::GetEffectItemValues(params) => to_result(
             &adapter
@@ -1395,6 +1405,18 @@ fn item_values_error(error: EffectItemValuesInputError) -> ErrorObject {
     error_object(ErrorCode::InvalidArgument, error.to_string())
 }
 
+/// effect の中身の要求内容の失敗を応答用のエラーへ変換する。
+///
+/// **どの規則で落ちたかを機械可読な形で添える。** 件数・重複・名前の構文は
+/// 要求元が取れる行動が異なり、名前が無ければ説明の文面を解析するほかない。
+/// 検証に失敗した effect 名そのものは説明にも補助情報にも現れない。
+fn describe_effects_error(error: DescribeEffectsInputError) -> ErrorObject {
+    with_details(
+        error_object(ErrorCode::InvalidArgument, error.to_string()),
+        input_error_details(Some(error.reason()), None),
+    )
+}
+
 /// 送信済み応答が読み取られるのを待ってから接続を閉じるための待機。
 ///
 /// クライアント切断（EOF）か期限超過まで受信を続け、受け取ったフレームは
@@ -1536,12 +1558,14 @@ mod tests {
     use super::*;
     use crate::read::{Page, Snapshot};
     use aviutl2_mcp_core::{
-        AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFlags, EffectItemValues,
-        EffectSelector, EffectType, EvaluatedItem, Extent, FiniteF64, FrameRange, LayerInfo,
+        AvailableEffect, Cursor, DescribeEffectsResult, DisplayRange, EditInfo, EffectDescription,
+        EffectFlags, EffectItemDescription, EffectItemType, EffectItemValues, EffectSelector,
+        EffectType, EvaluatedItem, Extent, FiniteF64, FrameRange, LayerInfo,
         ListAvailableEffectsResult, ListObjectAliasesResult, ListPalettesResult,
-        MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectAliasSummary,
-        ObjectDetail, ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary,
-        PALETTE_COLOR_COUNT, PaletteEntry, RequestBudgetKind, Rgba, SceneInfo, SectionRange,
+        MAX_DESCRIBED_EFFECTS, MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType,
+        ObjectAliasSummary, ObjectDetail, ObjectFilter, ObjectFingerprintInput, ObjectSelector,
+        ObjectSummary, PALETTE_COLOR_COUNT, PaletteEntry, RequestBudgetKind, Rgba, SceneInfo,
+        SectionRange,
     };
     use std::sync::Mutex;
 
@@ -1747,6 +1771,23 @@ mod tests {
             }
             let (items, page) = take_window(&effects, page, REVISION);
             Ok(ListAvailableEffectsResult { items, page })
+        }
+
+        fn describe_effects(
+            &self,
+            params: &DescribeEffectsParams,
+        ) -> Result<DescribeEffectsResult, ReadError> {
+            self.enter("describe_effects")?;
+            let catalog = fake_effects();
+            let mut effects = Vec::new();
+            let mut not_found = Vec::new();
+            for name in &params.effect_names {
+                match catalog.iter().find(|effect| effect.name == *name) {
+                    Some(effect) => effects.push(fake_effect_description(effect)),
+                    None => not_found.push(name.clone()),
+                }
+            }
+            Ok(DescribeEffectsResult { effects, not_found })
         }
 
         fn list_fonts(&self) -> Result<Snapshot<String>, ReadError> {
@@ -1978,6 +2019,26 @@ mod tests {
         ]
     }
 
+    /// 一覧の見出しから、中身を引いたときの応答を組み立てる。
+    ///
+    /// 項目の名前を effect 名から導いてあり、別の effect の項目を返した実装は
+    /// 結果に現れる。説明を持つのは effect 名が「ぼかし」の場合だけであり、
+    /// 説明を持つ effect と持たない effect を同じ要求へ並べられる。
+    fn fake_effect_description(effect: &AvailableEffect) -> EffectDescription {
+        let described = effect.name == "ぼかし";
+        EffectDescription {
+            name: effect.name.clone(),
+            description: described.then(|| format!("{} の説明", effect.name)),
+            items: (0..effect.item_count)
+                .map(|index| EffectItemDescription {
+                    name: format!("{}の項目{index}", effect.name),
+                    item_type: EffectItemType::Integer,
+                    description: described.then(|| format!("{}の項目{index} の説明", effect.name)),
+                })
+                .collect(),
+        }
+    }
+
     fn fake_fonts() -> Vec<String> {
         vec![
             "MS UI Gothic".to_string(),
@@ -2056,6 +2117,10 @@ mod tests {
             ),
             (ReadOperation::ListAvailableEffects, json!({})),
             (
+                ReadOperation::DescribeEffects,
+                json!({ "effect_names": ["ぼかし"] }),
+            ),
+            (
                 ReadOperation::GetEffectItemValues,
                 json!({ "effect": fake_effect_selector(), "frames": [100.0] }),
             ),
@@ -2100,6 +2165,7 @@ mod tests {
                 "list_available_effects",
                 ReadOperation::ListAvailableEffects,
             ),
+            ("describe_effects", ReadOperation::DescribeEffects),
             ("get_effect_item_values", ReadOperation::GetEffectItemValues),
             ("get_selection", ReadOperation::GetSelection),
             ("list_fonts", ReadOperation::ListFonts),
@@ -2216,6 +2282,107 @@ mod tests {
         assert_eq!(result["items"].as_array().unwrap().len(), 1);
         assert_eq!(result["items"][0]["name"], "動画ファイル");
         assert_eq!(result["page"]["total_count"], 1);
+    }
+
+    #[test]
+    fn describe_effects_returns_the_named_effects_and_what_it_could_not_find() {
+        // 見つかった分と見つからなかった名前が同じ応答に並ぶ。落とした名前が
+        // 応答に無ければ、要求元は「設定項目を持たない effect」と誤読する。
+        let adapter = FakeAdapter::new();
+        let result = read(
+            &adapter,
+            ReadOperation::DescribeEffects,
+            json!({ "effect_names": ["ぼかし", "存在しない効果", "動画ファイル"] }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result["effects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|effect| effect["name"].as_str().unwrap())
+                .collect::<Vec<&str>>(),
+            vec!["ぼかし", "動画ファイル"]
+        );
+        assert_eq!(result["not_found"], json!(["存在しない効果"]));
+        // 説明を持つ effect と持たない effect が混ざる。持たない側は null に
+        // なり、推測で埋まらない。
+        assert_eq!(result["effects"][0]["description"], "ぼかし の説明");
+        assert_eq!(result["effects"][0]["items"][0]["name"], "ぼかしの項目0");
+        assert_eq!(
+            result["effects"][0]["items"][0]["description"],
+            "ぼかしの項目0 の説明"
+        );
+        assert!(result["effects"][1]["description"].is_null());
+        assert_eq!(result["effects"][1]["items"], json!([]));
+        assert_eq!(adapter.calls(), vec!["describe_effects"]);
+    }
+
+    #[test]
+    fn describe_effects_does_not_take_a_page() {
+        // ページの続きという概念が無い。他の一覧を真似た指定は受理しない。
+        for field in ["offset", "limit", "snapshot_revision"] {
+            let adapter = FakeAdapter::new();
+            let mut params = json!({ "effect_names": ["ぼかし"] });
+            params
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_string(), json!(1));
+
+            let error = read(&adapter, ReadOperation::DescribeEffects, params).unwrap_err();
+            assert_eq!(
+                error.code,
+                ErrorCode::InvalidArgument,
+                "{field} が受理されました"
+            );
+            assert!(adapter.calls().is_empty(), "{field}");
+        }
+    }
+
+    #[test]
+    fn describe_effects_rejects_a_request_over_the_limit_without_reading() {
+        // 上限の判定は要求内容だけで決まる。読み取りへ進む前に落とす。
+        let names: Vec<String> = (0..=MAX_DESCRIBED_EFFECTS)
+            .map(|index| format!("効果{index}"))
+            .collect();
+        let adapter = FakeAdapter::new();
+
+        let error = read(
+            &adapter,
+            ReadOperation::DescribeEffects,
+            json!({ "effect_names": names }),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(
+            error.details["reason"],
+            json!("effect_count_out_of_range"),
+            "落ちた規則の名前がありません: {error:?}"
+        );
+        assert!(
+            adapter.calls().is_empty(),
+            "上限を超えた要求のまま読み取りへ進みました"
+        );
+    }
+
+    #[test]
+    fn describe_effects_rejects_an_empty_or_repeated_request_without_reading() {
+        for (params, reason) in [
+            (json!({ "effect_names": [] }), "effect_count_out_of_range"),
+            (
+                json!({ "effect_names": ["ぼかし", "ぼかし"] }),
+                "duplicate_effect_name",
+            ),
+        ] {
+            let adapter = FakeAdapter::new();
+            let error = read(&adapter, ReadOperation::DescribeEffects, params.clone()).unwrap_err();
+
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{params}");
+            assert_eq!(error.details["reason"], json!(reason), "{params}");
+            assert!(adapter.calls().is_empty(), "{params}");
+        }
     }
 
     #[test]

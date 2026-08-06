@@ -302,7 +302,7 @@ fn ensure_renderable_frame(info: &HostEditInfo, frame: u32) -> Result<(), Render
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::read::host::{HostEffectSummary, ReadHost};
+    use crate::read::host::{HostEffectHelp, HostEffectSummary, ReadHost};
     use crate::render::handoff::HandoffToken;
     use crate::render::slot::{MAX_ABANDONED_RENDERS, deliver_frame_guarded, guard_callback};
     use crate::test_support::with_silent_panic_hook;
@@ -592,8 +592,15 @@ mod tests {
             Ok(0)
         }
 
-        fn effect_description(&self, _effect_name: &str) -> Option<String> {
-            None
+        fn effect_items(
+            &self,
+            _effect_name: &str,
+        ) -> Result<Vec<aviutl2_mcp_core::AvailableEffectItem>, ReadError> {
+            Ok(Vec::new())
+        }
+
+        fn effect_help(&self, _effect_name: &str) -> HostEffectHelp {
+            HostEffectHelp::default()
         }
 
         fn font_names(&self) -> Result<Vec<String>, ReadError> {

@@ -90,6 +90,17 @@ pub fn list_available_effects() -> Value {
     page_of(available_effect())
 }
 
+/// `describe_effects` の出力。
+///
+/// ページのメタ情報を持たない。返すのは要求が名指しした effect だけであり、
+/// 続きという概念が無い。
+pub fn describe_effects() -> Value {
+    object(&[
+        ("effects", array(effect_description())),
+        ("not_found", array(string())),
+    ])
+}
+
 /// `list_fonts` の出力。
 pub fn list_fonts() -> Value {
     page_of(string())
@@ -534,6 +545,26 @@ fn available_effect() -> Value {
         ("effect_type", effect_type()),
         ("flags", effect_flags()),
         ("item_count", unsigned()),
+        ("description", nullable_string()),
+    ])
+}
+
+/// effect 1 件の中身。
+///
+/// 設定項目は名前・種別・説明だけを持ち、値を 1 つも含まない。値は対象へ
+/// 付与したあと `get_object` が返す。
+fn effect_description() -> Value {
+    object(&[
+        ("name", string()),
+        ("description", nullable_string()),
+        ("items", array(effect_item_description())),
+    ])
+}
+
+fn effect_item_description() -> Value {
+    object(&[
+        ("name", string()),
+        ("item_type", effect_item_type()),
         ("description", nullable_string()),
     ])
 }

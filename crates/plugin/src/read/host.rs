@@ -7,8 +7,10 @@
 
 use crate::read::error::ReadError;
 use aviutl2_mcp_core::{
-    EffectFlags, EffectItem, EffectType, FiniteF64, GridBpm, ModuleEntry, Rgba, SectionRange,
+    AvailableEffectItem, EffectFlags, EffectItem, EffectType, FiniteF64, GridBpm, ModuleEntry,
+    Rgba, SectionRange,
 };
+use std::collections::HashMap;
 use std::fmt;
 
 /// ホストの編集状態。
@@ -359,6 +361,23 @@ pub trait SceneValueReader: SceneReader {
     ) -> Result<Vec<String>, ReadError>;
 }
 
+/// ホストが同梱する説明のうち、effect 1 件に当たる分。
+///
+/// **効果の説明と設定項目の説明を別の欄で持つ。** 供給源は両者を同じ節の中の
+/// キーとして並べており、区別できるのはキーの名前だけである。1 つの表へ畳むと、
+/// 項目の説明として効果の説明が出る誤りを型が許してしまう。
+///
+/// **設定項目の名前を確定させるものではない。** 項目の一覧はホストの列挙から
+/// 得るのが正しく、ここに現れるのは説明が書かれている項目名だけである。
+/// 列挙に無い名前がここに在ることも、その逆もある。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostEffectHelp {
+    /// 効果そのものの説明。供給源に無ければ `None`。
+    pub description: Option<String>,
+    /// 設定項目名から説明を引く表。
+    pub items: HashMap<String, String>,
+}
+
 /// 登録済み effect 1 件の見出し。
 ///
 /// effect 名の列挙だけで得られる値をまとめたものであり、設定項目を 1 つも
@@ -403,17 +422,36 @@ pub trait ReadHost: Send + Sync {
     /// 登録数で決まるため、呼び出し側は応答へ載せる分に限る。
     fn effect_item_count(&self, effect_name: &str) -> Result<usize, ReadError>;
 
-    /// effect 1 件の説明を返す。参照区間を必要としない。
+    /// effect 1 件の設定項目の定義を、ホストが列挙した順に返す。参照区間を
+    /// 必要としない。
+    ///
+    /// **実装の義務**: 件数は [`Self::effect_item_count`] が同じ effect について
+    /// 返す値と一致させる。項目の定義を要さない呼び出し側は件数だけを引くため、
+    /// 両者が別の材料を読めば、一覧が名乗った件数と中身の件数が食い違う。
+    ///
+    /// 名前も種別もホストの列挙から得る。ホストが同梱する説明ファイルは項目名を
+    /// 確定させる材料ではなく、説明が書かれていない項目も、書かれているのに
+    /// 登録されていない項目も在り得る。
+    fn effect_items(&self, effect_name: &str) -> Result<Vec<AvailableEffectItem>, ReadError>;
+
+    /// effect 1 件に対してホストが同梱する説明を返す。参照区間を必要としない。
     ///
     /// **SDK には説明を引く手段が無く、供給源はホストが同梱するファイルだけで
     /// ある。** ホスト環境から引く値であることは他のメソッドと同じであり、この
     /// 境界に置くことで、供給源を持たない環境と持つ環境の双方を差し替えて
     /// 確かめられる。
     ///
-    /// 説明を持たない effect は `None` を返す。供給源そのものを読めない環境では
-    /// すべての effect が `None` になる。**失敗を型で運ばない。** 説明の有無は
-    /// 一覧の可用性を左右せず、読めなかったことを要求元へ伝えても取れる手が無い。
-    fn effect_description(&self, effect_name: &str) -> Option<String>;
+    /// **effect ごとに 1 度で節全体を返す。** 供給源は効果の説明と設定項目の
+    /// 説明を同じ節へ並べており、両者を区別する規則はその節の読み方そのもので
+    /// ある。項目ごとに引く形にすると、規則を適用する場所が呼び出しの数だけ
+    /// 増えるうえ、効果の説明を指すキーを項目名として渡せてしまう。節を丸ごと
+    /// 返せば、区別は供給源を解釈する 1 か所に閉じる。
+    ///
+    /// 説明を持たない effect は空の [`HostEffectHelp`] になる。供給源そのものを
+    /// 読めない環境ではすべての effect が空になる。**失敗を型で運ばない。**
+    /// 説明の有無は応答の可用性を左右せず、読めなかったことを要求元へ伝えても
+    /// 取れる手が無い。
+    fn effect_help(&self, effect_name: &str) -> HostEffectHelp;
 
     /// 登録済みフォント名を全件返す。参照区間を必要としない。
     ///

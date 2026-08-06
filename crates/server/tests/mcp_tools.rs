@@ -6,18 +6,19 @@ use aviutl2_mcp_core::AuthSecret;
 use aviutl2_mcp_core::ScaledBudgets;
 use aviutl2_mcp_core::settings::{Settings, SettingsDocument};
 use aviutl2_mcp_core::{
-    AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFlags, EffectItemValues, EffectType,
-    ErrorCode, ErrorObject, EvaluatedItem, Extent, FiniteF64, FrameRange, GetCurrentSceneResult,
-    GridBpm, InstanceId, InstanceState, LayerInfo, ListAvailableEffectsResult, ListFontsResult,
+    AvailableEffect, Cursor, DescribeEffectsResult, DisplayRange, EditInfo, EffectDescription,
+    EffectFlags, EffectItemDescription, EffectItemType, EffectItemValues, EffectType, ErrorCode,
+    ErrorObject, EvaluatedItem, Extent, FiniteF64, FrameRange, GetCurrentSceneResult, GridBpm,
+    InstanceId, InstanceState, LayerInfo, ListAvailableEffectsResult, ListFontsResult,
     ListLayersResult, ListModulesResult, ListObjectAliasesResult, ListObjectsResult,
-    ListPalettesResult, ModuleEntry, ModuleType, ObjectAliasSummary, ObjectDetail,
-    ObjectFingerprintInput, ObjectSummary, PALETTE_COLOR_COUNT, PageMeta, PaletteEntry,
-    RequestEnvelope, Rgba, SceneInfo, SectionRange, SelectionSnapshot, TrackGroup,
+    ListPalettesResult, MAX_DESCRIBED_EFFECTS, ModuleEntry, ModuleType, ObjectAliasSummary,
+    ObjectDetail, ObjectFingerprintInput, ObjectSummary, PALETTE_COLOR_COUNT, PageMeta,
+    PaletteEntry, RequestEnvelope, Rgba, SceneInfo, SectionRange, SelectionSnapshot, TrackGroup,
 };
 
 use aviutl2_mcp_server::mcp::input::{
-    CatalogPageInput, EffectSelectorInput, GetEffectItemValuesInput, GetObjectInput,
-    GetSelectionInput, InstanceInput, ListAvailableEffectsInput, ListFontsInput,
+    CatalogPageInput, DescribeEffectsInput, EffectSelectorInput, GetEffectItemValuesInput,
+    GetObjectInput, GetSelectionInput, InstanceInput, ListAvailableEffectsInput, ListFontsInput,
     ListInstancesInput, ListLayersInput, ListModulesInput, ListObjectAliasesInput,
     ListObjectsInput, ListPalettesInput, ModuleTypeInput, ObjectFilterInput, ObjectSelectorInput,
     PageInput,
@@ -559,6 +560,128 @@ async fn list_available_effects_tool_sends_effect_type() {
             "snapshot_revision": null,
         }),
     );
+}
+
+/// 説明を持つ effect と持たない effect を 1 つずつ含む応答。
+fn sample_effect_descriptions() -> DescribeEffectsResult {
+    DescribeEffectsResult {
+        effects: vec![
+            EffectDescription {
+                name: "図形".to_string(),
+                description: Some(
+                    "単色の図形を作成します\nsvgファイルから読み込むことも出来ます".to_string(),
+                ),
+                items: vec![EffectItemDescription {
+                    name: "図形の種類".to_string(),
+                    item_type: EffectItemType::Figure,
+                    description: Some(
+                        "図形の種類を選択します\nボタンクリックでsvgファイルを選択出来ます"
+                            .to_string(),
+                    ),
+                }],
+            },
+            EffectDescription {
+                name: "グロー".to_string(),
+                description: None,
+                items: vec![EffectItemDescription {
+                    name: "拡散".to_string(),
+                    item_type: EffectItemType::Integer,
+                    description: None,
+                }],
+            },
+        ],
+        not_found: vec!["ぐろー".to_string()],
+    }
+}
+
+#[tokio::test]
+async fn describe_effects_tool_sends_the_names_and_returns_the_items() {
+    let expected = serde_json::to_value(sample_effect_descriptions()).expect("直列化できる");
+    let harness = Harness::start(responses("describe_effects", expected.clone()));
+
+    let result = harness
+        .server
+        .describe_effects(Parameters(DescribeEffectsInput {
+            instance_id: harness.instance_id(),
+            effect_names: vec![
+                "図形".to_string(),
+                "グロー".to_string(),
+                "ぐろー".to_string(),
+            ],
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+    let requests = harness.read_requests();
+    assert_eq!(requests[0].operation, "describe_effects");
+    // ページ指定を運ばない。要求が名指しした名前だけを送る。
+    assert_eq!(
+        requests[0].params,
+        json!({ "effect_names": ["図形", "グロー", "ぐろー"] }),
+    );
+
+    // 項目の説明は 2 行目まで残る。text へは載らず structuredContent が運ぶ。
+    let structured = structured(&result);
+    assert!(
+        structured["effects"][0]["items"][0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("ボタンクリックでsvgファイルを選択出来ます"),
+        "{structured}"
+    );
+    assert!(
+        structured["effects"][1]["description"].is_null(),
+        "{structured}"
+    );
+    assert!(
+        structured["effects"][1]["items"][0]["description"].is_null(),
+        "{structured}"
+    );
+
+    // 落ちた名前は text にも現れる。structuredContent を読まない要求元も
+    // 「設定項目を持たない effect」と読まずに済む。
+    let text = text_of(&result);
+    assert!(text.contains("ぐろー"), "{text}");
+    assert!(text.contains("図形の種類"), "{text}");
+}
+
+#[tokio::test]
+async fn a_describe_effects_request_over_the_limit_never_reaches_the_instance() {
+    // 件数と重複は要求内容だけで決まる。接続前に落とさなければ、要求の誤りが
+    // 転送の失敗として報告される。
+    let over: Vec<String> = (0..=MAX_DESCRIBED_EFFECTS)
+        .map(|index| format!("効果{index}"))
+        .collect();
+    for (effect_names, reason) in [
+        (over, "effect_count_out_of_range"),
+        (Vec::new(), "effect_count_out_of_range"),
+        (
+            vec!["図形".to_string(), "図形".to_string()],
+            "duplicate_effect_name",
+        ),
+        (vec!["図形\u{0}".to_string()], "contains_nul"),
+    ] {
+        let harness = Harness::start(OperationResponses::new());
+
+        let result = harness
+            .server
+            .describe_effects(Parameters(DescribeEffectsInput {
+                instance_id: harness.instance_id(),
+                effect_names,
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true), "{}", text_of(&result));
+        let structured = structured(&result);
+        assert_eq!(structured["code"], json!("invalid_argument"));
+        assert_eq!(
+            structured["details"]["reason"],
+            json!(reason),
+            "落ちた規則の名前が違います: {structured}"
+        );
+        assert!(harness.read_requests().is_empty());
+    }
 }
 
 #[tokio::test]

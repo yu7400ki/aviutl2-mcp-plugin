@@ -16,7 +16,7 @@ use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
 use crate::project::ProjectState;
 use crate::read::ReadError;
 use crate::read::host::{
-    EditState, HostEditInfo, HostEffect, HostEffectSummary, HostLayer, HostObject,
+    EditState, HostEditInfo, HostEffect, HostEffectHelp, HostEffectSummary, HostLayer, HostObject,
     HostObjectDetail, HostObjectPlacement, ReadHost, SceneReader, SceneValueReader,
 };
 use crate::test_support::alias_with_effects;
@@ -855,19 +855,23 @@ impl ReadHost for FakeReadHost {
     }
 
     fn effect_item_count(&self, effect_name: &str) -> Result<usize, ReadError> {
+        Ok(self.effect_items(effect_name)?.len())
+    }
+
+    fn effect_items(&self, effect_name: &str) -> Result<Vec<AvailableEffectItem>, ReadError> {
         self.0
             .catalog
             .iter()
             .find(|entry| entry.name == effect_name)
-            .map(|entry| entry.items.len())
+            .map(|entry| entry.items.clone())
             .ok_or(ReadError::Sdk {
                 operation: "enum_effect_item",
             })
     }
 
-    fn effect_description(&self, _effect_name: &str) -> Option<String> {
+    fn effect_help(&self, _effect_name: &str) -> HostEffectHelp {
         // 編集経路は説明を読まない。説明の供給源を持たない環境を写す。
-        None
+        HostEffectHelp::default()
     }
 
     fn font_names(&self) -> Result<Vec<String>, ReadError> {

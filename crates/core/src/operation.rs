@@ -5,7 +5,7 @@
 
 use crate::budget::RequestBudgetKind;
 use crate::edit_info::SceneInfo;
-use crate::effect::{AvailableEffect, EffectType};
+use crate::effect::{AvailableEffect, EffectDescription, EffectType};
 use crate::module::{ModuleEntry, ModuleType};
 use crate::number::FiniteF64;
 use crate::object::{LayerInfo, ObjectSummary};
@@ -32,6 +32,9 @@ pub const OPERATION_GET_OBJECT: &str = "get_object";
 
 /// 利用可能な effect を列挙する operation 名。
 pub const OPERATION_LIST_AVAILABLE_EFFECTS: &str = "list_available_effects";
+
+/// 名前を指定した effect の中身を取得する operation 名。
+pub const OPERATION_DESCRIBE_EFFECTS: &str = "describe_effects";
 
 /// effect の設定項目を任意フレームで評価する operation 名。
 pub const OPERATION_GET_EFFECT_ITEM_VALUES: &str = "get_effect_item_values";
@@ -122,6 +125,8 @@ pub enum ReadOperation {
     GetObject,
     /// [`OPERATION_LIST_AVAILABLE_EFFECTS`]。
     ListAvailableEffects,
+    /// [`OPERATION_DESCRIBE_EFFECTS`]。
+    DescribeEffects,
     /// [`OPERATION_GET_EFFECT_ITEM_VALUES`]。
     GetEffectItemValues,
     /// [`OPERATION_GET_SELECTION`]。
@@ -140,13 +145,14 @@ impl ReadOperation {
     /// 全 variant。
     ///
     /// 要素数と内容は `read_operation_all_is_exhaustive` テストで固定する。
-    pub const ALL: [ReadOperation; 12] = [
+    pub const ALL: [ReadOperation; 13] = [
         ReadOperation::GetEditInfo,
         ReadOperation::GetCurrentScene,
         ReadOperation::ListLayers,
         ReadOperation::ListObjects,
         ReadOperation::GetObject,
         ReadOperation::ListAvailableEffects,
+        ReadOperation::DescribeEffects,
         ReadOperation::GetEffectItemValues,
         ReadOperation::GetSelection,
         ReadOperation::ListFonts,
@@ -164,6 +170,7 @@ impl ReadOperation {
             ReadOperation::ListObjects => OPERATION_LIST_OBJECTS,
             ReadOperation::GetObject => OPERATION_GET_OBJECT,
             ReadOperation::ListAvailableEffects => OPERATION_LIST_AVAILABLE_EFFECTS,
+            ReadOperation::DescribeEffects => OPERATION_DESCRIBE_EFFECTS,
             ReadOperation::GetEffectItemValues => OPERATION_GET_EFFECT_ITEM_VALUES,
             ReadOperation::GetSelection => OPERATION_GET_SELECTION,
             ReadOperation::ListFonts => OPERATION_LIST_FONTS,
@@ -384,6 +391,7 @@ impl KnownOperation {
                 | ReadOperation::ListObjects
                 | ReadOperation::GetObject
                 | ReadOperation::ListAvailableEffects
+                | ReadOperation::DescribeEffects
                 | ReadOperation::GetEffectItemValues
                 | ReadOperation::GetSelection
                 | ReadOperation::ListFonts
@@ -508,6 +516,90 @@ pub struct ListAvailableEffectsParams {
     /// ページ指定。要求では offset / limit / snapshot_revision として展開される。
     #[serde(flatten)]
     pub page: PageRequest,
+}
+
+/// 1 度の要求で中身を引ける effect の最大件数。
+pub const MAX_DESCRIBED_EFFECTS: usize = 10;
+
+/// `describe_effects` の params。
+///
+/// ページ指定を持たない。要求が名指しした effect だけを返すため、続きのページと
+/// いう概念が無く、`snapshot_revision` の運びどころも無い。件数の上限は
+/// [`MAX_DESCRIBED_EFFECTS`] であり、要求元は上限を超える分を別の要求へ分ける。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DescribeEffectsParams {
+    /// 中身を引く effect 名。1 件以上 [`MAX_DESCRIBED_EFFECTS`] 件以下で、
+    /// 同じ名前を 2 度並べられない。
+    ///
+    /// **複数を並べられるのは往復を減らすためだけではない。** 名前の似た effect の
+    /// 使い分けは設定項目の顔ぶれで解けるため、並べて比べられること自体が用途で
+    /// ある。
+    pub effect_names: Vec<String>,
+}
+
+impl DescribeEffectsParams {
+    /// 要求内容だけで決まる件数・名前・重複を検証する。
+    ///
+    /// 判定の順序は [`GetEffectItemValuesParams::validate`] と同じである。件数を
+    /// 先に見るのは、上限ちょうどの要求が上限を超えているかどうかを重複の有無に
+    /// 左右させないためである。名前の構文は重複より先に見るため、構文を満たさない
+    /// 名前が 2 度並んだ要求は重複ではなく名前の失敗を名乗る。
+    ///
+    /// 重複は黙って畳まずに拒否する。畳めば応答の件数が要求の件数と食い違い、
+    /// 要求元は応答の effect と要求の名前を突き合わせられなくなる。
+    pub fn validate(&self) -> Result<(), DescribeEffectsInputError> {
+        if self.effect_names.is_empty() || self.effect_names.len() > MAX_DESCRIBED_EFFECTS {
+            return Err(DescribeEffectsInputError::EffectCountOutOfRange {
+                count: self.effect_names.len(),
+            });
+        }
+        for name in &self.effect_names {
+            validate_name(name)
+                .map_err(|source| DescribeEffectsInputError::EffectName { source })?;
+        }
+        if let Some(index) = first_duplicate(&self.effect_names) {
+            return Err(DescribeEffectsInputError::DuplicateEffectName { index });
+        }
+        Ok(())
+    }
+}
+
+/// effect の中身の要求内容の検証失敗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DescribeEffectsInputError {
+    /// effect 名の件数が受け付ける範囲に無い。
+    #[error(
+        "effect_names は 1 件以上 {MAX_DESCRIBED_EFFECTS} 件以下である必要があります: {count} 件"
+    )]
+    EffectCountOutOfRange {
+        /// 指定された件数。
+        count: usize,
+    },
+    /// 同じ effect 名が 2 度指定されている。
+    #[error("effect_names[{index}] が一覧の中で重複しています")]
+    DuplicateEffectName {
+        /// 重複した側の、一覧の中での位置。
+        index: usize,
+    },
+    /// effect 名が名前の規則に反する。
+    #[error("effect 名が不正です: {source}")]
+    EffectName {
+        /// 反した規則。
+        #[source]
+        source: TextSyntaxError,
+    },
+}
+
+impl DescribeEffectsInputError {
+    /// 落ちた規則を表す機械可読な名前。
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::EffectCountOutOfRange { .. } => "effect_count_out_of_range",
+            Self::DuplicateEffectName { .. } => "duplicate_effect_name",
+            Self::EffectName { source } => source.reason(),
+        }
+    }
 }
 
 /// `get_selection` の params。
@@ -737,6 +829,24 @@ pub struct ListAvailableEffectsResult {
     pub page: PageMeta,
 }
 
+/// `describe_effects` の result。
+///
+/// ページのメタ情報を持たない。要求が名指しした effect だけを返し、続きという
+/// 概念が無い。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DescribeEffectsResult {
+    /// 見つかった effect を、要求の順に並べたもの。
+    pub effects: Vec<EffectDescription>,
+    /// 登録されていなかった effect 名を、要求の順に並べたもの。
+    ///
+    /// **見つからなかった名前を黙って落とさない。** 要求元は名前を推測して
+    /// 呼ぶため、落ちた名前に気付けなければ「その effect には設定項目が無い」と
+    /// 誤読する。要求全体を失敗させないのは、名前を並べて比べることがこの
+    /// operation の用途であり、1 つの綴り違いで残りの比較まで失う理由が無い
+    /// ためである。
+    pub not_found: Vec<String>,
+}
+
 /// `list_fonts` の result。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListFontsResult {
@@ -917,6 +1027,7 @@ mod tests {
         assert_eq!(OPERATION_LIST_OBJECTS, "list_objects");
         assert_eq!(OPERATION_GET_OBJECT, "get_object");
         assert_eq!(OPERATION_LIST_AVAILABLE_EFFECTS, "list_available_effects");
+        assert_eq!(OPERATION_DESCRIBE_EFFECTS, "describe_effects");
         assert_eq!(OPERATION_GET_EFFECT_ITEM_VALUES, "get_effect_item_values");
         assert_eq!(OPERATION_GET_SELECTION, "get_selection");
         assert_eq!(OPERATION_LIST_FONTS, "list_fonts");
@@ -1018,6 +1129,10 @@ mod tests {
         assert_eq!(
             ReadOperation::ListAvailableEffects.as_str(),
             OPERATION_LIST_AVAILABLE_EFFECTS
+        );
+        assert_eq!(
+            ReadOperation::DescribeEffects.as_str(),
+            OPERATION_DESCRIBE_EFFECTS
         );
         assert_eq!(
             ReadOperation::GetEffectItemValues.as_str(),
@@ -1134,6 +1249,7 @@ mod tests {
                 | ReadOperation::ListObjects
                 | ReadOperation::GetObject
                 | ReadOperation::ListAvailableEffects
+                | ReadOperation::DescribeEffects
                 | ReadOperation::GetEffectItemValues
                 | ReadOperation::GetSelection
                 | ReadOperation::ListFonts
@@ -1153,13 +1269,14 @@ mod tests {
         assert_listed(ReadOperation::ListObjects);
         assert_listed(ReadOperation::GetObject);
         assert_listed(ReadOperation::ListAvailableEffects);
+        assert_listed(ReadOperation::DescribeEffects);
         assert_listed(ReadOperation::GetEffectItemValues);
         assert_listed(ReadOperation::GetSelection);
         assert_listed(ReadOperation::ListFonts);
         assert_listed(ReadOperation::ListPalettes);
         assert_listed(ReadOperation::ListModules);
         assert_listed(ReadOperation::ListObjectAliases);
-        assert_eq!(ReadOperation::ALL.len(), 12);
+        assert_eq!(ReadOperation::ALL.len(), 13);
     }
 
     /// [`RenderOperation::ALL`] が全 variant を含むことを固定する。
@@ -1790,6 +1907,112 @@ mod tests {
         assert!(serde_json::from_str::<ListAvailableEffectsParams>(r#"{"future":1}"#).is_err());
     }
 
+    fn describe_params(names: &[&str]) -> DescribeEffectsParams {
+        DescribeEffectsParams {
+            effect_names: names.iter().map(|name| name.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn describe_effects_params_roundtrip() {
+        let params = describe_params(&["グロー", "発光"]);
+        let s = serde_json::to_string(&params).unwrap();
+        let restored: DescribeEffectsParams = serde_json::from_str(&s).unwrap();
+        assert_eq!(restored, params);
+    }
+
+    #[test]
+    fn describe_effects_params_reject_unknown_field() {
+        assert!(
+            serde_json::from_str::<DescribeEffectsParams>(
+                r#"{"effect_names":["グロー"],"future":1}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn describe_effects_params_do_not_take_a_page() {
+        // ページの続きという概念が無い。要求が名指しした effect だけを返すため、
+        // snapshot_revision の運びどころも無い。
+        let value = serde_json::to_value(describe_params(&["グロー"])).unwrap();
+        let keys: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .expect("オブジェクト")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, std::collections::BTreeSet::from(["effect_names"]));
+        for forbidden in ["offset", "limit", "snapshot_revision"] {
+            assert!(
+                serde_json::from_str::<DescribeEffectsParams>(&format!(
+                    r#"{{"effect_names":["グロー"],"{forbidden}":1}}"#
+                ))
+                .is_err(),
+                "{forbidden} を受理しています"
+            );
+        }
+    }
+
+    #[test]
+    fn describe_effects_params_bound_the_number_of_names() {
+        assert_eq!(MAX_DESCRIBED_EFFECTS, 10);
+        let names: Vec<String> = (0..MAX_DESCRIBED_EFFECTS)
+            .map(|index| format!("効果{index}"))
+            .collect();
+        let at_limit = DescribeEffectsParams {
+            effect_names: names.clone(),
+        };
+        assert_eq!(at_limit.validate(), Ok(()));
+
+        let mut over = names;
+        over.push("効果10".to_string());
+        let count = over.len();
+        assert_eq!(
+            DescribeEffectsParams { effect_names: over }.validate(),
+            Err(DescribeEffectsInputError::EffectCountOutOfRange { count })
+        );
+        assert_eq!(
+            describe_params(&[]).validate(),
+            Err(DescribeEffectsInputError::EffectCountOutOfRange { count: 0 })
+        );
+    }
+
+    #[test]
+    fn describe_effects_params_reject_a_repeated_name() {
+        // 畳むと応答の件数が要求の件数と食い違い、要求元は突き合わせられなくなる。
+        assert_eq!(
+            describe_params(&["グロー", "発光", "グロー"]).validate(),
+            Err(DescribeEffectsInputError::DuplicateEffectName { index: 2 })
+        );
+    }
+
+    #[test]
+    fn describe_effects_params_reject_a_name_that_breaks_the_rule() {
+        // 件数の判定を先に通した要求だけが名前の構文へ進む。構文を満たさない
+        // 名前が 2 度並んだ要求は、重複ではなく名前の失敗を名乗る。
+        let error = describe_params(&["グロー\u{0}", "グロー\u{0}"])
+            .validate()
+            .expect_err("NUL を含む名前は拒否される");
+        assert!(
+            matches!(error, DescribeEffectsInputError::EffectName { .. }),
+            "{error:?}"
+        );
+        assert_eq!(error.reason(), "contains_nul");
+    }
+
+    #[test]
+    fn describe_effects_input_errors_name_the_rule_they_broke() {
+        assert_eq!(
+            DescribeEffectsInputError::EffectCountOutOfRange { count: 11 }.reason(),
+            "effect_count_out_of_range"
+        );
+        assert_eq!(
+            DescribeEffectsInputError::DuplicateEffectName { index: 1 }.reason(),
+            "duplicate_effect_name"
+        );
+    }
+
     #[test]
     fn catalog_params_accept_flat_page_fields() {
         let fonts: ListFontsParams = serde_json::from_str(r#"{"offset":2,"limit":5}"#).unwrap();
@@ -2159,6 +2382,43 @@ mod tests {
         let s = serde_json::to_string(&result).unwrap();
         let restored: ListAvailableEffectsResult = serde_json::from_str(&s).unwrap();
         assert_eq!(restored, result);
+    }
+
+    #[test]
+    fn describe_effects_result_roundtrip() {
+        let result = DescribeEffectsResult {
+            effects: vec![crate::effect::EffectDescription {
+                name: "グロー".to_string(),
+                description: None,
+                items: vec![crate::effect::EffectItemDescription {
+                    name: "強さ".to_string(),
+                    item_type: crate::effect::EffectItemType::Integer,
+                    description: Some("光の強さを指定します".to_string()),
+                }],
+            }],
+            not_found: vec!["ぐろー".to_string()],
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        let restored: DescribeEffectsResult = serde_json::from_str(&s).unwrap();
+        assert_eq!(restored, result);
+    }
+
+    #[test]
+    fn describe_effects_result_names_what_it_could_not_find() {
+        // 見つからなかった名前を落とすと、要求元は「その effect には設定項目が
+        // 無い」と誤読する。空でも欄そのものは必ず現れる。
+        let value = serde_json::to_value(DescribeEffectsResult {
+            effects: Vec::new(),
+            not_found: vec!["ぐろー".to_string()],
+        })
+        .unwrap();
+        assert_eq!(value["not_found"], serde_json::json!(["ぐろー"]));
+        let empty = serde_json::to_value(DescribeEffectsResult {
+            effects: Vec::new(),
+            not_found: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(empty["not_found"], serde_json::json!([]));
     }
 
     #[test]

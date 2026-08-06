@@ -15,8 +15,8 @@ use crate::mcp::edit_input::{
     SetObjectItemInput, SetObjectNameInput, SetSceneSettingsInput, SetSelectionInput,
 };
 use crate::mcp::input::{
-    GetEffectItemValuesInput, GetObjectInput, GetSelectionInput, InstanceInput,
-    ListAvailableEffectsInput, ListFontsInput, ListInstancesInput, ListLayersInput,
+    DescribeEffectsInput, GetEffectItemValuesInput, GetObjectInput, GetSelectionInput,
+    InstanceInput, ListAvailableEffectsInput, ListFontsInput, ListInstancesInput, ListLayersInput,
     ListModulesInput, ListObjectAliasesInput, ListObjectsInput, ListPalettesInput,
     parse_instance_id,
 };
@@ -27,22 +27,22 @@ use crate::mcp::{describe, failure};
 use crate::redact;
 use crate::settings::SettingsSource;
 use aviutl2_mcp_core::{
-    BatchOutcome, EditInfo, EditOutcome, EffectItemValues, ErrorCode, ErrorObject,
-    GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GridBpmOutcome, InstanceId,
-    LayerStateOutcome, ListAvailableEffectsResult, ListFontsResult, ListLayersResult,
+    BatchOutcome, DescribeEffectsResult, EditInfo, EditOutcome, EffectItemValues, ErrorCode,
+    ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams, GridBpmOutcome,
+    InstanceId, LayerStateOutcome, ListAvailableEffectsResult, ListFontsResult, ListLayersResult,
     ListModulesResult, ListObjectAliasesResult, ListObjectsResult, ListPalettesResult,
     MAX_PAGE_LIMIT, OPERATION_ADD_EFFECT, OPERATION_APPLY_BATCH, OPERATION_CREATE_OBJECT,
     OPERATION_CREATE_OBJECT_SECTION, OPERATION_DELETE_EFFECT, OPERATION_DELETE_OBJECT,
-    OPERATION_DELETE_OBJECT_SECTION, OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO,
-    OPERATION_GET_EFFECT_ITEM_VALUES, OPERATION_GET_OBJECT, OPERATION_GET_SELECTION,
-    OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_FONTS, OPERATION_LIST_LAYERS,
-    OPERATION_LIST_MODULES, OPERATION_LIST_OBJECT_ALIASES, OPERATION_LIST_OBJECTS,
-    OPERATION_LIST_PALETTES, OPERATION_MOVE_OBJECT, OPERATION_MOVE_OBJECT_SECTION,
-    OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED, OPERATION_SET_GRID_BPM,
-    OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM, OPERATION_SET_OBJECT_NAME,
-    OPERATION_SET_SCENE_SETTINGS, OPERATION_SET_SELECTION, ObjectDetail, ObjectSectionsOutcome,
-    RenderFrameResult, RequestBudgetKind, ScaledBudgets, SceneSettingsOutcome, SelectionSnapshot,
-    SelectionState, request_budget_kind,
+    OPERATION_DELETE_OBJECT_SECTION, OPERATION_DESCRIBE_EFFECTS, OPERATION_GET_CURRENT_SCENE,
+    OPERATION_GET_EDIT_INFO, OPERATION_GET_EFFECT_ITEM_VALUES, OPERATION_GET_OBJECT,
+    OPERATION_GET_SELECTION, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_FONTS,
+    OPERATION_LIST_LAYERS, OPERATION_LIST_MODULES, OPERATION_LIST_OBJECT_ALIASES,
+    OPERATION_LIST_OBJECTS, OPERATION_LIST_PALETTES, OPERATION_MOVE_OBJECT,
+    OPERATION_MOVE_OBJECT_SECTION, OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED,
+    OPERATION_SET_GRID_BPM, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
+    OPERATION_SET_OBJECT_NAME, OPERATION_SET_SCENE_SETTINGS, OPERATION_SET_SELECTION, ObjectDetail,
+    ObjectSectionsOutcome, RenderFrameResult, RequestBudgetKind, ScaledBudgets,
+    SceneSettingsOutcome, SelectionSnapshot, SelectionState, request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -873,6 +873,59 @@ impl AviUtl2McpServer {
             )?;
             Ok(ToolSuccess {
                 text: describe::available_effects(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
+    /// 名前で指定した effect の中身を取得する。
+    /// effect_names には list_available_effects が返す名前を 1〜10 件指定する。
+    /// 同じ名前を 2 度指定すると invalid_argument となる。
+    /// 1 件につき name・description・items（name / item_type / description）を返す。
+    /// 設定項目の一覧はホストの列挙から得るため、必ず実際の effect と一致する。
+    /// description はホストが同梱する説明であり、持たない effect と持たない項目は
+    /// null になる。空欄を推測で補わない。
+    /// 説明を持たない effect は多く、とくにフィルタ効果はほとんどが null である。
+    /// 名前が似ている effect の使い分けは、説明ではなく items の顔ぶれで判断する。
+    /// そのために複数の名前をまとめて指定して並べて比べられる。
+    /// 登録されていない名前は not_found に並び、その名前だけが落ちる。
+    /// 要求全体は失敗しないため、effects に無い名前は not_found を必ず確認すること。
+    /// not_found に出た名前は綴りが違うだけであり、設定項目を持たない effect ではない。
+    /// 設定項目の現在値は返さない。対象へ付与したあと get_object を呼べば現在値が得られる。
+    /// ページ指定を持たない。offset / limit / snapshot_revision は受け付けない。
+    /// 返すのは指定した名前の分だけであり、続きのページという概念が無いためである。
+    #[tool(
+        name = "describe_effects",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::describe_effects()
+        )
+    )]
+    pub async fn describe_effects(
+        &self,
+        Parameters(input): Parameters<DescribeEffectsInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let CallBudgets { limits, discovery } = self.call_budgets();
+        self.run("describe_effects", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: DescribeEffectsResult = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                discovery,
+                OPERATION_DESCRIBE_EFFECTS,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::effect_descriptions(&result),
                 structured: to_structured(&result)?,
             })
         })
@@ -2817,8 +2870,8 @@ mod tests {
     use super::*;
 
     use aviutl2_mcp_core::{
-        AvailableEffectItem, EffectItemType, ItemValue, ItemWriteError, ReadBackCheck,
-        prepare_item_write, read_back_check,
+        AvailableEffectItem, EffectItemType, ItemValue, ItemWriteError, MAX_DESCRIBED_EFFECTS,
+        ReadBackCheck, prepare_item_write, read_back_check,
     };
     use rmcp::model::Tool;
 
@@ -2852,7 +2905,7 @@ mod tests {
             | "apply_batch"
             | "render_frame" => true,
             // effect カタログだけを扱い、frame も layer も現れない。
-            "list_available_effects" => false,
+            "list_available_effects" | "describe_effects" => false,
             // 登録物の一覧だけを扱い、frame も layer も現れない。
             "list_fonts" | "list_palettes" | "list_modules" | "list_object_aliases" => false,
             // BPM グリッドはシーンに属し、位置は秒で表す。フレーム番号も
@@ -2911,6 +2964,7 @@ mod tests {
         "list_objects",
         "get_object",
         "list_available_effects",
+        "describe_effects",
         "get_effect_item_values",
         "get_selection",
         "list_fonts",
@@ -3023,6 +3077,7 @@ mod tests {
             | "list_objects"
             | "get_object"
             | "list_available_effects"
+            | "describe_effects"
             | "get_effect_item_values"
             | "get_selection"
             | "list_fonts"
@@ -3089,7 +3144,7 @@ mod tests {
         assert_eq!(names, expected);
         // 件数そのものも固定する。router と表の両方から同じ tool を落とすと、
         // 集合の一致だけでは検出できない。
-        assert_eq!(names.len(), 30, "公開する tool の数が変わりました");
+        assert_eq!(names.len(), 31, "公開する tool の数が変わりました");
     }
 
     /// 共有設定を与えたサーバー。
@@ -3274,6 +3329,7 @@ mod tests {
             "list_objects" => schema::list_objects(),
             "get_object" => schema::object_detail(),
             "list_available_effects" => schema::list_available_effects(),
+            "describe_effects" => schema::describe_effects(),
             "list_fonts" => schema::list_fonts(),
             "list_palettes" => schema::list_palettes(),
             "list_modules" => schema::list_modules(),
@@ -3349,6 +3405,90 @@ mod tests {
         assert!(
             description.contains("description"),
             "説明が付かない effect があることが書かれていません: {description}"
+        );
+    }
+
+    #[test]
+    fn describe_effects_declares_the_same_limit_it_states() {
+        // 上限は 3 か所——core の検証・入力 schema・tool の説明——に現れる。
+        // 片方だけを動かすと、宣言と説明と実際の受理範囲が食い違う。
+        let tool = tool_named("describe_effects");
+        let names = &tool.input_schema["properties"]["effect_names"];
+        assert_eq!(
+            names["maxItems"],
+            serde_json::json!(MAX_DESCRIBED_EFFECTS),
+            "宣言した上限が core の上限と違います: {names}"
+        );
+        assert_eq!(names["minItems"], serde_json::json!(1), "{names}");
+        // 重複は畳まずに拒否する。宣言だけを落としても、実際には拒否される。
+        assert_eq!(names["uniqueItems"], serde_json::json!(true), "{names}");
+
+        let description = description_of("describe_effects");
+        assert!(
+            description.contains(&format!("1〜{MAX_DESCRIBED_EFFECTS} 件")),
+            "説明が宣言した上限を述べていません: {description}"
+        );
+    }
+
+    #[test]
+    fn describe_effects_states_how_a_missing_name_comes_back() {
+        // 落ちた名前に気付けなければ、要求元は「設定項目を持たない effect」と
+        // 誤読する。要求全体が失敗しないことと、確認先を説明が述べる。
+        let description = description_of("describe_effects");
+        for phrase in [
+            "not_found",
+            "要求全体は失敗しない",
+            "設定項目を持たない effect ではない",
+            "list_available_effects",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "describe_effects の説明が {phrase} に触れていません: {description}"
+            );
+        }
+    }
+
+    #[test]
+    fn describe_effects_states_where_the_descriptions_come_from_and_when_they_are_missing() {
+        // 説明を推測で補わない方針の帰結として、説明を持たない effect は多い。
+        // 述べておかなければ、null を「取得に失敗した」と読まれる。
+        let description = description_of("describe_effects");
+        for phrase in [
+            "ホストが同梱する説明",
+            "null",
+            "推測で補わない",
+            "items の顔ぶれ",
+            "get_object",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "describe_effects の説明が {phrase} に触れていません: {description}"
+            );
+        }
+    }
+
+    #[test]
+    fn describe_effects_neither_declares_nor_promises_a_page() {
+        // ページの続きという概念が無い。schema が受け付けないことと、説明が
+        // そう述べていることを揃える。
+        let tool = tool_named("describe_effects");
+        let properties = tool.input_schema["properties"]
+            .as_object()
+            .expect("入力が properties を宣言していません");
+        for field in ["offset", "limit", "snapshot_revision"] {
+            assert!(
+                !properties.contains_key(field),
+                "{field} を宣言しています: {properties:?}"
+            );
+        }
+        assert_eq!(
+            tool.input_schema["required"],
+            serde_json::json!(["instance_id", "effect_names"]),
+            "describe_effects の必須項目"
+        );
+        assert!(
+            description_of("describe_effects").contains("ページ指定を持たない"),
+            "ページを取らないことが説明されていません"
         );
     }
 
@@ -3616,6 +3756,8 @@ mod tests {
             | "list_layers"
             | "list_objects"
             | "get_object"
+            // 名前を名指しして引くため、続きのページという概念が無い。
+            | "describe_effects"
             | "get_effect_item_values"
             | "get_selection"
             | "create_object"

@@ -21,10 +21,11 @@ pub mod sdk;
 
 use crate::project::ProjectState;
 use aviutl2_mcp_core::{
-    EditInfo, EffectItemValues, EffectType, GetEffectItemValuesParams, LayerInfo,
-    ListAvailableEffectsResult, ListObjectAliasesResult, ListPalettesResult, ModuleEntry,
-    ModuleType, ObjectDetail, ObjectFilter, ObjectSelector, ObjectSummary, PageMeta, PageWindow,
-    SceneInfo, SelectionSnapshot, SnapshotRevisionMismatch, ValidatedPageRequest,
+    DescribeEffectsParams, DescribeEffectsResult, EditInfo, EffectItemValues, EffectType,
+    GetEffectItemValuesParams, LayerInfo, ListAvailableEffectsResult, ListObjectAliasesResult,
+    ListPalettesResult, ModuleEntry, ModuleType, ObjectDetail, ObjectFilter, ObjectSelector,
+    ObjectSummary, PageMeta, PageWindow, SceneInfo, SelectionSnapshot, SnapshotRevisionMismatch,
+    ValidatedPageRequest,
 };
 use std::sync::Arc;
 
@@ -166,6 +167,29 @@ pub trait ReadAdapter: Send + Sync {
         effect_type: Option<&EffectType>,
         page: &PageWindow,
     ) -> Result<ListAvailableEffectsResult, ReadError>;
+
+    /// 名前で指定した effect の中身を返す。
+    ///
+    /// `params` は件数・名前・重複の検証済みのものだけを受け取る。いずれも要求
+    /// 内容だけで決まり、読み取りを受け付けられるかにも期限にも依存しないため、
+    /// 要求の復号と同じ場所で判定して不正な要求はここへ届かせない。
+    ///
+    /// **登録されていない名前は要求全体を失敗させない。** 見つかった分を返し、
+    /// 見つからなかった名前を結果へ明示する。要求元は名前を推測して呼ぶため、
+    /// 1 つの綴り違いで残りの比較まで失う理由が無い。一方で黙って落とせば、
+    /// 落ちた名前を「設定項目を持たない effect」と誤読する。
+    ///
+    /// 参照区間へ入らない。カタログの列挙も設定項目の列挙も編集ハンドルの機能で
+    /// あり、プロジェクトデータの参照を要しない。同じ理由でシーンの guard も
+    /// 掛けない。
+    ///
+    /// ページを持たないため、[`Self::list_available_effects`] のような取り出し
+    /// 範囲も revision も受け取らない。返すのは要求が名指しした分だけであり、
+    /// 続きという概念が無い。
+    fn describe_effects(
+        &self,
+        params: &DescribeEffectsParams,
+    ) -> Result<DescribeEffectsResult, ReadError>;
 
     /// 登録済みフォント名を全件列挙する。
     ///

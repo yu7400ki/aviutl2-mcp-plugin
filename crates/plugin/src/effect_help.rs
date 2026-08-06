@@ -1,17 +1,21 @@
-//! ホストが同梱する効果の説明。
+//! ホストが同梱する効果と設定項目の説明。
 //!
 //! AviUtl2 の実行ファイルと同じディレクトリの `Default.aul2` が
 //! `[Tips.<効果名>]` の節として並べている。SDK には説明を引く手段が無く、
 //! このファイルだけが供給源である。
 //!
+//! 節の中では `effect.name` が効果そのものの説明、それ以外のキーが設定項目の
+//! 説明である。**両者を取り違えない。** 項目の説明が効果の説明として出れば、
+//! 受け取った側はエラーの出ないまま誤った文言を確信を持って使う。
+//!
 //! **説明を我々が書き足すことはしない。** ここが返すのはホストが同梱した文言
-//! そのものだけであり、供給源に無い効果の説明は `None` になる。推測で書いた
-//! 説明は他人のソフトウェアについての検証できない主張であり、微妙に外した
-//! ものを受け取った側は確信を持って誤用する。説明が無ければ慎重に扱われる。
+//! そのものだけであり、供給源に無い説明は `None` になる。推測で書いた説明は
+//! 他人のソフトウェアについての検証できない主張であり、微妙に外したものを
+//! 受け取った側は確信を持って誤用する。説明が無ければ慎重に扱われる。
 //!
 //! **説明は切り詰めない。** 発見の鍵が 2 行目以降に置かれている説明が実在する
 //! ため、先頭行だけに切ると、説明を載せることで埋めようとしている欠落がその
-//! まま残る。説明を持つのは供給元が挙げた効果に限られ、全文を載せても一覧の
+//! まま残る。説明を持つのは供給元が挙げた効果に限られ、全文を載せても応答の
 //! 大きさは効果の登録数では決まらない。
 //!
 //! **ファイルの位置は SDK の契約の外にある。** 設定ハンドルが公開するのは
@@ -31,10 +35,11 @@
 //! このファイルの先頭行は `;` で始まるコメントであり、1 行目で表が得られない。
 //! 加えて節名を `.` で割って入れ子にするため、`[Tips.<効果名>]` は `Tips` の
 //! 下の階層になり、`.` を含む効果名はさらに割れる。ここで要るのは節の見出しと
-//! キー 1 つだけであり、行を直に読めば取りこぼしが無い（[`crate::movement`] が
-//! 同じ理由で見出しを直に読んでいる）。
+//! その中の `キー=値` だけであり、行を直に読めば取りこぼしが無い
+//! （[`crate::movement`] が同じ理由で見出しを直に読んでいる）。
 
 use crate::alias::read_bounded;
+use crate::read::host::HostEffectHelp;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
@@ -47,6 +52,9 @@ const HELP_FILE: &str = "Default.aul2";
 
 /// 効果 1 つの節の見出しが始まる並び。
 const SECTION_PREFIX: &str = "[Tips.";
+
+/// コメント行が始まる文字。
+const COMMENT_PREFIX: char = ';';
 
 /// 効果そのものの説明を持つキーの名前。
 ///
@@ -68,15 +76,15 @@ const INITIAL_PATH_LEN: usize = 260;
 /// 失敗として扱う。
 const MAX_PATH_LEN: usize = 32 * 1024;
 
-/// 解決した効果の説明。
-static DESCRIPTIONS: OnceLock<HashMap<String, String>> = OnceLock::new();
+/// 解決した効果ごとの説明。
+static HELP: OnceLock<HashMap<String, HostEffectHelp>> = OnceLock::new();
 
-/// 効果名に対応する説明を返す。供給源に無ければ `None`。
+/// 効果名に対応する説明を返す。供給源に節が無ければ `None`。
 ///
 /// 初回の要求で 1 度だけ読み込む。説明が得られないことは plugin が起動できない
 /// 理由ではないため、初期化時には読まない。
-pub fn description_of(effect_name: &str) -> Option<&'static str> {
-    descriptions().get(effect_name).map(String::as_str)
+pub fn help_of(effect_name: &str) -> Option<&'static HostEffectHelp> {
+    help_table().get(effect_name)
 }
 
 /// 効果名から説明を引く表を返す。読めなければ空の表になる。
@@ -85,8 +93,8 @@ pub fn description_of(effect_name: &str) -> Option<&'static str> {
 /// ファイルの位置を解決できない・そこにファイルが無いか読めない・読めたが効果の
 /// 節が 1 つも無い、の 3 つは対処が違う。同じ文言に畳むと、どれが起きたのかを
 /// ログから切り分けられない。
-fn descriptions() -> &'static HashMap<String, String> {
-    DESCRIPTIONS.get_or_init(|| {
+fn help_table() -> &'static HashMap<String, HostEffectHelp> {
+    HELP.get_or_init(|| {
         let Some(dir) = host_directory() else {
             tracing::info!(
                 "ホストの実行ファイルの位置を解決できませんでした。効果の説明は返しません"
@@ -94,7 +102,7 @@ fn descriptions() -> &'static HashMap<String, String> {
             return HashMap::new();
         };
         let path = dir.join(HELP_FILE);
-        let Some(table) = read_descriptions(&dir) else {
+        let Some(table) = read_help(&dir) else {
             tracing::info!(
                 "{} を読めませんでした。効果の説明は返しません",
                 path.display()
@@ -151,56 +159,85 @@ fn module_file_name() -> Option<PathBuf> {
 /// **ファイルを読めなかったことと、読めたが効果の節が無かったことを区別する。**
 /// 前者は `None`、後者は空の表である。どちらも説明は出ないが、原因が違う。
 /// 無い・大きすぎる・UTF-8 として読めないはいずれも `None` になる。
-fn read_descriptions(dir: &Path) -> Option<HashMap<String, String>> {
+fn read_help(dir: &Path) -> Option<HashMap<String, HostEffectHelp>> {
     let bytes = read_bounded(&dir.join(HELP_FILE), MAX_HELP_BYTES).ok()??;
-    Some(parse_descriptions(&String::from_utf8(bytes).ok()?))
+    Some(parse_help(&String::from_utf8(bytes).ok()?))
 }
 
-/// 節の見出しと `キー=値` の行から、効果の説明を集める。
+/// 節の見出しと `キー=値` の行から、効果ごとの説明を集める。
 ///
 /// 見る節は `[Tips.<効果名>]` だけである。他の見出しが現れたらそれ以降の行は
 /// どの効果にも属さない——節を跨いで値を拾うと、効果と無関係な文言が説明に
 /// 化ける。
 ///
-/// 節の中で見るキーは [`EFFECT_DESCRIPTION_KEY`] だけである。**節の中の並びに
-/// 頼らない。** 他のキーは設定項目の説明であり、効果の説明として返せば、
-/// エラーの出ないまま誤った文言が確信を持って使われる。項目の説明を運ばないのは
-/// 一覧が項目を返さないためであり、項目の一覧は実行時に得られるので、ファイルの
-/// 記述と食い違うことがない。
+/// 節の中では [`EFFECT_DESCRIPTION_KEY`] だけが効果そのものの説明であり、他の
+/// キーは設定項目の説明である。**節の中の並びに頼らない。** 先頭の `キー=値` を
+/// 効果の説明として採る実装では、項目の説明が効果の説明として出て、エラーの
+/// 出ないまま誤った文言が確信を持って使われる。
 ///
-/// `;` で始まるコメント行は、`=` を含む形で現れてもキーが一致しないため採られ
-/// ない。節の外のコメント行は、そもそもどの効果にも属さない。
+/// 集めた項目の説明は項目名を確定させない。項目の一覧はホストの列挙から得る
+/// ため、ここに無い項目も、ここに在って列挙に無い項目も在り得る。
 ///
-/// 同じ効果名の節が 2 度現れた場合は先に現れたものを採る。
+/// `;` で始まる行はコメントとして読み飛ばす。**効果のキーだけを見ていた頃と
+/// 違い、読み飛ばしを省けない。** 項目の説明はキー名を問わずに採るため、
+/// `;キー=値` の形のコメントがそのまま項目の説明として現れてしまう。
+///
+/// 同じ効果名の節が 2 度現れた場合は先に現れた節を丸ごと採る。節の中で同じ
+/// キーが 2 度現れた場合も先に現れたものを採る。
 ///
 /// 見出しが無い行・`=` を持たない行・空のファイルはいずれも黙って読み飛ばす。
 /// 説明はあれば使うものであり、書式の乱れを失敗として表に出す先が無い。
-fn parse_descriptions(text: &str) -> HashMap<String, String> {
-    let mut descriptions = HashMap::new();
-    let mut section: Option<&str> = None;
+fn parse_help(text: &str) -> HashMap<String, HostEffectHelp> {
+    let mut table: HashMap<String, HostEffectHelp> = HashMap::new();
+    let mut section: Option<(&str, HostEffectHelp)> = None;
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('[') {
+            flush_section(&mut table, section.take());
             section = line
                 .strip_prefix(SECTION_PREFIX)
                 .and_then(|rest| rest.strip_suffix(']'))
-                .filter(|name| !name.is_empty());
+                .filter(|name| !name.is_empty())
+                .map(|name| (name, HostEffectHelp::default()));
             continue;
         }
-        let Some(name) = section else {
+        if line.starts_with(COMMENT_PREFIX) {
+            continue;
+        }
+        let Some((_, help)) = section.as_mut() else {
             continue;
         };
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        if key != EFFECT_DESCRIPTION_KEY {
-            continue;
+        if key == EFFECT_DESCRIPTION_KEY {
+            help.description
+                .get_or_insert_with(|| unescape_newlines(value));
+        } else {
+            help.items
+                .entry(key.to_string())
+                .or_insert_with(|| unescape_newlines(value));
         }
-        descriptions
-            .entry(name.to_string())
-            .or_insert_with(|| unescape_newlines(value));
     }
-    descriptions
+    flush_section(&mut table, section);
+    table
+}
+
+/// 読み終えた節を表へ移す。同じ効果名が既に在れば先の節を残す。
+///
+/// **説明を 1 つも持たない節は表へ入れない。** 見出しだけが在っても引ける文言が
+/// 無く、記録すれば「説明を持つ効果の数」がログでも表の大きさでも狂う。
+fn flush_section(
+    table: &mut HashMap<String, HostEffectHelp>,
+    section: Option<(&str, HostEffectHelp)>,
+) {
+    let Some((name, help)) = section else {
+        return;
+    };
+    if help.description.is_none() && help.items.is_empty() {
+        return;
+    }
+    table.entry(name.to_string()).or_insert(help);
 }
 
 /// 値の中の `\n`（`\` と `n` の 2 文字）を実際の改行へ戻す。
@@ -304,30 +341,44 @@ effect.name=文字を表示します\r\n";
     }
 
     /// 供給元の形を読んだ表。
-    fn help_table() -> HashMap<String, String> {
+    fn parsed_help() -> HashMap<String, HostEffectHelp> {
         let dir = TempDir::new("help");
         dir.write_help(HELP);
-        read_descriptions(dir.path()).expect("読める")
+        read_help(dir.path()).expect("読める")
+    }
+
+    /// 効果の説明だけを取り出す。
+    fn description_of(table: &HashMap<String, HostEffectHelp>, effect: &str) -> Option<String> {
+        table.get(effect)?.description.clone()
+    }
+
+    /// 設定項目の説明だけを取り出す。
+    fn item_description_of(
+        table: &HashMap<String, HostEffectHelp>,
+        effect: &str,
+        item: &str,
+    ) -> Option<String> {
+        table.get(effect)?.items.get(item).cloned()
     }
 
     #[test]
     fn the_description_comes_from_the_effect_key_of_the_tips_section() {
-        let table = help_table();
+        let table = parsed_help();
 
         assert_eq!(
-            table.get("図形").map(String::as_str),
+            description_of(&table, "図形").as_deref(),
             Some("単色の図形を作成します\nsvgファイルから読み込むことも出来ます"),
             "効果の説明が全文で返りません"
         );
         // 項目のキーが先に並ぶ節でも、採るのは効果のキーである。並び順で決めると
         // 設定項目の説明が効果の説明として出る。
         assert_eq!(
-            table.get("画像合成(オブジェクト)").map(String::as_str),
+            description_of(&table, "画像合成(オブジェクト)").as_deref(),
             Some("別のオブジェクトを合成します"),
             "節の中の並びで説明を選んでいます"
         );
         assert_eq!(
-            table.get("テキスト").map(String::as_str),
+            description_of(&table, "テキスト").as_deref(),
             Some("文字を表示します")
         );
     }
@@ -337,7 +388,7 @@ effect.name=文字を表示します\r\n";
         // 節の中の他のキーは設定項目の説明であり、効果の説明ではない。
         // `[Language]` は表示言語の対応表であって効果の節ではなく、`effect.name`
         // を持っていても効果として現れてはならない。
-        let table = help_table();
+        let table = parsed_help();
         let names: BTreeSet<&str> = table.keys().map(String::as_str).collect();
 
         assert_eq!(
@@ -348,25 +399,78 @@ effect.name=文字を表示します\r\n";
     }
 
     #[test]
+    fn the_other_keys_of_a_section_are_kept_as_item_descriptions() {
+        // 項目の説明は捨てない。名前の似た効果の使い分けは、散文ではなく設定
+        // 項目の顔ぶれとその説明で解ける。
+        let table = parsed_help();
+
+        assert_eq!(
+            item_description_of(&table, "図形", "ライン幅").as_deref(),
+            Some("図形を描画するラインの幅を指定します")
+        );
+        // 項目のキーが `effect.name` より前に並ぶ節でも取りこぼさない。
+        assert_eq!(
+            item_description_of(&table, "画像合成(オブジェクト)", "合成モード").as_deref(),
+            Some("合成のしかたを選択します")
+        );
+        assert_eq!(
+            item_description_of(&table, "画像合成(オブジェクト)", "X").as_deref(),
+            Some("合成する位置を指定します")
+        );
+    }
+
+    #[test]
+    fn the_effect_key_never_appears_as_an_item_description() {
+        // `effect.name` は効果そのものの説明である。項目の表へ入れると、項目の
+        // 説明として効果の説明が出る。
+        let table = parsed_help();
+
+        for effect in ["図形", "画像合成(オブジェクト)", "テキスト"] {
+            let help = table.get(effect).expect("節がある");
+            assert!(
+                !help.items.contains_key(EFFECT_DESCRIPTION_KEY),
+                "{effect} の項目に {EFFECT_DESCRIPTION_KEY} が混じっています"
+            );
+            let description = help.description.as_deref().expect("効果の説明がある");
+            assert!(
+                !help.items.values().any(|item| item == description),
+                "{effect} の項目の説明が効果の説明と同じです"
+            );
+        }
+        // 説明を 1 つだけ持つ節は、その 1 つを効果の説明として持つ。
+        assert!(
+            table.get("テキスト").expect("節がある").items.is_empty(),
+            "項目の説明を持たない節が項目を名乗っています"
+        );
+    }
+
+    #[test]
     fn a_comment_line_inside_a_section_is_skipped() {
-        // 節の中のコメント行は説明でも項目でもない。`=` を含む形で現れても、
-        // キーが一致しないため説明には採られない。
-        let table = parse_descriptions(
+        // 節の中のコメント行は説明でも項目でもない。項目の説明はキー名を問わずに
+        // 採るため、読み飛ばさなければ `;キー=値` が項目の説明として現れる。
+        let table = parse_help(
             "[Tips.図形]\r\n;effect.name=コメント\r\n;単なる注記\r\neffect.name=説明\r\n",
         );
 
-        assert_eq!(table.get("図形").map(String::as_str), Some("説明"));
+        assert_eq!(description_of(&table, "図形").as_deref(), Some("説明"));
+        assert!(table.get("図形").expect("節がある").items.is_empty());
         assert_eq!(table.len(), 1);
     }
 
     #[test]
     fn the_second_line_of_a_description_is_kept() {
         // 発見の鍵が 2 行目に置かれている説明が実在する。先頭行だけに切ると、
-        // 説明を載せる意味そのものが失われる。
-        let description = help_table().remove("図形").expect("説明がある");
+        // 説明を載せる意味そのものが失われる。効果の説明も項目の説明も同じで
+        // ある——`図形` が svg を読めることは、項目の説明の 2 行目にしか無い。
+        let table = parsed_help();
 
+        let description = description_of(&table, "図形").expect("効果の説明がある");
         assert_eq!(description.lines().count(), 2);
         assert!(description.lines().nth(1).unwrap().contains("svg"));
+
+        let item = item_description_of(&table, "図形", "図形の種類").expect("項目の説明がある");
+        assert_eq!(item.lines().count(), 2);
+        assert!(item.lines().nth(1).unwrap().contains("svg"));
     }
 
     #[test]
@@ -385,10 +489,23 @@ effect.name=文字を表示します\r\n";
             let dir = TempDir::new(name);
             dir.write_help(text);
             assert!(
-                read_descriptions(dir.path()).expect("読める").is_empty(),
+                read_help(dir.path()).expect("読める").is_empty(),
                 "{name} が説明を返しました"
             );
         }
+    }
+
+    #[test]
+    fn a_section_with_only_item_descriptions_is_still_recorded() {
+        // 効果の説明を持たない節でも、項目の説明は引ける。効果の説明の有無で
+        // 節ごと落とすと、項目の説明だけが書かれた効果が空として返る。
+        let table = parse_help("[Tips.グロー]\r\n拡散=光の広がりを指定します\r\n");
+
+        assert_eq!(description_of(&table, "グロー"), None);
+        assert_eq!(
+            item_description_of(&table, "グロー", "拡散").as_deref(),
+            Some("光の広がりを指定します")
+        );
     }
 
     #[test]
@@ -397,13 +514,13 @@ effect.name=文字を表示します\r\n";
         let readable = TempDir::new("no-tips");
         readable.write_help(";コメントだけ\r\n[Language]\r\n図形=Figure\r\n");
         assert_eq!(
-            read_descriptions(readable.path()),
+            read_help(readable.path()),
             Some(HashMap::new()),
             "読めたファイルが読めなかったことになっています"
         );
 
         let missing = TempDir::new("missing");
-        assert_eq!(read_descriptions(missing.path()), None);
+        assert_eq!(read_help(missing.path()), None);
     }
 
     #[test]
@@ -416,7 +533,7 @@ effect.name=文字を表示します\r\n";
         assert_eq!(text.len() as u64, MAX_HELP_BYTES + 1);
         dir.write_help(&text);
 
-        assert_eq!(read_descriptions(dir.path()), None);
+        assert_eq!(read_help(dir.path()), None);
     }
 
     #[test]
@@ -424,7 +541,7 @@ effect.name=文字を表示します\r\n";
         let dir = TempDir::new("non-utf8");
         dir.write_help_bytes(b"[Tips.\xff\xfe]\r\neffect.name=\xff\r\n");
 
-        assert_eq!(read_descriptions(dir.path()), None);
+        assert_eq!(read_help(dir.path()), None);
     }
 
     #[test]
@@ -439,10 +556,25 @@ effect.name=文字を表示します\r\n";
 
     #[test]
     fn the_first_section_wins_when_an_effect_appears_twice() {
-        let table = parse_descriptions(
-            "[Tips.図形]\r\neffect.name=先\r\n[Tips.図形]\r\neffect.name=後\r\n",
+        // 節は丸ごと先勝ちである。キーごとに先勝ちにすると、後の節の項目だけが
+        // 先の節へ紛れ込む。
+        let table = parse_help(
+            "[Tips.図形]\r\neffect.name=先\r\n[Tips.図形]\r\neffect.name=後\r\nライン幅=後の項目\r\n",
         );
-        assert_eq!(table.get("図形").map(String::as_str), Some("先"));
+        assert_eq!(description_of(&table, "図形").as_deref(), Some("先"));
+        assert_eq!(item_description_of(&table, "図形", "ライン幅"), None);
+    }
+
+    #[test]
+    fn the_first_key_wins_when_it_appears_twice_in_one_section() {
+        let table = parse_help(
+            "[Tips.図形]\r\neffect.name=先\r\neffect.name=後\r\nライン幅=先\r\nライン幅=後\r\n",
+        );
+        assert_eq!(description_of(&table, "図形").as_deref(), Some("先"));
+        assert_eq!(
+            item_description_of(&table, "図形", "ライン幅").as_deref(),
+            Some("先")
+        );
     }
 
     #[test]
