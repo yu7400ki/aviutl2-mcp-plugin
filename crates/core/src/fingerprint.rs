@@ -212,6 +212,22 @@ fn write_item_value(input: &mut FingerprintInput, value: &ItemValue) {
             input.text("item_value.kind", "text");
             input.text("item_value.text", value);
         }
+        ItemValue::Track(track) => {
+            input.text("item_value.kind", "track");
+            input.count("item_value.track.value_count", track.values.len());
+            for value in &track.values {
+                input.number("item_value.track.value", *value);
+            }
+            input.optional_text("item_value.track.mode", track.mode.as_deref());
+            input.count("item_value.track.param_count", track.params.len());
+            for param in &track.params {
+                input.number("item_value.track.param", *param);
+            }
+            input.boolean("item_value.track.accelerate", track.accelerate);
+            input.boolean("item_value.track.decelerate", track.decelerate);
+            input.boolean("item_value.track.twopoint", track.twopoint);
+            input.boolean("item_value.track.timecontrol", track.timecontrol);
+        }
         ItemValue::Unknown { raw } => {
             input.text("item_value.kind", "unknown");
             input.text("item_value.unknown", raw);

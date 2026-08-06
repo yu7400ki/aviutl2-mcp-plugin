@@ -22,8 +22,9 @@ use crate::read::host::{
 use crate::test_support::alias_with_effects;
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EffectFlags, EffectItem,
-    EffectItemType, EffectType, FiniteF64, FrameRange, GridBpm, ItemValue, ModuleEntry, ModuleType,
-    PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, decode_host_text, encode_host_text,
+    EffectItemType, EffectType, EvaluatedItemKind, FiniteF64, FrameRange, GridBpm, ItemValue,
+    ModuleEntry, ModuleType, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, TrackValue,
+    decode_host_text, decode_track_value, encode_host_text,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -1970,6 +1971,7 @@ pub(crate) fn raw_item_value(value: &ItemValue) -> String {
         ItemValue::Number { value } => format!("{:.*}", ITEM_VALUE_DECIMALS, value.get()),
         ItemValue::Bool { value } => if *value { "1" } else { "0" }.to_string(),
         ItemValue::Text { value } => encode_host_text(value),
+        ItemValue::Track(track) => raw_track_value(track),
         ItemValue::Color { value } | ItemValue::Choice { value } => value.clone(),
         ItemValue::Font { name } => name.clone(),
         ItemValue::File { path } | ItemValue::Folder { path } => path.clone(),
@@ -1998,6 +2000,14 @@ pub(crate) fn raw_item_value(value: &ItemValue) -> String {
 /// 書き込みを公開していない種別は生の文字列のまま保つ。読み取り経路がそれらを
 /// 生値として返すため、書き込みだけが別の形へ写ると場面の状態が種別と食い違う。
 fn host_write(item_type: &EffectItemType, value: &str, fonts: &[String]) -> Option<ItemValue> {
+    // トラックバーの項目は数値と移動の 2 通りの表記を受ける。移動として読める
+    // 文字列を数値として解釈すると、0 へ落ちて書き込みが黙って壊れる。
+    if item_type.evaluated_kind() == Some(EvaluatedItemKind::Track)
+        && let Some(track) = decode_track_value(value)
+        && track.mode.is_some()
+    {
+        return Some(host_write_track(&track));
+    }
     match item_type {
         EffectItemType::Select
         | EffectItemType::Combo
@@ -2049,6 +2059,72 @@ fn host_write(item_type: &EffectItemType, value: &str, fonts: &[String]) -> Opti
             raw: value.to_string(),
         }),
     }
+}
+
+/// ホストが受け付ける移動方法の名前。
+///
+/// **一覧に無い名前を書くと実機はプロセスごと落ちる。** ホストが投げた C++ の
+/// 例外が `extern "C"` の境界を越えて入り、巻き戻せずに abort する。フェイクは
+/// これを panic で模す。落ちる形を「黙って無視される」として模すと、名前の検証を
+/// 外しても検査が緑のまま通る。
+pub(crate) const TRACK_MODES: [&str; 3] = ["直線移動", "曲線移動", "ランダム移動"];
+
+/// ホストがパラメータ無しの書き込みに対して補う既定値を持つ移動方法。
+///
+/// 実機で `ランダム移動,0` を書くと `ランダム移動,0|15` として保存される。
+pub(crate) const TRACK_DEFAULT_PARAM: (&str, f64) = ("ランダム移動", 15.0);
+
+/// ホストが移動を含む値として読み取りへ返す生の文字列。
+///
+/// 値の桁は設定項目の小数桁へ揃う。実機で `-600,600,直線移動,0` を書くと
+/// 読み直しは `-600.00,600.00,直線移動,0` になる。
+fn raw_track_value(track: &TrackValue) -> String {
+    let decimals = |value: &FiniteF64| format!("{:.*}", ITEM_VALUE_DECIMALS, value.get());
+    let Some(mode) = track.mode.as_deref() else {
+        return decimals(&track.values[0]);
+    };
+    let mut fields: Vec<String> = track.values.iter().map(decimals).collect();
+    fields.push(mode.to_string());
+    let flags = u32::from(track.accelerate)
+        | (u32::from(track.decelerate) << 1)
+        | (u32::from(track.twopoint) << 2);
+    fields.push(flags.to_string());
+    let mut raw = fields.join(",");
+    raw.push('|');
+    raw.push_str(
+        &track
+            .params
+            .iter()
+            .map(decimals)
+            .collect::<Vec<String>>()
+            .join(","),
+    );
+    raw
+}
+
+/// 移動を含む書き込みをホストが保持する形へ写す。
+///
+/// 値は数値と同じ規則で切り詰めと丸めを受ける。パラメータを渡さない書き込みには
+/// 移動方法ごとの既定値が入る。一覧に無い移動方法では panic する（[`TRACK_MODES`]）。
+fn host_write_track(track: &TrackValue) -> ItemValue {
+    let mode = track.mode.as_deref().expect("移動を持つ値");
+    assert!(
+        TRACK_MODES.contains(&mode),
+        "存在しない移動方法 {mode} が書き込まれました。実機ではプロセスが落ちます"
+    );
+    let adjust = |value: &FiniteF64| {
+        FiniteF64::try_new(round_to_item_decimals(clamp_item_value(value.get()))).expect("有限値")
+    };
+    let params = match (track.params.is_empty(), mode == TRACK_DEFAULT_PARAM.0) {
+        (true, true) => vec![FiniteF64::try_new(TRACK_DEFAULT_PARAM.1).expect("有限値")],
+        (true, false) => Vec::new(),
+        (false, _) => track.params.iter().map(adjust).collect(),
+    };
+    ItemValue::Track(TrackValue {
+        values: track.values.iter().map(adjust).collect(),
+        params,
+        ..track.clone()
+    })
 }
 
 /// ホストが色として受け付ける表記か。16 進 6 桁だけを受ける。

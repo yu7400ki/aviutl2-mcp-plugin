@@ -3983,7 +3983,12 @@ mod tests {
                 prepare_item_write(&items, "項目", &probe),
                 Err(ItemWriteError::UnsupportedItemType { .. })
             );
-            if writable && matches!(read_back_check(item_type), ReadBackCheck::Declared { .. }) {
+            if writable
+                && matches!(
+                    read_back_check(item_type, &probe),
+                    ReadBackCheck::Declared { .. }
+                )
+            {
                 names.push(item_type.kind_name());
             }
         }

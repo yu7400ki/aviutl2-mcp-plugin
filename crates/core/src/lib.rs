@@ -47,6 +47,7 @@ pub mod settings;
 pub mod state;
 pub mod text_codec;
 pub mod tool;
+pub mod track_value;
 pub mod validation;
 pub mod wire_format;
 
@@ -145,6 +146,10 @@ pub use settings::{
 pub use state::InstanceState;
 pub use text_codec::{decode_host_text, encode_host_text};
 pub use tool::{ALWAYS_ENABLED_TOOL, ToolFamily, all_tool_names, togglable_tool_names};
+pub use track_value::{
+    TrackValue, TrackValueError, TrackWriteTarget, decode_track_value, encode_track_value,
+    validate_track_value,
+};
 pub use validation::{
     MAX_ALIAS_BYTES, MAX_ITEM_VALUE_BYTES, MAX_NAME_UTF16_UNITS, MAX_PATH_UTF16_UNITS,
     PathSyntaxError, TextSyntaxError, limit_item_value_bytes, validate_alias,

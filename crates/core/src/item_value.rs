@@ -1,9 +1,12 @@
 //! effect 設定項目の値と、書き込み時の検証。
 
-use crate::effect::{AvailableEffectItem, EffectItemType};
+use crate::effect::{AvailableEffectItem, EffectItemType, EvaluatedItemKind};
 use crate::error::ErrorCode;
 use crate::number::FiniteF64;
 use crate::text_codec::encode_host_text;
+use crate::track_value::{
+    TrackValue, TrackValueError, decode_track_value, encode_track_value, track_read_back_matches,
+};
 use crate::validation::{
     PathSyntaxError, TextSyntaxError, limit_item_value_bytes, validate_item_text,
     validate_multiline_item_text, validate_path,
@@ -71,6 +74,14 @@ pub enum ItemValue {
         /// 値。
         value: String,
     },
+    /// トラックバーの移動を含む値。
+    ///
+    /// **静的なトラックバーは [`ItemValue::Number`] のままである。** 読み取りが
+    /// 全トラックバーをこの形で返すと、`X` も `拡大率` も `透明度` も応答が
+    /// 膨らむ一方で、移動を持つ項目は一部でしかない。書き込みは両方を受け付け、
+    /// 数値を書けば静的になり、この形を書けば移動が入る。
+    #[serde(rename = "track")]
+    Track(TrackValue),
     /// 未対応種別の生値。
     #[serde(rename = "unknown")]
     Unknown {
@@ -94,6 +105,7 @@ impl ItemValue {
             ItemValue::Folder { .. } => "folder",
             ItemValue::Font { .. } => "font",
             ItemValue::Text { .. } => "text",
+            ItemValue::Track(_) => "track",
             ItemValue::Unknown { .. } => "unknown",
         }
     }
@@ -135,6 +147,9 @@ pub enum ItemWriteError {
     /// パス値の検証に失敗した。
     #[error(transparent)]
     Path(#[from] PathSyntaxError),
+    /// トラックバーの移動の検証に失敗した。
+    #[error(transparent)]
+    Track(#[from] TrackValueError),
 }
 
 impl ItemWriteError {
@@ -169,6 +184,12 @@ impl ItemWriteError {
                 .copied()
                 .map(ItemWriteError::Path),
         );
+        all.extend(
+            TrackValueError::ALL
+                .iter()
+                .copied()
+                .map(ItemWriteError::Track),
+        );
         all
     }
 
@@ -182,6 +203,7 @@ impl ItemWriteError {
             ItemWriteError::UnsupportedItemType { .. } => Some("item_type_not_writable"),
             ItemWriteError::Text(error) => Some(error.reason()),
             ItemWriteError::Path(error) => Some(error.reason()),
+            ItemWriteError::Track(error) => Some(error.reason()),
             ItemWriteError::UnknownValue
             | ItemWriteError::ItemNotFound { .. }
             | ItemWriteError::ValueKindMismatch { .. } => None,
@@ -196,7 +218,8 @@ impl ItemWriteError {
             ItemWriteError::UnknownValue
             | ItemWriteError::ValueKindMismatch { .. }
             | ItemWriteError::Text(_)
-            | ItemWriteError::Path(_) => ErrorCode::InvalidArgument,
+            | ItemWriteError::Path(_)
+            | ItemWriteError::Track(_) => ErrorCode::InvalidArgument,
         }
     }
 }
@@ -225,6 +248,9 @@ pub enum ReadBackCheck {
 /// **数値の比較に許容誤差を置かない。** 誤差を許すと、値域への切り詰めと小数
 /// 桁への丸めを一致として見逃す。`100` と `100.00` が等しいのは、どちらも同じ
 /// `f64` へ解釈されるからであって、近いからではない。
+///
+/// トラックバーの移動も同じ理由で生の文字列では比べられない。復号して構造として
+/// 比べる（[`track_read_back_matches`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadBackComparison {
     /// 文字列として完全に一致するか。
@@ -235,6 +261,8 @@ pub enum ReadBackComparison {
     Boolean,
     /// 大文字小文字を無視して一致するか。
     IgnoreAsciiCase,
+    /// トラックバーの移動として解釈して一致するか。
+    Track,
 }
 
 impl ReadBackComparison {
@@ -255,6 +283,12 @@ impl ReadBackComparison {
             ReadBackComparison::Boolean => {
                 match (parse_check_value(written), parse_check_value(observed)) {
                     (Some(written), Some(observed)) => written == observed,
+                    _ => false,
+                }
+            }
+            ReadBackComparison::Track => {
+                match (decode_track_value(written), decode_track_value(observed)) {
+                    (Some(written), Some(observed)) => track_read_back_matches(&written, &observed),
                     _ => false,
                 }
             }
@@ -361,7 +395,7 @@ pub fn prepare_item_write(
         })?;
     Ok(ItemWrite {
         value: encode_item_value(&entry.item_type, value)?,
-        read_back: read_back_check(&entry.item_type),
+        read_back: read_back_check(&entry.item_type, value),
     })
 }
 
@@ -454,9 +488,26 @@ fn is_writable(item_type: &EffectItemType) -> bool {
 /// 別に決めており、そちらで拒否されるためここへ由来する [`ItemWrite`] は生まれ
 /// ない。
 ///
-/// **`_` を使わない網羅 `match` である。** 種別を足したときに、照合するかを
-/// 決めないまま既定へ落ちることがない。
-pub fn read_back_check(item_type: &EffectItemType) -> ReadBackCheck {
+/// **値の形も見る。** トラックバーの種別は数値と移動の 2 通りの表記を受け付ける
+/// ため、種別だけでは比べ方が決まらない。移動を数値として比べると、正しい
+/// 書き込みが「数値として読めない」として失敗になる。
+///
+/// **`_` を使わない網羅 `match` である。** 種別を足したときも値の形を足したとき
+/// も、照合するかを決めないまま既定へ落ちることがない。
+pub fn read_back_check(item_type: &EffectItemType, value: &ItemValue) -> ReadBackCheck {
+    match value {
+        ItemValue::Track(_) => return ReadBackCheck::Compare(ReadBackComparison::Track),
+        ItemValue::Number { .. }
+        | ItemValue::Integer { .. }
+        | ItemValue::Bool { .. }
+        | ItemValue::Color { .. }
+        | ItemValue::Choice { .. }
+        | ItemValue::File { .. }
+        | ItemValue::Folder { .. }
+        | ItemValue::Font { .. }
+        | ItemValue::Text { .. }
+        | ItemValue::Unknown { .. } => {}
+    }
     match item_type {
         EffectItemType::Integer | EffectItemType::Number => {
             ReadBackCheck::Compare(ReadBackComparison::Numeric)
@@ -482,7 +533,15 @@ pub fn read_back_check(item_type: &EffectItemType) -> ReadBackCheck {
 }
 
 /// 種別が値の形を受け付けるか。
+///
+/// トラックバーの移動は、任意フレームでの値を評価できる種別のうちトラックバーと
+/// して評価されるものが受け付ける。**評価の種別を引き当てて判定する。** 種別の
+/// 名前を並べ直すと、評価はトラックバーとして行うのに移動は書けない、という
+/// 食い違いを作れてしまう。
 fn accepts(item_type: &EffectItemType, value: &ItemValue) -> bool {
+    if matches!(value, ItemValue::Track(_)) {
+        return item_type.evaluated_kind() == Some(EvaluatedItemKind::Track);
+    }
     matches!(
         (item_type, value),
         (EffectItemType::Integer, ItemValue::Integer { .. })
@@ -512,6 +571,10 @@ fn accepts(item_type: &EffectItemType, value: &ItemValue) -> bool {
 /// 整数は十進整数、実数は指数表記を用いない十進小数、真偽値は `0` / `1` と
 /// する。実数は元の値へ戻せる最短の桁数で書き出す。
 ///
+/// [`ItemValue::Track`] は区間ごとの値と移動を 1 本の文字列へ組み立てる
+/// （[`encode_track_value`]）。書式を壊す指定はそこで拒否する——不正な文字列は
+/// ホストのプロセスを落とす。
+///
 /// [`ItemValue::Text`] だけは改行とタブを許し、ホストのエスケープ表記へ
 /// 符号化する（[`encode_multiline_text`]）。改行を拒否すると複数行のテキストを
 /// 書く直接の手段が無くなり、符号化しないとクライアントの `\` がホストの
@@ -530,6 +593,7 @@ fn encode_value(value: &ItemValue) -> Result<String, ItemWriteError> {
         ItemValue::Number { value } => Ok(value.to_string()),
         ItemValue::Bool { value } => Ok(if *value { "1" } else { "0" }.to_string()),
         ItemValue::Text { value } => encode_multiline_text(value),
+        ItemValue::Track(track) => encode_track_value(track),
         ItemValue::Color { value } | ItemValue::Choice { value } => encode_text(value),
         ItemValue::Font { name } => encode_text(name),
         ItemValue::File { path } | ItemValue::Folder { path } => encode_path(path),
@@ -595,6 +659,7 @@ mod tests {
             ItemWriteError::UnsupportedItemType { .. } => "UnsupportedItemType",
             ItemWriteError::Text(_) => "Text",
             ItemWriteError::Path(_) => "Path",
+            ItemWriteError::Track(_) => "Track",
         }
     }
 
@@ -607,6 +672,7 @@ mod tests {
             "UnsupportedItemType",
             "Text",
             "Path",
+            "Track",
         ];
         let covered: Vec<&str> = ItemWriteError::all()
             .iter()
@@ -640,6 +706,9 @@ mod tests {
         for source in PathSyntaxError::ALL {
             assert!(reasons.contains(&Some(source.reason())), "{source}");
         }
+        for source in TrackValueError::ALL {
+            assert!(reasons.contains(&Some(source.reason())), "{source}");
+        }
     }
 
     #[test]
@@ -660,6 +729,13 @@ mod tests {
                 "{error}"
             );
         }
+        for error in TrackValueError::ALL {
+            assert_eq!(
+                ItemWriteError::Track(*error).reason(),
+                Some(error.reason()),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -670,6 +746,7 @@ mod tests {
             },
             ItemWriteError::Text(TextSyntaxError::ContainsNul),
             ItemWriteError::Path(PathSyntaxError::UncPath),
+            ItemWriteError::Track(TrackValueError::UnknownMode),
         ];
         for error in named {
             let reason = error.reason().expect("名前を持つ失敗です");
@@ -1488,6 +1565,15 @@ mod tests {
 
     /// 種別ごとに、読み直しをどう扱うかを述べる。
     ///
+    /// 照合のしかたが種別だけで決まる範囲を見るための当て木。
+    ///
+    /// トラックバーの移動は種別と値の両方で決まるため、この値では引けない。
+    fn read_back_probe() -> ItemValue {
+        ItemValue::Text {
+            value: "文字列".to_string(),
+        }
+    }
+
     /// [`EffectItemType`] に対する網羅 `match` であり `_` を使わない。**種別を
     /// 足すとここが落ち、照合のしかたを書くまでコンパイルできない。**
     fn expects_read_back(item_type: &EffectItemType) -> ReadBackCheck {
@@ -1525,7 +1611,7 @@ mod tests {
             .chain([&EffectItemType::Unknown(99)])
         {
             assert_eq!(
-                read_back_check(item_type),
+                read_back_check(item_type, &read_back_probe()),
                 expects_read_back(item_type),
                 "{item_type} の照合のしかたが宣言と異なります"
             );
@@ -1542,7 +1628,10 @@ mod tests {
                 continue;
             }
             assert!(
-                matches!(read_back_check(item_type), ReadBackCheck::Compare(_)),
+                matches!(
+                    read_back_check(item_type, &read_back_probe()),
+                    ReadBackCheck::Compare(_)
+                ),
                 "{item_type} が書き込み後に照合されません"
             );
         }

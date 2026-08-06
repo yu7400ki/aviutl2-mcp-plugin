@@ -38,7 +38,7 @@ use aviutl2_mcp_core::{
     MAX_GRID_BPM_ENTRIES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MAX_POSITION,
     MoveObjectParams, MoveObjectSectionParams, ObjectSource, Placement, RangeChange, SceneSize,
     SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
-    SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams,
+    SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams, TrackValue,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -316,6 +316,34 @@ pub enum ItemValueInput {
         #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]
         value: String,
     },
+    /// トラックバーの移動（キーフレーム）。区間ごとに違う値を書く唯一の形である。
+    /// トラックバーに数値を書くと全区間へ同じ値が入るため、中間点で値を変えるには
+    /// この形を使う。
+    /// values は区間の境界ごとの値で、区間数 + 1 個を指定する。中間点が 2 個なら
+    /// 3 区間となり 4 個である。個数が合わない指定は invalid_argument となる。
+    /// mode を null にし values を 1 要素にすると移動が消えて静的な値になる。
+    /// **移動を消す手段はこれだけである。**
+    /// mode には対象の設定項目が持つ移動方法の名前を指定する。一覧に無い名前は
+    /// 受け付けない。時間制御はフラグではなく移動方法の名前の変種が担うため、
+    /// timecontrol を真にするには時間制御の変種を mode に指定する。
+    /// params を空にすると移動方法ごとの既定値が入る。
+    Track {
+        /// 区間の境界ごとの値。
+        values: Vec<f64>,
+        /// 移動方法の名前。null は移動を持たないことを表す。
+        #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]
+        mode: Option<String>,
+        /// 移動方法のパラメータ。空にすると既定値が入る。
+        params: Vec<f64>,
+        /// 加速を有効にするか。
+        accelerate: bool,
+        /// 減速を有効にするか。
+        decelerate: bool,
+        /// 中間点を無視するか。
+        twopoint: bool,
+        /// 時間制御が有効か。mode が時間制御の変種であるときだけ真にできる。
+        timecontrol: bool,
+    },
     /// 未対応種別の生値。読み取りは返すが、書き込みには指定できない。
     Unknown {
         /// 生文字列。
@@ -345,9 +373,38 @@ impl ItemValueInput {
             ItemValueInput::Text { value } => ItemValue::Text {
                 value: value.clone(),
             },
+            ItemValueInput::Track {
+                values,
+                mode,
+                params,
+                accelerate,
+                decelerate,
+                twopoint,
+                timecontrol,
+            } => ItemValue::Track(TrackValue {
+                values: finite_values("values", values)?,
+                mode: mode.clone(),
+                params: finite_values("params", params)?,
+                accelerate: *accelerate,
+                decelerate: *decelerate,
+                twopoint: *twopoint,
+                timecontrol: *timecontrol,
+            }),
             ItemValueInput::Unknown { raw } => ItemValue::Unknown { raw: raw.clone() },
         })
     }
+}
+
+/// 実数の並びを有限値の並びへ写す。
+fn finite_values(field: &str, values: &[f64]) -> Result<Vec<FiniteF64>, ErrorObject> {
+    values
+        .iter()
+        .map(|value| {
+            FiniteF64::try_new(*value).ok_or_else(|| {
+                invalid_argument(format!("{field} には有限の数値を指定してください"))
+            })
+        })
+        .collect()
 }
 
 /// `create_object` の入力。
@@ -1932,7 +1989,19 @@ mod tests {
             ItemValue::Font { .. } => ItemValue::Text {
                 value: "字幕".to_string(),
             },
-            ItemValue::Text { .. } => ItemValue::Unknown {
+            ItemValue::Text { .. } => ItemValue::Track(TrackValue {
+                values: [0.0, 100.0]
+                    .into_iter()
+                    .map(|value| FiniteF64::try_new(value).expect("有限値"))
+                    .collect(),
+                mode: Some("直線移動".to_string()),
+                params: Vec::new(),
+                accelerate: false,
+                decelerate: false,
+                twopoint: false,
+                timecontrol: false,
+            }),
+            ItemValue::Track(_) => ItemValue::Unknown {
                 raw: "future=1".to_string(),
             },
             ItemValue::Unknown { .. } => return None,

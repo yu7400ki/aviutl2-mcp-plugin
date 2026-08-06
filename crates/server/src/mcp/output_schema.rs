@@ -630,6 +630,15 @@ fn item_value() -> Value {
             tagged("folder", &[("path", string())]),
             tagged("font", &[("name", string())]),
             tagged("text", &[("value", string())]),
+            tagged("track", &[
+                ("values", array(number())),
+                ("mode", nullable(string())),
+                ("params", array(number())),
+                ("accelerate", boolean()),
+                ("decelerate", boolean()),
+                ("twopoint", boolean()),
+                ("timecontrol", boolean()),
+            ]),
             tagged("unknown", &[("raw", string())]),
         ]
     })
@@ -735,7 +744,7 @@ mod tests {
         ListModulesResult, ListObjectAliasesResult, ListObjectsResult, ListPalettesResult,
         ModuleEntry, ModuleType, ObjectAliasSummary, ObjectDetail, ObjectFingerprintInput,
         ObjectSummary, ObservedSelection, PageMeta, PaletteEntry, Rgba, SceneInfo, SectionRange,
-        SelectionField, SelectionSnapshot, SelectionState, TrackGroup, TrackInfo,
+        SelectionField, SelectionSnapshot, SelectionState, TrackGroup, TrackInfo, TrackValue,
     };
 
     /// 値が schema に適合するかを再帰的に検査する。
@@ -922,6 +931,18 @@ mod tests {
             ItemValue::Text {
                 value: "字幕".to_string(),
             },
+            ItemValue::Track(TrackValue {
+                values: vec![
+                    FiniteF64::try_new(0.0).expect("有限値"),
+                    FiniteF64::try_new(100.0).expect("有限値"),
+                ],
+                mode: Some("直線移動".to_string()),
+                params: vec![FiniteF64::try_new(15.0).expect("有限値")],
+                accelerate: true,
+                decelerate: false,
+                twopoint: false,
+                timecontrol: false,
+            }),
             ItemValue::Unknown {
                 raw: "raw".to_string(),
             },
