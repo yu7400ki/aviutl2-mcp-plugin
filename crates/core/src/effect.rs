@@ -104,6 +104,12 @@ pub struct AvailableEffect {
     pub flags: EffectFlags,
     /// 設定項目の数。
     pub item_count: usize,
+    /// 効果の説明。ホストが説明を持たない effect は null。
+    ///
+    /// 文言はホストが同梱するものをそのまま運ぶ。**説明が無いことを推測で
+    /// 埋めない。** 検証できない説明は、無い場合より悪い——受け取った側はそれを
+    /// 信じて使う。
+    pub description: Option<String>,
 }
 
 /// 利用可能な effect の設定項目定義。
@@ -608,6 +614,7 @@ mod tests {
             effect_type: EffectType::Filter,
             flags: EffectFlags::from_raw(EFFECT_FLAG_VIDEO | EFFECT_FLAG_CAMERA),
             item_count: 1,
+            description: Some("ぼかします".to_string()),
         }
     }
 
@@ -837,6 +844,20 @@ mod tests {
     }
 
     #[test]
+    fn available_effect_without_a_description_carries_null() {
+        // 説明の無い effect は null で名乗る。埋めた説明と区別が付かなくなる
+        // 空文字列や既定の文言では代えない。
+        let effect = AvailableEffect {
+            description: None,
+            ..sample_available_effect()
+        };
+        let value = serde_json::to_value(&effect).unwrap();
+        assert!(value["description"].is_null(), "{value}");
+        let restored: AvailableEffect = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, effect);
+    }
+
+    #[test]
     fn available_effect_keeps_unknown_types() {
         let effect = AvailableEffect {
             effect_type: EffectType::Unknown(42),
@@ -853,6 +874,7 @@ mod tests {
         // 載せると、応答量の大半をそれが占めたまま判断の材料は増えない。
         let value = serde_json::to_value(sample_available_effect()).unwrap();
         assert_eq!(value["item_count"], 1);
+        assert_eq!(value["description"], "ぼかします");
         for forbidden in ["items", "item_names"] {
             assert!(
                 value.get(forbidden).is_none(),

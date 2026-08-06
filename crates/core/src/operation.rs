@@ -2152,6 +2152,7 @@ mod tests {
                 effect_type: EffectType::Filter,
                 flags: EffectFlags::from_raw(9),
                 item_count: 1,
+                description: None,
             }],
             page: sample_page_meta(),
         };

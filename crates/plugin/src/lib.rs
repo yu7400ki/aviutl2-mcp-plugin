@@ -10,6 +10,8 @@ mod atomic_file;
 #[cfg(windows)]
 pub mod edit;
 #[cfg(windows)]
+pub mod effect_help;
+#[cfg(windows)]
 pub mod identity;
 #[cfg(windows)]
 pub mod lifecycle;

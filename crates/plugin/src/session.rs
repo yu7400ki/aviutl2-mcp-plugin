@@ -1966,12 +1966,14 @@ mod tests {
                 effect_type: EffectType::Filter,
                 flags: EffectFlags::from_raw(1),
                 item_count: 1,
+                description: None,
             },
             AvailableEffect {
                 name: "動画ファイル".to_string(),
                 effect_type: EffectType::Input,
                 flags: EffectFlags::from_raw(3),
                 item_count: 0,
+                description: None,
             },
         ]
     }

@@ -530,6 +530,7 @@ async fn list_available_effects_tool_sends_effect_type() {
             effect_type: EffectType::Filter,
             flags: EffectFlags::from_raw(9),
             item_count: 1,
+            description: None,
         }],
         page: sample_page_meta(),
     })

@@ -365,6 +365,9 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
         for effect in window {
             let item_count = guard(|| self.host.effect_item_count(&effect.name))?;
             items.push(AvailableEffect {
+                // 説明はホストが同梱するものだけを運ぶ。無い効果は null になり、
+                // 読めない環境では全件が null になる。
+                description: crate::effect_help::description_of(&effect.name).map(str::to_string),
                 name: effect.name,
                 effect_type: effect.effect_type,
                 flags: effect.flags,
@@ -3316,6 +3319,30 @@ mod tests {
             .list_available_effects_page(Some(&EffectType::Transition))
             .unwrap();
         assert!(none.items.is_empty());
+    }
+
+    #[test]
+    fn list_available_effects_leaves_the_description_null_without_the_host_help_file() {
+        // 説明の供給源はホストが同梱するファイルだけである。ホストの実行ファイル
+        // の隣にそれが無い環境では説明が出ないが、一覧そのものは働き続ける。
+        assert!(
+            crate::effect_help::description_of("ぼかし").is_none(),
+            "この環境で説明が読めています。検査の前提が崩れています"
+        );
+        let adapter = adapter();
+        let result = adapter.list_available_effects_page(None).unwrap();
+
+        assert_eq!(result.items.len(), fake_catalog().len());
+        for effect in &result.items {
+            assert!(
+                effect.description.is_none(),
+                "{} に説明が付きました",
+                effect.name
+            );
+        }
+        assert_eq!(result.items[0].name, "ぼかし");
+        assert_eq!(result.items[0].item_count, 1);
+        assert_eq!(result.items[0].effect_type, EffectType::Filter);
     }
 
     #[test]

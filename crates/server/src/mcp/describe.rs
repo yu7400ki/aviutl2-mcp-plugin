@@ -195,15 +195,22 @@ pub fn available_effects(result: &ListAvailableEffectsResult) -> String {
         catalog_page_line(&result.page)
     ));
     for effect in &result.items {
-        text.push_line(format!(
+        let mut line = format!(
             "- {} type={} items={}",
             clamp_chars(&effect.name, MAX_NAME_CHARS),
             effect_type_label(&effect.effect_type),
             effect.item_count,
-        ));
+        );
+        // 説明はホストが持つ効果にしか付かない。改行の畳み込みと行の切り詰めは
+        // 行の追加が行うため、ここでは全文をそのまま繋ぐ。
+        if let Some(description) = &effect.description {
+            line.push(' ');
+            line.push_str(description);
+        }
+        text.push_line(line);
     }
     text.push_line(
-        "effect_type を指定すると種別で絞り込めます。設定項目の名前は、対象へ付与したあと get_object が現在値付きで返します",
+        "effect_type を指定すると種別で絞り込めます。説明はホストが同梱するものだけで、無い effect は null になります。設定項目の名前は、対象へ付与したあと get_object が現在値付きで返します",
     );
     text.finish()
 }
@@ -978,6 +985,42 @@ mod tests {
     }
 
     #[test]
+    fn available_effects_text_shows_the_description_when_the_host_supplies_one() {
+        let result = ListAvailableEffectsResult {
+            items: vec![
+                AvailableEffect {
+                    name: "図形".to_string(),
+                    effect_type: EffectType::Input,
+                    flags: EffectFlags::from_raw(1),
+                    item_count: 4,
+                    description: Some(
+                        "単色の図形を作成します\nsvgファイルから読み込めます".to_string(),
+                    ),
+                },
+                AvailableEffect {
+                    name: "ぼかし".to_string(),
+                    effect_type: EffectType::Filter,
+                    flags: EffectFlags::from_raw(1),
+                    item_count: 2,
+                    description: None,
+                },
+            ],
+            page: page(2, 2),
+        };
+        let text = available_effects(&result);
+
+        // 説明は 1 行へ畳んで載せる。発見の鍵が 2 行目にある説明があるため、
+        // 先頭行だけに切らない。
+        assert!(
+            text.contains(
+                "- 図形 type=input items=4 単色の図形を作成します svgファイルから読み込めます"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("- ぼかし type=filter items=2\n"), "{text}");
+    }
+
+    #[test]
     fn available_effects_text_is_bounded_for_oversized_results() {
         let items: Vec<AvailableEffect> = (0..OVERSIZED_COUNT)
             .map(|_| AvailableEffect {
@@ -985,6 +1028,7 @@ mod tests {
                 effect_type: EffectType::Filter,
                 flags: EffectFlags::from_raw(1),
                 item_count: 0,
+                description: None,
             })
             .collect();
         let result = ListAvailableEffectsResult {

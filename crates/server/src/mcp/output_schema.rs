@@ -534,6 +534,7 @@ fn available_effect() -> Value {
         ("effect_type", effect_type()),
         ("flags", effect_flags()),
         ("item_count", unsigned()),
+        ("description", nullable_string()),
     ])
 }
 
@@ -1138,12 +1139,14 @@ mod tests {
                     effect_type: EffectType::Filter,
                     flags: EffectFlags::from_raw(9),
                     item_count: 1,
+                    description: Some("ぼかします\n範囲を指定します".to_string()),
                 },
                 AvailableEffect {
                     name: "未知".to_string(),
                     effect_type: EffectType::Unknown(42),
                     flags: EffectFlags::from_raw(0),
                     item_count: 0,
+                    description: None,
                 },
             ],
             page: sample_page_meta(),
