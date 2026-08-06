@@ -625,7 +625,7 @@ fn item_value() -> Value {
             tagged("integer", &[("value", integer())]),
             tagged("bool", &[("value", boolean())]),
             tagged("color", &[("value", string())]),
-            tagged("choice", &[("value", string()), ("index", nullable_unsigned())]),
+            tagged("choice", &[("value", string())]),
             tagged("file", &[("path", string())]),
             tagged("folder", &[("path", string())]),
             tagged("font", &[("name", string())]),
@@ -909,7 +909,6 @@ mod tests {
             },
             ItemValue::Choice {
                 value: "標準".to_string(),
-                index: Some(0),
             },
             ItemValue::File {
                 path: r"C:\clip.mp4".to_string(),

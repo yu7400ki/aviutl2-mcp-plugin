@@ -1935,9 +1935,9 @@ fn raw_item_value(value: &ItemValue) -> String {
         ItemValue::Integer { value } => value.to_string(),
         ItemValue::Number { value } => value.to_string(),
         ItemValue::Bool { value } => if *value { "1" } else { "0" }.to_string(),
-        ItemValue::Color { value }
-        | ItemValue::Choice { value, .. }
-        | ItemValue::Text { value } => value.clone(),
+        ItemValue::Color { value } | ItemValue::Choice { value } | ItemValue::Text { value } => {
+            value.clone()
+        }
         ItemValue::Font { name } => name.clone(),
         ItemValue::File { path } | ItemValue::Folder { path } => path.clone(),
     }
@@ -1959,7 +1959,6 @@ fn host_write(item_type: &EffectItemType, value: &str) -> Option<ItemValue> {
         | EffectItemType::Mask
         | EffectItemType::Figure => CHOICE_VALUES.contains(&value).then(|| ItemValue::Choice {
             value: value.to_string(),
-            index: None,
         }),
         EffectItemType::Color => Some(ItemValue::Color {
             value: value.to_lowercase(),
@@ -2066,7 +2065,6 @@ pub(crate) fn shape(index: usize) -> HostEffect {
                 item_type: EffectItemType::Select,
                 value: ItemValue::Choice {
                     value: CHOICE_VALUES[0].to_string(),
-                    index: None,
                 },
                 track: None,
             },
@@ -2075,7 +2073,6 @@ pub(crate) fn shape(index: usize) -> HostEffect {
                 item_type: EffectItemType::Mask,
                 value: ItemValue::Choice {
                     value: CHOICE_VALUES[0].to_string(),
-                    index: None,
                 },
                 track: None,
             },
@@ -2084,7 +2081,6 @@ pub(crate) fn shape(index: usize) -> HostEffect {
                 item_type: EffectItemType::Figure,
                 value: ItemValue::Choice {
                     value: CHOICE_VALUES[0].to_string(),
-                    index: None,
                 },
                 track: None,
             },

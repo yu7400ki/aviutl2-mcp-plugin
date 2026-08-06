@@ -391,8 +391,7 @@ fn item_value_strategy() -> impl Strategy<Value = ItemValue> {
         any::<i64>().prop_map(|value| ItemValue::Integer { value }),
         any::<bool>().prop_map(|value| ItemValue::Bool { value }),
         ".*".prop_map(|value| ItemValue::Color { value }),
-        (".*", prop::option::of(0..100usize))
-            .prop_map(|(value, index)| ItemValue::Choice { value, index }),
+        ".*".prop_map(|value| ItemValue::Choice { value }),
         ".*".prop_map(|path| ItemValue::File { path }),
         ".*".prop_map(|path| ItemValue::Folder { path }),
         ".*".prop_map(|name| ItemValue::Font { name }),

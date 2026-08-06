@@ -2029,7 +2029,6 @@ fn set_choice_item(harness: &Harness, item: &str, value: &str) -> SetObjectItemP
         item: item.to_string(),
         value: ItemValue::Choice {
             value: value.to_string(),
-            index: None,
         },
     }
 }
@@ -2126,7 +2125,6 @@ fn a_choice_value_the_host_accepts_succeeds() {
             changed_item(&outcome, item),
             ItemValue::Choice {
                 value: CHOICE_VALUES[1].to_string(),
-                index: None,
             },
             "{item}"
         );

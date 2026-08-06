@@ -276,9 +276,6 @@ pub enum ItemValueInput {
         /// 選択する表示文字列。
         #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]
         value: String,
-        /// 読み取りが付ける補助情報。書き込みでは無視される。
-        #[serde(default)]
-        index: Option<u32>,
     },
     /// ファイルパス。
     File {
@@ -330,9 +327,8 @@ impl ItemValueInput {
             ItemValueInput::Color { value } => ItemValue::Color {
                 value: value.clone(),
             },
-            ItemValueInput::Choice { value, index } => ItemValue::Choice {
+            ItemValueInput::Choice { value } => ItemValue::Choice {
                 value: value.clone(),
-                index: index.map(|index| index as usize),
             },
             ItemValueInput::File { path } => ItemValue::File { path: path.clone() },
             ItemValueInput::Folder { path } => ItemValue::Folder { path: path.clone() },
@@ -1914,7 +1910,6 @@ mod tests {
             },
             ItemValue::Color { .. } => ItemValue::Choice {
                 value: "通常".to_string(),
-                index: Some(2),
             },
             ItemValue::Choice { .. } => ItemValue::File {
                 path: r"C:\movie.mp4".to_string(),
@@ -1983,7 +1978,7 @@ mod tests {
             "instance_id": SAMPLE_ID,
             "selector": effect_selector_json(),
             "item": "種類",
-            "value": { "type": "choice", "value": "通常", "index": 2, "future": 1 },
+            "value": { "type": "choice", "value": "通常", "future": 1 },
         }))
         .expect("未知フィールドを含む設定値を受理する");
 
@@ -1992,7 +1987,6 @@ mod tests {
             params.value,
             ItemValue::Choice {
                 value: "通常".to_string(),
-                index: Some(2),
             },
             "既知フィールドが失われています"
         );

@@ -3924,7 +3924,6 @@ mod tests {
             }];
             let value = ItemValue::Choice {
                 value: "四角形".to_string(),
-                index: None,
             };
             if prepare_item_write(&items, "項目", &value).is_ok() {
                 names.push(item_type.kind_name());

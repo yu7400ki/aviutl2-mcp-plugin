@@ -45,11 +45,6 @@ pub enum ItemValue {
     Choice {
         /// 選択された表示文字列。
         value: String,
-        /// 選択肢の 0 始まりインデックス。
-        ///
-        /// 読み取りは常に null を返す。選択肢の一覧を得る手段が無く、表示
-        /// 文字列が何番目かを知る材料が無いためである。書き込みでは無視する。
-        index: Option<usize>,
     },
     /// ファイルパス。
     #[serde(rename = "file")]
@@ -398,9 +393,6 @@ fn accepts(item_type: &EffectItemType, value: &ItemValue) -> bool {
 /// [`ItemValue::Text`] だけは改行とタブを許す。これらを拒否すると、複数行の
 /// テキストを書く直接の手段が無くなる。色・フォント名・選択肢の値に改行が
 /// 現れる余地は無いため、緩和しない。
-///
-/// [`ItemValue::Choice`] の `index` は書き込みでは無視する。選択肢の並びは
-/// ホスト側の都合で変わり得るため、index を正としない。
 fn encode_value(value: &ItemValue) -> Result<String, ItemWriteError> {
     match value {
         ItemValue::Unknown { .. } => Err(ItemWriteError::UnknownValue),
@@ -408,7 +400,7 @@ fn encode_value(value: &ItemValue) -> Result<String, ItemWriteError> {
         ItemValue::Number { value } => Ok(value.to_string()),
         ItemValue::Bool { value } => Ok(if *value { "1" } else { "0" }.to_string()),
         ItemValue::Text { value } => encode_multiline_text(value),
-        ItemValue::Color { value } | ItemValue::Choice { value, .. } => encode_text(value),
+        ItemValue::Color { value } | ItemValue::Choice { value } => encode_text(value),
         ItemValue::Font { name } => encode_text(name),
         ItemValue::File { path } | ItemValue::Folder { path } => encode_path(path),
     }
@@ -566,11 +558,6 @@ mod tests {
             },
             ItemValue::Choice {
                 value: "通常".to_string(),
-                index: Some(0),
-            },
-            ItemValue::Choice {
-                value: "通常".to_string(),
-                index: None,
             },
             ItemValue::File {
                 path: r"C:\movie.mp4".to_string(),
@@ -619,18 +606,6 @@ mod tests {
             }
         );
         assert_eq!(serde_json::to_string(&value).unwrap(), s);
-    }
-
-    #[test]
-    fn item_value_choice_index_defaults_to_none() {
-        let value: ItemValue = serde_json::from_str(r#"{"type":"choice","value":"通常"}"#).unwrap();
-        assert_eq!(
-            value,
-            ItemValue::Choice {
-                value: "通常".to_string(),
-                index: None,
-            }
-        );
     }
 
     #[test]
@@ -720,7 +695,6 @@ mod tests {
                 EffectItemType::Select,
                 ItemValue::Choice {
                     value: "通常".to_string(),
-                    index: Some(2),
                 },
                 "通常",
             ),
@@ -728,7 +702,6 @@ mod tests {
                 EffectItemType::Combo,
                 ItemValue::Choice {
                     value: "通常".to_string(),
-                    index: Some(2),
                 },
                 "通常",
             ),
@@ -736,7 +709,6 @@ mod tests {
                 EffectItemType::Mask,
                 ItemValue::Choice {
                     value: "四角形".to_string(),
-                    index: Some(1),
                 },
                 "四角形",
             ),
@@ -744,7 +716,6 @@ mod tests {
                 EffectItemType::Figure,
                 ItemValue::Choice {
                     value: "星型".to_string(),
-                    index: None,
                 },
                 "星型",
             ),
@@ -919,7 +890,6 @@ mod tests {
             },
             ItemValue::Choice {
                 value: "四角形".to_string(),
-                index: None,
             },
         ];
         for item_type in non_writable_item_types() {
@@ -984,38 +954,15 @@ mod tests {
     }
 
     #[test]
-    fn write_ignores_the_choice_index() {
-        // 選択肢の並びはホスト側の都合で変わり得るため、index を正としない。
-        for item_type in choice_item_types() {
-            let encoded: Vec<String> = [Some(0), Some(7), None]
-                .into_iter()
-                .map(|index| {
-                    encode_item_value(
-                        &item_type,
-                        &ItemValue::Choice {
-                            value: "通常".to_string(),
-                            index,
-                        },
-                    )
-                    .unwrap()
-                })
-                .collect();
-            assert_eq!(encoded, vec!["通常".to_string(); 3], "{item_type}");
-        }
-    }
-
-    #[test]
     fn every_choice_type_shares_the_select_write_path() {
         // 表記が同じであることを、専用の分岐を持たないことで示す。同じ値に
         // 対して受理・拒否・変換結果のすべてが一致する。
         let cases = [
             ItemValue::Choice {
                 value: "左寄せ[上]".to_string(),
-                index: None,
             },
             ItemValue::Choice {
                 value: "通常".to_string(),
-                index: Some(3),
             },
             // 形が対応しない値。
             ItemValue::Text {
@@ -1024,7 +971,6 @@ mod tests {
             // 単一行の文字列として拒否される値。
             ItemValue::Choice {
                 value: "通常\n".to_string(),
-                index: None,
             },
         ];
         for value in cases {
@@ -1078,7 +1024,6 @@ mod tests {
             },
             ItemValue::Choice {
                 value: "通常\0".to_string(),
-                index: None,
             },
             ItemValue::File {
                 path: "C:\\movie\0.mp4".to_string(),
@@ -1102,7 +1047,6 @@ mod tests {
             },
             ItemValue::Choice {
                 value: "通常\t".to_string(),
-                index: None,
             },
         ] {
             assert_eq!(
@@ -1366,7 +1310,6 @@ mod tests {
             "図形の種類",
             &ItemValue::Choice {
                 value: "四角形".to_string(),
-                index: Some(1),
             },
         )
         .expect("選択肢の書き込み");

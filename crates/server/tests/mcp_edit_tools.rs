@@ -583,9 +583,6 @@ async fn set_object_item_tool_sends_the_effect_selector_and_value() {
 
 #[tokio::test]
 async fn set_object_item_tool_forwards_the_choice_value_verbatim() {
-    // 読み取りが返した値をそのまま書き戻せるよう、補助情報の index も落とさずに
-    // 転送する。選択肢の並びはホスト側の都合で変わるため、index を正として
-    // 解釈しないのは実行側の責務である。
     let harness = Harness::start(responses("set_object_item", effect_changed()));
 
     let result = harness
@@ -596,15 +593,16 @@ async fn set_object_item_tool_forwards_the_choice_value_verbatim() {
             item: "種類".to_string(),
             value: ItemValueInput::Choice {
                 value: "通常".to_string(),
-                index: Some(3),
             },
         }))
         .await;
 
     assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
     let request = harness.only_request();
-    assert_eq!(request.params["value"]["value"], json!("通常"));
-    assert_eq!(request.params["value"]["index"], json!(3));
+    assert_eq!(
+        request.params["value"],
+        json!({ "type": "choice", "value": "通常" }),
+    );
 }
 
 #[tokio::test]

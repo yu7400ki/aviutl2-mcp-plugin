@@ -163,14 +163,6 @@ impl FingerprintInput {
         }
     }
 
-    /// 省略可能な件数を、存在フラグを伴って書く。
-    fn optional_count(&mut self, name: &str, value: Option<usize>) {
-        self.boolean(&format!("{name}.present"), value.is_some());
-        if let Some(value) = value {
-            self.count(name, value);
-        }
-    }
-
     fn finish(self) -> Fingerprint {
         let mut hasher = Sha256::new();
         hasher.update(&self.buffer);
@@ -200,10 +192,9 @@ fn write_item_value(input: &mut FingerprintInput, value: &ItemValue) {
             input.text("item_value.kind", "color");
             input.text("item_value.color", value);
         }
-        ItemValue::Choice { value, index } => {
+        ItemValue::Choice { value } => {
             input.text("item_value.kind", "choice");
             input.text("item_value.choice", value);
-            input.optional_count("item_value.choice_index", *index);
         }
         ItemValue::File { path } => {
             input.text("item_value.kind", "file");
@@ -631,16 +622,6 @@ mod tests {
             }),
             make(ItemValue::Unknown {
                 raw: "x".to_string()
-            })
-        );
-        assert_ne!(
-            make(ItemValue::Choice {
-                value: "x".to_string(),
-                index: None
-            }),
-            make(ItemValue::Choice {
-                value: "x".to_string(),
-                index: Some(0)
             })
         );
     }

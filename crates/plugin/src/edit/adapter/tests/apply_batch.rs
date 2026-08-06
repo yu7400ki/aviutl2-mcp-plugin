@@ -712,7 +712,6 @@ fn set_choice_op(harness: &Harness, value: &str) -> BatchOperation {
         item: "図形の種類".to_string(),
         value: ItemValue::Choice {
             value: value.to_string(),
-            index: None,
         },
     }
 }
@@ -747,7 +746,6 @@ fn a_choice_value_the_host_ignores_fails_the_batch_and_rolls_it_back() {
         item_of(&harness, 3, 1, "図形の種類"),
         ItemValue::Choice {
             value: CHOICE_VALUES[0].to_string(),
-            index: None,
         }
     );
 }
@@ -768,7 +766,6 @@ fn a_choice_value_the_host_accepts_passes_through_the_batch() {
         item_of(&harness, 3, 1, "図形の種類"),
         ItemValue::Choice {
             value: CHOICE_VALUES[1].to_string(),
-            index: None,
         }
     );
 }
@@ -791,7 +788,6 @@ fn the_apply_phase_reads_back_once_per_choice_sub_operation() {
             item: "図形の種類".to_string(),
             value: ItemValue::Choice {
                 value: CHOICE_VALUES[1].to_string(),
-                index: None,
             },
         },
         BatchOperation::SetObjectItem {
@@ -799,7 +795,6 @@ fn the_apply_phase_reads_back_once_per_choice_sub_operation() {
             item: "図形の種類".to_string(),
             value: ItemValue::Choice {
                 value: CHOICE_VALUES[1].to_string(),
-                index: None,
             },
         },
     ]);

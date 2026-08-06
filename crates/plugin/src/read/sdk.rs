@@ -753,9 +753,9 @@ fn track_info(
 ///
 /// 対応する表現が無い種別と、種別どおりに解釈できない値は生文字列のまま返す。
 ///
-/// 選択肢から選ぶ種別は、選択された表示文字列をそのまま持つ。何番目の選択肢か
-/// は選択肢の一覧を得る手段が無いため付けられない。生文字列として返すと書き
-/// 込みが受け付けない形になり、読み取った値をそのまま書き戻せなくなる。
+/// 選択肢から選ぶ種別は、選択された表示文字列をそのまま持つ。生文字列として
+/// 返すと書き込みが受け付けない形になり、読み取った値をそのまま書き戻せなく
+/// なる。
 fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
     match item_type {
         EffectItemType::Integer => match raw.trim().parse::<i64>() {
@@ -776,10 +776,7 @@ fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
         EffectItemType::Select
         | EffectItemType::Combo
         | EffectItemType::Mask
-        | EffectItemType::Figure => ItemValue::Choice {
-            value: raw,
-            index: None,
-        },
+        | EffectItemType::Figure => ItemValue::Choice { value: raw },
         EffectItemType::File => ItemValue::File { path: raw },
         EffectItemType::Folder => ItemValue::Folder { path: raw },
         EffectItemType::Font => ItemValue::Font { name: raw },
@@ -1233,7 +1230,6 @@ mod tests {
             item_value(&EffectItemType::Select, "通常".to_string()),
             ItemValue::Choice {
                 value: "通常".to_string(),
-                index: None
             }
         );
         assert_eq!(
@@ -1293,7 +1289,6 @@ mod tests {
                 item_value(&item_type, "四角形".to_string()),
                 ItemValue::Choice {
                     value: "四角形".to_string(),
-                    index: None,
                 },
                 "{item_type} が選択肢として返りません"
             );
@@ -1382,7 +1377,6 @@ mod tests {
                 "通常",
                 ItemValue::Choice {
                     value: "通常".to_string(),
-                    index: None,
                 },
                 Ok("通常".to_string()),
             ),
@@ -1407,7 +1401,6 @@ mod tests {
                 "左寄せ[上]",
                 ItemValue::Choice {
                     value: "左寄せ[上]".to_string(),
-                    index: None,
                 },
                 Ok("左寄せ[上]".to_string()),
             ),
@@ -1416,7 +1409,6 @@ mod tests {
                 "四角形",
                 ItemValue::Choice {
                     value: "四角形".to_string(),
-                    index: None,
                 },
                 Ok("四角形".to_string()),
             ),
@@ -1433,7 +1425,6 @@ mod tests {
                 "星型",
                 ItemValue::Choice {
                     value: "星型".to_string(),
-                    index: None,
                 },
                 Ok("星型".to_string()),
             ),
