@@ -1310,9 +1310,16 @@ impl AviUtl2McpServer {
     /// selector で続けて編集すると precondition_failed となる。
     /// 書き込みを公開していない設定項目種別があり、その場合は unsupported_operation
     /// となる。種別は get_object の item_type で確認できる。
-    /// 選択肢から選ぶ種別（select・combo・mask・figure）へ選択肢に無い値を書くと、書き込み後の
-    /// 読み直しで検出して unsupported_operation となり details.reason は
-    /// choice_value_rejected となる。選択肢の一覧を返す手段が無いため、有効な値は
+    /// 書き込みは全ての種別で、書いた直後に読み直して要求した値が入ったかを照合する。
+    /// 入っていなければ unsupported_operation となり details.reason は
+    /// item_value_not_applied、details.current_value に読み直した実値が入る。
+    /// これをそのまま送り直せば 1 往復で解決する。
+    /// 選択肢から選ぶ種別（select・combo・mask・figure）で選択肢に無い値、登録されていない
+    /// フォント名、書式の合わない色はいずれもこの失敗になる。
+    /// 数値が値域を外れてクランプされた場合と、小数が項目の桁数へ丸められた場合も
+    /// 同じ失敗になる。ホストが値を調整したことと拒否したことは区別できないため、
+    /// 要求した値を得られていない点で同じ扱いにする。
+    /// 選択肢の一覧を返す手段が無いため、有効な値は
     /// get_object が返す既存オブジェクトの値から得る。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
@@ -2791,7 +2798,10 @@ fn to_mcp_error(error: &ErrorObject) -> McpError {
 mod tests {
     use super::*;
 
-    use aviutl2_mcp_core::{AvailableEffectItem, EffectItemType, ItemValue, prepare_item_write};
+    use aviutl2_mcp_core::{
+        AvailableEffectItem, EffectItemType, ItemValue, ItemWriteError, ReadBackCheck,
+        prepare_item_write, read_back_check,
+    };
     use rmcp::model::Tool;
 
     /// tool が frame / layer を入出力に持ち、0 始まりであることの明記が要るか。
@@ -3947,6 +3957,51 @@ mod tests {
         );
     }
 
+    /// 書き込みを公開する種別のうち、書き込み後に照合しないものを集める。
+    ///
+    /// 判定を書き写さず、公開されている入口の答えから決める。公開の可否と照合の
+    /// しかたの、どちらが動いてもここが動く。
+    fn writable_item_types_without_read_back() -> Vec<String> {
+        let mut names = Vec::new();
+        for item_type in EffectItemType::ALL {
+            let items = vec![AvailableEffectItem {
+                name: "項目".to_string(),
+                item_type: item_type.clone(),
+            }];
+            let probe = ItemValue::Text {
+                value: "文字列".to_string(),
+            };
+            // 種別への書き込みを公開しているかは、値の形の照合より先に決まる。
+            // 形が合わない値を渡しても判定は変わらない。
+            let writable = !matches!(
+                prepare_item_write(&items, "項目", &probe),
+                Err(ItemWriteError::UnsupportedItemType { .. })
+            );
+            if writable && matches!(read_back_check(item_type), ReadBackCheck::Declared { .. }) {
+                names.push(item_type.kind_name());
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn the_description_states_that_every_write_is_verified_by_reading_back() {
+        // 説明は保証である。照合しない種別が生まれたのに説明が「全ての種別」を
+        // 名乗り続けると、要求元は掛かっていない検査を前提に書き込みを組む。
+        // 実装だけを直した場合も、説明だけを直した場合も落ちる。
+        let unverified = writable_item_types_without_read_back();
+        assert!(
+            unverified.is_empty(),
+            "照合しない種別 {unverified:?} を説明が挙げていません"
+        );
+        assert!(
+            description_of("set_object_item").contains(
+                "書き込みは全ての種別で、書いた直後に読み直して要求した値が入ったかを照合する"
+            ),
+            "説明が全種別の照合を述べていません"
+        );
+    }
+
     #[test]
     fn the_text_item_description_states_what_survives_the_round_trip() {
         // 説明は保証である。書いた値がそのまま返ること、CRLF が LF になること、
@@ -3988,11 +4043,16 @@ mod tests {
                     "fingerprint",
                     "公開していない設定項目種別",
                     "item_type",
-                    // 選択肢の一覧を返す手段が無いため、外した値の直し方を
+                    // 有効な値の一覧を返す手段が無いため、外した値の直し方を
                     // 示さなければ要求元は当て推量を繰り返す。
-                    "choice_value_rejected",
+                    "item_value_not_applied",
+                    "details.current_value に読み直した実値が入る",
                     "選択肢に無い値",
                     "get_object が返す既存オブジェクトの値から得る",
+                    // クランプと丸めも失敗になることを予期できなければ、要求元は
+                    // 成功するはずの要求が落ちたと読む。
+                    "クランプ",
+                    "丸められた",
                 ],
             ),
             ("set_effect_enabled", &["fingerprint", "出力 item"]),
