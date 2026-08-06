@@ -72,7 +72,6 @@ impl Lifecycle {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .state
-            .clone()
     }
 
     /// descriptor への参照を取得する（内部更新用）。
@@ -109,7 +108,7 @@ impl Lifecycle {
         // 参照者がホストの処理時間だけ待たされ、ロック順の循環も生まれる。
         let old_state = {
             let mut descriptor = self.lock_descriptor();
-            let old_state = descriptor.state.clone();
+            let old_state = descriptor.state;
 
             let allowed = match (&old_state, &new_state) {
                 (InstanceState::Starting, InstanceState::Ready) => true,
@@ -126,7 +125,7 @@ impl Lifecycle {
                 anyhow::bail!("無効な状態遷移です: {old_state} → {new_state}");
             }
 
-            descriptor.state = new_state.clone();
+            descriptor.state = new_state;
             self.writer.write(&descriptor).with_context(|| {
                 format!("descriptor の状態更新に失敗しました: {old_state} → {new_state}")
             })?;

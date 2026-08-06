@@ -834,7 +834,6 @@ fn admit_request(state: &InstanceState) -> Result<(), ErrorObject> {
             ErrorCode::InstanceStale,
             "インスタンスは既に終了しています",
         )),
-        InstanceState::Unknown(_) => Err(host_busy("要求を受け付けられない状態です")),
     }
 }
 
@@ -2817,7 +2816,6 @@ mod tests {
             InstanceState::Starting,
             InstanceState::Draining,
             InstanceState::Gone,
-            InstanceState::Unknown("future".to_string()),
         ] {
             for (operation, params) in malformed_params_of_all_operations() {
                 let adapter = FakeAdapter::new();
@@ -2912,7 +2910,7 @@ mod tests {
             InstanceState::Draining,
         ] {
             let adapter = FakeAdapter::new();
-            let result = pong_result(instance_id, state.clone(), &adapter);
+            let result = pong_result(instance_id, state, &adapter);
 
             assert_eq!(result.instance_id, instance_id);
             assert_eq!(result.state, state);
@@ -3042,11 +3040,7 @@ mod tests {
             assert_eq!(admit_request(&state), Ok(()), "{state} が拒否されました");
         }
 
-        for state in [
-            InstanceState::Starting,
-            InstanceState::Draining,
-            InstanceState::Unknown("future".to_string()),
-        ] {
+        for state in [InstanceState::Starting, InstanceState::Draining] {
             let error = admit_request(&state).unwrap_err();
             assert_eq!(error.code, ErrorCode::HostBusy, "{state} が受理されました");
             assert!(error.retryable);

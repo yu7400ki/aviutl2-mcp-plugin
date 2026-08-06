@@ -1,10 +1,13 @@
 //! ライフサイクル状態。
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::fmt;
 
 /// インスタンスのライフサイクル状態。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// 値を作るのは plugin の状態機械だけであり、ここに並ぶ 5 つ以外は名乗らない。
+/// 一覧に無い値を運ぶ descriptor や応答は、状態が読めないものとして拒否する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InstanceState {
     /// plugin 登録 / IPC 初期化中。新規要求は host_busy。
     Starting,
@@ -16,19 +19,16 @@ pub enum InstanceState {
     Draining,
     /// pipe 切断 / 生存確認失敗。instance_stale。
     Gone,
-    /// 未知の状態値を raw 保持。
-    Unknown(String),
 }
 
 impl InstanceState {
-    pub fn as_snake_case(&self) -> String {
+    pub fn as_snake_case(&self) -> &'static str {
         match self {
-            InstanceState::Starting => "starting".to_string(),
-            InstanceState::Ready => "ready".to_string(),
-            InstanceState::Busy => "busy".to_string(),
-            InstanceState::Draining => "draining".to_string(),
-            InstanceState::Gone => "gone".to_string(),
-            InstanceState::Unknown(s) => s.clone(),
+            InstanceState::Starting => "starting",
+            InstanceState::Ready => "ready",
+            InstanceState::Busy => "busy",
+            InstanceState::Draining => "draining",
+            InstanceState::Gone => "gone",
         }
     }
 }
@@ -38,7 +38,7 @@ impl Serialize for InstanceState {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&self.as_snake_case())
+        serializer.serialize_str(self.as_snake_case())
     }
 }
 
@@ -48,14 +48,17 @@ impl<'de> Deserialize<'de> for InstanceState {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Ok(match s.as_str() {
-            "starting" => InstanceState::Starting,
-            "ready" => InstanceState::Ready,
-            "busy" => InstanceState::Busy,
-            "draining" => InstanceState::Draining,
-            "gone" => InstanceState::Gone,
-            _ => InstanceState::Unknown(s),
-        })
+        match s.as_str() {
+            "starting" => Ok(InstanceState::Starting),
+            "ready" => Ok(InstanceState::Ready),
+            "busy" => Ok(InstanceState::Busy),
+            "draining" => Ok(InstanceState::Draining),
+            "gone" => Ok(InstanceState::Gone),
+            _ => Err(de::Error::custom(format!(
+                "state が既知の値ではありません: 実際は {:?}",
+                s
+            ))),
+        }
     }
 }
 
@@ -85,11 +88,12 @@ mod tests {
     }
 
     #[test]
-    fn instance_state_unknown_preserved() {
+    fn instance_state_outside_the_set_is_rejected() {
+        // 状態を書くのは plugin の状態機械だけである。読めない状態を推測で
+        // 埋めると、descriptor も pong も「どの状態か分からない」ことを
+        // 伝えられなくなる。
         let s = "\"future_state\"";
-        let state: InstanceState = serde_json::from_str(s).unwrap();
-        assert_eq!(state, InstanceState::Unknown("future_state".to_string()));
-        let s2 = serde_json::to_string(&state).unwrap();
-        assert_eq!(s2, "\"future_state\"");
+        let result: Result<InstanceState, _> = serde_json::from_str(s);
+        assert!(result.is_err());
     }
 }

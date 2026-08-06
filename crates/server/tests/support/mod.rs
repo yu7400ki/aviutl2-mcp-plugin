@@ -177,7 +177,7 @@ impl MockPipeServer {
             auth_secret: auth_secret.clone(),
             pid,
             process_created_at: process_created_at.clone(),
-            state: state.clone(),
+            state,
             responses,
             response_delay,
             received: Arc::clone(&received),
@@ -228,7 +228,7 @@ impl MockPipeServer {
             process_created_at: self.process_created_at.clone(),
             hwnd: None,
             started_at: self.process_created_at.clone(),
-            state: self.state.clone(),
+            state: self.state,
             project: Some(DescriptorProject {
                 display_name: "Mock Project".to_string(),
                 path: r"C:\mock.aup".to_string(),
@@ -484,8 +484,7 @@ pub fn build_response(request: &RequestEnvelope, behavior: &MockBehavior) -> Res
             return ResponseEnvelope::pong(
                 ProtocolVersion::CURRENT,
                 request.request_id,
-                &PongResult::new(behavior.instance_id, behavior.state.clone())
-                    .with_project(mock_project()),
+                &PongResult::new(behavior.instance_id, behavior.state).with_project(mock_project()),
             );
         }
         None => err_result(ErrorObject::new(
