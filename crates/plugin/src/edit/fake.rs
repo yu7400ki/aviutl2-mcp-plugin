@@ -16,15 +16,15 @@ use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
 use crate::project::ProjectState;
 use crate::read::ReadError;
 use crate::read::host::{
-    EditState, HostEditInfo, HostEffect, HostLayer, HostObject, HostObjectDetail,
-    HostObjectPlacement, ReadHost, SceneReader, SceneValueReader,
+    EditState, HostEditInfo, HostEffect, HostEffectSummary, HostLayer, HostObject,
+    HostObjectDetail, HostObjectPlacement, ReadHost, SceneReader, SceneValueReader,
 };
 use crate::test_support::alias_with_effects;
 use aviutl2_mcp_core::{
-    AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EffectFlags, EffectItem,
-    EffectItemType, EffectType, EvaluatedItemKind, FiniteF64, FrameRange, GridBpm, ItemValue,
-    ModuleEntry, ModuleType, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, TrackInfo,
-    TrackValue, decode_host_text, decode_track_value, encode_host_text,
+    AvailableEffectItem, Cursor, DisplayRange, EffectFlags, EffectItem, EffectItemType, EffectType,
+    EvaluatedItemKind, FiniteF64, FrameRange, GridBpm, ItemValue, ModuleEntry, ModuleType,
+    PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, TrackInfo, TrackValue, decode_host_text,
+    decode_track_value, encode_host_text,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -697,14 +697,10 @@ impl EditHost for FakeEditHost {
         })
     }
 
-    fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, EditError> {
+    fn effect_catalog(&self) -> Result<Vec<HostEffectSummary>, EditError> {
         self.assert_ready("get_effects");
         self.record("effect_catalog");
-        Ok(self
-            .catalog
-            .iter()
-            .map(FakeCatalogEntry::available)
-            .collect())
+        Ok(self.catalog.iter().map(FakeCatalogEntry::summary).collect())
     }
 
     fn alias_data_directory(&self) -> Option<PathBuf> {
@@ -808,7 +804,7 @@ impl EditHost for Arc<FakeEditHost> {
         self.as_ref().edit_state()
     }
 
-    fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, EditError> {
+    fn effect_catalog(&self) -> Result<Vec<HostEffectSummary>, EditError> {
         self.as_ref().effect_catalog()
     }
 
@@ -849,13 +845,24 @@ impl ReadHost for FakeReadHost {
         Ok(self.0.info.clone())
     }
 
-    fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError> {
+    fn effect_catalog(&self) -> Result<Vec<HostEffectSummary>, ReadError> {
         Ok(self
             .0
             .catalog
             .iter()
-            .map(FakeCatalogEntry::available)
+            .map(FakeCatalogEntry::summary)
             .collect())
+    }
+
+    fn effect_item_count(&self, effect_name: &str) -> Result<usize, ReadError> {
+        self.0
+            .catalog
+            .iter()
+            .find(|entry| entry.name == effect_name)
+            .map(|entry| entry.items.len())
+            .ok_or(ReadError::Sdk {
+                operation: "enum_effect_item",
+            })
     }
 
     fn font_names(&self) -> Result<Vec<String>, ReadError> {
@@ -2574,13 +2581,12 @@ pub(crate) struct FakeCatalogEntry {
 }
 
 impl FakeCatalogEntry {
-    /// 応答へ載る見出しへ写す。設定項目は数だけが現れる。
-    fn available(&self) -> AvailableEffect {
-        AvailableEffect {
+    /// 項目を読まずに得られる見出しへ写す。
+    fn summary(&self) -> HostEffectSummary {
+        HostEffectSummary {
             name: self.name.clone(),
             effect_type: self.effect_type.clone(),
             flags: self.flags,
-            item_count: self.items.len(),
         }
     }
 }

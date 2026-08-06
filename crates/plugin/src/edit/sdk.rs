@@ -15,7 +15,9 @@ use crate::edit::host::{
 use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
 use crate::read::ReadError;
-use crate::read::host::{EditState, HostEditInfo, ReadHost, SceneReader, SceneValueReader};
+use crate::read::host::{
+    EditState, HostEditInfo, HostEffectSummary, ReadHost, SceneReader, SceneValueReader,
+};
 use crate::read::sdk::{
     SdkReadHost, SdkSceneReader, host_edit_info, non_negative, to_inclusive_sections,
 };
@@ -23,8 +25,7 @@ use aviutl2::generic::{
     EditSection, EditSectionError, EffectHandle, MediaFileSupportMode, ObjectHandle, ReadSection,
 };
 use aviutl2_mcp_core::{
-    AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EffectItemType, FrameRange,
-    GridBpm, SectionRange,
+    AvailableEffectItem, Cursor, DisplayRange, EffectItemType, FrameRange, GridBpm, SectionRange,
 };
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -136,7 +137,7 @@ impl EditHost for SdkEditHost {
         Ok(SdkReadHost.edit_state()?)
     }
 
-    fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, EditError> {
+    fn effect_catalog(&self) -> Result<Vec<HostEffectSummary>, EditError> {
         Ok(SdkReadHost.effect_catalog()?)
     }
 

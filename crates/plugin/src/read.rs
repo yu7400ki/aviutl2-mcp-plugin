@@ -19,10 +19,10 @@ pub mod sdk;
 
 use crate::project::ProjectState;
 use aviutl2_mcp_core::{
-    AvailableEffect, EditInfo, EffectItemValues, EffectType, GetEffectItemValuesParams, LayerInfo,
-    ListObjectAliasesResult, ListPalettesResult, ModuleEntry, ModuleType, ObjectDetail,
-    ObjectFilter, ObjectSelector, ObjectSummary, PageMeta, PageWindow, SceneInfo,
-    SelectionSnapshot, SnapshotRevisionMismatch, ValidatedPageRequest,
+    EditInfo, EffectItemValues, EffectType, GetEffectItemValuesParams, LayerInfo,
+    ListAvailableEffectsResult, ListObjectAliasesResult, ListPalettesResult, ModuleEntry,
+    ModuleType, ObjectDetail, ObjectFilter, ObjectSelector, ObjectSummary, PageMeta, PageWindow,
+    SceneInfo, SelectionSnapshot, SnapshotRevisionMismatch, ValidatedPageRequest,
 };
 use std::sync::Arc;
 
@@ -138,18 +138,32 @@ pub trait ReadAdapter: Send + Sync {
         page: &ValidatedPageRequest,
     ) -> Result<Result<SelectionSnapshot, SnapshotRevisionMismatch>, ReadError>;
 
-    /// 登録済み effect を全件列挙する。
+    /// 登録済み effect を列挙し、要求ページを切り出して返す。
+    ///
+    /// 手順の順序に意味がある。
+    ///
+    /// 1. effect 名を列挙し、見出し（名前・種別・フラグ）を集める
+    /// 2. `effect_type` が指定されていれば、種別で絞る
+    /// 3. ページを切り出す
+    /// 4. 切り出した分についてだけ設定項目を列挙し、その数を数える
+    ///
+    /// **設定項目を列挙するのは 4 だけである。** 列挙は effect ごとの呼び出しで
+    /// あり、応答へ載せない effect まで数えると費用が要求ページではなく登録数で
+    /// 決まってしまう。見出しは 1 の列挙だけで揃うため、絞り込みも並びも項目を
+    /// 読まずに確定する。
     ///
     /// 結果は登録済みプラグインの集合であり、プロジェクトの編集内容から独立して
     /// いる。返す `snapshot_revision` は列挙時点のプロジェクト revision だが、
     /// 一覧の内容はこの値に連動しない。revision の一致をページ間の一貫性検証に
     /// 用いると、無関係な編集で revision が進んだだけで後続ページが拒否される
     /// 一方、カタログ自体の変化は検出できない。この operation は revision による
-    /// 一貫性検証の対象にしない。
+    /// 一貫性検証の対象にしない。受け取るのが取り出し範囲でありページ要求その
+    /// ものではないのは、そのためである。
     fn list_available_effects(
         &self,
         effect_type: Option<&EffectType>,
-    ) -> Result<Snapshot<AvailableEffect>, ReadError>;
+        page: &PageWindow,
+    ) -> Result<ListAvailableEffectsResult, ReadError>;
 
     /// 登録済みフォント名を全件列挙する。
     ///

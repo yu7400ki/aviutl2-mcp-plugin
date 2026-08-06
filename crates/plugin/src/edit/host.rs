@@ -16,9 +16,9 @@
 use crate::edit::error::EditError;
 use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
-use crate::read::host::{EditState, HostEditInfo, HostObject, SceneReader};
+use crate::read::host::{EditState, HostEditInfo, HostEffectSummary, HostObject, SceneReader};
 use aviutl2_mcp_core::{
-    AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, FrameRange, GridBpm, SectionRange,
+    AvailableEffectItem, Cursor, DisplayRange, FrameRange, GridBpm, SectionRange,
 };
 use std::path::PathBuf;
 
@@ -429,7 +429,7 @@ pub trait EditHost: Send + Sync {
     fn edit_state(&self) -> Result<EditState, EditError>;
 
     /// 登録済み effect のカタログ。編集区間を必要としない。
-    fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, EditError>;
+    fn effect_catalog(&self) -> Result<Vec<HostEffectSummary>, EditError>;
 
     /// 登録済みエイリアスを収めた AviUtl2 のデータディレクトリ。
     ///

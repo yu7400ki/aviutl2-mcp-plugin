@@ -6,7 +6,9 @@
 
 use crate::project::ProjectState;
 use crate::read::error::ReadError;
-use crate::read::host::{EditState, HostEditInfo, HostObjectDetail, ReadHost, SceneValueReader};
+use crate::read::host::{
+    EditState, HostEditInfo, HostEffectSummary, HostObjectDetail, ReadHost, SceneValueReader,
+};
 use crate::read::resolve::{
     dropped_from_page, effect_fingerprint_inputs, effect_info_at, find_effect_position,
     object_summary, resolve_selected_detail, scene_info,
@@ -15,9 +17,9 @@ use crate::read::{Page, ProjectStatus, ReadAdapter, Snapshot};
 use aviutl2_mcp_core::{
     AvailableEffect, Cursor, DisplayRange, EditInfo, EffectInfo, EffectItem, EffectItemValues,
     EffectSelector, EffectType, EvaluatedItem, EvaluatedItemKind, Extent, FrameRange,
-    GetEffectItemValuesParams, LayerInfo, ListObjectAliasesResult, ListPalettesResult,
-    MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectDetail, ObjectFilter, ObjectSelector,
-    ObjectSummary, PageWindow, PaletteEntry, SceneInfo, SelectionSnapshot,
+    GetEffectItemValuesParams, LayerInfo, ListAvailableEffectsResult, ListObjectAliasesResult,
+    ListPalettesResult, MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectDetail, ObjectFilter,
+    ObjectSelector, ObjectSummary, PageWindow, PaletteEntry, SceneInfo, SelectionSnapshot,
     SnapshotRevisionMismatch, TrackGroup, ValidatedPageRequest, take_page, take_window,
 };
 use std::collections::HashMap;
@@ -71,8 +73,8 @@ impl<H: ReadHost> HostReadAdapter<H> {
         guard(|| self.host.edit_info())
     }
 
-    /// 登録済み effect のカタログを取得する。
-    fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError> {
+    /// 登録済み effect の見出しを取得する。
+    fn effect_catalog(&self) -> Result<Vec<HostEffectSummary>, ReadError> {
         guard(|| self.host.effect_catalog())
     }
 
@@ -346,18 +348,30 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
     fn list_available_effects(
         &self,
         effect_type: Option<&EffectType>,
-    ) -> Result<Snapshot<AvailableEffect>, ReadError> {
+        page: &PageWindow,
+    ) -> Result<ListAvailableEffectsResult, ReadError> {
         self.ensure_readable()?;
         // カタログは参照区間を必要としないため、列挙の直前の revision を採る。
         let snapshot_revision = self.project.revision();
-        let mut items = self.effect_catalog()?;
+
+        // 見出しだけを先に集める。項目数は窓に入った分だけ読む。
+        let mut summaries = self.effect_catalog()?;
         if let Some(effect_type) = effect_type {
-            items.retain(|effect| effect.effect_type == *effect_type);
+            summaries.retain(|effect| effect.effect_type == *effect_type);
         }
-        Ok(Snapshot {
-            items,
-            snapshot_revision,
-        })
+        let (window, meta) = take_window(&summaries, page, snapshot_revision);
+
+        let mut items = Vec::with_capacity(window.len());
+        for effect in window {
+            let item_count = guard(|| self.host.effect_item_count(&effect.name))?;
+            items.push(AvailableEffect {
+                name: effect.name,
+                effect_type: effect.effect_type,
+                flags: effect.flags,
+                item_count,
+            });
+        }
+        Ok(ListAvailableEffectsResult { items, page: meta })
     }
 
     fn list_fonts(&self) -> Result<Snapshot<String>, ReadError> {
@@ -821,7 +835,12 @@ mod tests {
         scene_name: Option<String>,
         grid_bpm: Vec<GridBpm>,
         layers: Vec<FakeLayer>,
-        catalog: Vec<AvailableEffect>,
+        catalog: Vec<FakeCatalogEntry>,
+        /// 設定項目の数を問い合わせた effect 名を、問い合わせた順に覚える。
+        ///
+        /// 窓の外の effect について問い合わせていないことを、件数でも名前でも
+        /// 数えられる。
+        item_count_queries: Mutex<Vec<String>>,
         panic_at: Option<PanicPoint>,
         /// 対象そのものの読み取りを失敗させる開始フレーム。
         ///
@@ -929,6 +948,7 @@ mod tests {
                 grid_bpm: vec![sample_grid_bpm()],
                 layers: fake_layers(),
                 catalog: fake_catalog(),
+                item_count_queries: Mutex::new(Vec::new()),
                 panic_at: None,
                 object_read_fails_at: None,
                 effects_fail_at: None,
@@ -954,6 +974,11 @@ mod tests {
 
         fn evaluations(&self) -> Vec<Evaluation> {
             self.evaluations.lock().unwrap().clone()
+        }
+
+        /// 設定項目の数を問い合わせた effect 名を、問い合わせた順に返す。
+        fn item_count_queries(&self) -> Vec<String> {
+            self.item_count_queries.lock().unwrap().clone()
         }
 
         /// 準備前の呼び出しを、実際の SDK と同じ失敗モードで再現する。
@@ -1008,10 +1033,30 @@ mod tests {
             }
         }
 
-        fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError> {
+        fn effect_catalog(&self) -> Result<Vec<HostEffectSummary>, ReadError> {
             self.assert_ready("get_effects");
             self.record("effect_catalog");
-            Ok(self.catalog.clone())
+            Ok(self
+                .catalog
+                .iter()
+                .map(|entry| entry.summary.clone())
+                .collect())
+        }
+
+        fn effect_item_count(&self, effect_name: &str) -> Result<usize, ReadError> {
+            self.assert_ready("enum_effect_item");
+            self.record("effect_item_count");
+            self.item_count_queries
+                .lock()
+                .unwrap()
+                .push(effect_name.to_string());
+            self.catalog
+                .iter()
+                .find(|entry| entry.summary.name == effect_name)
+                .map(|entry| entry.item_count)
+                .ok_or(ReadError::Sdk {
+                    operation: "enum_effect_item",
+                })
         }
 
         fn font_names(&self) -> Result<Vec<String>, ReadError> {
@@ -1469,20 +1514,43 @@ mod tests {
         vec![file_effect("動画ファイル", 0, r"C:\movie.mp4")]
     }
 
-    fn fake_catalog() -> Vec<AvailableEffect> {
+    /// テスト用のカタログ 1 件。
+    ///
+    /// 見出しと設定項目の数を別に保つ。読み取り経路がそれぞれを別の呼び出しで
+    /// 返すため、フェイクも同じ形で保持する。
+    #[derive(Debug, Clone)]
+    struct FakeCatalogEntry {
+        summary: HostEffectSummary,
+        item_count: usize,
+    }
+
+    fn catalog_entry(
+        name: &str,
+        effect_type: EffectType,
+        flags: u32,
+        item_count: usize,
+    ) -> FakeCatalogEntry {
+        FakeCatalogEntry {
+            summary: HostEffectSummary {
+                name: name.to_string(),
+                effect_type,
+                flags: EffectFlags::from_raw(flags),
+            },
+            item_count,
+        }
+    }
+
+    /// フェイクの effect カタログ。
+    ///
+    /// 種別ごとに複数件を並べる。1 件ずつしか無いと、種別で絞ってから窓を切る
+    /// 順序と、窓を切ってから絞る順序の区別が付かない。
+    fn fake_catalog() -> Vec<FakeCatalogEntry> {
         vec![
-            AvailableEffect {
-                name: "ぼかし".to_string(),
-                effect_type: EffectType::Filter,
-                flags: EffectFlags::from_raw(1),
-                item_count: 1,
-            },
-            AvailableEffect {
-                name: "動画ファイル".to_string(),
-                effect_type: EffectType::Input,
-                flags: EffectFlags::from_raw(3),
-                item_count: 0,
-            },
+            catalog_entry("ぼかし", EffectType::Filter, 1, 1),
+            catalog_entry("動画ファイル", EffectType::Input, 3, 0),
+            catalog_entry("グロー", EffectType::Filter, 1, 4),
+            catalog_entry("画像ファイル", EffectType::Input, 1, 2),
+            catalog_entry("標準描画", EffectType::Output, 1, 6),
         ]
     }
 
@@ -1564,6 +1632,14 @@ mod tests {
         fn list_palettes_page(&self) -> Result<ListPalettesResult, ReadError> {
             self.list_palettes(&default_page_window())
         }
+
+        /// 既定のページ要求で effect を列挙する。
+        fn list_available_effects_page(
+            &self,
+            effect_type: Option<&EffectType>,
+        ) -> Result<ListAvailableEffectsResult, ReadError> {
+            self.list_available_effects(effect_type, &default_page_window())
+        }
     }
 
     /// adapter とプロジェクト状態を組み立てる。
@@ -1592,7 +1668,7 @@ mod tests {
                 .map(|e| e.error_code()),
             adapter.get_object(&selector).err().map(|e| e.error_code()),
             adapter
-                .list_available_effects(None)
+                .list_available_effects_page(None)
                 .err()
                 .map(|e| e.error_code()),
             adapter
@@ -3222,23 +3298,86 @@ mod tests {
     #[test]
     fn list_available_effects_returns_catalog() {
         let adapter = adapter();
-        let snapshot = adapter.list_available_effects(None).unwrap();
-        assert_eq!(snapshot.items.len(), 2);
+        let result = adapter.list_available_effects_page(None).unwrap();
+        assert_eq!(result.items.len(), fake_catalog().len());
+        assert_eq!(result.page.total_count as usize, fake_catalog().len());
     }
 
     #[test]
     fn list_available_effects_filters_by_type() {
         let adapter = adapter();
-        let snapshot = adapter
-            .list_available_effects(Some(&EffectType::Input))
+        let result = adapter
+            .list_available_effects_page(Some(&EffectType::Input))
             .unwrap();
-        assert_eq!(snapshot.items.len(), 1);
-        assert_eq!(snapshot.items[0].name, "動画ファイル");
+        let names: Vec<&str> = result.items.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["動画ファイル", "画像ファイル"]);
 
         let none = adapter
-            .list_available_effects(Some(&EffectType::Output))
+            .list_available_effects_page(Some(&EffectType::Transition))
             .unwrap();
         assert!(none.items.is_empty());
+    }
+
+    #[test]
+    fn list_available_effects_reports_the_item_count_of_each_effect() {
+        let adapter = adapter();
+        let result = adapter.list_available_effects_page(None).unwrap();
+        let counts: Vec<usize> = result
+            .items
+            .iter()
+            .map(|effect| effect.item_count)
+            .collect();
+        assert_eq!(
+            counts,
+            fake_catalog()
+                .iter()
+                .map(|entry| entry.item_count)
+                .collect::<Vec<usize>>()
+        );
+    }
+
+    #[test]
+    fn list_available_effects_counts_items_only_for_the_requested_page() {
+        // 項目の列挙は effect ごとの呼び出しである。全件について呼ぶと、費用が
+        // 要求ページではなく登録数で決まる。
+        let adapter = adapter();
+        let page = page_request(1, 2, None).window();
+        let result = adapter.list_available_effects(None, &page).unwrap();
+
+        let names: Vec<String> = result.items.iter().map(|e| e.name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["動画ファイル".to_string(), "グロー".to_string()]
+        );
+        assert_eq!(
+            adapter.host.item_count_queries(),
+            names,
+            "窓の外の effect について設定項目を数えています"
+        );
+        assert!(
+            adapter.host.item_count_queries().len() < fake_catalog().len(),
+            "カタログの全件について設定項目を数えています"
+        );
+    }
+
+    #[test]
+    fn list_available_effects_counts_items_only_for_the_filtered_page() {
+        // 絞り込みは窓より先に効く。絞る前の並びで窓を切ると、応答へ載らない
+        // effect の項目を数えることになる。
+        let adapter = adapter();
+        let page = page_request(0, 1, None).window();
+        let result = adapter
+            .list_available_effects(Some(&EffectType::Filter), &page)
+            .unwrap();
+
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].name, "ぼかし");
+        assert_eq!(result.page.total_count, 2, "絞り込み後の総件数を返します");
+        assert_eq!(
+            adapter.host.item_count_queries(),
+            vec!["ぼかし".to_string()],
+            "窓の外の effect について設定項目を数えています"
+        );
     }
 
     #[test]
@@ -3275,7 +3414,7 @@ mod tests {
 
         // effect のカタログは編集ハンドルから直接得られ、参照区間を必要としない。
         let effects = adapter();
-        effects.list_available_effects(None).unwrap();
+        effects.list_available_effects_page(None).unwrap();
         assert_eq!(entries(&effects), 0, "list_available_effects");
 
         // フォントとモジュールの列挙も編集ハンドルの機能である。

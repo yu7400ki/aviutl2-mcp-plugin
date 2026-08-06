@@ -9,13 +9,13 @@
 use crate::EDIT_HANDLE;
 use crate::read::error::ReadError;
 use crate::read::host::{
-    EditState, HostEditInfo, HostEffect, HostLayer, HostObject, HostObjectDetail,
-    HostObjectPlacement, ReadHost, SceneReader, SceneValueReader,
+    EditState, HostEditInfo, HostEffect, HostEffectSummary, HostLayer, HostObject,
+    HostObjectDetail, HostObjectPlacement, ReadHost, SceneReader, SceneValueReader,
 };
 use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection};
 use aviutl2_mcp_core::{
-    AvailableEffect, EffectFlags, EffectItem, EffectItemType, EffectType, FiniteF64, GridBpm,
-    ItemValue, ModuleEntry, ModuleType, Rgba, SectionRange, decode_host_text, decode_track_value,
+    EffectFlags, EffectItem, EffectItemType, EffectType, FiniteF64, GridBpm, ItemValue,
+    ModuleEntry, ModuleType, Rgba, SectionRange, decode_host_text, decode_track_value,
     parse_check_value,
 };
 use std::collections::HashMap;
@@ -61,22 +61,24 @@ impl ReadHost for SdkReadHost {
         host_edit_info(&EDIT_HANDLE.get_edit_info())
     }
 
-    fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError> {
-        let effects = EDIT_HANDLE.get_effects();
-        let mut catalog = Vec::with_capacity(effects.len());
-        for effect in effects {
-            let items = EDIT_HANDLE
-                .get_effect_items(&effect.name)
-                .map_err(|_| sdk("enum_effect_item"))?;
-            catalog.push(AvailableEffect {
+    fn effect_catalog(&self) -> Result<Vec<HostEffectSummary>, ReadError> {
+        Ok(EDIT_HANDLE
+            .get_effects()
+            .into_iter()
+            .map(|effect| HostEffectSummary {
                 name: effect.name,
                 effect_type: EffectType::from_raw(i32::from(effect.effect_type)),
                 // 既知ビットのみを組み直した値であり、未知ビットは保持できない。
                 flags: EffectFlags::from_raw(effect.flag.to_bits() as u32),
-                item_count: items.len(),
-            });
-        }
-        Ok(catalog)
+            })
+            .collect())
+    }
+
+    fn effect_item_count(&self, effect_name: &str) -> Result<usize, ReadError> {
+        Ok(EDIT_HANDLE
+            .get_effect_items(effect_name)
+            .map_err(|_| sdk("enum_effect_item"))?
+            .len())
     }
 
     fn font_names(&self) -> Result<Vec<String>, ReadError> {

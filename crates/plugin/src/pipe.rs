@@ -833,8 +833,8 @@ mod tests {
         fn list_available_effects(
             &self,
             _effect_type: Option<&aviutl2_mcp_core::EffectType>,
-        ) -> Result<crate::read::Snapshot<aviutl2_mcp_core::AvailableEffect>, crate::read::ReadError>
-        {
+            _page: &aviutl2_mcp_core::PageWindow,
+        ) -> Result<aviutl2_mcp_core::ListAvailableEffectsResult, crate::read::ReadError> {
             Err(crate::read::ReadError::NotReady)
         }
 
@@ -936,8 +936,12 @@ mod tests {
 
         fn effect_catalog(
             &self,
-        ) -> Result<Vec<aviutl2_mcp_core::AvailableEffect>, crate::read::ReadError> {
+        ) -> Result<Vec<crate::read::host::HostEffectSummary>, crate::read::ReadError> {
             Ok(Vec::new())
+        }
+
+        fn effect_item_count(&self, _effect_name: &str) -> Result<usize, crate::read::ReadError> {
+            Ok(0)
         }
 
         fn font_names(&self) -> Result<Vec<String>, crate::read::ReadError> {
@@ -2140,9 +2144,9 @@ mod tests {
         fn list_available_effects(
             &self,
             effect_type: Option<&aviutl2_mcp_core::EffectType>,
-        ) -> Result<crate::read::Snapshot<aviutl2_mcp_core::AvailableEffect>, crate::read::ReadError>
-        {
-            StubReadAdapter.list_available_effects(effect_type)
+            page: &aviutl2_mcp_core::PageWindow,
+        ) -> Result<aviutl2_mcp_core::ListAvailableEffectsResult, crate::read::ReadError> {
+            StubReadAdapter.list_available_effects(effect_type, page)
         }
 
         fn list_fonts(&self) -> Result<crate::read::Snapshot<String>, crate::read::ReadError> {

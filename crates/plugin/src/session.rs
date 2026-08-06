@@ -21,17 +21,16 @@ use aviutl2_mcp_core::{
     DeleteObjectSectionParams, EditInputError, EditOperation, EffectItemValuesInputError,
     ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams,
     GetEffectItemValuesParams, GetObjectParams, GetSelectionParams, InstanceId, InstanceState,
-    KnownOperation, LimitOutOfRange, ListAvailableEffectsParams, ListAvailableEffectsResult,
-    ListFontsParams, ListFontsResult, ListLayersParams, ListLayersResult, ListModulesParams,
-    ListModulesResult, ListObjectAliasesParams, ListObjectsParams, ListObjectsResult,
-    ListPalettesParams, MoveObjectParams, MoveObjectSectionParams, Nonce, ObjectFilterError,
-    PageWindow, PongProject, PongResult, ProtocolVersion, ReadOperation, RenderFrameParams,
-    RenderFrameResult, RenderInputError, RenderOperation, RequestEnvelope, RequestId,
-    ResponseEnvelope, ResponseKind, ResponseResult, ScaledBudgets, SelectionSnapshot,
-    SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
-    SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams, SnapshotRevisionMismatch,
-    TextSyntaxError, ValidatedPageRequest, compute_client_mac, compute_server_mac,
-    deserialize_json, take_page, take_window, verify_mac,
+    KnownOperation, LimitOutOfRange, ListAvailableEffectsParams, ListFontsParams, ListFontsResult,
+    ListLayersParams, ListLayersResult, ListModulesParams, ListModulesResult,
+    ListObjectAliasesParams, ListObjectsParams, ListObjectsResult, ListPalettesParams,
+    MoveObjectParams, MoveObjectSectionParams, Nonce, ObjectFilterError, PageWindow, PongProject,
+    PongResult, ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult,
+    RenderInputError, RenderOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind,
+    ResponseResult, ScaledBudgets, SelectionSnapshot, SetEffectEnabledParams, SetGridBpmParams,
+    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSceneSettingsParams,
+    SetSelectionParams, SnapshotRevisionMismatch, TextSyntaxError, ValidatedPageRequest,
+    compute_client_mac, compute_server_mac, deserialize_json, take_page, take_window, verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -977,15 +976,15 @@ fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Valu
             to_result(&adapter.get_object(&params.selector).map_err(read_error)?)
         }
         ReadRequest::ListAvailableEffects(params, request) => {
-            let snapshot = adapter
-                .list_available_effects(params.effect_type.as_ref())
+            // 切り出しは読み取り口が済ませている。設定項目を数えるのが窓に入った
+            // 分だけであることを、切り出しと同じ場所で保証する必要がある。
+            let result = adapter
+                .list_available_effects(
+                    params.effect_type.as_ref(),
+                    &catalog_page_request(&request),
+                )
                 .map_err(read_error)?;
-            let (items, page) = take_window(
-                &snapshot.items,
-                &catalog_page_request(&request),
-                snapshot.snapshot_revision,
-            );
-            to_result(&ListAvailableEffectsResult { items, page })
+            to_result(&result)
         }
         ReadRequest::GetEffectItemValues(params) => to_result(
             &adapter
@@ -1539,10 +1538,10 @@ mod tests {
     use aviutl2_mcp_core::{
         AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFlags, EffectItemValues,
         EffectSelector, EffectType, EvaluatedItem, Extent, FiniteF64, FrameRange, LayerInfo,
-        ListObjectAliasesResult, ListPalettesResult, MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS,
-        ModuleEntry, ModuleType, ObjectAliasSummary, ObjectDetail, ObjectFilter,
-        ObjectFingerprintInput, ObjectSelector, ObjectSummary, PALETTE_COLOR_COUNT, PaletteEntry,
-        RequestBudgetKind, Rgba, SceneInfo, SectionRange,
+        ListAvailableEffectsResult, ListObjectAliasesResult, ListPalettesResult,
+        MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectAliasSummary,
+        ObjectDetail, ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary,
+        PALETTE_COLOR_COUNT, PaletteEntry, RequestBudgetKind, Rgba, SceneInfo, SectionRange,
     };
     use std::sync::Mutex;
 
@@ -1739,16 +1738,15 @@ mod tests {
         fn list_available_effects(
             &self,
             effect_type: Option<&EffectType>,
-        ) -> Result<Snapshot<AvailableEffect>, ReadError> {
+            page: &PageWindow,
+        ) -> Result<ListAvailableEffectsResult, ReadError> {
             self.enter("list_available_effects")?;
-            let mut items = fake_effects();
+            let mut effects = fake_effects();
             if let Some(effect_type) = effect_type {
-                items.retain(|effect| effect.effect_type == *effect_type);
+                effects.retain(|effect| effect.effect_type == *effect_type);
             }
-            Ok(Snapshot {
-                items,
-                snapshot_revision: REVISION,
-            })
+            let (items, page) = take_window(&effects, page, REVISION);
+            Ok(ListAvailableEffectsResult { items, page })
         }
 
         fn list_fonts(&self) -> Result<Snapshot<String>, ReadError> {

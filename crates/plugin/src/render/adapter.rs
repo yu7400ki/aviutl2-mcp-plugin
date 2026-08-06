@@ -302,13 +302,13 @@ fn ensure_renderable_frame(info: &HostEditInfo, frame: u32) -> Result<(), Render
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::read::host::ReadHost;
+    use crate::read::host::{HostEffectSummary, ReadHost};
     use crate::render::handoff::HandoffToken;
     use crate::render::slot::{MAX_ABANDONED_RENDERS, deliver_frame_guarded, guard_callback};
     use crate::test_support::with_silent_panic_hook;
     use aviutl2_mcp_core::settings::{Settings, SettingsDocument};
     use aviutl2_mcp_core::{
-        ARTIFACT_MAX_BYTES, AvailableEffect, ErrorCode, InstanceId, RenderFormat, ScaledBudgets,
+        ARTIFACT_MAX_BYTES, ErrorCode, InstanceId, RenderFormat, ScaledBudgets,
     };
     use serde_json::json;
     use std::ops::Deref;
@@ -584,8 +584,12 @@ mod tests {
             Ok(self.info.clone())
         }
 
-        fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError> {
+        fn effect_catalog(&self) -> Result<Vec<HostEffectSummary>, ReadError> {
             Ok(Vec::new())
+        }
+
+        fn effect_item_count(&self, _effect_name: &str) -> Result<usize, ReadError> {
+            Ok(0)
         }
 
         fn font_names(&self) -> Result<Vec<String>, ReadError> {

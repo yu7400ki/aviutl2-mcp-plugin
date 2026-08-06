@@ -7,7 +7,7 @@
 
 use crate::read::error::ReadError;
 use aviutl2_mcp_core::{
-    AvailableEffect, EffectItem, FiniteF64, GridBpm, ModuleEntry, Rgba, SectionRange,
+    EffectFlags, EffectItem, EffectType, FiniteF64, GridBpm, ModuleEntry, Rgba, SectionRange,
 };
 use std::fmt;
 
@@ -359,6 +359,21 @@ pub trait SceneValueReader: SceneReader {
     ) -> Result<Vec<String>, ReadError>;
 }
 
+/// 登録済み effect 1 件の見出し。
+///
+/// effect 名の列挙だけで得られる値をまとめたものであり、設定項目を 1 つも
+/// 含まない。項目の列挙は effect ごとに別の呼び出しを要するため、見出しを
+/// 集める段では踏み込まない。
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostEffectSummary {
+    /// effect 名。
+    pub name: String,
+    /// effect の種別。
+    pub effect_type: EffectType,
+    /// 対応内容を表すフラグ。
+    pub flags: EffectFlags,
+}
+
 /// 編集ハンドルが提供する読み取り経路。
 ///
 /// [`Self::enter_read_section`] は与えられたクロージャを SDK の参照区間の内側で
@@ -376,8 +391,17 @@ pub trait ReadHost: Send + Sync {
     /// 参照区間の外で取得する編集情報。
     fn edit_info(&self) -> Result<HostEditInfo, ReadError>;
 
-    /// 登録済み effect のカタログ。参照区間を必要としない。
-    fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError>;
+    /// 登録済み effect の見出しを全件返す。参照区間を必要としない。
+    ///
+    /// **設定項目は読まない。** 名前・種別・フラグは effect 名の列挙だけで
+    /// 得られる。項目を要する値は [`Self::effect_item_count`] が別に返す。
+    fn effect_catalog(&self) -> Result<Vec<HostEffectSummary>, ReadError>;
+
+    /// effect 1 件の設定項目数を返す。参照区間を必要としない。
+    ///
+    /// **effect ごとに列挙を 1 度行う呼び出しである。** 全件について呼ぶと費用が
+    /// 登録数で決まるため、呼び出し側は応答へ載せる分に限る。
+    fn effect_item_count(&self, effect_name: &str) -> Result<usize, ReadError>;
 
     /// 登録済みフォント名を全件返す。参照区間を必要としない。
     ///
