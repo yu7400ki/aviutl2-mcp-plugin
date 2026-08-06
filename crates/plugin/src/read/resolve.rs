@@ -136,6 +136,10 @@ fn resolve_candidate(
 ///
 /// 列の絶対位置と総数も材料に含めるため、要素を単独では組み立てられない。
 /// 一覧と詳細で同じ列から同じ入力が得られるよう、組み立てはここへ集約する。
+///
+/// 本モジュールの他の入口と違い `read` の内側にだけ見せる。読み取りの応答は
+/// 列全体を一度に組み立てるためこれを引くが、編集が要るのは
+/// [`effect_info_at`] が返す 1 件だけであり、材料そのものを渡す必要が無い。
 pub(super) fn effect_fingerprint_inputs(
     effects: &[HostEffect],
 ) -> impl Iterator<Item = EffectFingerprintInput<'_>> {
