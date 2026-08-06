@@ -63,6 +63,14 @@ pub enum ErrorCode {
     /// deadline 超過。
     Timeout,
     /// 実行開始前に cancel。
+    ///
+    /// **現在このコードを生成する経路は無い。** 生成できるのは、1 インスタンスが
+    /// 複数の要求を同時に受け付ける形になり、実行開始前の取り消しが起き得るように
+    /// なったときである。それまで `cancelled` が応答に現れることはなく、
+    /// `cancelled_is_never_produced` に相当する検査がそれを固定している。
+    ///
+    /// **値域は最初から確定させる。** [`ErrorCode`] は MCP 境界へ露出するため、
+    /// 後から足すと要求元が扱う値域が増える。
     Cancelled,
     /// schema/範囲/型が不正。
     InvalidArgument,
