@@ -25,6 +25,7 @@ use aviutl2_mcp_core::{
     ObjectSelector, Placement, SceneSize,
 };
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
@@ -855,7 +856,7 @@ fn an_effect_source_does_not_go_through_the_media_path_check() {
             effect_type: EffectType::Filter,
             flags: EffectFlags::from_raw(1),
             items: Vec::new(),
-            choices: Default::default(),
+            choices: HashMap::new(),
         });
     });
     harness.host.clear_calls();
