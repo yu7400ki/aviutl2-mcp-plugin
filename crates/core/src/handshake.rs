@@ -182,7 +182,10 @@ pub fn verify_mac(expected: &Mac, actual: &Mac) -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientHello {
-    /// client が対応する最大 MINOR。
+    /// client が名乗る自身のプロトコルバージョン。
+    ///
+    /// 版はすり合わせない。受け取った側は [`ProtocolVersion::CURRENT`] との
+    /// 完全一致だけを求める。
     pub protocol_version: ProtocolVersion,
     /// 接続先として期待する ID。
     pub instance_id: InstanceId,
@@ -197,7 +200,7 @@ pub struct ClientHello {
 /// 直せるが、応答に足された値は受け手に直す手が無い。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerAuth {
-    /// negotiation 結果のプロトコルバージョン。
+    /// plugin が名乗る自身のプロトコルバージョン。採用版ではない。
     pub protocol_version: ProtocolVersion,
     /// plugin の実 ID。
     pub instance_id: InstanceId,
