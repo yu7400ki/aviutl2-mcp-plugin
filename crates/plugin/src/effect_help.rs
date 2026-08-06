@@ -25,6 +25,14 @@
 //! や [`crate::movement::movements`] と同じ扱い）。ファイルはホストが同梱する
 //! ものであり、内容は AviUtl2 の版で決まる。版を入れ替えればホストごと起動し
 //! 直されて plugin も読み込み直されるため、要求のたびに開いても得るものが無い。
+//!
+//! **表のパーサは流用しない。** `aviutl2::alias::Table` は、節の見出しにも
+//! `キー=値` にも当たらない行を不正な行として扱い、パース全体を失敗させる。
+//! このファイルの先頭行は `;` で始まるコメントであり、1 行目で表が得られない。
+//! 加えて節名を `.` で割って入れ子にするため、`[Tips.<効果名>]` は `Tips` の
+//! 下の階層になり、`.` を含む効果名はさらに割れる。ここで要るのは節の見出しと
+//! キー 1 つだけであり、行を直に読めば取りこぼしが無い（[`crate::movement`] が
+//! 同じ理由で見出しを直に読んでいる）。
 
 use crate::alias::read_bounded;
 use std::collections::HashMap;
@@ -72,11 +80,32 @@ pub fn description_of(effect_name: &str) -> Option<&'static str> {
 }
 
 /// 効果名から説明を引く表を返す。読めなければ空の表になる。
+///
+/// **説明が 0 件になる理由は 3 つあり、いずれもログでは別の行になる。** 実行
+/// ファイルの位置を解決できない・そこにファイルが無いか読めない・読めたが効果の
+/// 節が 1 つも無い、の 3 つは対処が違う。同じ文言に畳むと、どれが起きたのかを
+/// ログから切り分けられない。
 fn descriptions() -> &'static HashMap<String, String> {
     DESCRIPTIONS.get_or_init(|| {
-        let table = host_directory().map(read_descriptions).unwrap_or_default();
+        let Some(dir) = host_directory() else {
+            tracing::info!(
+                "ホストの実行ファイルの位置を解決できませんでした。効果の説明は返しません"
+            );
+            return HashMap::new();
+        };
+        let path = dir.join(HELP_FILE);
+        let Some(table) = read_descriptions(&dir) else {
+            tracing::info!(
+                "{} を読めませんでした。効果の説明は返しません",
+                path.display()
+            );
+            return HashMap::new();
+        };
         if table.is_empty() {
-            tracing::info!("効果の説明を読めませんでした。説明は返しません");
+            tracing::info!(
+                "{} に効果の節がありませんでした。効果の説明は返しません",
+                path.display()
+            );
         } else {
             tracing::info!("効果の説明: {} 件", table.len());
         }
@@ -117,16 +146,14 @@ fn module_file_name() -> Option<PathBuf> {
     }
 }
 
-/// ディレクトリ直下の説明ファイルを読む。失敗はすべて空の表に畳む。
-fn read_descriptions(dir: PathBuf) -> HashMap<String, String> {
-    read_help_file(&dir.join(HELP_FILE)).unwrap_or_default()
-}
-
-/// 説明ファイル 1 つを読んで表を組み立てる。
-fn read_help_file(path: &Path) -> Option<HashMap<String, String>> {
-    let bytes = read_bounded(path, MAX_HELP_BYTES).ok()??;
-    let table = parse_descriptions(&String::from_utf8(bytes).ok()?);
-    (!table.is_empty()).then_some(table)
+/// ディレクトリ直下の説明ファイルを読んで表を組み立てる。
+///
+/// **ファイルを読めなかったことと、読めたが効果の節が無かったことを区別する。**
+/// 前者は `None`、後者は空の表である。どちらも説明は出ないが、原因が違う。
+/// 無い・大きすぎる・UTF-8 として読めないはいずれも `None` になる。
+fn read_descriptions(dir: &Path) -> Option<HashMap<String, String>> {
+    let bytes = read_bounded(&dir.join(HELP_FILE), MAX_HELP_BYTES).ok()??;
+    Some(parse_descriptions(&String::from_utf8(bytes).ok()?))
 }
 
 /// 節の見出しと `キー=値` の行から、効果の説明を集める。
@@ -135,9 +162,14 @@ fn read_help_file(path: &Path) -> Option<HashMap<String, String>> {
 /// どの効果にも属さない——節を跨いで値を拾うと、効果と無関係な文言が説明に
 /// 化ける。
 ///
-/// 節の中で見るキーは 1 つだけである。他のキーは設定項目の説明だが、一覧は
-/// 項目を返さない。項目の一覧は実行時に得られるため、ファイルの記述と食い違う
-/// ことがない。
+/// 節の中で見るキーは [`EFFECT_DESCRIPTION_KEY`] だけである。**節の中の並びに
+/// 頼らない。** 他のキーは設定項目の説明であり、効果の説明として返せば、
+/// エラーの出ないまま誤った文言が確信を持って使われる。項目の説明を運ばないのは
+/// 一覧が項目を返さないためであり、項目の一覧は実行時に得られるので、ファイルの
+/// 記述と食い違うことがない。
+///
+/// `;` で始まるコメント行は、`=` を含む形で現れてもキーが一致しないため採られ
+/// ない。節の外のコメント行は、そもそもどの効果にも属さない。
 ///
 /// 同じ効果名の節が 2 度現れた場合は先に現れたものを採る。
 ///
@@ -179,6 +211,10 @@ fn parse_descriptions(text: &str) -> HashMap<String, String> {
 /// **`\` の他の並びは `\` ごとそのまま残す。** この書式が包むと分かっているのは
 /// 改行だけであり、他の並びの解き方は定まっていない。
 ///
+/// **`\\n`（`\` 2 つ + `n`）は改行にならない。** 先頭の 2 文字が「その他の
+/// 並び」として素通しされ、続く `n` はただの文字として出るため、`\\n` は
+/// `\\n` のまま残る。設定値の codec なら `\\` を `\` へ解いて `\n` になる。
+///
 /// **設定値の codec は用いない。** [`aviutl2_mcp_core::decode_host_text`] は
 /// 書き込みと対にして往復させる設定値の書式であり、`\\` を `\` へ解く規則を
 /// 含む。ここには書き込みが無く往復もしないため、その規則を持ち込むと説明文の
@@ -206,40 +242,89 @@ fn unescape_newlines(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::fs;
 
-    /// 供給元が並べる形。先頭はコメント行で、効果の節以外の節も混じる。
+    /// 供給元が並べる形。
+    ///
+    /// **キーの並びに頼れない形にしてある。** `[Tips.画像合成(オブジェクト)]` は
+    /// 項目のキーが `effect.name` より前に並び、節の中にコメント行を挟む。
+    /// キー名を見ずに先頭の `キー=値` を採る実装では別の文言が採られる。
+    ///
+    /// **`[Language]` も `effect.name` を持つ。** 節の見出しの判定を緩めると
+    /// 表示言語の対応表が効果として現れる。
+    ///
+    /// 効果名には括弧を含むものがある。節の見出しの切り出しはこれを壊さない。
     const HELP: &str = ";AviUtl2 Default\r\n\
 [Language]\r\n\
 図形=Figure\r\n\
+effect.name=表示言語の対応表であって効果の説明ではありません\r\n\
 [Tips.図形]\r\n\
 effect.name=単色の図形を作成します\\nsvgファイルから読み込むことも出来ます\r\n\
 図形の種類=図形の種類を選択します\\nボタンクリックでsvgファイルを選択出来ます\r\n\
 ライン幅=図形を描画するラインの幅を指定します\r\n\
+[Tips.画像合成(オブジェクト)]\r\n\
+;合成の設定\r\n\
+合成モード=合成のしかたを選択します\r\n\
+X=合成する位置を指定します\r\n\
+effect.name=別のオブジェクトを合成します\r\n\
 [Tips.テキスト]\r\n\
 effect.name=文字を表示します\r\n";
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("aviutl2-mcp-effect-help-{name}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("作れる");
-        dir
+    /// テスト用の作業ディレクトリ。抜けるときに消す。
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "aviutl2-mcp-effect-help-{name}-{}",
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(&dir).expect("作れる");
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        fn write_help(&self, text: &str) {
+            self.write_help_bytes(text.as_bytes());
+        }
+
+        fn write_help_bytes(&self, bytes: &[u8]) {
+            fs::write(self.0.join(HELP_FILE), bytes).expect("書ける");
+        }
     }
 
-    fn write_help(dir: &Path, text: &str) {
-        fs::write(dir.join(HELP_FILE), text.as_bytes()).expect("書ける");
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 供給元の形を読んだ表。
+    fn help_table() -> HashMap<String, String> {
+        let dir = TempDir::new("help");
+        dir.write_help(HELP);
+        read_descriptions(dir.path()).expect("読める")
     }
 
     #[test]
     fn the_description_comes_from_the_effect_key_of_the_tips_section() {
-        let dir = temp_dir("sections");
-        write_help(&dir, HELP);
-        let table = read_descriptions(dir);
+        let table = help_table();
 
         assert_eq!(
             table.get("図形").map(String::as_str),
             Some("単色の図形を作成します\nsvgファイルから読み込むことも出来ます"),
             "効果の説明が全文で返りません"
+        );
+        // 項目のキーが先に並ぶ節でも、採るのは効果のキーである。並び順で決めると
+        // 設定項目の説明が効果の説明として出る。
+        assert_eq!(
+            table.get("画像合成(オブジェクト)").map(String::as_str),
+            Some("別のオブジェクトを合成します"),
+            "節の中の並びで説明を選んでいます"
         );
         assert_eq!(
             table.get("テキスト").map(String::as_str),
@@ -250,22 +335,35 @@ effect.name=文字を表示します\r\n";
     #[test]
     fn item_keys_and_other_sections_are_not_effect_descriptions() {
         // 節の中の他のキーは設定項目の説明であり、効果の説明ではない。
-        // `[Language]` は表示言語の対応表であって効果の節ではない。
-        let dir = temp_dir("other-keys");
-        write_help(&dir, HELP);
-        let table = read_descriptions(dir);
+        // `[Language]` は表示言語の対応表であって効果の節ではなく、`effect.name`
+        // を持っていても効果として現れてはならない。
+        let table = help_table();
+        let names: BTreeSet<&str> = table.keys().map(String::as_str).collect();
 
-        assert_eq!(table.len(), 2, "効果以外の節や項目のキーが混じっています");
-        assert!(!table.contains_key("図形の種類"));
+        assert_eq!(
+            names,
+            BTreeSet::from(["図形", "画像合成(オブジェクト)", "テキスト"]),
+            "効果以外の節や項目のキーが混じっています"
+        );
+    }
+
+    #[test]
+    fn a_comment_line_inside_a_section_is_skipped() {
+        // 節の中のコメント行は説明でも項目でもない。`=` を含む形で現れても、
+        // キーが一致しないため説明には採られない。
+        let table = parse_descriptions(
+            "[Tips.図形]\r\n;effect.name=コメント\r\n;単なる注記\r\neffect.name=説明\r\n",
+        );
+
+        assert_eq!(table.get("図形").map(String::as_str), Some("説明"));
+        assert_eq!(table.len(), 1);
     }
 
     #[test]
     fn the_second_line_of_a_description_is_kept() {
         // 発見の鍵が 2 行目に置かれている説明が実在する。先頭行だけに切ると、
         // 説明を載せる意味そのものが失われる。
-        let dir = temp_dir("second-line");
-        write_help(&dir, HELP);
-        let description = read_descriptions(dir).remove("図形").expect("説明がある");
+        let description = help_table().remove("図形").expect("説明がある");
 
         assert_eq!(description.lines().count(), 2);
         assert!(description.lines().nth(1).unwrap().contains("svg"));
@@ -284,39 +382,49 @@ effect.name=文字を表示します\r\n";
                 "effect.name=前\r\n[Language]\r\neffect.name=別の節\r\n",
             ),
         ] {
-            let dir = temp_dir(name);
-            write_help(&dir, text);
+            let dir = TempDir::new(name);
+            dir.write_help(text);
             assert!(
-                read_descriptions(dir).is_empty(),
+                read_descriptions(dir.path()).expect("読める").is_empty(),
                 "{name} が説明を返しました"
             );
         }
     }
 
     #[test]
-    fn a_missing_file_yields_no_description() {
-        let dir = temp_dir("missing");
-        assert!(read_descriptions(dir).is_empty());
+    fn a_readable_file_without_effect_sections_is_told_apart_from_an_unreadable_one() {
+        // どちらも説明は 0 件だが原因が違う。畳むと、ログから切り分けられない。
+        let readable = TempDir::new("no-tips");
+        readable.write_help(";コメントだけ\r\n[Language]\r\n図形=Figure\r\n");
+        assert_eq!(
+            read_descriptions(readable.path()),
+            Some(HashMap::new()),
+            "読めたファイルが読めなかったことになっています"
+        );
+
+        let missing = TempDir::new("missing");
+        assert_eq!(read_descriptions(missing.path()), None);
     }
 
     #[test]
     fn a_file_over_the_limit_is_not_read() {
-        let dir = temp_dir("oversized");
-        let mut text = String::from("[Tips.図形]\r\neffect.name=説明\r\n");
-        text.push_str(&";x".repeat(MAX_HELP_BYTES as usize));
-        write_help(&dir, &text);
-        assert!(read_descriptions(dir).is_empty());
+        let dir = TempDir::new("oversized");
+        let head = "[Tips.図形]\r\neffect.name=説明\r\n";
+        // 上限をちょうど 1 バイト超える。境界そのものを跨がせる。
+        let mut text = String::from(head);
+        text.push_str(&";".repeat(MAX_HELP_BYTES as usize + 1 - head.len()));
+        assert_eq!(text.len() as u64, MAX_HELP_BYTES + 1);
+        dir.write_help(&text);
+
+        assert_eq!(read_descriptions(dir.path()), None);
     }
 
     #[test]
     fn a_non_utf8_file_yields_no_description() {
-        let dir = temp_dir("non-utf8");
-        fs::write(
-            dir.join(HELP_FILE),
-            b"[Tips.\xff\xfe]\r\neffect.name=\xff\r\n",
-        )
-        .expect("書ける");
-        assert!(read_descriptions(dir).is_empty());
+        let dir = TempDir::new("non-utf8");
+        dir.write_help_bytes(b"[Tips.\xff\xfe]\r\neffect.name=\xff\r\n");
+
+        assert_eq!(read_descriptions(dir.path()), None);
     }
 
     #[test]
@@ -324,6 +432,8 @@ effect.name=文字を表示します\r\n";
         assert_eq!(unescape_newlines(r"1 行目\n2 行目"), "1 行目\n2 行目");
         // 改行以外の並びは `\` ごと残る。設定値の codec と違い `\\` を解かない。
         assert_eq!(unescape_newlines(r"C:\\temp\path"), r"C:\\temp\path");
+        // 最も紛らわしい並び。`\\` を解かないため改行にはならない。
+        assert_eq!(unescape_newlines(r"1 行目\\n2 行目"), r"1 行目\\n2 行目");
         assert_eq!(unescape_newlines(r"末尾の\"), r"末尾の\");
     }
 
