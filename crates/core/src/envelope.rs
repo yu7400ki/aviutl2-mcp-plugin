@@ -181,8 +181,8 @@ impl<'de> Deserialize<'de> for ResponseResult {
                         "result" => result = Some(map.next_value::<serde_json::Value>()?),
                         "error" => error = Some(map.next_value::<ErrorObject>()?),
                         _ => {
-                            // 前方互換のため、将来の MINOR で追加される未知フィールドは
-                            // 読み飛ばして許容する。
+                            // 知らないフィールドは読み飛ばす。受け手が使わない値 1 つの
+                            // ために応答そのものを落とさない。
                             map.next_value::<serde_json::Value>()?;
                         }
                     }
@@ -340,8 +340,10 @@ impl<'de> Deserialize<'de> for ResponseEnvelope {
                         "result" => result = Some(map.next_value::<serde_json::Value>()?),
                         "error" => error = Some(map.next_value::<ErrorObject>()?),
                         _ => {
-                            // 前方互換のため、将来の MINOR で追加される未知フィールドは
-                            // 読み飛ばして許容する。
+                            // 知らないフィールドは読み飛ばす。受け手が使わない値 1 つの
+                            // ために応答そのものを落とさない。名乗りを完全一致で求める
+                            // ことと矛盾しない——`kind` はフレームの取り違えを捕まえる
+                            // 値であり、こちらは中身に足された値である。
                             map.next_value::<serde_json::Value>()?;
                         }
                     }
