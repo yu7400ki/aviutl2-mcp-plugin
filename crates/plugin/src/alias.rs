@@ -12,8 +12,8 @@
 
 use aviutl2::alias::Table;
 use aviutl2_mcp_core::{
-    ErrorCode, ListObjectAliasesResult, MAX_ALIAS_BYTES, ObjectAliasSummary, PageError,
-    PageRequest, TextSyntaxError, take_page, validate_alias, validate_object_alias_name,
+    ErrorCode, ListObjectAliasesResult, MAX_ALIAS_BYTES, ObjectAliasSummary, PageWindow,
+    TextSyntaxError, take_window, validate_alias, validate_object_alias_name,
 };
 use serde_json::{Value, json};
 use std::fs::File;
@@ -524,18 +524,18 @@ impl AliasFiles for DiskAliasFiles {
 pub fn list_object_aliases(
     data_dir: &Path,
     label: Option<&str>,
-    page: &PageRequest,
+    page: &PageWindow,
     snapshot_revision: u64,
     files: &dyn AliasFiles,
-) -> Result<ListObjectAliasesResult, PageError> {
+) -> ListObjectAliasesResult {
     let labels = files.label_table(data_dir);
     let Some(alias_dir) = AliasDirectory::resolve(data_dir) else {
         // ディレクトリが無ければ列挙するものも無い。空のページを返す。
-        let (_, meta) = take_page::<(String, Option<String>)>(&[], page, snapshot_revision)?;
-        return Ok(ListObjectAliasesResult {
+        let (_, meta) = take_window::<(String, Option<String>)>(&[], page, snapshot_revision);
+        return ListObjectAliasesResult {
             items: Vec::new(),
             page: meta,
-        });
+        };
     };
     let mut entries: Vec<(String, Option<String>)> = enumerate_alias_names(&alias_dir)
         .into_iter()
@@ -549,7 +549,7 @@ pub fn list_object_aliases(
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
 
-    let (window, meta) = take_page(&entries, page, snapshot_revision)?;
+    let (window, meta) = take_window(&entries, page, snapshot_revision);
     let mut items = Vec::with_capacity(window.len());
     let mut dropped = 0usize;
     for (name, label) in window {
@@ -568,7 +568,7 @@ pub fn list_object_aliases(
     }
 
     let page = dropped_from_page(meta, dropped, items.len());
-    Ok(ListObjectAliasesResult { items, page })
+    ListObjectAliasesResult { items, page }
 }
 
 /// ディレクトリを列挙し、名前の規則を通るものだけを集める。
@@ -775,16 +775,12 @@ pub(crate) mod tests {
         bytes
     }
 
-    fn page(offset: u32, limit: u32) -> PageRequest {
-        PageRequest {
-            offset,
-            limit,
-            snapshot_revision: None,
-        }
+    fn page(offset: u32, limit: u32) -> PageWindow {
+        crate::test_support::page_request(offset, limit, None).window()
     }
 
-    fn list(dir: &TempDir, label: Option<&str>, page: &PageRequest) -> ListObjectAliasesResult {
-        list_object_aliases(dir.path(), label, page, 7, &DiskAliasFiles).unwrap()
+    fn list(dir: &TempDir, label: Option<&str>, page: &PageWindow) -> ListObjectAliasesResult {
+        list_object_aliases(dir.path(), label, page, 7, &DiskAliasFiles)
     }
 
     fn item_names(result: &ListObjectAliasesResult) -> Vec<String> {
@@ -1263,7 +1259,7 @@ pub(crate) mod tests {
 
         let files = CountingFiles::new();
         let limit = 2;
-        let result = list_object_aliases(dir.path(), None, &page(0, limit), 7, &files).unwrap();
+        let result = list_object_aliases(dir.path(), None, &page(0, limit), 7, &files);
 
         assert_eq!(result.items.len(), limit as usize);
         assert_eq!(result.page.total_count, 8);

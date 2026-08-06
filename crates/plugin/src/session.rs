@@ -21,16 +21,17 @@ use aviutl2_mcp_core::{
     DeleteObjectSectionParams, EditInputError, EditOperation, EffectItemValuesInputError,
     ErrorCode, ErrorObject, GetCurrentSceneParams, GetCurrentSceneResult, GetEditInfoParams,
     GetEffectItemValuesParams, GetObjectParams, GetSelectionParams, InstanceId, InstanceState,
-    KnownOperation, ListAvailableEffectsParams, ListAvailableEffectsResult, ListFontsParams,
-    ListFontsResult, ListLayersParams, ListLayersResult, ListModulesParams, ListModulesResult,
-    ListObjectAliasesParams, ListObjectsParams, ListObjectsResult, ListPalettesParams,
-    MoveObjectParams, MoveObjectSectionParams, Nonce, ObjectFilterError, PageError, PageRequest,
-    PongProject, PongResult, ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult,
-    RenderInputError, RenderOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind,
-    ResponseResult, ScaledBudgets, SelectionSnapshot, SetEffectEnabledParams, SetGridBpmParams,
-    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSceneSettingsParams,
-    SetSelectionParams, TextSyntaxError, compute_client_mac, compute_server_mac, deserialize_json,
-    take_page, verify_mac,
+    KnownOperation, LimitOutOfRange, ListAvailableEffectsParams, ListAvailableEffectsResult,
+    ListFontsParams, ListFontsResult, ListLayersParams, ListLayersResult, ListModulesParams,
+    ListModulesResult, ListObjectAliasesParams, ListObjectsParams, ListObjectsResult,
+    ListPalettesParams, MoveObjectParams, MoveObjectSectionParams, Nonce, ObjectFilterError,
+    PageWindow, PongProject, PongResult, ProtocolVersion, ReadOperation, RenderFrameParams,
+    RenderFrameResult, RenderInputError, RenderOperation, RequestEnvelope, RequestId,
+    ResponseEnvelope, ResponseKind, ResponseResult, ScaledBudgets, SelectionSnapshot,
+    SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
+    SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams, SnapshotRevisionMismatch,
+    TextSyntaxError, ValidatedPageRequest, compute_client_mac, compute_server_mac,
+    deserialize_json, take_page, take_window, verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -845,21 +846,23 @@ fn host_busy(message: &str) -> ErrorObject {
 
 /// 復号と検証を終えた読み取り要求。
 ///
-/// この型を作れた時点で、要求内容だけで判定できる誤りは残っていない。
+/// この型を作れた時点で、要求内容だけで判定できる誤りは残っていない。ページ
+/// 指定を伴う operation が検証済みのページ要求を併せて運ぶのはそのためである。
+/// params が持つ生のページ指定は切り出しへ渡せない。
 #[derive(Debug, Clone, PartialEq)]
 enum ReadRequest {
     GetEditInfo,
     GetCurrentScene,
-    ListLayers(ListLayersParams),
-    ListObjects(ListObjectsParams),
+    ListLayers(ListLayersParams, ValidatedPageRequest),
+    ListObjects(ListObjectsParams, ValidatedPageRequest),
     GetObject(Box<GetObjectParams>),
-    ListAvailableEffects(ListAvailableEffectsParams),
+    ListAvailableEffects(ListAvailableEffectsParams, ValidatedPageRequest),
     GetEffectItemValues(Box<GetEffectItemValuesParams>),
-    GetSelection(GetSelectionParams),
-    ListFonts(ListFontsParams),
-    ListPalettes(ListPalettesParams),
-    ListModules(ListModulesParams),
-    ListObjectAliases(ListObjectAliasesParams),
+    GetSelection(GetSelectionParams, ValidatedPageRequest),
+    ListFonts(ValidatedPageRequest),
+    ListPalettes(ValidatedPageRequest),
+    ListModules(ListModulesParams, ValidatedPageRequest),
+    ListObjectAliases(ListObjectAliasesParams, ValidatedPageRequest),
 }
 
 /// operation 別の params を復号し、要求内容だけで決まる検証を済ませる。
@@ -878,24 +881,24 @@ fn decode_request(operation: ReadOperation, params: &Value) -> Result<ReadReques
         }
         ReadOperation::ListLayers => {
             let params: ListLayersParams = decode_params(params)?;
-            params.page.validate().map_err(page_error)?;
-            ReadRequest::ListLayers(params)
+            let page = params.page.validate().map_err(page_limit_error)?;
+            ReadRequest::ListLayers(params, page)
         }
         ReadOperation::ListObjects => {
             let params: ListObjectsParams = decode_params(params)?;
-            params.page.validate().map_err(page_error)?;
+            let page = params.page.validate().map_err(page_limit_error)?;
             if let Some(filter) = &params.filter {
                 filter.validate().map_err(filter_error)?;
             }
-            ReadRequest::ListObjects(params)
+            ReadRequest::ListObjects(params, page)
         }
         ReadOperation::GetObject => {
             ReadRequest::GetObject(Box::new(decode_params::<GetObjectParams>(params)?))
         }
         ReadOperation::ListAvailableEffects => {
             let params: ListAvailableEffectsParams = decode_params(params)?;
-            params.page.validate().map_err(page_error)?;
-            ReadRequest::ListAvailableEffects(params)
+            let page = params.page.validate().map_err(page_limit_error)?;
+            ReadRequest::ListAvailableEffects(params, page)
         }
         ReadOperation::GetEffectItemValues => {
             let params: GetEffectItemValuesParams = decode_params(params)?;
@@ -904,29 +907,27 @@ fn decode_request(operation: ReadOperation, params: &Value) -> Result<ReadReques
         }
         ReadOperation::GetSelection => {
             let params: GetSelectionParams = decode_params(params)?;
-            params.page.validate().map_err(page_error)?;
-            ReadRequest::GetSelection(params)
+            let page = params.page.validate().map_err(page_limit_error)?;
+            ReadRequest::GetSelection(params, page)
         }
         ReadOperation::ListFonts => {
             let params: ListFontsParams = decode_params(params)?;
-            params.page.validate().map_err(page_error)?;
-            ReadRequest::ListFonts(params)
+            ReadRequest::ListFonts(params.page.validate().map_err(page_limit_error)?)
         }
         ReadOperation::ListPalettes => {
             let params: ListPalettesParams = decode_params(params)?;
-            params.page.validate().map_err(page_error)?;
-            ReadRequest::ListPalettes(params)
+            ReadRequest::ListPalettes(params.page.validate().map_err(page_limit_error)?)
         }
         ReadOperation::ListModules => {
             let params: ListModulesParams = decode_params(params)?;
-            params.page.validate().map_err(page_error)?;
-            ReadRequest::ListModules(params)
+            let page = params.page.validate().map_err(page_limit_error)?;
+            ReadRequest::ListModules(params, page)
         }
         ReadOperation::ListObjectAliases => {
             let params: ListObjectAliasesParams = decode_params(params)?;
-            params.page.validate().map_err(page_error)?;
+            let page = params.page.validate().map_err(page_limit_error)?;
             params.validate().map_err(label_error)?;
-            ReadRequest::ListObjectAliases(params)
+            ReadRequest::ListObjectAliases(params, page)
         }
     })
 }
@@ -949,26 +950,21 @@ fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Valu
                 project_revision,
             })
         }
-        ReadRequest::ListLayers(params) => {
+        ReadRequest::ListLayers(params, request) => {
             let snapshot = adapter
                 .list_layers(params.expected_scene_id)
                 .map_err(read_error)?;
-            let (items, page) =
-                take_page(&snapshot.items, &params.page, snapshot.snapshot_revision)
-                    .map_err(page_error)?;
+            let (items, page) = take_page(&snapshot.items, &request, snapshot.snapshot_revision)
+                .map_err(snapshot_revision_error)?;
             to_result(&ListLayersResult { items, page })
         }
-        ReadRequest::ListObjects(params) => {
+        ReadRequest::ListObjects(params, request) => {
             // 切り出しは読み取り口が済ませている。参照区間の失敗と、ページ要求
             // そのものの不整合は別の失敗であり、対応するエラーも異なる。
             let page = adapter
-                .list_objects(
-                    params.expected_scene_id,
-                    params.filter.as_ref(),
-                    &params.page,
-                )
+                .list_objects(params.expected_scene_id, params.filter.as_ref(), &request)
                 .map_err(read_error)?
-                .map_err(page_error)?;
+                .map_err(snapshot_revision_error)?;
             to_result(&ListObjectsResult {
                 items: page.items,
                 page: page.meta,
@@ -977,16 +973,15 @@ fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Valu
         ReadRequest::GetObject(params) => {
             to_result(&adapter.get_object(&params.selector).map_err(read_error)?)
         }
-        ReadRequest::ListAvailableEffects(params) => {
+        ReadRequest::ListAvailableEffects(params, request) => {
             let snapshot = adapter
                 .list_available_effects(params.effect_type.as_ref())
                 .map_err(read_error)?;
-            let (items, page) = take_page(
+            let (items, page) = take_window(
                 &snapshot.items,
-                &catalog_page_request(&params.page),
+                &catalog_page_request(&request),
                 snapshot.snapshot_revision,
-            )
-            .map_err(page_error)?;
+            );
             to_result(&ListAvailableEffectsResult { items, page })
         }
         ReadRequest::GetEffectItemValues(params) => to_result(
@@ -994,53 +989,49 @@ fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Valu
                 .get_effect_item_values(&params)
                 .map_err(read_error)?,
         ),
-        ReadRequest::GetSelection(params) => {
+        ReadRequest::GetSelection(params, request) => {
             // 切り出しは読み取り口が済ませている。参照区間の失敗と、ページ要求
             // そのものの不整合は別の失敗であり、対応するエラーも異なる。
             let snapshot: SelectionSnapshot = adapter
-                .get_selection(params.expected_scene_id, &params.page)
+                .get_selection(params.expected_scene_id, &request)
                 .map_err(read_error)?
-                .map_err(page_error)?;
+                .map_err(snapshot_revision_error)?;
             to_result(&snapshot)
         }
-        ReadRequest::ListFonts(params) => {
+        ReadRequest::ListFonts(request) => {
             let snapshot = adapter.list_fonts().map_err(read_error)?;
-            let (items, page) = take_page(
+            let (items, page) = take_window(
                 &snapshot.items,
-                &catalog_page_request(&params.page),
+                &catalog_page_request(&request),
                 snapshot.snapshot_revision,
-            )
-            .map_err(page_error)?;
+            );
             to_result(&ListFontsResult { items, page })
         }
-        ReadRequest::ListPalettes(params) => {
+        ReadRequest::ListPalettes(request) => {
             // 切り出しは読み取り口が済ませている。色を読むのが窓に入った分だけで
             // あることを、参照区間の内側で保証する必要がある。
             let result = adapter
-                .list_palettes(&catalog_page_request(&params.page))
-                .map_err(read_error)?
-                .map_err(page_error)?;
+                .list_palettes(&catalog_page_request(&request))
+                .map_err(read_error)?;
             to_result(&result)
         }
-        ReadRequest::ListModules(params) => {
+        ReadRequest::ListModules(params, request) => {
             let snapshot = adapter
                 .list_modules(params.module_type.as_ref())
                 .map_err(read_error)?;
-            let (items, page) = take_page(
+            let (items, page) = take_window(
                 &snapshot.items,
-                &catalog_page_request(&params.page),
+                &catalog_page_request(&request),
                 snapshot.snapshot_revision,
-            )
-            .map_err(page_error)?;
+            );
             to_result(&ListModulesResult { items, page })
         }
-        ReadRequest::ListObjectAliases(params) => {
+        ReadRequest::ListObjectAliases(params, request) => {
             // 切り出しは読み取り口が済ませている。ファイルを開くのが窓に入った
             // 分だけであることを、切り出しと同じ場所で保証する必要がある。
             let result = adapter
-                .list_object_aliases(params.label.as_deref(), &catalog_page_request(&params.page))
-                .map_err(read_error)?
-                .map_err(page_error)?;
+                .list_object_aliases(params.label.as_deref(), &catalog_page_request(&request))
+                .map_err(read_error)?;
             to_result(&result)
         }
     }
@@ -1057,11 +1048,11 @@ fn dispatch_read(adapter: &dyn ReadAdapter, request: ReadRequest) -> Result<Valu
 /// 応答へ載せる revision は落とさない。それは列挙を始めた時点のプロジェクト
 /// revision であり、ページのメタ情報が表す意味そのものである。照合に使えない
 /// ことを表す固定値へ置き換えても、実在し得る revision と区別が付かない。
-fn catalog_page_request(page: &PageRequest) -> PageRequest {
-    PageRequest {
-        snapshot_revision: None,
-        ..*page
-    }
+///
+/// 落とした結果は取り出し範囲であり、切り出しは失敗しない。照合しないと決めた
+/// ことが、失敗の種類が 0 であることとして型に現れる。
+fn catalog_page_request(page: &ValidatedPageRequest) -> PageWindow {
+    page.window()
 }
 
 /// 復号と検証を終えた編集要求。
@@ -1361,21 +1352,21 @@ fn render_input_error(error: RenderInputError) -> ErrorObject {
     error_object(error.error_code(), error.to_string())
 }
 
-/// ページ指定の失敗を応答用のエラーへ変換する。
-fn page_error(error: PageError) -> ErrorObject {
-    match error {
-        PageError::LimitOutOfRange(_) => {
-            error_object(ErrorCode::InvalidArgument, error.to_string())
-        }
-        PageError::SnapshotRevisionMismatch { requested, current } => error_object(
-            ErrorCode::PreconditionFailed,
-            "一覧が変化したため、先頭のページから取り直してください",
-        )
-        .with_details(json!({
-            "requested_snapshot_revision": requested,
-            "current_snapshot_revision": current,
-        })),
-    }
+/// ページ指定の範囲の失敗を応答用のエラーへ変換する。
+fn page_limit_error(error: LimitOutOfRange) -> ErrorObject {
+    error_object(ErrorCode::InvalidArgument, error.to_string())
+}
+
+/// ページ間の revision 照合の失敗を応答用のエラーへ変換する。
+fn snapshot_revision_error(error: SnapshotRevisionMismatch) -> ErrorObject {
+    error_object(
+        ErrorCode::PreconditionFailed,
+        "一覧が変化したため、先頭のページから取り直してください",
+    )
+    .with_details(json!({
+        "requested_snapshot_revision": error.requested,
+        "current_snapshot_revision": error.current,
+    }))
 }
 
 /// 絞り込み条件の失敗を応答用のエラーへ変換する。
@@ -1710,8 +1701,8 @@ mod tests {
             &self,
             expected_scene_id: i32,
             filter: Option<&ObjectFilter>,
-            page: &PageRequest,
-        ) -> Result<Result<Page<ObjectSummary>, PageError>, ReadError> {
+            page: &ValidatedPageRequest,
+        ) -> Result<Result<Page<ObjectSummary>, SnapshotRevisionMismatch>, ReadError> {
             self.enter("list_objects")?;
             ensure_scene(expected_scene_id)?;
             let layer_min = filter.and_then(|filter| filter.layer_min).unwrap_or(0);
@@ -1765,33 +1756,29 @@ mod tests {
             })
         }
 
-        fn list_palettes(
-            &self,
-            page: &PageRequest,
-        ) -> Result<Result<ListPalettesResult, PageError>, ReadError> {
+        fn list_palettes(&self, page: &PageWindow) -> Result<ListPalettesResult, ReadError> {
             self.enter("list_palettes")?;
             let names = fake_palette_names();
-            Ok(
-                take_page(&names, page, REVISION).map(|(window, meta)| ListPalettesResult {
-                    current: Some("[標準.既定]".to_string()),
-                    items: window
-                        .into_iter()
-                        .map(|name| PaletteEntry {
-                            name,
-                            colors: vec![
-                                Rgba {
-                                    r: 0,
-                                    g: 0,
-                                    b: 0,
-                                    a: 255
-                                };
-                                PALETTE_COLOR_COUNT
-                            ],
-                        })
-                        .collect(),
-                    page: meta,
-                }),
-            )
+            let (window, meta) = take_window(&names, page, REVISION);
+            Ok(ListPalettesResult {
+                current: Some("[標準.既定]".to_string()),
+                items: window
+                    .into_iter()
+                    .map(|name| PaletteEntry {
+                        name,
+                        colors: vec![
+                            Rgba {
+                                r: 0,
+                                g: 0,
+                                b: 0,
+                                a: 255
+                            };
+                            PALETTE_COLOR_COUNT
+                        ],
+                    })
+                    .collect(),
+                page: meta,
+            })
         }
 
         fn list_modules(
@@ -1812,8 +1799,8 @@ mod tests {
         fn list_object_aliases(
             &self,
             label: Option<&str>,
-            page: &PageRequest,
-        ) -> Result<Result<ListObjectAliasesResult, PageError>, ReadError> {
+            page: &PageWindow,
+        ) -> Result<ListObjectAliasesResult, ReadError> {
             self.enter("list_object_aliases")?;
             let mut items = fake_object_aliases();
             if let Some(label) = label {
@@ -1827,8 +1814,8 @@ mod tests {
                 .filter(|call| **call == "list_object_aliases")
                 .count() as u64;
             let revision = REVISION + calls - 1;
-            Ok(take_page(&items, page, revision)
-                .map(|(items, page)| ListObjectAliasesResult { items, page }))
+            let (items, page) = take_window(&items, page, revision);
+            Ok(ListObjectAliasesResult { items, page })
         }
 
         fn get_effect_item_values(
@@ -1851,8 +1838,8 @@ mod tests {
         fn get_selection(
             &self,
             expected_scene_id: i32,
-            page: &PageRequest,
-        ) -> Result<Result<SelectionSnapshot, PageError>, ReadError> {
+            page: &ValidatedPageRequest,
+        ) -> Result<Result<SelectionSnapshot, SnapshotRevisionMismatch>, ReadError> {
             self.enter("get_selection")?;
             ensure_scene(expected_scene_id)?;
             let items = fake_objects();

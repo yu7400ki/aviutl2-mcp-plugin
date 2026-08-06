@@ -15,8 +15,9 @@ use aviutl2_mcp_core::{
     EffectItem, EffectItemValues, EffectSelector, EffectType, EvaluatedItem, EvaluatedItemKind,
     Extent, FiniteF64, FrameRange, GetEffectItemValuesParams, LayerInfo, ListObjectAliasesResult,
     ListPalettesResult, MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectDetail, ObjectFilter,
-    ObjectFingerprintInput, ObjectSelector, ObjectSummary, PageError, PageMeta, PageRequest,
-    PaletteEntry, SceneInfo, SelectionSnapshot, TrackGroup, take_page,
+    ObjectFingerprintInput, ObjectSelector, ObjectSummary, PageMeta, PageWindow, PaletteEntry,
+    SceneInfo, SelectionSnapshot, SnapshotRevisionMismatch, TrackGroup, ValidatedPageRequest,
+    take_page, take_window,
 };
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -236,8 +237,8 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
         &self,
         expected_scene_id: i32,
         filter: Option<&ObjectFilter>,
-        page: &PageRequest,
-    ) -> Result<Result<Page<ObjectSummary>, PageError>, ReadError> {
+        page: &ValidatedPageRequest,
+    ) -> Result<Result<Page<ObjectSummary>, SnapshotRevisionMismatch>, ReadError> {
         self.ensure_readable()?;
         let info = self.edit_info()?;
         ensure_scene(&info, expected_scene_id)?;
@@ -300,8 +301,8 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
     fn get_selection(
         &self,
         expected_scene_id: i32,
-        page: &PageRequest,
-    ) -> Result<Result<SelectionSnapshot, PageError>, ReadError> {
+        page: &ValidatedPageRequest,
+    ) -> Result<Result<SelectionSnapshot, SnapshotRevisionMismatch>, ReadError> {
         self.ensure_readable()?;
         let info = self.edit_info()?;
         ensure_scene(&info, expected_scene_id)?;
@@ -385,10 +386,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
         })
     }
 
-    fn list_palettes(
-        &self,
-        page: &PageRequest,
-    ) -> Result<Result<ListPalettesResult, PageError>, ReadError> {
+    fn list_palettes(&self, page: &PageWindow) -> Result<ListPalettesResult, ReadError> {
         self.ensure_readable()?;
         let project = self.project.as_ref();
         let page = *page;
@@ -398,10 +396,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
 
             // 名前だけを先に集める。色は窓に入った分だけ読む。
             let names = scene.palette_names()?;
-            let (window, meta) = match take_page(&names, &page, revision) {
-                Ok(page) => page,
-                Err(error) => return Ok(Err(error)),
-            };
+            let (window, meta) = take_window(&names, &page, revision);
 
             let mut items = Vec::with_capacity(window.len());
             let mut dropped = 0usize;
@@ -417,11 +412,11 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
             // 現在のパレット名は付随情報である。取れなくても一覧は返す。
             let current = scene.current_palette_name();
 
-            Ok(Ok(ListPalettesResult {
+            Ok(ListPalettesResult {
                 current,
                 page: dropped_from_page(meta, dropped, items.len()),
                 items,
-            }))
+            })
         })
     }
 
@@ -445,8 +440,8 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
     fn list_object_aliases(
         &self,
         label: Option<&str>,
-        page: &PageRequest,
-    ) -> Result<Result<ListObjectAliasesResult, PageError>, ReadError> {
+        page: &PageWindow,
+    ) -> Result<ListObjectAliasesResult, ReadError> {
         // SDK を 1 度も呼ばない。受付判定も参照区間も通らず、読むのは
         // AviUtl2 のデータディレクトリ配下のファイルだけである。
         let Some(data_dir) = crate::alias::data_directory() else {
@@ -968,10 +963,13 @@ fn selected_range(info: &HostEditInfo) -> Option<FrameRange> {
 mod tests {
     use super::*;
     use crate::read::host::HostLayer;
-    use crate::test_support::{alias_with_effects, with_silent_panic_hook};
+    use crate::test_support::{
+        alias_with_effects, default_page_request, default_page_window, page_request,
+        with_silent_panic_hook,
+    };
     use aviutl2_mcp_core::{
         AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
-        GridBpm, ItemValue, MAX_PAGE_LIMIT, PALETTE_COLOR_COUNT, Rgba, SectionRange, TrackInfo,
+        GridBpm, ItemValue, PALETTE_COLOR_COUNT, Rgba, SectionRange, TrackInfo,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1763,14 +1761,13 @@ mod tests {
     impl<H: ReadHost> HostReadAdapter<H> {
         /// 既定のページ要求でオブジェクトを列挙する。
         ///
-        /// ページ要求は要求の復号側で検証済みのものだけが届くため、既定値を
-        /// そのまま用いる。フェイクの対象数は既定の 1 ページに収まる。
+        /// フェイクの対象数は既定の 1 ページに収まる。
         fn list_objects_page(
             &self,
             expected_scene_id: i32,
             filter: Option<&ObjectFilter>,
         ) -> Result<Page<ObjectSummary>, ReadError> {
-            self.list_objects(expected_scene_id, filter, &PageRequest::default())
+            self.list_objects(expected_scene_id, filter, &default_page_request())
                 .map(|page| page.expect("既定のページ要求が拒否されました"))
         }
 
@@ -1779,19 +1776,13 @@ mod tests {
             &self,
             expected_scene_id: i32,
         ) -> Result<SelectionSnapshot, ReadError> {
-            self.get_selection(expected_scene_id, &PageRequest::default())
+            self.get_selection(expected_scene_id, &default_page_request())
                 .map(|snapshot| snapshot.expect("既定のページ要求が拒否されました"))
         }
 
         /// 既定のページ要求でパレットを列挙する。
         fn list_palettes_page(&self) -> Result<ListPalettesResult, ReadError> {
-            self.list_palettes_with(&PageRequest::default())
-        }
-
-        /// 指定のページ要求でパレットを列挙する。
-        fn list_palettes_with(&self, page: &PageRequest) -> Result<ListPalettesResult, ReadError> {
-            self.list_palettes(page)
-                .map(|result| result.expect("ページ要求が拒否されました"))
+            self.list_palettes(&default_page_window())
         }
     }
 
@@ -2848,15 +2839,7 @@ mod tests {
     fn list_objects_reads_details_only_within_the_page() {
         let adapter = adapter();
         let page = adapter
-            .list_objects(
-                0,
-                None,
-                &PageRequest {
-                    offset: 1,
-                    limit: 1,
-                    snapshot_revision: None,
-                },
-            )
+            .list_objects(0, None, &page_request(1, 1, None))
             .unwrap()
             .unwrap();
 
@@ -2895,15 +2878,7 @@ mod tests {
         });
 
         let page = adapter
-            .list_objects(
-                0,
-                None,
-                &PageRequest {
-                    offset: 0,
-                    limit: LIMIT,
-                    snapshot_revision: None,
-                },
-            )
+            .list_objects(0, None, &page_request(0, LIMIT, None))
             .unwrap()
             .unwrap();
 
@@ -2947,55 +2922,19 @@ mod tests {
         );
     }
 
-    /// 上限を超える件数の要求が、詳細を 1 件も読まずに拒否されることを
-    /// 確かめる。
-    ///
-    /// 切り出しは参照区間の内側にあり、件数の上限がそのまま 1 参照区間での
-    /// 重い読み取り回数の上限になる。要求の復号側の検証だけに頼ると、そこを
-    /// 通らない呼び出しで読み取り回数が列挙全件まで伸びる。
-    #[test]
-    fn list_objects_rejects_an_oversized_limit_before_reading_details() {
-        let adapter = adapter();
-        for limit in [MAX_PAGE_LIMIT + 1, u32::MAX] {
-            let error = adapter
-                .list_objects(
-                    0,
-                    None,
-                    &PageRequest {
-                        offset: 0,
-                        limit,
-                        snapshot_revision: None,
-                    },
-                )
-                .unwrap()
-                .unwrap_err();
-
-            assert_eq!(error, PageError::LimitOutOfRange(limit));
-        }
-        assert_eq!(identity_reads(&adapter), 0);
-    }
-
     /// スナップショット revision が一致しない要求で、重い読み取りへ進まない
     /// ことを確かめる。
     #[test]
     fn list_objects_rejects_a_stale_snapshot_revision_before_reading_details() {
         let adapter = adapter();
         let error = adapter
-            .list_objects(
-                0,
-                None,
-                &PageRequest {
-                    offset: 0,
-                    limit: 50,
-                    snapshot_revision: Some(99),
-                },
-            )
+            .list_objects(0, None, &page_request(0, 50, Some(99)))
             .unwrap()
             .unwrap_err();
 
         assert_eq!(
             error,
-            PageError::SnapshotRevisionMismatch {
+            SnapshotRevisionMismatch {
                 requested: 99,
                 current: 0,
             }
@@ -3515,7 +3454,7 @@ mod tests {
         // 要求元は他の tool も動かないものと読む。
         let adapter = adapter();
         let error = adapter
-            .list_object_aliases(None, &PageRequest::default())
+            .list_object_aliases(None, &default_page_window())
             .unwrap_err();
 
         assert!(matches!(error, ReadError::AliasDirectoryUnavailable));
@@ -3573,12 +3512,9 @@ mod tests {
         // 色は 1 件あたり 64 個ある。応答へ載せない分まで読むと、参照区間の
         // 保持時間が要求ページではなく登録数で決まってしまう。
         let adapter = adapter();
-        let page = PageRequest {
-            offset: 1,
-            limit: 2,
-            snapshot_revision: None,
-        };
-        let result = adapter.list_palettes_with(&page).unwrap();
+        let result = adapter
+            .list_palettes(&page_request(1, 2, None).window())
+            .unwrap();
 
         let read_colors = adapter
             .host
@@ -3938,14 +3874,7 @@ mod tests {
         );
 
         let snapshot = adapter
-            .get_selection(
-                0,
-                &PageRequest {
-                    offset: 0,
-                    limit: 1,
-                    snapshot_revision: None,
-                },
-            )
+            .get_selection(0, &page_request(0, 1, None))
             .unwrap()
             .unwrap();
 
@@ -4077,20 +4006,13 @@ mod tests {
     fn get_selection_rejects_a_stale_snapshot_revision() {
         let adapter = adapter_with(|_| selecting_host());
         let error = adapter
-            .get_selection(
-                0,
-                &PageRequest {
-                    offset: 0,
-                    limit: 50,
-                    snapshot_revision: Some(99),
-                },
-            )
+            .get_selection(0, &page_request(0, 50, Some(99)))
             .unwrap()
             .unwrap_err();
 
         assert_eq!(
             error,
-            PageError::SnapshotRevisionMismatch {
+            SnapshotRevisionMismatch {
                 requested: 99,
                 current: 0,
             }

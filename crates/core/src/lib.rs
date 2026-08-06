@@ -125,7 +125,10 @@ pub use operation::{
     OPERATION_SET_SELECTION, ObjectAliasSummary, ObjectFilter, ObjectFilterError, ReadOperation,
     RenderOperation, SelectionSnapshot, TrackGroup,
 };
-pub use page::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, PageMeta, PageRequest, take_page};
+pub use page::{
+    DEFAULT_PAGE_LIMIT, LimitOutOfRange, MAX_PAGE_LIMIT, PageMeta, PageRequest, PageWindow,
+    SnapshotRevisionMismatch, ValidatedPageRequest, take_page, take_window,
+};
 pub use palette::{PALETTE_COLOR_COUNT, PaletteEntry, Rgba};
 pub use render::{
     ARTIFACT_MAX_BYTES, MAX_RENDER_FRAME_BYTES, RenderFormat, RenderFrameParams, RenderFrameResult,

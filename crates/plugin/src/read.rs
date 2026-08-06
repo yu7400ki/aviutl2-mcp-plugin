@@ -20,8 +20,8 @@ use crate::project::ProjectState;
 use aviutl2_mcp_core::{
     AvailableEffect, EditInfo, EffectItemValues, EffectType, GetEffectItemValuesParams, LayerInfo,
     ListObjectAliasesResult, ListPalettesResult, ModuleEntry, ModuleType, ObjectDetail,
-    ObjectFilter, ObjectSelector, ObjectSummary, PageError, PageMeta, PageRequest, SceneInfo,
-    SelectionSnapshot,
+    ObjectFilter, ObjectSelector, ObjectSummary, PageMeta, PageWindow, SceneInfo,
+    SelectionSnapshot, SnapshotRevisionMismatch, ValidatedPageRequest,
 };
 use std::sync::Arc;
 
@@ -95,8 +95,8 @@ pub trait ReadAdapter: Send + Sync {
     ///
     /// `filter` は検証済みのものだけを受け取る。絞り込み条件の妥当性は要求内容
     /// だけで決まり、読み取りを受け付けられるかにも期限にも依存しないため、
-    /// 要求の復号と同じ場所で判定して不正な条件はここへ届かせない。`page` も
-    /// 同じ理由で `limit` の範囲は検証済みである。
+    /// 要求の復号と同じ場所で判定して不正な条件はここへ届かせない。`page` は
+    /// 検証を通ったことを型が表しており、範囲外の `limit` はここへ届かない。
     ///
     /// 切り出しを呼び出し側へ委ねず、ここで行う。オブジェクト 1 件の読み取りは
     /// alias と配下 effect を含んで重く、全件を読んでから切り出すと、応答へ
@@ -109,8 +109,8 @@ pub trait ReadAdapter: Send + Sync {
         &self,
         expected_scene_id: i32,
         filter: Option<&ObjectFilter>,
-        page: &PageRequest,
-    ) -> Result<Result<Page<ObjectSummary>, PageError>, ReadError>;
+        page: &ValidatedPageRequest,
+    ) -> Result<Result<Page<ObjectSummary>, SnapshotRevisionMismatch>, ReadError>;
 
     /// セレクターが指すオブジェクトの詳細を取得する。
     fn get_object(&self, selector: &ObjectSelector) -> Result<ObjectDetail, ReadError>;
@@ -134,8 +134,8 @@ pub trait ReadAdapter: Send + Sync {
     fn get_selection(
         &self,
         expected_scene_id: i32,
-        page: &PageRequest,
-    ) -> Result<Result<SelectionSnapshot, PageError>, ReadError>;
+        page: &ValidatedPageRequest,
+    ) -> Result<Result<SelectionSnapshot, SnapshotRevisionMismatch>, ReadError>;
 
     /// 登録済み effect を全件列挙する。
     ///
@@ -172,12 +172,9 @@ pub trait ReadAdapter: Send + Sync {
     /// 参照区間へ入るが、シーンの guard は掛けない。区間へ入ることと、シーンに
     /// 紐づく値であることは別である。
     ///
-    /// スナップショット revision の不一致は参照区間の失敗ではないため、畳まずに
-    /// 返す。
-    fn list_palettes(
-        &self,
-        page: &PageRequest,
-    ) -> Result<Result<ListPalettesResult, PageError>, ReadError>;
+    /// 受け取るのは取り出し範囲であり、ページ要求そのものではない。この一覧は
+    /// revision を照合しないため、切り出しが失敗することはない。
+    fn list_palettes(&self, page: &PageWindow) -> Result<ListPalettesResult, ReadError>;
 
     /// 登録済みモジュールを全件列挙する。
     ///
@@ -200,15 +197,16 @@ pub trait ReadAdapter: Send + Sync {
     ///
     /// 返す `snapshot_revision` は列挙を始めた時点のプロジェクト revision だが、
     /// 一覧の内容はこの値に連動しない。扱いは
-    /// [`Self::list_available_effects`] と同じである。
+    /// [`Self::list_available_effects`] と同じである。切り出しが失敗しない理由も
+    /// [`Self::list_palettes`] と同じである。
     ///
     /// データディレクトリを解決できない場合は、この AviUtl2 では機能が使えない
     /// ことを述べる失敗を返す。要求そのものは正しい。
     fn list_object_aliases(
         &self,
         label: Option<&str>,
-        page: &PageRequest,
-    ) -> Result<Result<ListObjectAliasesResult, PageError>, ReadError>;
+        page: &PageWindow,
+    ) -> Result<ListObjectAliasesResult, ReadError>;
 
     /// effect の設定項目を、要求されたフレームで評価した値を返す。
     ///

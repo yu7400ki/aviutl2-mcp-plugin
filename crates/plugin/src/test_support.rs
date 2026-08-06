@@ -1,8 +1,40 @@
 //! テストが共有する補助。
 
 use crate::read::host::HostEffect;
-use aviutl2_mcp_core::{ObjectFingerprintInput, ObjectSummary};
+use aviutl2_mcp_core::{
+    ObjectFingerprintInput, ObjectSummary, PageRequest, PageWindow, ValidatedPageRequest,
+};
 use std::sync::{Mutex, MutexGuard};
+
+/// 検証を通ったページ要求を組み立てる。
+///
+/// 切り出しは検証済みの要求しか受け取らない。要求を組み立てる試験は複数あり、
+/// そのたびに検証の呼び出しを書き並べると、何を見る試験なのかが埋もれる。
+pub(crate) fn page_request(
+    offset: u32,
+    limit: u32,
+    snapshot_revision: Option<u64>,
+) -> ValidatedPageRequest {
+    PageRequest {
+        offset,
+        limit,
+        snapshot_revision,
+    }
+    .validate()
+    .expect("検証を通らないページ要求です")
+}
+
+/// 既定のページ要求を検証済みの形で返す。
+pub(crate) fn default_page_request() -> ValidatedPageRequest {
+    PageRequest::default()
+        .validate()
+        .expect("既定のページ要求が拒否されました")
+}
+
+/// 既定のページ要求の取り出し範囲を返す。
+pub(crate) fn default_page_window() -> PageWindow {
+    default_page_request().window()
+}
 
 /// fingerprint の食い違いが運ぶ「読み直した対象の概要」の代表値。
 ///

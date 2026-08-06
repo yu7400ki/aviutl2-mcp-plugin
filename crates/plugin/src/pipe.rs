@@ -813,9 +813,12 @@ mod tests {
             &self,
             _expected_scene_id: i32,
             _filter: Option<&aviutl2_mcp_core::ObjectFilter>,
-            _page: &aviutl2_mcp_core::PageRequest,
+            _page: &aviutl2_mcp_core::ValidatedPageRequest,
         ) -> Result<
-            Result<crate::read::Page<aviutl2_mcp_core::ObjectSummary>, aviutl2_mcp_core::PageError>,
+            Result<
+                crate::read::Page<aviutl2_mcp_core::ObjectSummary>,
+                aviutl2_mcp_core::SnapshotRevisionMismatch,
+            >,
             crate::read::ReadError,
         > {
             Err(crate::read::ReadError::NotReady)
@@ -842,11 +845,8 @@ mod tests {
 
         fn list_palettes(
             &self,
-            _page: &aviutl2_mcp_core::PageRequest,
-        ) -> Result<
-            Result<aviutl2_mcp_core::ListPalettesResult, aviutl2_mcp_core::PageError>,
-            crate::read::ReadError,
-        > {
+            _page: &aviutl2_mcp_core::PageWindow,
+        ) -> Result<aviutl2_mcp_core::ListPalettesResult, crate::read::ReadError> {
             Err(crate::read::ReadError::NotReady)
         }
 
@@ -861,11 +861,8 @@ mod tests {
         fn list_object_aliases(
             &self,
             _label: Option<&str>,
-            _page: &aviutl2_mcp_core::PageRequest,
-        ) -> Result<
-            Result<aviutl2_mcp_core::ListObjectAliasesResult, aviutl2_mcp_core::PageError>,
-            crate::read::ReadError,
-        > {
+            _page: &aviutl2_mcp_core::PageWindow,
+        ) -> Result<aviutl2_mcp_core::ListObjectAliasesResult, crate::read::ReadError> {
             Err(crate::read::ReadError::AliasDirectoryUnavailable)
         }
 
@@ -879,9 +876,9 @@ mod tests {
         fn get_selection(
             &self,
             _expected_scene_id: i32,
-            _page: &aviutl2_mcp_core::PageRequest,
+            _page: &aviutl2_mcp_core::ValidatedPageRequest,
         ) -> Result<
-            Result<aviutl2_mcp_core::SelectionSnapshot, aviutl2_mcp_core::PageError>,
+            Result<aviutl2_mcp_core::SelectionSnapshot, aviutl2_mcp_core::SnapshotRevisionMismatch>,
             crate::read::ReadError,
         > {
             Err(crate::read::ReadError::NotReady)
@@ -1532,7 +1529,7 @@ mod tests {
         ));
 
         let page = read
-            .list_objects(SCENE_ID, None, &aviutl2_mcp_core::PageRequest::default())
+            .list_objects(SCENE_ID, None, &crate::test_support::default_page_request())
             .expect("列挙に失敗しました")
             .expect("ページ要求が拒否されました");
         let selector = |layer: usize, frame: usize| {
@@ -2121,9 +2118,12 @@ mod tests {
             &self,
             expected_scene_id: i32,
             filter: Option<&aviutl2_mcp_core::ObjectFilter>,
-            page: &aviutl2_mcp_core::PageRequest,
+            page: &aviutl2_mcp_core::ValidatedPageRequest,
         ) -> Result<
-            Result<crate::read::Page<aviutl2_mcp_core::ObjectSummary>, aviutl2_mcp_core::PageError>,
+            Result<
+                crate::read::Page<aviutl2_mcp_core::ObjectSummary>,
+                aviutl2_mcp_core::SnapshotRevisionMismatch,
+            >,
             crate::read::ReadError,
         > {
             StubReadAdapter.list_objects(expected_scene_id, filter, page)
@@ -2150,11 +2150,8 @@ mod tests {
 
         fn list_palettes(
             &self,
-            page: &aviutl2_mcp_core::PageRequest,
-        ) -> Result<
-            Result<aviutl2_mcp_core::ListPalettesResult, aviutl2_mcp_core::PageError>,
-            crate::read::ReadError,
-        > {
+            page: &aviutl2_mcp_core::PageWindow,
+        ) -> Result<aviutl2_mcp_core::ListPalettesResult, crate::read::ReadError> {
             StubReadAdapter.list_palettes(page)
         }
 
@@ -2169,11 +2166,8 @@ mod tests {
         fn list_object_aliases(
             &self,
             label: Option<&str>,
-            page: &aviutl2_mcp_core::PageRequest,
-        ) -> Result<
-            Result<aviutl2_mcp_core::ListObjectAliasesResult, aviutl2_mcp_core::PageError>,
-            crate::read::ReadError,
-        > {
+            page: &aviutl2_mcp_core::PageWindow,
+        ) -> Result<aviutl2_mcp_core::ListObjectAliasesResult, crate::read::ReadError> {
             StubReadAdapter.list_object_aliases(label, page)
         }
 
@@ -2187,9 +2181,9 @@ mod tests {
         fn get_selection(
             &self,
             expected_scene_id: i32,
-            page: &aviutl2_mcp_core::PageRequest,
+            page: &aviutl2_mcp_core::ValidatedPageRequest,
         ) -> Result<
-            Result<aviutl2_mcp_core::SelectionSnapshot, aviutl2_mcp_core::PageError>,
+            Result<aviutl2_mcp_core::SelectionSnapshot, aviutl2_mcp_core::SnapshotRevisionMismatch>,
             crate::read::ReadError,
         > {
             StubReadAdapter.get_selection(expected_scene_id, page)

@@ -14,13 +14,13 @@ use crate::edit::fake::{
     SCENE_ID, SCENE_NAME, SECTION_RANGES, SHAPE, shape, shape_catalog_entry,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
-use crate::test_support::with_silent_panic_hook;
+use crate::test_support::{default_page_request, default_page_window, with_silent_panic_hook};
 use aviutl2_mcp_core::{
     ApplyBatchParams, AvailableEffect, BatchOperation, CreateObjectSectionParams, CursorPosition,
     DeleteObjectSectionParams, Destination, EditOperation, EffectFlags, EffectItem, EffectItemType,
     EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemValue,
     LayerNameChange, MAX_GRID_BPM_ENTRIES, MoveObjectSectionParams, ObjectSectionsOutcome,
-    ObjectSelector, PageRequest, Placement, SceneSize,
+    ObjectSelector, Placement, SceneSize,
 };
 use serde_json::json;
 use std::sync::mpsc::channel;
@@ -97,7 +97,7 @@ impl Harness {
         let page = self
             .healthy(|| {
                 self.read
-                    .list_objects(SCENE_ID, None, &PageRequest::default())
+                    .list_objects(SCENE_ID, None, &default_page_request())
             })
             .expect("列挙に失敗しました")
             .expect("ページ要求が拒否されました");
@@ -1030,11 +1030,10 @@ fn listed_alias_names(dir: &TempDir) -> Vec<String> {
     crate::alias::list_object_aliases(
         dir.path(),
         None,
-        &PageRequest::default(),
+        &default_page_window(),
         0,
         &crate::alias::DiskAliasFiles,
     )
-    .expect("ページ要求が拒否されました")
     .items
     .into_iter()
     .map(|item| item.name)
@@ -4453,7 +4452,7 @@ fn the_focused_section_number_indexes_the_sections_of_the_focused_object() {
     let focused_section = |harness: &Harness| {
         let snapshot = harness
             .read
-            .get_selection(SCENE_ID, &PageRequest::default())
+            .get_selection(SCENE_ID, &default_page_request())
             .expect("選択を取得できます")
             .expect("ページ要求が拒否されました");
         let focus = snapshot.focus.expect("フォーカス対象がありません");
@@ -5157,7 +5156,7 @@ fn the_selection_of_three_objects_carries_no_handle() {
 
     let snapshot = harness
         .read
-        .get_selection(SCENE_ID, &PageRequest::default())
+        .get_selection(SCENE_ID, &default_page_request())
         .expect("選択を取得できます")
         .expect("ページ要求が拒否されました");
 

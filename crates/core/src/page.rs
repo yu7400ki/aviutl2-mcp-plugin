@@ -43,16 +43,65 @@ impl Default for PageRequest {
 }
 
 impl PageRequest {
-    /// `offset` / `limit` の範囲を検証する。
+    /// `offset` / `limit` の範囲を検証し、切り出しへ渡せる要求を返す。
     ///
     /// `offset` は符号なしのため下限側の検証は不要で、総件数を超える値は
     /// 空ページとして扱う。
-    pub fn validate(&self) -> Result<(), PageError> {
+    pub fn validate(&self) -> Result<ValidatedPageRequest, LimitOutOfRange> {
         if self.limit == 0 || self.limit > MAX_PAGE_LIMIT {
-            return Err(PageError::LimitOutOfRange(self.limit));
+            return Err(LimitOutOfRange(self.limit));
         }
-        Ok(())
+        Ok(ValidatedPageRequest {
+            window: PageWindow {
+                offset: self.offset,
+                limit: self.limit,
+            },
+            snapshot_revision: self.snapshot_revision,
+        })
     }
+}
+
+/// 検証を通ったページ要求。
+///
+/// 作れるのは [`PageRequest::validate`] だけである。[`take_page`] はこの型しか
+/// 受け取らないため、範囲を検証していない要求で切り出すことはできない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidatedPageRequest {
+    window: PageWindow,
+    snapshot_revision: Option<u64>,
+}
+
+impl ValidatedPageRequest {
+    /// revision の照合指定を落とした取り出し範囲を返す。
+    ///
+    /// 照合しない一覧はこの形で切り出す。落とすかどうかは一覧ごとの設計判断で
+    /// あり、判断した側が [`take_window`] を呼ぶことで失敗の種類が 0 になる。
+    pub fn window(&self) -> PageWindow {
+        self.window
+    }
+}
+
+/// 検証を通った要求は、要求そのものの表現へ戻せる。
+///
+/// 要求を運ぶ経路は JSON へ直列化するため、ワイヤ上の形は [`PageRequest`] の
+/// ままである。検証を経て初めてその形が得られる。
+impl From<ValidatedPageRequest> for PageRequest {
+    fn from(request: ValidatedPageRequest) -> Self {
+        Self {
+            offset: request.window.offset,
+            limit: request.window.limit,
+            snapshot_revision: request.snapshot_revision,
+        }
+    }
+}
+
+/// 検証を通った取り出し範囲。
+///
+/// revision の照合指定を持たないため、[`take_window`] は失敗しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageWindow {
+    offset: u32,
+    limit: u32,
 }
 
 /// ページ応答のメタ情報。
@@ -72,46 +121,57 @@ pub struct PageMeta {
     pub snapshot_revision: u64,
 }
 
-/// pagination の検証失敗。
+/// `limit` が 1..=[`MAX_PAGE_LIMIT`] の外。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum PageError {
-    /// `limit` が 1..=[`MAX_PAGE_LIMIT`] の外。
-    #[error("limit は 1 以上 {MAX_PAGE_LIMIT} 以下である必要があります: {0}")]
-    LimitOutOfRange(u32),
-    /// 要求が指定した snapshot revision と現在のスナップショットが不一致。
-    #[error("snapshot revision が一致しません: 要求 {requested}, 現在 {current}")]
-    SnapshotRevisionMismatch {
-        /// 要求が指定した revision。
-        requested: u64,
-        /// スナップショット作成時点の revision。
-        current: u64,
-    },
+#[error("limit は 1 以上 {MAX_PAGE_LIMIT} 以下である必要があります: {0}")]
+pub struct LimitOutOfRange(pub u32);
+
+/// 要求が指定した snapshot revision と現在のスナップショットが不一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("snapshot revision が一致しません: 要求 {requested}, 現在 {current}")]
+pub struct SnapshotRevisionMismatch {
+    /// 要求が指定した revision。
+    pub requested: u64,
+    /// スナップショット作成時点の revision。
+    pub current: u64,
 }
 
 /// スナップショットから要求ページを切り出し、[`PageMeta`] を組み立てる。
 ///
 /// `snapshot_revision` は `items` を列挙した時点の project revision である。
 /// 要求が revision を指定していて一致しない場合は、先頭からの再取得が必要な
-/// 状態であるため [`PageError::SnapshotRevisionMismatch`] を返す。
+/// 状態であるため [`SnapshotRevisionMismatch`] を返す。失敗はこの 1 種類だけ
+/// である——`limit` の範囲は要求の型が既に保証している。
 pub fn take_page<T: Clone>(
     items: &[T],
-    request: &PageRequest,
+    request: &ValidatedPageRequest,
     snapshot_revision: u64,
-) -> Result<(Vec<T>, PageMeta), PageError> {
-    request.validate()?;
-
+) -> Result<(Vec<T>, PageMeta), SnapshotRevisionMismatch> {
     if let Some(requested) = request.snapshot_revision
         && requested != snapshot_revision
     {
-        return Err(PageError::SnapshotRevisionMismatch {
+        return Err(SnapshotRevisionMismatch {
             requested,
             current: snapshot_revision,
         });
     }
 
+    Ok(take_window(items, &request.window, snapshot_revision))
+}
+
+/// スナップショットから取り出し範囲を切り出し、[`PageMeta`] を組み立てる。
+///
+/// 照合する revision を持たないため失敗しない。応答へ載せる
+/// `snapshot_revision` は照合とは別の値であり、`items` を列挙した時点の
+/// project revision をそのまま伝える。
+pub fn take_window<T: Clone>(
+    items: &[T],
+    window: &PageWindow,
+    snapshot_revision: u64,
+) -> (Vec<T>, PageMeta) {
     let total = items.len();
-    let offset = request.offset as usize;
-    let page_end = offset.saturating_add(request.limit as usize);
+    let offset = window.offset as usize;
+    let page_end = offset.saturating_add(window.limit as usize);
     let page = if offset >= total {
         Vec::new()
     } else {
@@ -127,12 +187,12 @@ pub fn take_page<T: Clone>(
     let meta = PageMeta {
         total_count: saturating_u32(total),
         count: saturating_u32(page.len()),
-        offset: request.offset,
+        offset: window.offset,
         has_more: next_offset.is_some(),
         next_offset,
         snapshot_revision,
     };
-    Ok((page, meta))
+    (page, meta)
 }
 
 /// 件数を `u32` へ落とす。上限を超える件数は飽和させる。
@@ -146,6 +206,16 @@ mod tests {
 
     fn sample_items(count: usize) -> Vec<u32> {
         (0..count as u32).collect()
+    }
+
+    fn validated(offset: u32, limit: u32, snapshot_revision: Option<u64>) -> ValidatedPageRequest {
+        PageRequest {
+            offset,
+            limit,
+            snapshot_revision,
+        }
+        .validate()
+        .expect("検証を通らないページ要求です")
     }
 
     #[test]
@@ -188,7 +258,7 @@ mod tests {
                 limit,
                 ..PageRequest::default()
             };
-            assert_eq!(request.validate(), Err(PageError::LimitOutOfRange(limit)));
+            assert_eq!(request.validate(), Err(LimitOutOfRange(limit)));
         }
     }
 
@@ -199,19 +269,15 @@ mod tests {
                 limit,
                 ..PageRequest::default()
             };
-            assert_eq!(request.validate(), Ok(()));
+            let validated = request.validate().expect("範囲内の limit が拒否されました");
+            assert_eq!(PageRequest::from(validated), request);
         }
     }
 
     #[test]
     fn take_page_returns_first_page() {
         let items = sample_items(10);
-        let request = PageRequest {
-            offset: 0,
-            limit: 3,
-            snapshot_revision: None,
-        };
-        let (page, meta) = take_page(&items, &request, 42).unwrap();
+        let (page, meta) = take_page(&items, &validated(0, 3, None), 42).unwrap();
         assert_eq!(page, vec![0, 1, 2]);
         assert_eq!(
             meta,
@@ -229,12 +295,7 @@ mod tests {
     #[test]
     fn take_page_last_page_has_no_next_offset() {
         let items = sample_items(10);
-        let request = PageRequest {
-            offset: 8,
-            limit: 5,
-            snapshot_revision: None,
-        };
-        let (page, meta) = take_page(&items, &request, 1).unwrap();
+        let (page, meta) = take_page(&items, &validated(8, 5, None), 1).unwrap();
         assert_eq!(page, vec![8, 9]);
         assert_eq!(meta.count, 2);
         assert!(!meta.has_more);
@@ -244,12 +305,7 @@ mod tests {
     #[test]
     fn take_page_beyond_total_is_empty() {
         let items = sample_items(3);
-        let request = PageRequest {
-            offset: 100,
-            limit: 10,
-            snapshot_revision: None,
-        };
-        let (page, meta) = take_page(&items, &request, 1).unwrap();
+        let (page, meta) = take_page(&items, &validated(100, 10, None), 1).unwrap();
         assert!(page.is_empty());
         assert_eq!(meta.total_count, 3);
         assert_eq!(meta.count, 0);
@@ -260,49 +316,29 @@ mod tests {
     #[test]
     fn take_page_accepts_matching_snapshot_revision() {
         let items = sample_items(3);
-        let request = PageRequest {
-            offset: 0,
-            limit: 2,
-            snapshot_revision: Some(9),
-        };
-        let (_, meta) = take_page(&items, &request, 9).unwrap();
+        let (_, meta) = take_page(&items, &validated(0, 2, Some(9)), 9).unwrap();
         assert_eq!(meta.snapshot_revision, 9);
+    }
+
+    #[test]
+    fn a_window_drops_the_requested_snapshot_revision() {
+        let items = sample_items(3);
+        let request = validated(0, 2, Some(9));
+        let (page, meta) = take_window(&items, &request.window(), 10);
+        assert_eq!(page, vec![0, 1]);
+        assert_eq!(meta.snapshot_revision, 10);
     }
 
     #[test]
     fn take_page_rejects_snapshot_revision_mismatch() {
         let items = sample_items(3);
-        let request = PageRequest {
-            offset: 0,
-            limit: 2,
-            snapshot_revision: Some(9),
-        };
         assert_eq!(
-            take_page(&items, &request, 10),
-            Err(PageError::SnapshotRevisionMismatch {
+            take_page(&items, &validated(0, 2, Some(9)), 10),
+            Err(SnapshotRevisionMismatch {
                 requested: 9,
                 current: 10,
             })
         );
-    }
-
-    #[test]
-    fn take_page_rejects_invalid_limit() {
-        // 切り出しは応答の件数だけでなく、1 件ごとの取得が重い列挙で
-        // 取得回数の上限も担う。範囲の検証は切り出しの経路自体が行う。
-        let items = sample_items(3);
-        for limit in [0, MAX_PAGE_LIMIT + 1, u32::MAX] {
-            let request = PageRequest {
-                offset: 0,
-                limit,
-                snapshot_revision: None,
-            };
-            assert_eq!(
-                take_page(&items, &request, 1),
-                Err(PageError::LimitOutOfRange(limit)),
-                "limit {limit} が受理されました"
-            );
-        }
     }
 
     #[test]

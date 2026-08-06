@@ -106,8 +106,8 @@ pub fn list_instances(
     discovery: DiscoveryConfig,
 ) -> Result<ListInstancesResponse, ListInstancesError> {
     // 範囲外の要求で registry を走査しないよう、生存確認の前に検証する。
-    let page_request = request.page();
-    page_request
+    let page_request = request
+        .page()
         .validate()
         .map_err(|_| ListInstancesError::InvalidArgument)?;
 
@@ -207,9 +207,8 @@ mod tests {
         assert_eq!(request.offset, 0);
         assert_eq!(request.limit, DEFAULT_PAGE_LIMIT);
         assert_eq!(request.limit, 50);
-        assert_eq!(
-            request.page().validate(),
-            Ok(()),
+        assert!(
+            request.page().validate().is_ok(),
             "既定値はそのまま受理される"
         );
     }

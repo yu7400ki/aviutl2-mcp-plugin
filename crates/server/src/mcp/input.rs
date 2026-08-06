@@ -143,17 +143,18 @@ fn build_page_request(
     limit: u32,
     snapshot_revision: Option<u64>,
 ) -> Result<PageRequest, ErrorObject> {
-    let request = PageRequest {
+    let validated = PageRequest {
         offset,
         limit,
         snapshot_revision,
-    };
-    request.validate().map_err(|_| {
+    }
+    .validate()
+    .map_err(|_| {
         invalid_argument(format!(
             "limit は 1 以上 {MAX_PAGE_LIMIT} 以下である必要があります"
         ))
     })?;
-    Ok(request)
+    Ok(validated.into())
 }
 
 /// `list_layers` の入力。
