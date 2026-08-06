@@ -12,8 +12,8 @@ use crate::edit::fake::{
     LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX, MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER,
     MAX_SCENE_HEIGHT, MAX_SCENE_SAMPLE_RATE, MAX_SCENE_WIDTH, MOVE_FRAME_SHIFT, MOVING_ITEM,
     MUTATIONS, OBSERVED_SCENE, PanicPoint, READ_SECTION, RENAMED_SCENE_NAME, SCENE_ID, SCENE_NAME,
-    SECTION_RANGES, SHAPE, STATIC_ITEM, coordinate, coordinate_catalog_entry, raw_item_value,
-    shape, shape_catalog_entry,
+    SECTION_RANGES, SHAPE, STATIC_ITEM, TRACK_MODES, coordinate, coordinate_catalog_entry,
+    raw_item_value, shape, shape_catalog_entry,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::{default_page_request, default_page_window, with_silent_panic_hook};
@@ -2460,6 +2460,40 @@ fn a_movement_with_an_unknown_mode_never_reaches_the_host() {
         harness.host.fatal_movement_writes(),
         Vec::<String>::new(),
         "落ちる移動方法がホストへ届きました"
+    );
+}
+
+#[test]
+fn a_movement_that_reaches_the_host_with_an_unknown_mode_is_recorded() {
+    // **記録に入る経路があることを確かめる。** 空であることしか見ない検査は、
+    // 記録そのものが壊れていても緑のまま通り、検証を外した変更を捕まえられない。
+    // ホストが本当に知っている名前と、検証へ渡す一覧は別の出所を持つ。食い違わ
+    // せれば、検証を通り抜けた書き込みがホストへ届く。
+    let harness = harness_with_track_effect();
+    let unknown = "存在しない移動";
+    assert!(
+        !TRACK_MODES.contains(&unknown),
+        "ホストが知っている名前を未知の名前として使っています"
+    );
+    harness.host.set_movements(vec![unknown.to_string()]);
+
+    let error = with_silent_panic_hook(|| {
+        harness
+            .edit
+            .set_object_item(&set_movement(
+                &harness,
+                movement(&[0.0, 50.0, 100.0], unknown),
+            ))
+            .expect_err("実機ならプロセスが落ちる書き込みが成功として返りました")
+    });
+
+    // 実機は落ちる。フェイクの panic は編集の入口が捕捉するため、応答からは
+    // 内部の失敗としか見えない。
+    assert_eq!(error.error_code(), ErrorCode::InternalError);
+    assert_eq!(
+        harness.host.fatal_movement_writes(),
+        vec![unknown.to_string()],
+        "落ちる移動方法がホストへ届いたのに記録されていません"
     );
 }
 

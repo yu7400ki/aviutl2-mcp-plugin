@@ -1663,7 +1663,6 @@ impl SceneEditor for FakeSceneEditor<'_> {
         // フォント名の妥当性は登録済みの一覧で決まる。種別だけでは書き換えの
         // 結果が決まらない設定項目がある。
         let fonts = self.host.fonts.clone();
-        let movements = self.host.movements.lock().unwrap().clone();
         let host = self.host;
         self.with_effect(effect, move |effect| {
             let Some(entry) = effect.items.iter_mut().find(|entry| entry.name == item) else {
@@ -1671,7 +1670,7 @@ impl SceneEditor for FakeSceneEditor<'_> {
             };
             // 落ちる入力がここへ届いたことを、panic とは別に記録する。編集の
             // 入口は panic を捕捉するため、記録が無いと応答からは見分けられない。
-            if let Some(mode) = fatal_movement(&entry.item_type, &value, &movements) {
+            if let Some(mode) = fatal_movement(&entry.item_type, &value) {
                 host.record_fatal_movement(mode);
             }
             if let Some(written) = host_write(&entry.item_type, &value, &fonts) {
@@ -2129,12 +2128,19 @@ pub(crate) const TRACK_DEFAULT_PARAM: (&str, f64) = ("ランダム移動", 15.0)
 /// 書き込まれた文字列が、実機ならプロセスを落とす移動方法を名乗るか。
 ///
 /// 落とす名前を返す。落とさない書き込みでは `None`。
-fn fatal_movement(item_type: &EffectItemType, value: &str, movements: &[String]) -> Option<String> {
+///
+/// **ホストが本当に知っている名前は [`TRACK_MODES`] であり、検証へ渡す一覧
+/// （[`FakeEditHost::set_movements`]）とは別である。** 両者を同じ一覧にすると、
+/// 検証を通り抜けた書き込みがホストへ届く経路をフェイクの上に作れなくなり、
+/// この記録に入る道が 1 つも無くなる。実機でも 2 つは別の出所を持つ——検証が
+/// 見るのは設定ファイルの内容であり、落ちるかどうかを決めるのはホストの実装で
+/// ある。
+fn fatal_movement(item_type: &EffectItemType, value: &str) -> Option<String> {
     if item_type.evaluated_kind() != Some(EvaluatedItemKind::Track) {
         return None;
     }
     let mode = decode_track_value(value)?.mode?;
-    (!movements.iter().any(|known| known == &mode)).then_some(mode)
+    (!TRACK_MODES.contains(&mode.as_str())).then_some(mode)
 }
 
 /// ホストが移動を含む値として読み取りへ返す生の文字列。
