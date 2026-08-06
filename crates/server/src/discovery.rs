@@ -586,17 +586,14 @@ fn process_created_at_matches(descriptor_value: &str, actual: DateTime<Utc>) -> 
 
 /// `InstanceDescriptor` と ping 応答から `InstanceInfo` を生成する。
 ///
-/// registry の descriptor は表示名とパスしか持たない。epoch / revision / modified は
-/// ping 応答が運んだ場合にのみ入り、運ばれなければ欠落のままとする。既定値で埋めると
-/// 「未取得」と実測値が区別できなくなる。
+/// **出所は 2 つある。** registry の descriptor が表示名とパスを、ping 応答が
+/// epoch / revision / modified を運ぶ。後者は ping 応答が必ず持つため、組み立ては
+/// 常に成功する。
 ///
-/// descriptor に project が無くても、ping が状態を運んでいれば project を組み立てる。
-/// descriptor へ project が載るのはプロジェクトファイルのパスが確定したときだけで、
-/// 未保存のプロジェクトでは載らない。そこで descriptor 側の有無を条件にすると、
+/// **表示名とパスだけは欠け得る。** descriptor へ project が載るのはプロジェクト
+/// ファイルのパスが確定したときだけで、未保存のプロジェクトでは載らない。この 2 つを
+/// 欠落として表し、descriptor 側の有無で組み立て全体を打ち切らない——打ち切ると、
 /// 未保存の変更があることを表す `modified` が真である状況でこそ、その値が落ちる。
-///
-/// 現在シーンは ping 応答に含まれない。シーンは編集ハンドルを介してしか読めず、
-/// 生存確認だけでは取得できないため `None` とする。
 fn build_instance_info(descriptor: InstanceDescriptor, pong: PongResult) -> InstanceInfo {
     let (display_name, path) = match descriptor.project {
         Some(project) => (Some(project.display_name), Some(project.path)),

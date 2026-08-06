@@ -204,8 +204,9 @@ impl PipeClient {
     /// 接続先が ping を拒否した場合は [`PipeClientError::Remote`] を返す。拒否理由は
     /// 「起動中で今は応じられない」と「生存確認に失敗した」を区別するために要る。
     ///
-    /// 応答が運ぶ内容は既定値で埋めずにそのまま返す。接続先が載せなかった値を
-    /// 埋めると、未取得と実測値が区別できなくなる。
+    /// 応答が運ぶプロジェクトの状態は必須である。欠けた応答は復号の時点で
+    /// [`PipeClientError::InvalidResponse`] として落ちる。既定値で埋めて先へ進めると、
+    /// 接続先の載せ忘れが実測値として一覧へ届く。
     #[instrument(skip_all, fields(instance = %redact::instance_id(&self.instance_id)))]
     pub fn ping(&self, deadline: Instant) -> Result<PongResult, PipeClientError> {
         let request =
