@@ -37,11 +37,11 @@ use crate::edit::precondition::{Boundary, MutationPermit};
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject, resolve_effect, resolve_object};
 use crate::project::ProjectState;
 use crate::read::ReadError;
-use crate::read::adapter::effect_info_at;
 use crate::read::host::{
     HostEditInfo, HostEffect, HostLayer, HostObject, HostObjectDetail, HostObjectPlacement,
     SceneReader,
 };
+use crate::read::resolve::effect_info_at;
 use aviutl2_mcp_core::{
     AvailableEffectItem, BatchOperation, BatchOutcome, BatchStepOutcome, FrameRange, GridBpm,
     ItemWrite, ItemWriteError, ObjectSelector, ObjectSummary, prepare_item_write,

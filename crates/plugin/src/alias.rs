@@ -22,7 +22,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::read::adapter::dropped_from_page;
+use crate::read::resolve::dropped_from_page;
 
 /// エイリアスを収めたディレクトリの名前。
 const ALIAS_DIRECTORY: &str = "Alias";

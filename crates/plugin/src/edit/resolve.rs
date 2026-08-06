@@ -11,10 +11,10 @@
 use crate::edit::error::EditError;
 use crate::edit::host::{EffectSlot, ObjectSlot, SceneEditor};
 use crate::edit::precondition::Boundary;
-use crate::read::adapter::{
+use crate::read::host::HostEffect;
+use crate::read::resolve::{
     effect_info_at, find_effect_position, resolve_selected_detail, resolve_selected_object,
 };
-use crate::read::host::HostEffect;
 use aviutl2_mcp_core::{EffectInfo, EffectSelector, ObjectSelector, ObjectSummary};
 use std::marker::PhantomData;
 

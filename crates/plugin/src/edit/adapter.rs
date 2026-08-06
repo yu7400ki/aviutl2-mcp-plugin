@@ -25,8 +25,8 @@ use crate::edit::resolve::{
 };
 use crate::project::ProjectState;
 use crate::read::ReadError;
-use crate::read::adapter::{effect_info_at, object_summary, scene_info};
 use crate::read::host::{EditState, HostEffect, HostLayer, HostObjectPlacement};
+use crate::read::resolve::{effect_info_at, object_summary, scene_info};
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchOperation, BatchOutcome, CreateObjectParams,
     CreateObjectSectionParams, Cursor, DeleteEffectParams, DeleteObjectParams,

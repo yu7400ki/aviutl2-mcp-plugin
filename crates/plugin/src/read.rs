@@ -14,6 +14,7 @@
 pub mod adapter;
 pub mod error;
 pub mod host;
+pub mod resolve;
 pub mod sdk;
 
 use crate::project::ProjectState;
