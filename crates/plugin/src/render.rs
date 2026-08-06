@@ -232,12 +232,15 @@ mod tests {
         }
     }
 
+    /// 完了待ちが期限切れにならない上限。
+    const AMPLE_TIMEOUT: Duration = Duration::from_secs(30);
+
     #[test]
     fn an_empty_inventory_never_waits() {
         // 投入したタスクが全て完了していれば待つ必要が無い。費用も危険も無い
         // 経路を既定にする。
         let drain = FakeDrain::new(0, Duration::ZERO);
-        drain_render_tasks(&drain, render_drain_timeout());
+        drain_render_tasks(&drain, AMPLE_TIMEOUT);
         assert_eq!(drain.waited(), 0);
         assert_eq!(drain.calls(), vec!["outstanding"]);
     }
@@ -247,7 +250,7 @@ mod tests {
         // 実行中のタスクは放棄済みではない。放棄済みだけを数える実装はここで
         // 0 件と判定し、待たずにアンロードへ進む。
         let drain = FakeDrain::new(1, Duration::ZERO);
-        drain_render_tasks(&drain, render_drain_timeout());
+        drain_render_tasks(&drain, AMPLE_TIMEOUT);
         assert_eq!(drain.waited(), 1);
     }
 

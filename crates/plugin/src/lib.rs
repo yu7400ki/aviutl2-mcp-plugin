@@ -41,6 +41,8 @@ mod win_io;
 
 #[cfg(windows)]
 use std::sync::Arc;
+#[cfg(windows)]
+use std::time::Duration;
 
 #[cfg(windows)]
 use aviutl2::AnyResult;
@@ -470,16 +472,18 @@ fn descriptor_project(path: &std::path::Path) -> DescriptorProject {
 /// 委譲だけにすることで、ここで行うことが plugin の他の状態に依存しないことを
 /// 型で示し、SDK 無しでも確かめられるようにしている。
 ///
-/// 待つ上限は設定から引く。0 を選べば待たずに切り離す。
+/// 待つ上限は呼び出し元が渡す。0 を渡せば待たずに切り離す。**設定をここで
+/// 引かないのは、待つかどうかで振る舞いが変わる関数を、設定の現在値に依らず
+/// 確かめられるようにするためである。**
 #[cfg(windows)]
-fn shutdown_renders<D>(render_adapter: Option<&Arc<D>>)
+fn shutdown_renders<D>(render_adapter: Option<&Arc<D>>, timeout: Duration)
 where
     D: render::RenderDrain + 'static,
 {
     let Some(render_adapter) = render_adapter else {
         return;
     };
-    render::drain_render_tasks(render_adapter, render::render_drain_timeout());
+    render::drain_render_tasks(render_adapter, timeout);
     // 以後この instance が成果物を書くことはない。
     render_adapter.discard_artifacts();
 }
@@ -529,7 +533,7 @@ impl Drop for AviUtl2McpPlugin {
                     pipe_server.stop(pipe::STOP_TIMEOUT);
                 }
             },
-            || shutdown_renders(render_adapter.as_ref()),
+            || shutdown_renders(render_adapter.as_ref(), render::render_drain_timeout()),
             || {
                 if let Some(lifecycle) = &lifecycle
                     && let Err(e) = lifecycle.shutdown()
@@ -623,6 +627,9 @@ mod tests {
         }
     }
 
+    /// 完了待ちが期限切れにならない上限。
+    const AMPLE_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
     #[test]
     fn shutting_down_waits_for_the_renders_and_then_clears_the_artifacts() {
         // 待つ前に成果物を消しても、後で書かれた分が残る。順序も含めて固定する。
@@ -631,7 +638,7 @@ mod tests {
             ..FakeRenderDrain::default()
         });
 
-        shutdown_renders(Some(&drain));
+        shutdown_renders(Some(&drain), AMPLE_DRAIN_TIMEOUT);
 
         assert_eq!(drain.calls(), vec!["wait_all_tasks", "discard_artifacts"]);
     }
@@ -641,7 +648,7 @@ mod tests {
         // 在庫が空でも、前の要求が残した成果物は消す。
         let drain = Arc::new(FakeRenderDrain::default());
 
-        shutdown_renders(Some(&drain));
+        shutdown_renders(Some(&drain), AMPLE_DRAIN_TIMEOUT);
 
         assert_eq!(drain.calls(), vec!["discard_artifacts"]);
     }
@@ -649,7 +656,7 @@ mod tests {
     #[test]
     fn shutting_down_before_the_render_adapter_exists_does_nothing() {
         // 登録が途中で打ち切られた場合、実行口は無い。
-        shutdown_renders(Option::<&Arc<FakeRenderDrain>>::None);
+        shutdown_renders(Option::<&Arc<FakeRenderDrain>>::None, AMPLE_DRAIN_TIMEOUT);
     }
 
     #[test]
