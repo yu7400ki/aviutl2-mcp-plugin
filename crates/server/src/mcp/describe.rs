@@ -800,11 +800,12 @@ mod tests {
     use super::*;
     use crate::mcp::summary::{MAX_TEXT_CHARS, TRUNCATION_NOTICE};
     use aviutl2_mcp_core::{
-        AvailableEffect, Cursor, DisplayRange, EffectFingerprintInput, EffectFlags, EffectInfo,
-        EffectItem, EffectItemType, EffectType, FiniteF64, FrameRange, InstanceId, InstanceProject,
-        InstanceState, ItemValue, LayerInfo, ModuleEntry, ModuleType, ObjectAliasSummary,
-        ObjectFingerprintInput, ObjectSummary, ObservedSelection, PALETTE_COLOR_COUNT,
-        PaletteEntry, Rgba, SceneInfo, SectionRange, TrackGroup,
+        AvailableEffect, Cursor, DisplayRange, EffectDescription, EffectFingerprintInput,
+        EffectFlags, EffectInfo, EffectItem, EffectItemDescription, EffectItemType, EffectType,
+        FiniteF64, FrameRange, InstanceId, InstanceProject, InstanceState, ItemValue, LayerInfo,
+        ModuleEntry, ModuleType, ObjectAliasSummary, ObjectFingerprintInput, ObjectSummary,
+        ObservedSelection, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SceneInfo, SectionRange,
+        TrackGroup,
     };
 
     /// 上限を必ず超える件数。要求上限を無視した応答でも打ち切られることを確かめる。
@@ -1097,6 +1098,109 @@ mod tests {
             page: page(10_000, OVERSIZED_COUNT as u32),
         };
         assert_truncated_within_limit(&available_effects(&result));
+    }
+
+    /// 説明を持つ effect と持たない effect、そして落ちた名前を含む応答。
+    fn sample_effect_descriptions() -> DescribeEffectsResult {
+        DescribeEffectsResult {
+            effects: vec![
+                EffectDescription {
+                    name: "図形".to_string(),
+                    description: Some(
+                        "単色の図形を作成します\nsvgファイルから読み込めます".to_string(),
+                    ),
+                    items: vec![
+                        EffectItemDescription {
+                            name: "図形の種類".to_string(),
+                            item_type: EffectItemType::Figure,
+                            description: Some(
+                                "図形の種類を選択します\nボタンクリックでsvgファイルを選択出来ます"
+                                    .to_string(),
+                            ),
+                        },
+                        EffectItemDescription {
+                            name: "ライン幅".to_string(),
+                            item_type: EffectItemType::Integer,
+                            description: None,
+                        },
+                    ],
+                },
+                EffectDescription {
+                    name: "グロー".to_string(),
+                    description: None,
+                    items: Vec::new(),
+                },
+            ],
+            not_found: vec!["ぐろー".to_string()],
+        }
+    }
+
+    #[test]
+    fn effect_descriptions_text_lists_the_item_names_without_their_descriptions() {
+        let text = effect_descriptions(&sample_effect_descriptions());
+
+        // 名前の似た effect の使い分けは項目の顔ぶれで解ける。行に並べるのは
+        // 名前だけであり、項目の説明は structuredContent が運ぶ。
+        assert!(
+            text.contains("- 図形 items=2 図形の種類 / ライン幅"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("ボタンクリックでsvgファイルを選択出来ます"),
+            "項目の説明が text に載っています: {text}"
+        );
+        // 効果の説明は 1 行へ畳んで全文を載せる。
+        assert!(
+            text.contains("desc=単色の図形を作成します svgファイルから読み込めます"),
+            "{text}"
+        );
+        // 説明を持たない effect には項ごと付かない。空の `desc=` は、説明が
+        // 空文字列であることと区別が付かない。
+        assert!(text.contains("- グロー items=0\n"), "{text}");
+        assert!(!text.contains("desc=\n"), "{text}");
+    }
+
+    #[test]
+    fn effect_descriptions_text_names_what_could_not_be_found() {
+        // 落ちた名前が text に無ければ、structuredContent を読まない要求元は
+        // 「設定項目を持たない effect」と誤読する。
+        let text = effect_descriptions(&sample_effect_descriptions());
+        assert!(text.contains("登録されていない名前 1 件: ぐろー"), "{text}");
+        assert!(text.contains("list_available_effects"), "{text}");
+
+        // 落ちた名前が無ければ、その案内も出ない。
+        let all_found = DescribeEffectsResult {
+            not_found: Vec::new(),
+            ..sample_effect_descriptions()
+        };
+        assert!(
+            !effect_descriptions(&all_found).contains("登録されていない名前"),
+            "落ちた名前が無いのに案内が出ています"
+        );
+    }
+
+    #[test]
+    fn effect_descriptions_text_is_bounded_for_oversized_results() {
+        // 1 件あたりの項目数は要求では抑えられない。件数と項目数の双方が上限を
+        // 超えても、text は打ち切られる。
+        let effects: Vec<EffectDescription> = (0..OVERSIZED_COUNT)
+            .map(|_| EffectDescription {
+                name: long_name(),
+                description: Some(long_name()),
+                items: (0..8)
+                    .map(|_| EffectItemDescription {
+                        name: long_name(),
+                        item_type: EffectItemType::Integer,
+                        description: Some(long_name()),
+                    })
+                    .collect(),
+            })
+            .collect();
+        let result = DescribeEffectsResult {
+            effects,
+            not_found: (0..OVERSIZED_COUNT).map(|_| long_name()).collect(),
+        };
+        assert_truncated_within_limit(&effect_descriptions(&result));
     }
 
     #[test]
