@@ -861,7 +861,6 @@ pub struct EditOutcome {
     ///
     /// 複数オブジェクトを含む alias では 2 件以上になる。`object` はその
     /// 先頭を指す。
-    #[serde(default)]
     pub created: Vec<ObjectSummary>,
 }
 
