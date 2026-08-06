@@ -790,20 +790,36 @@ fn the_plan_phase_reads_the_item_value_once_per_item_sub_operation() {
 
 #[test]
 fn the_same_movement_write_is_judged_the_same_way_alone_and_in_a_batch() {
-    // 移動を消す書き込みは、単独でも一括適用でも同じように拒否する。判定が
-    // 2 か所へ分かれると、片方だけが黙って通る。
-    let cases: [(&str, ItemValue); 1] = [(
-        MOVING_ITEM,
-        ItemValue::Number {
-            value: FiniteF64::try_new(0.0).expect("有限値"),
-        },
-    )];
+    // 受理する集合が単独編集と一括適用で違ってはならない。**通る入力も並べる**
+    // ——拒否だけを見ていると、両方が同じように拒みすぎていても気付けない。
+    let cases: [(&str, ItemValue); 3] = [
+        // 移動を消す数値の書き込み。どちらも拒否する。
+        (
+            MOVING_ITEM,
+            ItemValue::Number {
+                value: FiniteF64::try_new(0.0).expect("有限値"),
+            },
+        ),
+        // 移動を消す明示的な指定。どちらも通す。
+        (
+            MOVING_ITEM,
+            ItemValue::Track(aviutl2_mcp_core::TrackValue {
+                values: vec![FiniteF64::try_new(50.0).expect("有限値")],
+                mode: None,
+                params: Vec::new(),
+                accelerate: false,
+                decelerate: false,
+                twopoint: false,
+            }),
+        ),
+        // 移動を持たない項目へ移動を付ける。どちらも通す。
+        (STATIC_ITEM, movement(&[0.0, 50.0, 100.0], "直線移動")),
+    ];
     for (item, value) in cases {
         let alone = harness_with_track_effect();
         let single = alone
             .edit
-            .set_object_item(&set_track_item(&alone, item, value.clone()))
-            .expect_err("移動を消す書き込みが単独で成功しました");
+            .set_object_item(&set_track_item(&alone, item, value.clone()));
 
         let together = harness_with_track_effect();
         let batched = together
@@ -812,27 +828,35 @@ fn the_same_movement_write_is_judged_the_same_way_alone_and_in_a_batch() {
                 selector: together.effect_selector(1, 100, COORDINATE, 0),
                 item: item.to_string(),
                 value: value.clone(),
-            }]))
-            .expect_err("移動を消す書き込みが一括適用で成功しました");
+            }]));
 
-        assert_eq!(single.error_code(), batched.error_code(), "{item}");
-        assert_eq!(
-            single.details()["reason"],
-            batched.details()["reason"],
-            "{item}"
-        );
-        assert_eq!(
-            single.details()["current_value"],
-            batched.details()["current_value"],
-            "{item}"
-        );
-        assert_eq!(batched.details()["failed_index"], json!(0), "{item}");
-        // 事前解決相で落ちる。変更は 1 つも発行されていない。
-        assert!(
-            batched.details().get("mutation_issued").is_none(),
-            "{item} の拒否が変更の発行後に起きました"
-        );
-        together.assert_untouched();
+        match (single, batched) {
+            (Ok(_), Ok(_)) => {}
+            (Err(single), Err(batched)) => {
+                assert_eq!(single.error_code(), batched.error_code(), "{item}");
+                assert_eq!(
+                    single.details()["reason"],
+                    batched.details()["reason"],
+                    "{item}"
+                );
+                assert_eq!(
+                    single.details()["current_value"],
+                    batched.details()["current_value"],
+                    "{item}"
+                );
+                assert_eq!(batched.details()["failed_index"], json!(0), "{item}");
+                // 事前解決相で落ちる。変更は 1 つも発行されていない。
+                assert!(
+                    batched.details().get("mutation_issued").is_none(),
+                    "{item} の拒否が変更の発行後に起きました"
+                );
+                together.assert_untouched();
+            }
+            (single, batched) => panic!(
+                "{item} へ {} を書いた結果が単独と一括で分かれました: {single:?} / {batched:?}",
+                value.kind()
+            ),
+        }
     }
 }
 

@@ -2191,14 +2191,32 @@ fn movement(values: &[f64], mode: &str) -> ItemValue {
 /// カタログと対象オブジェクトの双方へ同じ effect を足す。種別はカタログの
 /// 一覧から引かれるため、両方を揃えないと本番と同じ経路を通らない。
 ///
-/// 対象は中間点を 1 つ持つ。区間 2 個に対して移動の値は 3 個である。
+/// **中間点の数が違う 2 つの対象へ足す。** レイヤー 1 フレーム 100 の対象は
+/// 中間点を 1 つ持ち、区間 2 個に対して値は 3 個である。フレーム 300 の対象は
+/// 中間点を持たず、区間 1 個に対して値は 2 個である。1 つしか置かないと、
+/// 「値の個数は区間数 + 1」の規則が片側の数でしか固定されない。
 fn harness_with_track_effect() -> Harness {
     Harness::with(|host| {
         host.catalog.push(coordinate_catalog_entry());
-        host.scene.get_mut().unwrap().layers[1].objects[0]
+        let layer = &mut host.scene.get_mut().unwrap().layers[1];
+        layer.objects[0]
             .effects
             .push(coordinate(0, &[0.0, 50.0, 100.0]));
+        layer.objects[1].effects.push(coordinate(0, &[0.0, 100.0]));
     })
+}
+
+/// 中間点を持たない対象のトラックバーへ値を書き込む要求を組み立てる。
+fn set_track_item_without_midpoints(
+    harness: &Harness,
+    item: &str,
+    value: ItemValue,
+) -> SetObjectItemParams {
+    SetObjectItemParams {
+        selector: harness.effect_selector(1, 300, COORDINATE, 0),
+        item: item.to_string(),
+        value,
+    }
 }
 
 /// トラックバーへ値を書き込む要求を組み立てる。
@@ -2295,6 +2313,44 @@ fn a_movement_can_be_added_to_an_item_that_has_none() {
         "直線移動",
         "移動情報が付いていません"
     );
+}
+
+#[test]
+fn a_movement_can_be_added_to_an_object_without_midpoints() {
+    // 中間点を持たない対象の静的なトラックバーへ 2 値の移動を書くと成功する
+    // （実測）。区間は 1 個であり、値は 2 個でなければならない。
+    let harness = harness_with_track_effect();
+    let requested = movement(&[0.0, 100.0], "直線移動");
+    let outcome = harness
+        .edit
+        .set_object_item(&set_track_item_without_midpoints(
+            &harness,
+            STATIC_ITEM,
+            requested.clone(),
+        ))
+        .expect("中間点を持たない対象へ移動を書けませんでした");
+    assert_eq!(changed_item(&outcome, STATIC_ITEM), requested);
+
+    // 区間 1 個に対して 3 値は多い。個数の規則は区間の数で決まり、両端で効く。
+    let harness = harness_with_track_effect();
+    let error = harness
+        .edit
+        .set_object_item(&set_track_item_without_midpoints(
+            &harness,
+            STATIC_ITEM,
+            movement(&[0.0, 50.0, 100.0], "直線移動"),
+        ))
+        .expect_err("区間の数と合わない値が受理されました");
+    assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+    assert_eq!(error.details()["reason"], json!("track_value_count"));
+
+    // 同じ 2 値を、中間点を 1 つ持つ対象へ書くと個数が足りない。
+    let harness = harness_with_track_effect();
+    let error = harness
+        .edit
+        .set_object_item(&set_track_item(&harness, STATIC_ITEM, requested))
+        .expect_err("区間の数と合わない値が受理されました");
+    assert_eq!(error.details()["reason"], json!("track_value_count"));
 }
 
 #[test]
