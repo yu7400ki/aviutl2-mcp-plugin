@@ -2211,10 +2211,10 @@ fn a_value_the_host_normalizes_is_not_treated_as_a_choice_rejection() {
         (
             "メモ",
             ItemValue::Text {
-                value: "上\n下".to_string(),
+                value: "上\r\n下".to_string(),
             },
             ItemValue::Text {
-                value: "上\\n下".to_string(),
+                value: "上\n下".to_string(),
             },
         ),
     ];

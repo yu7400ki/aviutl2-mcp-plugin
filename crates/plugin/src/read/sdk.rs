@@ -15,7 +15,7 @@ use crate::read::host::{
 use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection};
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, EffectType,
-    FiniteF64, GridBpm, ItemValue, ModuleEntry, ModuleType, Rgba, SectionRange,
+    FiniteF64, GridBpm, ItemValue, ModuleEntry, ModuleType, Rgba, SectionRange, decode_host_text,
 };
 use std::collections::HashMap;
 use std::ops::Range;
@@ -756,6 +756,11 @@ fn track_info(
 /// 選択肢から選ぶ種別は、選択された表示文字列をそのまま持つ。生文字列として
 /// 返すと書き込みが受け付けない形になり、読み取った値をそのまま書き戻せなく
 /// なる。
+///
+/// テキスト種別だけは、ホストが返すエスケープ表記を [`decode_host_text`] で
+/// 解いてから載せる。書き込みが同じ表記へ符号化するため、解かなければ読みと
+/// 書きが非対称になり、読み取った値を書き戻すたびに包みが育つ。ホストが
+/// 正規化しない種別（パス・色・フォント名・選択肢）には掛けない。
 fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
     match item_type {
         EffectItemType::Integer => match raw.trim().parse::<i64>() {
@@ -780,7 +785,9 @@ fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
         EffectItemType::File => ItemValue::File { path: raw },
         EffectItemType::Folder => ItemValue::Folder { path: raw },
         EffectItemType::Font => ItemValue::Font { name: raw },
-        EffectItemType::Text | EffectItemType::String => ItemValue::Text { value: raw },
+        EffectItemType::Text | EffectItemType::String => ItemValue::Text {
+            value: decode_host_text(&raw),
+        },
         EffectItemType::Scene
         | EffectItemType::Range
         | EffectItemType::Data
@@ -1241,6 +1248,33 @@ mod tests {
     }
 
     #[test]
+    fn text_values_are_decoded_and_other_types_are_left_alone() {
+        // テキスト種別だけがエスケープ表記を解く。ホストが正規化しない種別へ
+        // 掛けると、`\` を含む値が壊れる。
+        for item_type in [EffectItemType::Text, EffectItemType::String] {
+            assert_eq!(
+                item_value(&item_type, r"C:\\temp\nの先".to_string()),
+                ItemValue::Text {
+                    value: "C:\\temp\nの先".to_string(),
+                },
+                "{item_type}"
+            );
+        }
+        assert_eq!(
+            item_value(&EffectItemType::File, r"C:\\temp".to_string()),
+            ItemValue::File {
+                path: r"C:\\temp".to_string(),
+            }
+        );
+        assert_eq!(
+            item_value(&EffectItemType::Select, r"\n".to_string()),
+            ItemValue::Choice {
+                value: r"\n".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn unparsable_values_keep_raw_text() {
         for item_type in [
             EffectItemType::Integer,
@@ -1312,6 +1346,10 @@ mod tests {
     /// 読み取りの写像・書き込みを公開する種別・種別が受け付ける値の形の 3 つが
     /// 揃って初めて、読み取った値がそのまま書き戻せる。どれか 1 つが欠けると
     /// この表と食い違う。
+    ///
+    /// **テキスト種別の生値にはエスケープ表記を含める。** 生値をそのまま値へ
+    /// 載せる種別と同じ入力にすると、復号と符号化のどちらを外しても表が通り、
+    /// 対称性の検査が働かなくなる。
     fn read_then_write_back() -> Vec<(
         EffectItemType,
         &'static str,
@@ -1342,19 +1380,19 @@ mod tests {
             ),
             (
                 EffectItemType::Text,
-                "字幕",
+                r"字幕\n2 行目",
                 ItemValue::Text {
-                    value: "字幕".to_string(),
+                    value: "字幕\n2 行目".to_string(),
                 },
-                Ok("字幕".to_string()),
+                Ok(r"字幕\n2 行目".to_string()),
             ),
             (
                 EffectItemType::String,
-                "文字列",
+                r"C:\\temp",
                 ItemValue::Text {
-                    value: "文字列".to_string(),
+                    value: r"C:\temp".to_string(),
                 },
-                Ok("文字列".to_string()),
+                Ok(r"C:\\temp".to_string()),
             ),
             (
                 EffectItemType::File,

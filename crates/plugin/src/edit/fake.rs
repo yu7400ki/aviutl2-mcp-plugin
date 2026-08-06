@@ -23,7 +23,7 @@ use crate::test_support::alias_with_effects;
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EffectFlags, EffectItem,
     EffectItemType, EffectType, FiniteF64, FrameRange, GridBpm, ItemValue, ModuleEntry, ModuleType,
-    PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange,
+    PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, decode_host_text, encode_host_text,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -1929,15 +1929,18 @@ pub(crate) const CHOICE_VALUES: [&str; 2] = ["円", "四角形"];
 ///
 /// 保持している値をそのまま文字列にする。種別ごとに別の表記へ写すと、書き込みが
 /// 渡した文字列と読み直した文字列を比べる検査が成立しない。
+///
+/// **テキスト種別だけは例外で、エスケープ表記へ包んで返す。** ホストは `\` と
+/// 改行を包んだ表記でしか値を返さない。[`host_write`] が同じ表記を解いて保持する
+/// ため、2 つは対になっており、包みが増えることも減ることもない。
 fn raw_item_value(value: &ItemValue) -> String {
     match value {
         ItemValue::Unknown { raw } => raw.clone(),
         ItemValue::Integer { value } => value.to_string(),
         ItemValue::Number { value } => value.to_string(),
         ItemValue::Bool { value } => if *value { "1" } else { "0" }.to_string(),
-        ItemValue::Color { value } | ItemValue::Choice { value } | ItemValue::Text { value } => {
-            value.clone()
-        }
+        ItemValue::Text { value } => encode_host_text(value),
+        ItemValue::Color { value } | ItemValue::Choice { value } => value.clone(),
         ItemValue::Font { name } => name.clone(),
         ItemValue::File { path } | ItemValue::Folder { path } => path.clone(),
     }
@@ -1947,8 +1950,12 @@ fn raw_item_value(value: &ItemValue) -> String {
 ///
 /// 選択肢から選ぶ種別は、選択肢に無い値を失敗を返さずに無視する。ほかの種別は
 /// 種別に対応する値として受け付け、一部は表記を正規化する——整数と実数の上限
-/// への丸め、色の小文字化、改行のエスケープ表記である。**正規化した値は書いた
-/// 文字列と一致しない。**
+/// への丸め、色の小文字化である。**正規化した値は書いた文字列と一致しない。**
+///
+/// テキスト種別は渡された表記を解いて保持する。ホストは `\\` を 1 つの `\` へ、
+/// `\n` を改行へ戻してから保存し、[`raw_item_value`] が読み取りへ返すときに同じ
+/// 表記へ包み直す。解かずに保持すると、書いた `\` がそのまま残り、実機で起きる
+/// 「`\t` が素通りして `\n` だけ改行になる」形を再現できない。
 ///
 /// 書き込みを公開していない種別は生の文字列のまま保つ。読み取り経路がそれらを
 /// 生値として返すため、書き込みだけが別の形へ写ると場面の状態が種別と食い違う。
@@ -1972,7 +1979,7 @@ fn host_write(item_type: &EffectItemType, value: &str) -> Option<ItemValue> {
                 .unwrap_or_else(|| FiniteF64::try_new(0.0).expect("有限値")),
         }),
         EffectItemType::Text | EffectItemType::String => Some(ItemValue::Text {
-            value: value.replace('\n', "\\n"),
+            value: decode_host_text(value),
         }),
         EffectItemType::Check => Some(ItemValue::Bool {
             value: value != "0",
@@ -2266,4 +2273,65 @@ pub(crate) fn fake_catalog() -> Vec<AvailableEffect> {
             items: Vec::new(),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aviutl2_mcp_core::{AvailableEffectItem, prepare_item_write};
+
+    /// テキスト種別の設定項目を 1 つだけ公開する一覧。
+    fn text_item() -> Vec<AvailableEffectItem> {
+        vec![AvailableEffectItem {
+            name: "メモ".to_string(),
+            item_type: EffectItemType::Text,
+        }]
+    }
+
+    #[test]
+    fn the_fake_host_wraps_backslashes_and_line_feeds_like_the_real_one() {
+        // 書いた文字列を解いて保持し、読み取りへは包み直して返す。
+        let written = host_write(&EffectItemType::Text, r"C:\\temp\nの先").expect("受理される");
+        assert_eq!(
+            written,
+            ItemValue::Text {
+                value: "C:\\temp\nの先".to_string(),
+            }
+        );
+        assert_eq!(raw_item_value(&written), r"C:\\temp\nの先");
+    }
+
+    #[test]
+    fn the_fake_host_reports_back_exactly_what_the_write_path_handed_it() {
+        // 書き込みが渡す文字列と、読み直しが返す文字列が一致する。ここが一致
+        // しない限り、テキスト種別は書き込み後の照合を課せない。
+        for value in [
+            r"C:\temp\note",
+            "1 行目\n2 行目",
+            "\t字下げ",
+            r"^\d+\.txt$",
+            "字幕",
+        ] {
+            let write = prepare_item_write(
+                &text_item(),
+                "メモ",
+                &ItemValue::Text {
+                    value: value.to_string(),
+                },
+            )
+            .expect("書き込み");
+            let stored = host_write(&EffectItemType::Text, write.value()).expect("受理される");
+            assert_eq!(
+                stored,
+                ItemValue::Text {
+                    value: value.to_string(),
+                },
+                "{value:?} がホストの保持で崩れました"
+            );
+            assert!(
+                write.read_back_matches(&raw_item_value(&stored)),
+                "{value:?} の読み直しが渡した文字列と一致しません"
+            );
+        }
+    }
 }
