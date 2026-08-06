@@ -16,6 +16,7 @@ use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, EffectType,
     FiniteF64, GridBpm, ItemValue, ModuleEntry, ModuleType, Rgba, SectionRange, decode_host_text,
+    parse_check_value,
 };
 use std::collections::HashMap;
 use std::ops::Range;
@@ -773,7 +774,7 @@ fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
                 None => ItemValue::Unknown { raw },
             }
         }
-        EffectItemType::Check => match parse_check(&raw) {
+        EffectItemType::Check => match parse_check_value(&raw) {
             Some(value) => ItemValue::Bool { value },
             None => ItemValue::Unknown { raw },
         },
@@ -792,15 +793,6 @@ fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
         | EffectItemType::Range
         | EffectItemType::Data
         | EffectItemType::Unknown(_) => ItemValue::Unknown { raw },
-    }
-}
-
-/// チェックボックスの値を解釈する。
-fn parse_check(raw: &str) -> Option<bool> {
-    match raw.trim() {
-        "0" | "false" => Some(false),
-        "1" | "true" => Some(true),
-        _ => None,
     }
 }
 
@@ -1535,12 +1527,20 @@ mod tests {
     }
 
     #[test]
-    fn check_accepts_only_known_forms() {
-        assert_eq!(parse_check("0"), Some(false));
-        assert_eq!(parse_check("1"), Some(true));
-        assert_eq!(parse_check("true"), Some(true));
-        assert_eq!(parse_check("2"), None);
-        assert_eq!(parse_check(""), None);
+    fn check_values_the_host_does_not_use_stay_raw() {
+        // 解釈できない表記を真偽値へ丸めると、書き戻したときに別の値になる。
+        for raw in ["2", "", "yes"] {
+            assert_eq!(
+                item_value(&EffectItemType::Check, raw.to_string()),
+                ItemValue::Unknown {
+                    raw: raw.to_string()
+                }
+            );
+        }
+        assert_eq!(
+            item_value(&EffectItemType::Check, "true".to_string()),
+            ItemValue::Bool { value: true }
+        );
     }
 
     #[test]
