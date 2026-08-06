@@ -116,11 +116,10 @@ pub struct AvailableEffectItem {
 
 /// effect が対応する内容を表すフラグ。
 ///
-/// 既知ビットを bool で展開しつつ、ビット列そのものを `raw` に併記する。
+/// 既知ビットを bool で展開する。**ビット列そのものは載せない**——生成元が
+/// 復元できるのは既知ビットだけであり、未知ビットを運ぶ手段が無いためである。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectFlags {
-    /// ビット列。生成元が既知ビットしか復元できない場合は未知ビットを含まない。
-    pub raw: u32,
     /// 画像をサポートする。
     pub video: bool,
     /// 音声をサポートする。
@@ -141,10 +140,9 @@ const EFFECT_FLAG_FILTER: u32 = 4;
 const EFFECT_FLAG_CAMERA: u32 = 8;
 
 impl EffectFlags {
-    /// 生のビット列から既知フラグを展開する。
+    /// 生のビット列から既知フラグを展開する。未知ビットは落ちる。
     pub fn from_raw(raw: u32) -> Self {
         Self {
-            raw,
             video: raw & EFFECT_FLAG_VIDEO != 0,
             audio: raw & EFFECT_FLAG_AUDIO != 0,
             filter: raw & EFFECT_FLAG_FILTER != 0,
@@ -765,14 +763,12 @@ mod tests {
         assert!(flags.audio);
         assert!(flags.filter);
         assert!(!flags.camera);
-        assert_eq!(flags.raw, 6);
     }
 
     #[test]
-    fn effect_flags_keeps_unknown_bits_in_raw() {
+    fn effect_flags_drop_unknown_bits() {
         let flags = EffectFlags::from_raw(0x8000_0000);
         assert!(!flags.video && !flags.audio && !flags.filter && !flags.camera);
-        assert_eq!(flags.raw, 0x8000_0000);
     }
 
     #[test]

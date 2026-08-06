@@ -550,7 +550,6 @@ fn available_effect_item() -> Value {
 
 fn effect_flags() -> Value {
     object(&[
-        ("raw", unsigned()),
         ("video", boolean()),
         ("audio", boolean()),
         ("filter", boolean()),
