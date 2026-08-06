@@ -14,10 +14,11 @@
 
 use crate::edit::error::EditError;
 use crate::render::error::RenderError;
-use crate::session::{batch_input_error, edit_input_error};
+use crate::session::{batch_input_error, describe_effects_error, edit_input_error};
 use aviutl2_mcp_core::error::REASON_VALUES;
 use aviutl2_mcp_core::{
-    BatchInputError, EditInputError, ItemWriteError, MAX_ITEM_VALUE_BYTES, MAX_NAME_UTF16_UNITS,
+    BatchInputError, DescribeEffectsInputError, DescribeEffectsParams, EditInputError,
+    ItemWriteError, MAX_DESCRIBED_EFFECTS, MAX_ITEM_VALUE_BYTES, MAX_NAME_UTF16_UNITS,
     MAX_PATH_UTF16_UNITS, PathSyntaxError, TextSyntaxError, validate_alias, validate_item_text,
     validate_multiline_item_text, validate_name, validate_object_alias_name, validate_path,
 };
@@ -58,6 +59,39 @@ fn text_syntax_case(variant: &TextSyntaxError) -> Vec<TextSyntaxError> {
         TextSyntaxError::TooLongBytes { .. } => vec![rejected(validate_item_text(
             &"a".repeat(MAX_ITEM_VALUE_BYTES + 1),
         ))],
+    }
+}
+
+/// variant を実際に起こす effect の中身の要求を並べる。網羅 `match` の理由は同上。
+///
+/// 起こすのは [`DescribeEffectsParams::validate`] そのものであり、失敗値を手で
+/// 組み立てない。組み立てると、その規則を課す検証が製品に 1 つも無くても検査が
+/// 通る。
+fn describe_effects_case(variant: &DescribeEffectsInputError) -> Vec<DescribeEffectsInputError> {
+    let rejected = |names: &[&str]| {
+        DescribeEffectsParams {
+            effect_names: names.iter().map(|name| name.to_string()).collect(),
+        }
+        .validate()
+        .expect_err("受理されました")
+    };
+    let over_the_limit: Vec<String> = (0..=MAX_DESCRIBED_EFFECTS)
+        .map(|index| format!("効果{index}"))
+        .collect();
+    match variant {
+        DescribeEffectsInputError::EffectCountOutOfRange { .. } => vec![
+            rejected(&[]),
+            rejected(
+                &over_the_limit
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<&str>>(),
+            ),
+        ],
+        DescribeEffectsInputError::DuplicateEffectName { .. } => {
+            vec![rejected(&["グロー", "発光", "グロー"])]
+        }
+        DescribeEffectsInputError::EffectName { .. } => vec![rejected(&["グロー\0"])],
     }
 }
 
@@ -204,6 +238,15 @@ fn produced_reasons() -> BTreeSet<String> {
         BatchInputError::all()
             .into_iter()
             .filter_map(|error| reason_of(&batch_input_error(error).details)),
+    );
+    reasons.extend(
+        produced_variants(
+            DescribeEffectsInputError::ALL,
+            describe_effects_case,
+            DescribeEffectsInputError::reason,
+        )
+        .into_iter()
+        .filter_map(|error| reason_of(&describe_effects_error(error).details)),
     );
     reasons
 }

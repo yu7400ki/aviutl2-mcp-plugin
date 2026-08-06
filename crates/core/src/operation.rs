@@ -592,6 +592,23 @@ pub enum DescribeEffectsInputError {
 }
 
 impl DescribeEffectsInputError {
+    /// 全 variant の代表値。
+    ///
+    /// [`DescribeEffectsInputError::reason`] が返し得る名前を数え上げるために
+    /// 用いる。値を持つ variant には代表となる値を添えてあり、名前はその値に
+    /// 依存しない。**代表値は名前の数え上げに限る**——この失敗を実際に起こすのは
+    /// [`DescribeEffectsParams::validate`] であり、起こせることの証明は入力の側が
+    /// 持つ。
+    pub const ALL: &'static [DescribeEffectsInputError] = &[
+        DescribeEffectsInputError::EffectCountOutOfRange {
+            count: MAX_DESCRIBED_EFFECTS + 1,
+        },
+        DescribeEffectsInputError::DuplicateEffectName { index: 1 },
+        DescribeEffectsInputError::EffectName {
+            source: TextSyntaxError::ContainsNul,
+        },
+    ];
+
     /// 落ちた規則を表す機械可読な名前。
     pub fn reason(&self) -> &'static str {
         match self {

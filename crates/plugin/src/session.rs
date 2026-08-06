@@ -1410,7 +1410,7 @@ fn item_values_error(error: EffectItemValuesInputError) -> ErrorObject {
 /// **どの規則で落ちたかを機械可読な形で添える。** 件数・重複・名前の構文は
 /// 要求元が取れる行動が異なり、名前が無ければ説明の文面を解析するほかない。
 /// 検証に失敗した effect 名そのものは説明にも補助情報にも現れない。
-fn describe_effects_error(error: DescribeEffectsInputError) -> ErrorObject {
+pub(crate) fn describe_effects_error(error: DescribeEffectsInputError) -> ErrorObject {
     with_details(
         error_object(ErrorCode::InvalidArgument, error.to_string()),
         input_error_details(Some(error.reason()), None),
