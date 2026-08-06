@@ -28,8 +28,8 @@
 //! ことを主張することになる。
 
 use crate::edit::adapter::{
-    attribute, ensure_destination_free, ensure_layers_unlocked, index, reread_with_effects,
-    track_write_target, unlisted_item, verify_written_item,
+    attribute, ensure_destination_free, ensure_layers_unlocked, ensure_movement_write, index,
+    reread_with_effects, track_write_target, unlisted_item, verify_written_item,
 };
 use crate::edit::error::{EditError, RollbackOutcome, UnsupportedReason};
 use crate::edit::host::{ObjectPosition, SceneEditor};
@@ -283,6 +283,9 @@ fn plan_step<'sec>(
                     reason: UnsupportedReason::InverseUnavailable,
                 }
             })?;
+            // 移動の有無の照合はこの値で足りる。**読み直さない**——同じ項目の
+            // 同じ値を、逆操作の材料として既に読んでいる。
+            ensure_movement_write(&items, item, value, &origin_value)?;
             Ok(PlannedStep::SetItem {
                 object,
                 effect: Box::new(effect),

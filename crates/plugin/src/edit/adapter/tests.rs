@@ -7,12 +7,13 @@
 use super::*;
 use crate::alias::tests::{TempDir, write_fixture};
 use crate::edit::fake::{
-    CHOICE_VALUES, CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, DEFAULT_COLOR, DEFAULT_FONT, EFFECT_LIST,
-    FakeEditHost, FakeLayer, FakeObject, FakeReadHost, Fault, ITEM_VALUE, Knobs, LAYER_ATTRIBUTES,
-    LAYER_LOCK, LAYER_MAX, MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER, MAX_SCENE_HEIGHT,
-    MAX_SCENE_SAMPLE_RATE, MAX_SCENE_WIDTH, MOVE_FRAME_SHIFT, MUTATIONS, OBSERVED_SCENE,
-    PanicPoint, READ_SECTION, RENAMED_SCENE_NAME, SCENE_ID, SCENE_NAME, SECTION_RANGES, SHAPE,
-    raw_item_value, shape, shape_catalog_entry,
+    CHOICE_VALUES, CLOSURE_ESCAPED, COORDINATE, CREATE_FRAME_SHIFT, DEFAULT_COLOR, DEFAULT_FONT,
+    EFFECT_LIST, FakeEditHost, FakeLayer, FakeObject, FakeReadHost, Fault, ITEM_VALUE, Knobs,
+    LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX, MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER,
+    MAX_SCENE_HEIGHT, MAX_SCENE_SAMPLE_RATE, MAX_SCENE_WIDTH, MOVE_FRAME_SHIFT, MOVING_ITEM,
+    MUTATIONS, OBSERVED_SCENE, PanicPoint, READ_SECTION, RENAMED_SCENE_NAME, SCENE_ID, SCENE_NAME,
+    SECTION_RANGES, SHAPE, STATIC_ITEM, coordinate, coordinate_catalog_entry, raw_item_value,
+    shape, shape_catalog_entry,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::{default_page_request, default_page_window, with_silent_panic_hook};
@@ -2007,6 +2008,16 @@ fn an_item_missing_from_the_listing_but_readable_is_not_writable() {
     harness.assert_untouched();
 }
 
+/// 記録された呼び出しのうち、最初に変更 API が現れた位置。
+fn first_mutation(calls: &[&'static str]) -> Option<usize> {
+    calls.iter().position(|call| MUTATIONS.contains(call))
+}
+
+/// 記録された呼び出しのうち、指定した呼び出しが現れた回数。
+fn count(calls: &[&'static str], call: &str) -> usize {
+    calls.iter().filter(|recorded| **recorded == call).count()
+}
+
 #[test]
 fn a_successful_write_reads_the_value_back_exactly_once() {
     // ホストは書き込みの成否を返さない。成功経路でも読み直さなければ、要求した
@@ -2024,17 +2035,54 @@ fn a_successful_write_reads_the_value_back_exactly_once() {
         })
         .expect("設定項目の変更に失敗しました");
 
+    let calls = harness.host.calls();
+    let first = first_mutation(&calls).expect("変更 API が呼ばれていません");
     assert_eq!(
-        harness
-            .host
-            .calls()
-            .iter()
-            .filter(|call| **call == ITEM_VALUE)
-            .count(),
+        count(&calls[first..], ITEM_VALUE),
         1,
-        "照合の読み直しは 1 回だけです: {:?}",
-        harness.host.calls()
+        "照合の読み直しは 1 回だけです: {calls:?}"
     );
+}
+
+#[test]
+fn only_the_items_that_can_hold_a_movement_are_read_before_the_write() {
+    // 移動の有無は設定値の生文字列にしか現れないため、移動を持ち得る種別では
+    // 書き込みの前に 1 回読む。**持ち得ない種別では読まない**——判定は変わらず、
+    // 設定項目 1 件あたりの呼び出しだけが増える。
+    let cases = [
+        ("範囲", ItemValue::Integer { value: 30 }, 1),
+        (
+            "メモ",
+            ItemValue::Text {
+                value: "覚書".to_string(),
+            },
+            0,
+        ),
+    ];
+    for (item, value, expected) in cases {
+        let harness = harness_with_choice_effect();
+        let selector = match item {
+            "範囲" => harness.effect_selector(1, 300, "ぼかし", 0),
+            _ => harness.effect_selector(1, 300, SHAPE, 0),
+        };
+        harness.host.clear_calls();
+        harness
+            .edit
+            .set_object_item(&SetObjectItemParams {
+                selector,
+                item: item.to_string(),
+                value,
+            })
+            .unwrap_or_else(|error| panic!("{item} の書き込みに失敗しました: {error}"));
+
+        let calls = harness.host.calls();
+        let first = first_mutation(&calls).expect("変更 API が呼ばれていません");
+        assert_eq!(
+            count(&calls[..first], ITEM_VALUE),
+            expected,
+            "{item} の書き込み前の読み取り回数が想定と異なります: {calls:?}"
+        );
+    }
 }
 
 /// 選択肢から選ぶ設定項目を持つ effect を足したフェイクを組む。
@@ -2124,32 +2172,209 @@ fn movement(values: &[f64], mode: &str) -> ItemValue {
     })
 }
 
-/// トラックバーへ移動を書き込む要求を組み立てる。
-fn set_movement(harness: &Harness, value: ItemValue) -> SetObjectItemParams {
+/// 移動を持つ項目と持たない項目を備えたフェイクを組む。
+///
+/// カタログと対象オブジェクトの双方へ同じ effect を足す。種別はカタログの
+/// 一覧から引かれるため、両方を揃えないと本番と同じ経路を通らない。
+///
+/// 対象は中間点を 1 つ持つ。区間 2 個に対して移動の値は 3 個である。
+fn harness_with_track_effect() -> Harness {
+    Harness::with(|host| {
+        host.catalog.push(coordinate_catalog_entry());
+        host.scene.get_mut().unwrap().layers[1].objects[0]
+            .effects
+            .push(coordinate(0, &[0.0, 50.0, 100.0]));
+    })
+}
+
+/// トラックバーへ値を書き込む要求を組み立てる。
+fn set_track_item(harness: &Harness, item: &str, value: ItemValue) -> SetObjectItemParams {
     SetObjectItemParams {
-        selector: harness.effect_selector(1, 100, "ぼかし", 0),
-        item: "範囲".to_string(),
+        selector: harness.effect_selector(1, 100, COORDINATE, 0),
+        item: item.to_string(),
         value,
     }
+}
+
+/// 移動を持つ項目へ書き込む要求を組み立てる。
+fn set_movement(harness: &Harness, value: ItemValue) -> SetObjectItemParams {
+    set_track_item(harness, MOVING_ITEM, value)
 }
 
 #[test]
 fn a_movement_the_host_knows_is_written_and_read_back() {
     // 一覧にある移動方法は書ける。ホストが桁を整えて返しても照合は通る。
-    let harness = Harness::new();
+    let harness = harness_with_track_effect();
     let outcome = harness
         .edit
         .set_object_item(&set_movement(
             &harness,
-            movement(&[0.0, 50.0, 100.0], "直線移動"),
+            movement(&[0.0, 50.0, 100.0], "曲線移動"),
         ))
         .expect("一覧にある移動方法が拒否されました");
 
     assert_eq!(
-        changed_item(&outcome, "範囲"),
-        movement(&[0.0, 50.0, 100.0], "直線移動")
+        changed_item(&outcome, MOVING_ITEM),
+        movement(&[0.0, 50.0, 100.0], "曲線移動")
     );
     assert!(harness.host.fatal_movement_writes().is_empty());
+}
+
+#[test]
+fn a_scalar_that_would_erase_a_movement_is_refused() {
+    // ホストは移動を持つ項目へ数値を書くと、移動も加速も中間点無視も捨てて
+    // 成功を返す。生の文字列を渡しても同じであり、止められる場所はここしかない。
+    let harness = harness_with_track_effect();
+    let error = harness
+        .edit
+        .set_object_item(&set_movement(
+            &harness,
+            ItemValue::Number {
+                value: FiniteF64::try_new(0.0).expect("有限値"),
+            },
+        ))
+        .expect_err("移動を消す書き込みが成功として返りました");
+
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(error.details()["reason"], json!("track_movement_present"));
+    // 対象がいま持つ移動を載せる。要求元はこれを読んで書き戻すか消すかを決める。
+    assert_eq!(
+        error.details()["current_value"],
+        json!("0.00,50.00,100.00,直線移動,0|")
+    );
+    // 書き込みは発行していない。発行してしまえば移動は復元できない。
+    harness.assert_untouched();
+}
+
+#[test]
+fn a_movement_is_refused_where_the_item_has_none() {
+    // 移動を持たない項目へ多値の文字列を渡すと、ホストは先頭の値だけを使って
+    // 残りを捨てる。要求した移動が入らないことに気付く手段が要求元に無い。
+    let harness = harness_with_track_effect();
+    let error = harness
+        .edit
+        .set_object_item(&set_track_item(
+            &harness,
+            STATIC_ITEM,
+            movement(&[0.0, 50.0, 100.0], "直線移動"),
+        ))
+        .expect_err("移動を持たない項目への移動が成功として返りました");
+
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(error.details()["reason"], json!("track_movement_absent"));
+    assert_eq!(error.details()["current_value"], json!("1.00"));
+    harness.assert_untouched();
+}
+
+#[test]
+fn a_movement_is_removed_by_writing_a_value_without_a_mode() {
+    // 移動を消す手段はこれだけである。**表せるのだから、数値の書き込みが黙って
+    // 消すことを成功として返す理由が無い。**
+    let harness = harness_with_track_effect();
+    let outcome = harness
+        .edit
+        .set_object_item(&set_movement(
+            &harness,
+            ItemValue::Track(aviutl2_mcp_core::TrackValue {
+                values: vec![FiniteF64::try_new(50.0).expect("有限値")],
+                mode: None,
+                params: Vec::new(),
+                accelerate: false,
+                decelerate: false,
+                twopoint: false,
+            }),
+        ))
+        .expect("移動を消す書き込みが拒否されました");
+
+    assert_eq!(
+        changed_item(&outcome, MOVING_ITEM),
+        ItemValue::Number {
+            value: FiniteF64::try_new(50.0).expect("有限値"),
+        }
+    );
+    // 消した後は移動を持たない項目になる。数値で書き換えられる。
+    harness
+        .edit
+        .set_object_item(&set_movement(
+            &harness,
+            ItemValue::Number {
+                value: FiniteF64::try_new(10.0).expect("有限値"),
+            },
+        ))
+        .expect("移動を消した後の数値の書き込みが拒否されました");
+}
+
+/// 編集手順が実際に返した「移動の有無が食い違う」失敗を、向きごとに集める。
+///
+/// 名前を生む経路が製品に在ることの裏付けとして用いる。一覧から値を組み立てる
+/// のでは、返す呼び出しが 1 つも無くても検査が通ってしまう。
+pub(crate) fn produced_movement_mismatch_failures() -> Vec<EditError> {
+    let scalar = ItemValue::Number {
+        value: FiniteF64::try_new(0.0).expect("有限値"),
+    };
+    let moving = movement(&[0.0, 50.0, 100.0], "直線移動");
+    [(MOVING_ITEM, scalar), (STATIC_ITEM, moving)]
+        .into_iter()
+        .map(|(item, value)| {
+            let harness = harness_with_track_effect();
+            harness
+                .edit
+                .set_object_item(&set_track_item(&harness, item, value))
+                .expect_err("移動の有無が食い違う書き込みが成功として返りました")
+        })
+        .collect()
+}
+
+#[test]
+fn both_directions_of_the_movement_mismatch_have_a_request_that_produces_them() {
+    let reasons: Vec<String> = produced_movement_mismatch_failures()
+        .iter()
+        .map(|failure| failure.details()["reason"].to_string())
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![
+            json!("track_movement_present").to_string(),
+            json!("track_movement_absent").to_string(),
+        ]
+    );
+}
+
+#[test]
+fn a_movement_read_from_the_object_can_be_written_straight_back() {
+    // 読み取りが返した移動をそのまま書き戻せる。ホストが桁を整えても往復は
+    // 成立し、対象の同一性も動かない。
+    let harness = harness_with_track_effect();
+    let selector = harness.selector(1, 100);
+    let detail = harness.read.get_object(&selector).expect("対象の詳細");
+    let effect = detail
+        .effects
+        .iter()
+        .find(|effect| effect.name == COORDINATE)
+        .expect("effect がありません")
+        .clone();
+    let value = effect
+        .items
+        .iter()
+        .find(|item| item.name == MOVING_ITEM)
+        .expect("設定項目がありません")
+        .value
+        .clone();
+    assert!(
+        matches!(value, ItemValue::Track(_)),
+        "移動が移動として読めません: {value:?}"
+    );
+
+    let outcome = harness
+        .edit
+        .set_object_item(&set_movement(&harness, value.clone()))
+        .expect("読み取った移動を書き戻せませんでした");
+
+    assert_eq!(changed_item(&outcome, MOVING_ITEM), value);
+    // 書き戻しても対象は変わっていない。fingerprint は設定値まで含めて算出
+    // されるため、値が動けばここが食い違う。
+    assert_eq!(outcome.object.expect("対象の概要").selector, selector);
+    assert_eq!(outcome.effect.expect("effect"), effect);
 }
 
 #[test]
@@ -2158,7 +2383,7 @@ fn a_movement_with_an_unknown_mode_never_reaches_the_host() {
     // 書き込みの手前だけである。** 記録が空でなければ、検証を通り抜けた入力が
     // ホストへ届いている。panic は編集の入口が捕捉して失敗の応答へ畳むため、
     // 応答の形だけを見ても届いたことは分からない。
-    let harness = Harness::new();
+    let harness = harness_with_track_effect();
     let error = harness
         .edit
         .set_object_item(&set_movement(
@@ -2181,7 +2406,7 @@ fn a_movement_whose_value_count_does_not_match_the_sections_is_refused() {
     // ホストは個数の不一致を拒否せず、余った値を評価せずに保存する。要求した
     // 区間の値が入らないことに気付く手段が要求元に無い。
     // 標本の対象は中間点を 1 つ持つ。区間 2 個に対して値は 3 個である。
-    let harness = Harness::new();
+    let harness = harness_with_track_effect();
     harness
         .edit
         .set_object_item(&set_movement(
@@ -2204,7 +2429,7 @@ fn a_movement_whose_value_count_does_not_match_the_sections_is_refused() {
 fn no_movement_can_be_written_when_the_list_is_unavailable() {
     // 一覧を引けない環境では移動を 1 つも書けない。検証できないまま通すと、
     // その場でホストのプロセスが落ちる。
-    let harness = Harness::new();
+    let harness = harness_with_track_effect();
     harness.host.set_movements(Vec::new());
     let error = harness
         .edit

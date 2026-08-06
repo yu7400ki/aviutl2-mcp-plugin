@@ -141,6 +141,7 @@ fn edit_failures() -> Vec<EditError> {
         .into_iter()
         .chain(crate::edit::adapter::tests::unsupported_target_failures())
         .chain(crate::edit::adapter::tests::produced_item_value_mismatch_failures())
+        .chain(crate::edit::adapter::tests::produced_movement_mismatch_failures())
         .chain(crate::edit::sdk::tests::failures_that_never_reached_the_sdk())
         .chain(crate::edit::adapter::tests::produced_section_precondition_failures())
         .chain(syntax_failures().into_iter().map(EditError::ItemWrite))

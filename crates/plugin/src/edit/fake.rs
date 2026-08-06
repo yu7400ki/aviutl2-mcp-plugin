@@ -23,8 +23,8 @@ use crate::test_support::alias_with_effects;
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EffectFlags, EffectItem,
     EffectItemType, EffectType, EvaluatedItemKind, FiniteF64, FrameRange, GridBpm, ItemValue,
-    ModuleEntry, ModuleType, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, TrackValue,
-    decode_host_text, decode_track_value, encode_host_text,
+    ModuleEntry, ModuleType, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, TrackInfo,
+    TrackValue, decode_host_text, decode_track_value, encode_host_text,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -1675,6 +1675,7 @@ impl SceneEditor for FakeSceneEditor<'_> {
                 host.record_fatal_movement(mode);
             }
             if let Some(written) = host_write(&entry.item_type, &value, &fonts) {
+                entry.track = host_track(&written, entry.track.as_ref());
                 entry.value = written;
             }
         })
@@ -2111,7 +2112,14 @@ fn host_write(item_type: &EffectItemType, value: &str, fonts: &[String]) -> Opti
 /// 例外が `extern "C"` の境界を越えて入り、巻き戻せずに abort する。フェイクは
 /// これを記録と panic の 2 つで模す。落ちる形を「黙って無視される」として模すと、
 /// 名前の検証を外しても検査が緑のまま通る。
-pub(crate) const TRACK_MODES: [&str; 3] = ["直線移動", "曲線移動", "ランダム移動"];
+pub(crate) const TRACK_MODES: [&str; 4] =
+    ["直線移動", "曲線移動", "ランダム移動", "直線移動(時間制御)"];
+
+/// 時間制御を有効にする移動方法の名前の接尾辞。
+///
+/// 時間制御はフラグではなく移動方法の名前の変種が担う。フラグの欄は変種を
+/// 書いても 0 のままである。
+const TIME_CONTROL_SUFFIX: &str = "(時間制御)";
 
 /// ホストがパラメータ無しの書き込みに対して補う既定値を持つ移動方法。
 ///
@@ -2183,6 +2191,34 @@ fn host_write_track(track: &TrackValue) -> ItemValue {
         values: track.values.iter().map(adjust).collect(),
         params,
         ..track.clone()
+    })
+}
+
+/// ホストが保持する値に対応する移動情報。
+///
+/// **移動を持たない項目に移動情報は返らない。** SDK は移動方法の名前を持たない
+/// トラックバーに対して名前を空で返し、ラッパーはそれを「移動情報なし」へ畳む。
+/// 値と移動情報が食い違う状態は実機に無いため、書き込みのたびに値から組み直す。
+/// 食い違ったままにすると、移動の有無を移動情報から判定する実装も、値から判定
+/// する実装も、どちらも同じように緑になる。
+///
+/// 所属グループはホストの報告であり、書き込みでは指定できない。書き換えの前後で
+/// 変わらないものとして引き継ぐ。時間制御は移動方法の名前が決める。
+fn host_track(value: &ItemValue, before: Option<&TrackInfo>) -> Option<TrackInfo> {
+    let ItemValue::Track(track) = value else {
+        return None;
+    };
+    let mode = track.mode.clone()?;
+    Some(TrackInfo {
+        timecontrol: mode.ends_with(TIME_CONTROL_SUFFIX),
+        mode,
+        params: track.params.clone(),
+        accelerate: track.accelerate,
+        decelerate: track.decelerate,
+        twopoint: track.twopoint,
+        group_num: before.map_or(1, |track| track.group_num),
+        group_index: before.map_or(0, |track| track.group_index),
+        group_name: before.and_then(|track| track.group_name.clone()),
     })
 }
 
@@ -2347,6 +2383,79 @@ pub(crate) fn shape_catalog_entry() -> AvailableEffect {
 
 /// [`shape`] の effect 名。
 pub(crate) const SHAPE: &str = "図形";
+
+/// 移動を持つ項目と持たない項目を並べたトラックバーの effect。
+///
+/// **移動の有無は同じ種別の中で分かれる。** 片方だけを置くと、移動の有無で
+/// 判定する実装と種別で判定する実装を見分けられない。
+///
+/// `values` は移動を持つ項目の区間ごとの値である。個数は対象の区間の数で決まる
+/// ため、付与する対象に合わせて渡す。
+///
+/// 既定の状態には含めない。移動を要する試験だけが
+/// [`coordinate_catalog_entry`] と対にして差し込む。
+pub(crate) fn coordinate(index: usize, values: &[f64]) -> HostEffect {
+    let track = TrackValue {
+        values: values
+            .iter()
+            .map(|value| FiniteF64::try_new(*value).expect("有限値"))
+            .collect(),
+        mode: Some(TRACK_MODES[0].to_string()),
+        params: Vec::new(),
+        accelerate: false,
+        decelerate: false,
+        twopoint: false,
+    };
+    let moving = ItemValue::Track(track);
+    HostEffect {
+        name: COORDINATE.to_string(),
+        index,
+        enabled: true,
+        locked: false,
+        items: vec![
+            EffectItem {
+                name: MOVING_ITEM.to_string(),
+                item_type: EffectItemType::Number,
+                track: host_track(&moving, None),
+                value: moving,
+            },
+            EffectItem {
+                name: STATIC_ITEM.to_string(),
+                item_type: EffectItemType::Number,
+                value: ItemValue::Number {
+                    value: FiniteF64::try_new(1.0).expect("有限値"),
+                },
+                track: None,
+            },
+        ],
+    }
+}
+
+/// [`coordinate`] をカタログへ載せる形。
+pub(crate) fn coordinate_catalog_entry() -> AvailableEffect {
+    AvailableEffect {
+        name: COORDINATE.to_string(),
+        effect_type: EffectType::Filter,
+        flags: EffectFlags::from_raw(1),
+        items: coordinate(0, &[0.0, 1.0])
+            .items
+            .into_iter()
+            .map(|item| AvailableEffectItem {
+                name: item.name,
+                item_type: item.item_type,
+            })
+            .collect(),
+    }
+}
+
+/// [`coordinate`] の effect 名。
+pub(crate) const COORDINATE: &str = "座標";
+
+/// [`coordinate`] が持つ、移動を持つ設定項目の名前。
+pub(crate) const MOVING_ITEM: &str = "X";
+
+/// [`coordinate`] が持つ、移動を持たない設定項目の名前。
+pub(crate) const STATIC_ITEM: &str = "拡大率";
 
 /// 入力 effect。
 fn video() -> HostEffect {
@@ -2646,6 +2755,47 @@ mod tests {
                 "{mode} の読み直しが要求と一致しません"
             );
         }
+    }
+
+    #[test]
+    fn the_fake_host_drops_the_movement_when_a_scalar_is_written() {
+        // **破棄しているのはホストである。** 移動を持つ項目へ数値を書くと、
+        // 移動も加速も中間点無視も消え、失敗は返らない。符号化が値を落として
+        // いるのではないため、書き込みを拒む規則が要る。
+        let before = sample_track("直線移動", &[]);
+        assert_eq!(
+            written_back(&EffectItemType::Number, "0", &before),
+            "0.00",
+            "移動が残りました"
+        );
+        // 移動情報も同時に消える。値だけが変わる状態は実機に無い。
+        let stored = host_write(&EffectItemType::Number, "0", &fonts()).expect("受理される");
+        assert_eq!(
+            host_track(&stored, host_track(&before, None).as_ref()),
+            None
+        );
+    }
+
+    #[test]
+    fn the_movement_information_follows_the_value() {
+        // 移動情報は値から組み直す。食い違ったままにすると、移動の有無を
+        // 移動情報から判定する実装も値から判定する実装も同じように緑になる。
+        let stored =
+            host_write(&EffectItemType::Number, "0,100,曲線移動,5", &fonts()).expect("受理される");
+        let track = host_track(&stored, None).expect("移動情報");
+        assert_eq!(track.mode, "曲線移動");
+        assert!(track.accelerate);
+        assert!(track.twopoint);
+        assert!(!track.decelerate);
+        // 時間制御はフラグではなく移動方法の名前の変種が担う。
+        assert!(!track.timecontrol);
+        let controlled = host_write(
+            &EffectItemType::Number,
+            "0,100,直線移動(時間制御),0",
+            &fonts(),
+        )
+        .expect("受理される");
+        assert!(host_track(&controlled, None).expect("移動情報").timecontrol);
     }
 
     #[test]

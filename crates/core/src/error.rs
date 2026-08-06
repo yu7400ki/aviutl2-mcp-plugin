@@ -248,6 +248,8 @@ pub const REASON_VALUES: &[&str] = &[
     "too_long",
     "track_mode_reads_as_number",
     "track_mode_unknown",
+    "track_movement_absent",
+    "track_movement_present",
     "track_movement_without_mode",
     "track_value_count",
     "track_value_unavailable",

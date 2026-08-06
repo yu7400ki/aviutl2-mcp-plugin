@@ -59,16 +59,6 @@ fn item_of(harness: &Harness, id: usize, effect: usize, item: &str) -> ItemValue
         .clone()
 }
 
-/// 記録された呼び出しのうち、最初に変更 API が現れた位置。
-fn first_mutation(calls: &[&'static str]) -> Option<usize> {
-    calls.iter().position(|call| MUTATIONS.contains(call))
-}
-
-/// 記録された呼び出しのうち、指定した呼び出しが現れた回数。
-fn count(calls: &[&'static str], call: &str) -> usize {
-    calls.iter().filter(|recorded| **recorded == call).count()
-}
-
 // -------------------------------------------------------------- 相の分離
 
 #[test]
@@ -775,6 +765,78 @@ fn a_choice_value_the_host_accepts_passes_through_the_batch() {
             value: CHOICE_VALUES[1].to_string(),
         }
     );
+}
+
+#[test]
+fn the_plan_phase_reads_the_item_value_once_per_item_sub_operation() {
+    // 移動の有無の照合は、逆操作の材料として既に読んだ値を見る。**読み直さない**
+    // ため、sub-operation あたりの読み取りは 1 回のままである。
+    let harness = Harness::new();
+    let params = batch(vec![
+        set_item_op(harness.effect_selector(1, 300, "ぼかし", 0), "範囲", 40),
+        set_item_op(harness.effect_selector(1, 100, "ぼかし", 0), "範囲", 40),
+    ]);
+    harness.host.clear_calls();
+    harness.edit.apply_batch(&params).expect("一括適用の失敗");
+
+    let calls = harness.host.calls();
+    let first = first_mutation(&calls).expect("変更 API が呼ばれていません");
+    assert_eq!(
+        count(&calls[..first], ITEM_VALUE),
+        2,
+        "事前解決相の読み取りが設定項目を変える sub-operation の件数と違います: {calls:?}"
+    );
+}
+
+#[test]
+fn the_same_movement_mismatch_fails_the_same_way_alone_and_in_a_batch() {
+    // 移動を消す書き込みも、移動を持たない項目への移動も、単独と一括適用で
+    // 同じように拒否する。判定が 2 か所へ分かれると、片方だけが黙って通る。
+    let cases: [(&str, ItemValue); 2] = [
+        (
+            MOVING_ITEM,
+            ItemValue::Number {
+                value: FiniteF64::try_new(0.0).expect("有限値"),
+            },
+        ),
+        (STATIC_ITEM, movement(&[0.0, 50.0, 100.0], "直線移動")),
+    ];
+    for (item, value) in cases {
+        let alone = harness_with_track_effect();
+        let single = alone
+            .edit
+            .set_object_item(&set_track_item(&alone, item, value.clone()))
+            .expect_err("移動の有無が食い違う書き込みが単独で成功しました");
+
+        let together = harness_with_track_effect();
+        let batched = together
+            .edit
+            .apply_batch(&batch(vec![BatchOperation::SetObjectItem {
+                selector: together.effect_selector(1, 100, COORDINATE, 0),
+                item: item.to_string(),
+                value: value.clone(),
+            }]))
+            .expect_err("移動の有無が食い違う書き込みが一括適用で成功しました");
+
+        assert_eq!(single.error_code(), batched.error_code(), "{item}");
+        assert_eq!(
+            single.details()["reason"],
+            batched.details()["reason"],
+            "{item}"
+        );
+        assert_eq!(
+            single.details()["current_value"],
+            batched.details()["current_value"],
+            "{item}"
+        );
+        assert_eq!(batched.details()["failed_index"], json!(0), "{item}");
+        // 事前解決相で落ちる。変更は 1 つも発行されていない。
+        assert!(
+            batched.details().get("mutation_issued").is_none(),
+            "{item} の拒否が変更の発行後に起きました"
+        );
+        together.assert_untouched();
+    }
 }
 
 #[test]

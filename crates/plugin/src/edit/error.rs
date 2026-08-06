@@ -2,7 +2,7 @@
 
 use crate::alias::{AliasAdmissionError, AliasRejection};
 use crate::read::ReadError;
-use aviutl2_mcp_core::{ErrorCode, ItemWriteError};
+use aviutl2_mcp_core::{ErrorCode, ItemWriteError, MovementMismatch};
 use serde_json::{Map, Value, json};
 
 /// 応答の補助情報へ載せる文字列の上限文字数。
@@ -400,6 +400,25 @@ pub enum EditError {
         /// 受け付けられる値を選び直すか、この値を受け入れるかである。
         observed: String,
     },
+    /// 書き込む値の移動の有無が、対象がいま持つ移動と食い違う。
+    ///
+    /// ホストはどちらも受理して破壊する。**書き込みは発行していない**——発行
+    /// してしまえば、消えた移動を復元する手段がこちら側に無い。
+    ///
+    /// [`EditError::ItemValueNotApplied`] とは畳まない。あちらは書き込んだ後に
+    /// しか分からない食い違いであり、こちらは書き込む前に分かる。要求元が取る
+    /// 行動も違う——前者は受け付けられる値を選び直し、後者は消したい移動を
+    /// `mode` が `null` の値で明示するか、対象の移動を含む値を送る。
+    #[error("{mismatch}")]
+    MovementMismatch {
+        /// 食い違いの内容。
+        mismatch: MovementMismatch,
+        /// ホストが現在保持している値。
+        ///
+        /// **要求された値ではない。** 対象がいまどの移動を持つかは、この値に
+        /// しか現れない。要求元はこれを読んで、書き戻すか消すかを決める。
+        current_value: String,
+    },
     /// 対象または SDK が変更に対応しない。
     #[error("{reason}")]
     UnsupportedTarget {
@@ -531,6 +550,7 @@ impl EditError {
             EditError::DuplicateTarget => ErrorCode::InvalidArgument,
             EditError::ItemWrite(error) => error.error_code(),
             EditError::ItemValueNotApplied { .. } => ErrorCode::UnsupportedOperation,
+            EditError::MovementMismatch { .. } => ErrorCode::UnsupportedOperation,
             EditError::UnsupportedTarget { .. } => ErrorCode::UnsupportedOperation,
             EditError::AliasRejected(rejection) => rejection.error_code(),
             EditError::SectionChangeRejected { .. } | EditError::Sdk { .. } => ErrorCode::SdkError,
@@ -656,6 +676,15 @@ impl EditError {
             EditError::ItemValueNotApplied { observed } => {
                 details.insert("reason".to_string(), json!("item_value_not_applied"));
                 details.insert("current_value".to_string(), json!(truncate(observed)));
+            }
+            // 載せるのは対象がいま持つ移動である。要求元はこれを読んで、
+            // 書き戻すか消すかを決める。要求された値は反響させない。
+            EditError::MovementMismatch {
+                mismatch,
+                current_value,
+            } => {
+                details.insert("reason".to_string(), json!(mismatch.reason()));
+                details.insert("current_value".to_string(), json!(truncate(current_value)));
             }
             EditError::UnsupportedTarget { reason } => {
                 details.insert("reason".to_string(), json!(reason.as_str()));
@@ -843,6 +872,15 @@ pub(crate) mod tests {
             EditError::ItemValueNotApplied {
                 observed: r"C:\assets\bgm.wav".to_string(),
             },
+            // 対象がいま持つ移動を運ぶ。食い違いの向きは 2 つある。
+            EditError::MovementMismatch {
+                mismatch: MovementMismatch::MovementPresent,
+                current_value: "-500.00,500.00,直線移動,5".to_string(),
+            },
+            EditError::MovementMismatch {
+                mismatch: MovementMismatch::MovementAbsent,
+                current_value: "0.00".to_string(),
+            },
             // 受け入れ規則の 4 条件は、名前を持つものと持たないものの双方を通す。
             EditError::AliasRejected(AliasRejection::NotFound),
             EditError::AliasRejected(AliasRejection::WithoutEffect),
@@ -927,6 +965,7 @@ pub(crate) mod tests {
             EditError::DuplicateTarget => "DuplicateTarget",
             EditError::ItemWrite(_) => "ItemWrite",
             EditError::ItemValueNotApplied { .. } => "ItemValueNotApplied",
+            EditError::MovementMismatch { .. } => "MovementMismatch",
             EditError::UnsupportedTarget { .. } => "UnsupportedTarget",
             EditError::AliasRejected(_) => "AliasRejected",
             EditError::SectionPrecondition { .. } => "SectionPrecondition",
@@ -954,6 +993,7 @@ pub(crate) mod tests {
             "DuplicateTarget",
             "ItemWrite",
             "ItemValueNotApplied",
+            "MovementMismatch",
             "UnsupportedTarget",
             "AliasRejected",
             "SectionPrecondition",
@@ -1080,6 +1120,11 @@ pub(crate) mod tests {
                 ErrorCode::UnsupportedOperation,
                 // 書き込んだ値が要求どおりに入らなかった。読み直しても有効に
                 // ならない。色を運ぶ標本とパスを運ぶ標本の 2 つ。
+                ErrorCode::UnsupportedOperation,
+                ErrorCode::UnsupportedOperation,
+                // 書き込む値の移動の有無が対象の現状と食い違う。2 つの向きを
+                // 別々に名乗るが、要求元にとってはどちらも対応しない書き込み
+                // である。
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 // 名前で指定されたエイリアスが受け入れ規則を通らなかった。落ちた
@@ -1567,6 +1612,7 @@ pub(crate) mod tests {
             // 値と突き合わせて確かめる。
             let expected = match &error {
                 EditError::ItemValueNotApplied { observed } => Some(observed.clone()),
+                EditError::MovementMismatch { current_value, .. } => Some(current_value.clone()),
                 _ => None,
             };
             assert_eq!(

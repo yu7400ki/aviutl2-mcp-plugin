@@ -225,6 +225,95 @@ impl ItemWriteError {
     }
 }
 
+/// 書き込む値の移動の有無が、対象がいま持つ移動と食い違う。
+///
+/// **どちらもホストは失敗として返さない。** 移動を持つ項目へ数値を書くと移動も
+/// 加速も中間点無視も消え、`success` が返る。移動を持たない項目へ多値の文字列を
+/// 書くと先頭の値だけが使われ、残りは黙って捨てられる（観測したのはチェック
+/// ボックスの項目である）。**破棄しているのはホストであり、生の文字列を渡しても
+/// 同じことが起きる。** 止められる場所は要求を受け付ける側しか無い。
+///
+/// 移動を消したい要求は表せる——`mode` が `null` の [`ItemValue::Track`] が
+/// それである。**表せるのに黙って消すことを、成功として返さない。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MovementMismatch {
+    /// 対象は移動を持つのに、移動を表せない形の値が指定された。
+    #[error("移動を持つ設定項目へは移動を含む値でしか書き込めません")]
+    MovementPresent,
+    /// 対象は移動を持たないのに、移動が指定された。
+    #[error("移動を持たない設定項目へ移動は書き込めません")]
+    MovementAbsent,
+}
+
+impl MovementMismatch {
+    /// 全 variant。
+    ///
+    /// [`MovementMismatch::reason`] が返し得る名前を数え上げるために用いる。
+    pub const ALL: &'static [MovementMismatch] = &[
+        MovementMismatch::MovementPresent,
+        MovementMismatch::MovementAbsent,
+    ];
+
+    /// 失敗の種別を表す機械可読な名前を返す。
+    ///
+    /// 名乗るのは対象の現状であり、要求された値を含まない。
+    pub fn reason(&self) -> &'static str {
+        match self {
+            MovementMismatch::MovementPresent => "track_movement_present",
+            MovementMismatch::MovementAbsent => "track_movement_absent",
+        }
+    }
+}
+
+/// 書き込む前に対象の現在値を読む必要があるか。
+///
+/// 移動を持ち得るのはトラックバーとして評価される種別だけである。**評価の種別を
+/// 引き当てて判定する**——種別の名前を並べ直すと、移動を書ける種別と現状を
+/// 確かめる種別が食い違い、確かめない側から移動が消える。
+///
+/// 移動を持ち得ない種別では読まない。読んでも判定は変わらず、設定項目の書き込み
+/// 1 件あたりの SDK 呼び出しが増えるだけである。
+pub fn movement_check_reads_current_value(item_type: &EffectItemType) -> bool {
+    item_type.evaluated_kind() == Some(EvaluatedItemKind::Track)
+}
+
+/// 対象がいま持つ移動と、書き込む値が両立するかを判定する。
+///
+/// `current` はホストが返した生の文字列である。移動の有無はその文字列にしか
+/// 現れないため、対象を読まずには判定できない。
+///
+/// 判定は「移動の有無が一致するか」ではない。書き込む値が
+/// [`ItemValue::Track`] であれば、移動を消す指定も移動を書く指定も要求元の意図で
+/// あり、通す。拒むのは意図を表せていない 2 つだけである。
+///
+/// - 移動を持つ項目へ、移動を表せない形の値が来た。要求元は移動を消すつもりが
+///   無いのに移動が消える
+/// - 移動を持たない項目へ、移動が来た。ホストは先頭の値だけを使う
+///
+/// **[`movement_check_reads_current_value`] が偽の種別では常に通す。** 読まずに
+/// 呼べる形にしておくと、現在値の代わりに空文字を渡す呼び出しが判定を素通り
+/// する。判定の対象を関数の内側に置き、呼び出し側が決められないようにする。
+pub fn check_movement_write(
+    item_type: &EffectItemType,
+    value: &ItemValue,
+    current: &str,
+) -> Result<(), MovementMismatch> {
+    if !movement_check_reads_current_value(item_type) {
+        return Ok(());
+    }
+    let has_movement = decode_track_value(current).is_some_and(|track| track.mode.is_some());
+    match value {
+        ItemValue::Track(track) => match track.mode.is_some() && !has_movement {
+            true => Err(MovementMismatch::MovementAbsent),
+            false => Ok(()),
+        },
+        _ => match has_movement {
+            true => Err(MovementMismatch::MovementPresent),
+            false => Ok(()),
+        },
+    }
+}
+
 /// 書き込んだ直後に読み直した文字列をどう扱うか。
 ///
 /// **真偽値では「照合しない」と「照合して一致した」を同じ値で表してしまう。**
@@ -1024,6 +1113,151 @@ mod tests {
             numeric.read_back(),
             ReadBackCheck::Compare(ReadBackComparison::Numeric)
         );
+    }
+
+    /// 移動を持たない値。区間の数に依らず 1 要素である。
+    fn static_track() -> TrackValue {
+        TrackValue {
+            values: vec![FiniteF64::try_new(0.0).unwrap()],
+            mode: None,
+            params: Vec::new(),
+            accelerate: false,
+            decelerate: false,
+            twopoint: false,
+        }
+    }
+
+    #[test]
+    fn a_scalar_cannot_overwrite_a_movement() {
+        // ホストは移動を持つ項目へ数値を書くと、移動も加速も中間点無視も捨てて
+        // 成功を返す。要求元が移動を消すつもりだったかは値の形に現れない。
+        let current = "-500.00,500.00,直線移動,5";
+        for value in [
+            ItemValue::Number {
+                value: FiniteF64::try_new(0.0).unwrap(),
+            },
+            ItemValue::Integer { value: 0 },
+        ] {
+            assert_eq!(
+                check_movement_write(&EffectItemType::Number, &value, current),
+                Err(MovementMismatch::MovementPresent),
+                "{}",
+                value.kind()
+            );
+        }
+        // 移動を消す指定は通る。**これが消す唯一の手段である。**
+        assert_eq!(
+            check_movement_write(
+                &EffectItemType::Number,
+                &ItemValue::Track(static_track()),
+                current
+            ),
+            Ok(())
+        );
+        // 移動の書き換えも通る。読み取った値をそのまま書き戻せる。
+        assert_eq!(
+            check_movement_write(
+                &EffectItemType::Number,
+                &ItemValue::Track(sample_track()),
+                current
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_movement_cannot_be_written_where_there_is_none() {
+        // 移動を持たない項目へ多値の文字列を渡すと、ホストは先頭の値だけを
+        // 使って残りを捨てる。
+        assert_eq!(
+            check_movement_write(
+                &EffectItemType::Number,
+                &ItemValue::Track(sample_track()),
+                "0.00"
+            ),
+            Err(MovementMismatch::MovementAbsent)
+        );
+        // 移動を持たない値どうしは通る。
+        for value in [
+            ItemValue::Number {
+                value: FiniteF64::try_new(1.5).unwrap(),
+            },
+            ItemValue::Track(static_track()),
+        ] {
+            assert_eq!(
+                check_movement_write(&EffectItemType::Number, &value, "0.00"),
+                Ok(()),
+                "{}",
+                value.kind()
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_types_that_can_hold_a_movement_are_checked() {
+        // 移動を持ち得ない種別では現在値を読まない。読んでも判定は変わらず、
+        // 設定項目 1 件あたりの SDK 呼び出しが増えるだけである。
+        for item_type in EffectItemType::ALL
+            .iter()
+            .chain([&EffectItemType::Unknown(99)])
+        {
+            let checked = item_type.evaluated_kind() == Some(EvaluatedItemKind::Track);
+            assert_eq!(
+                movement_check_reads_current_value(item_type),
+                checked,
+                "{item_type} の判定が評価の種別と食い違います"
+            );
+            // 判定を通す種別では、移動を持つ現在値も食い違いにならない。
+            assert_eq!(
+                check_movement_write(
+                    item_type,
+                    &ItemValue::Text {
+                        value: "字幕".to_string(),
+                    },
+                    "-500.00,500.00,直線移動,0",
+                )
+                .is_err(),
+                checked,
+                "{item_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_current_value_counts_as_no_movement() {
+        // 読めない文字列は移動を名乗っていない。移動として扱うと、移動を持たない
+        // 項目への数値の書き込みまで拒否される。
+        for current in ["", "?", "0,100,直線移動"] {
+            assert_eq!(
+                check_movement_write(
+                    &EffectItemType::Number,
+                    &ItemValue::Number {
+                        value: FiniteF64::try_new(0.0).unwrap(),
+                    },
+                    current,
+                ),
+                Ok(()),
+                "{current}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_movement_mismatch_has_a_machine_readable_name() {
+        let names: Vec<&str> = MovementMismatch::ALL
+            .iter()
+            .map(MovementMismatch::reason)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["track_movement_present", "track_movement_absent"]
+        );
+        for reason in names {
+            assert!(
+                REASON_VALUES.contains(&reason),
+                "{reason} が reason の値域にありません"
+            );
+        }
     }
 
     #[test]

@@ -250,12 +250,14 @@ impl FocusChangeInput {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ItemValueInput {
-    /// 実数。有限値のみ。
+    /// 実数。有限値のみ。トラックバーへ書くと全区間へ同じ値が入る。
+    /// 移動を持つ項目へは指定できず、unsupported_operation となる。
+    /// 移動を消したい場合は mode を null にした track を送る。
     Number {
         /// 値。
         value: f64,
     },
-    /// 整数。
+    /// 整数。トラックバーでの扱いは number と同じである。
     Integer {
         /// 値。
         value: i64,
@@ -323,7 +325,12 @@ pub enum ItemValueInput {
     /// 3 区間となり 4 個である。区間の数は get_object が返す sections の件数である。
     /// 個数が合わない指定は invalid_argument となる。
     /// mode を null にし values を 1 要素にすると移動が消えて静的な値になる。
-    /// **移動を消す手段はこれだけである。**
+    /// **移動を消す手段はこれだけである。** 移動を持つ項目へ number や integer を
+    /// 書く要求は unsupported_operation となり、移動は消えない。
+    /// 逆に、移動を持たない項目へ mode を指定した track を書く要求も
+    /// unsupported_operation となる。ホストが先頭の値だけを使って残りを捨てる
+    /// ためである。項目が移動を持つかは get_object が返す track が null かどうかで
+    /// 分かり、値も移動を持つ項目でだけ track の形で返る。
     /// mode には AviUtl2 が持つ移動方法の名前を指定する。一覧に無い名前は
     /// 受け付けない。時間制御はフラグではなく移動方法の名前の変種が担うため、
     /// 時間制御を使うにはその変種の名前を mode に指定する。

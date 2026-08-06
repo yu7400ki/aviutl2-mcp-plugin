@@ -28,15 +28,16 @@ use crate::read::ReadError;
 use crate::read::host::{EditState, HostEffect, HostLayer, HostObjectPlacement};
 use crate::read::resolve::{effect_info_at, object_summary, scene_info};
 use aviutl2_mcp_core::{
-    AddEffectParams, ApplyBatchParams, BatchOperation, BatchOutcome, CreateObjectParams,
-    CreateObjectSectionParams, Cursor, DeleteEffectParams, DeleteObjectParams,
+    AddEffectParams, ApplyBatchParams, AvailableEffectItem, BatchOperation, BatchOutcome,
+    CreateObjectParams, CreateObjectSectionParams, Cursor, DeleteEffectParams, DeleteObjectParams,
     DeleteObjectSectionParams, DisplayRange, DisplayStart, EditOutcome, EffectInfo, EffectType,
-    FocusChange, FrameRange, GridBpmOutcome, ItemWrite, ItemWriteError, LayerInfo,
+    FocusChange, FrameRange, GridBpmOutcome, ItemValue, ItemWrite, ItemWriteError, LayerInfo,
     LayerStateOutcome, MoveObjectParams, MoveObjectSectionParams, ObjectSectionsOutcome,
     ObjectSelector, ObjectSource, ObjectSummary, ObservedSelection, RangeChange, ReadBackCheck,
     SceneSettingsOutcome, SectionRange, SelectionField, SelectionState, SetEffectEnabledParams,
     SetGridBpmParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSceneSettingsParams, SetSelectionParams, TrackWriteTarget, prepare_item_write,
+    SetSceneSettingsParams, SetSelectionParams, TrackWriteTarget, check_movement_write,
+    movement_check_reads_current_value, prepare_item_write,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -575,19 +576,6 @@ fn created_placements(
     created
 }
 
-/// 列挙に現れない設定項目名を、値が読めるかどうかで分ける。
-///
-/// 設定項目の列挙は未知種別の項目を落とす。落ちた項目への書き込みを「項目が
-/// 見つからない」として返すと、要求元は存在しない問題を指す失敗を受け取り、
-/// 名前を直そうとして直らない。項目名で値を読めるなら項目は存在しており、
-/// 書き込みを公開していない種別である。
-///
-/// 読めなかった場合は不在として扱う。値の取得は名前の誤りと取得そのものの
-/// 失敗を区別しないため、この分岐は「項目が無い」と断定できていない。それでも
-/// 不在側へ倒すのは、逆へ倒すと存在しない項目を書き込み可能な対象として扱う
-/// ことになるからである。取り違えの向きは、要求元が名前を疑う側に留まる。
-///
-/// 追加の呼び出しはこの失敗経路でだけ 1 回行う。成功する要求の費用は変わらない。
 /// 移動を書き込む対象の性質を、いま読み直して組み立てる。
 ///
 /// 区間の数は [`SceneEditor::object_sections`] が返す並びの要素数である。
@@ -628,6 +616,79 @@ impl TrackTarget {
     }
 }
 
+/// 対象がいま持つ移動と、書き込む値が両立することを確かめる。
+///
+/// 判定そのものは [`check_movement_write`] が持つ。単独の変更と一括適用は
+/// どちらもこの 1 か所を通り、同じ入力に対して同じ失敗を返す。
+///
+/// `current` はホストが返した生の文字列である。**要求元が与えた値ではない。**
+/// 対象がいまどの移動を持つかはこの文字列にしか現れず、応答へ載せるのも同じ
+/// 値である。
+///
+/// 一覧に無い項目はここへ来ない。書き込む文字列の組み立てが先に失敗するため
+/// である（[`prepare_item_write`]）。
+pub(crate) fn ensure_movement_write(
+    items: &[AvailableEffectItem],
+    item: &str,
+    value: &ItemValue,
+    current: &str,
+) -> Result<(), EditError> {
+    let Some(entry) = items.iter().find(|entry| entry.name == item) else {
+        return Ok(());
+    };
+    check_movement_write(&entry.item_type, value, current).map_err(|mismatch| {
+        EditError::MovementMismatch {
+            mismatch,
+            current_value: current.to_string(),
+        }
+    })
+}
+
+/// 対象の現在値を読み直したうえで [`ensure_movement_write`] を掛ける。
+///
+/// **現在値は項目名で 1 つだけ読む**（[`SceneEditor::effect_item_value`]）。
+/// 移動の有無は設定値の生文字列にしか現れないため、対象を読まずに判定する手段が
+/// 無い。設定項目の一覧へ移動の有無を載せる形も採れるが、そちらは effect が
+/// 公開する項目の数だけ問い合わせることになる——1 件を書くために全項目の現状を
+/// 読むのは、要る情報の量と釣り合わない。
+///
+/// **移動を持ち得ない種別では読まない。** 判定は変わらず、設定項目の書き込み
+/// 1 件あたりの SDK 呼び出しだけが増える。
+///
+/// **一括適用はこの関数を通らない。** 逆操作の材料として同じ値を既に読んで
+/// いるため、読み直さずに [`ensure_movement_write`] だけを呼ぶ。sub-operation
+/// あたりの費用は 1 件も増えない。
+fn ensure_movement_write_now(
+    editor: &dyn SceneEditor,
+    effect: &ResolvedEffect<'_>,
+    items: &[AvailableEffectItem],
+    item: &str,
+    value: &ItemValue,
+) -> Result<(), EditError> {
+    let reads = items
+        .iter()
+        .find(|entry| entry.name == item)
+        .is_some_and(|entry| movement_check_reads_current_value(&entry.item_type));
+    if !reads {
+        return Ok(());
+    }
+    let current = editor.effect_item_value(effect, item)?;
+    ensure_movement_write(items, item, value, &current)
+}
+
+/// 列挙に現れない設定項目名を、値が読めるかどうかで分ける。
+///
+/// 設定項目の列挙は未知種別の項目を落とす。落ちた項目への書き込みを「項目が
+/// 見つからない」として返すと、要求元は存在しない問題を指す失敗を受け取り、
+/// 名前を直そうとして直らない。項目名で値を読めるなら項目は存在しており、
+/// 書き込みを公開していない種別である。
+///
+/// 読めなかった場合は不在として扱う。値の取得は名前の誤りと取得そのものの
+/// 失敗を区別しないため、この分岐は「項目が無い」と断定できていない。それでも
+/// 不在側へ倒すのは、逆へ倒すと存在しない項目を書き込み可能な対象として扱う
+/// ことになるからである。取り違えの向きは、要求元が名前を疑う側に留まる。
+///
+/// 追加の呼び出しはこの失敗経路でだけ 1 回行う。成功する要求の費用は変わらない。
 pub(crate) fn unlisted_item(
     editor: &dyn SceneEditor,
     effect: &ResolvedEffect<'_>,
@@ -954,6 +1015,9 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 }
                 Err(error) => return Err(EditError::ItemWrite(error)),
             };
+            // 書き込みを発行する前に確かめる。発行してしまえば、消えた移動を
+            // 復元する手段がこちら側に無い。
+            ensure_movement_write_now(editor, &effect, &items, &params.item, &params.value)?;
 
             let permit = boundary.issue_permit(project)?;
             permit.issue(&boundary, |ticket| {
