@@ -1537,12 +1537,12 @@ mod tests {
     use super::*;
     use crate::read::{Page, Snapshot};
     use aviutl2_mcp_core::{
-        AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
-        EffectItemType, EffectItemValues, EffectSelector, EffectType, EvaluatedItem, Extent,
-        FiniteF64, FrameRange, LayerInfo, ListObjectAliasesResult, ListPalettesResult,
-        MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectAliasSummary,
-        ObjectDetail, ObjectFilter, ObjectFingerprintInput, ObjectSelector, ObjectSummary,
-        PALETTE_COLOR_COUNT, PaletteEntry, RequestBudgetKind, Rgba, SceneInfo, SectionRange,
+        AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFlags, EffectItemValues,
+        EffectSelector, EffectType, EvaluatedItem, Extent, FiniteF64, FrameRange, LayerInfo,
+        ListObjectAliasesResult, ListPalettesResult, MAX_EVALUATED_FRAMES, MAX_EVALUATED_ITEMS,
+        ModuleEntry, ModuleType, ObjectAliasSummary, ObjectDetail, ObjectFilter,
+        ObjectFingerprintInput, ObjectSelector, ObjectSummary, PALETTE_COLOR_COUNT, PaletteEntry,
+        RequestBudgetKind, Rgba, SceneInfo, SectionRange,
     };
     use std::sync::Mutex;
 
@@ -1967,16 +1967,13 @@ mod tests {
                 name: "ぼかし".to_string(),
                 effect_type: EffectType::Filter,
                 flags: EffectFlags::from_raw(1),
-                items: vec![AvailableEffectItem {
-                    name: "範囲".to_string(),
-                    item_type: EffectItemType::Integer,
-                }],
+                item_count: 1,
             },
             AvailableEffect {
                 name: "動画ファイル".to_string(),
                 effect_type: EffectType::Input,
                 flags: EffectFlags::from_raw(3),
-                items: Vec::new(),
+                item_count: 0,
             },
         ]
     }

@@ -8,17 +8,17 @@ use super::*;
 use crate::alias::tests::{TempDir, write_fixture};
 use crate::edit::fake::{
     CHOICE_VALUES, CLOSURE_ESCAPED, COORDINATE, CREATE_FRAME_SHIFT, DEFAULT_COLOR, DEFAULT_FONT,
-    EFFECT_LIST, FakeEditHost, FakeLayer, FakeObject, FakeReadHost, Fault, ITEM_VALUE, Knobs,
-    LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX, MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER,
-    MAX_SCENE_HEIGHT, MAX_SCENE_SAMPLE_RATE, MAX_SCENE_WIDTH, MOVE_FRAME_SHIFT, MOVING_ITEM,
-    MUTATIONS, OBSERVED_SCENE, PanicPoint, READ_SECTION, RENAMED_SCENE_NAME, SCENE_ID, SCENE_NAME,
-    SECTION_RANGES, SHAPE, STATIC_ITEM, TRACK_MODES, coordinate, coordinate_catalog_entry,
-    raw_item_value, shape, shape_catalog_entry,
+    EFFECT_LIST, FakeCatalogEntry, FakeEditHost, FakeLayer, FakeObject, FakeReadHost, Fault,
+    ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX, MAX_FRAME, MAX_ITEM_VALUE,
+    MAX_LAYER, MAX_SCENE_HEIGHT, MAX_SCENE_SAMPLE_RATE, MAX_SCENE_WIDTH, MOVE_FRAME_SHIFT,
+    MOVING_ITEM, MUTATIONS, OBSERVED_SCENE, PanicPoint, READ_SECTION, RENAMED_SCENE_NAME, SCENE_ID,
+    SCENE_NAME, SECTION_RANGES, SHAPE, STATIC_ITEM, TRACK_MODES, coordinate,
+    coordinate_catalog_entry, raw_item_value, shape, shape_catalog_entry,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::{default_page_request, default_page_window, with_silent_panic_hook};
 use aviutl2_mcp_core::{
-    ApplyBatchParams, AvailableEffect, BatchOperation, CreateObjectSectionParams, CursorPosition,
+    ApplyBatchParams, BatchOperation, CreateObjectSectionParams, CursorPosition,
     DeleteObjectSectionParams, Destination, EditOperation, EffectFlags, EffectItem, EffectItemType,
     EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemValue,
     LayerNameChange, MAX_GRID_BPM_ENTRIES, MoveObjectSectionParams, ObjectSectionsOutcome,
@@ -850,7 +850,7 @@ fn an_effect_source_does_not_go_through_the_media_path_check() {
     // 作成元がパスを運ばない以上、パスの規則は掛からない。掛けると、パスとしては
     // 不正な文字列を名前に持つ effect が作成元にできなくなる。
     let harness = Harness::with(|host| {
-        host.catalog.push(AvailableEffect {
+        host.catalog.push(FakeCatalogEntry {
             name: r"..\図形:1".to_string(),
             effect_type: EffectType::Filter,
             flags: EffectFlags::from_raw(1),

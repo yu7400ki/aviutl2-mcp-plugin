@@ -199,11 +199,11 @@ pub fn available_effects(result: &ListAvailableEffectsResult) -> String {
             "- {} type={} items={}",
             clamp_chars(&effect.name, MAX_NAME_CHARS),
             effect_type_label(&effect.effect_type),
-            effect.items.len(),
+            effect.item_count,
         ));
     }
     text.push_line(
-        "effect_type を指定すると種別で絞り込めます。設定項目の定義は structuredContent を参照してください",
+        "effect_type を指定すると種別で絞り込めます。設定項目の名前は、対象へ付与したあと get_object が現在値付きで返します",
     );
     text.finish()
 }
@@ -984,7 +984,7 @@ mod tests {
                 name: long_name(),
                 effect_type: EffectType::Filter,
                 flags: EffectFlags::from_raw(1),
-                items: Vec::new(),
+                item_count: 0,
             })
             .collect();
         let result = ListAvailableEffectsResult {
@@ -1118,7 +1118,7 @@ mod tests {
             page: page(0, 0),
         });
         assert!(available_effects_text.contains("effect_type"));
-        assert!(available_effects_text.contains("structuredContent"));
+        assert!(available_effects_text.contains("get_object"));
 
         let effect_item_values_text = effect_item_values(&EffectItemValues {
             project_revision: 42,

@@ -749,9 +749,8 @@ mod tests {
         with_silent_panic_hook,
     };
     use aviutl2_mcp_core::{
-        AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
-        FiniteF64, GridBpm, ItemValue, PALETTE_COLOR_COUNT, Rgba, SectionRange, TrackInfo,
-        TrackValue,
+        EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint, FiniteF64, GridBpm,
+        ItemValue, PALETTE_COLOR_COUNT, Rgba, SectionRange, TrackInfo, TrackValue,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1476,16 +1475,13 @@ mod tests {
                 name: "ぼかし".to_string(),
                 effect_type: EffectType::Filter,
                 flags: EffectFlags::from_raw(1),
-                items: vec![AvailableEffectItem {
-                    name: "範囲".to_string(),
-                    item_type: EffectItemType::Integer,
-                }],
+                item_count: 1,
             },
             AvailableEffect {
                 name: "動画ファイル".to_string(),
                 effect_type: EffectType::Input,
                 flags: EffectFlags::from_raw(3),
-                items: Vec::new(),
+                item_count: 0,
             },
         ]
     }

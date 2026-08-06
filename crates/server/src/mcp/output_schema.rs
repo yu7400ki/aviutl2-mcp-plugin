@@ -533,12 +533,8 @@ fn available_effect() -> Value {
         ("name", string()),
         ("effect_type", effect_type()),
         ("flags", effect_flags()),
-        ("items", array(available_effect_item())),
+        ("item_count", unsigned()),
     ])
-}
-
-fn available_effect_item() -> Value {
-    object(&[("name", string()), ("item_type", effect_item_type())])
 }
 
 fn effect_flags() -> Value {
@@ -735,15 +731,15 @@ mod tests {
     use super::*;
     use crate::api::ListInstancesResponse;
     use aviutl2_mcp_core::{
-        AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EditOutcome,
-        EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem, EffectItemType,
-        EffectItemValues, EffectType, EvaluatedItem, Extent, FiniteF64, FrameRange,
-        GetCurrentSceneResult, GridBpm, InstanceId, InstanceInfo, InstanceProject, InstanceState,
-        ItemValue, LayerInfo, ListAvailableEffectsResult, ListFontsResult, ListLayersResult,
-        ListModulesResult, ListObjectAliasesResult, ListObjectsResult, ListPalettesResult,
-        ModuleEntry, ModuleType, ObjectAliasSummary, ObjectDetail, ObjectFingerprintInput,
-        ObjectSummary, ObservedSelection, PageMeta, PaletteEntry, Rgba, SceneInfo, SectionRange,
-        SelectionField, SelectionSnapshot, SelectionState, TrackGroup, TrackInfo, TrackValue,
+        AvailableEffect, Cursor, DisplayRange, EditInfo, EditOutcome, EffectFingerprintInput,
+        EffectFlags, EffectInfo, EffectItem, EffectItemType, EffectItemValues, EffectType,
+        EvaluatedItem, Extent, FiniteF64, FrameRange, GetCurrentSceneResult, GridBpm, InstanceId,
+        InstanceInfo, InstanceProject, InstanceState, ItemValue, LayerInfo,
+        ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
+        ListObjectAliasesResult, ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType,
+        ObjectAliasSummary, ObjectDetail, ObjectFingerprintInput, ObjectSummary, ObservedSelection,
+        PageMeta, PaletteEntry, Rgba, SceneInfo, SectionRange, SelectionField, SelectionSnapshot,
+        SelectionState, TrackGroup, TrackInfo, TrackValue,
     };
 
     /// 値が schema に適合するかを再帰的に検査する。
@@ -1141,19 +1137,13 @@ mod tests {
                     name: "ぼかし".to_string(),
                     effect_type: EffectType::Filter,
                     flags: EffectFlags::from_raw(9),
-                    items: vec![AvailableEffectItem {
-                        name: "範囲".to_string(),
-                        item_type: EffectItemType::Integer,
-                    }],
+                    item_count: 1,
                 },
                 AvailableEffect {
                     name: "未知".to_string(),
                     effect_type: EffectType::Unknown(42),
                     flags: EffectFlags::from_raw(0),
-                    items: vec![AvailableEffectItem {
-                        name: "未知項目".to_string(),
-                        item_type: EffectItemType::Unknown(77),
-                    }],
+                    item_count: 0,
                 },
             ],
             page: sample_page_meta(),

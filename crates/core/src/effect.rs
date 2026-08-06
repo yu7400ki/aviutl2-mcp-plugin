@@ -89,6 +89,11 @@ pub struct TrackInfo {
 }
 
 /// 利用可能な effect 種別のメタ情報。
+///
+/// **設定項目の一覧は持たない。** この型が答えるのは「どの effect が在るか」で
+/// あり、項目名の列挙はその判断に寄与しない一方で応答量の大半を占める。既存
+/// オブジェクトの項目名は `get_object` が現在値付きで返すため、編集の経路は
+/// この型を経由しない。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AvailableEffect {
     /// effect 名。
@@ -97,8 +102,8 @@ pub struct AvailableEffect {
     pub effect_type: EffectType,
     /// 対応内容を表すフラグ。
     pub flags: EffectFlags,
-    /// 設定項目の定義。
-    pub items: Vec<AvailableEffectItem>,
+    /// 設定項目の数。
+    pub item_count: usize,
 }
 
 /// 利用可能な effect の設定項目定義。
@@ -602,10 +607,7 @@ mod tests {
             name: "ぼかし".to_string(),
             effect_type: EffectType::Filter,
             flags: EffectFlags::from_raw(EFFECT_FLAG_VIDEO | EFFECT_FLAG_CAMERA),
-            items: vec![AvailableEffectItem {
-                name: "範囲".to_string(),
-                item_type: EffectItemType::Integer,
-            }],
+            item_count: 1,
         }
     }
 
@@ -838,14 +840,24 @@ mod tests {
     fn available_effect_keeps_unknown_types() {
         let effect = AvailableEffect {
             effect_type: EffectType::Unknown(42),
-            items: vec![AvailableEffectItem {
-                name: "未知".to_string(),
-                item_type: EffectItemType::Unknown(99),
-            }],
             ..sample_available_effect()
         };
         let s = serde_json::to_string(&effect).unwrap();
         let restored: AvailableEffect = serde_json::from_str(&s).unwrap();
         assert_eq!(restored, effect);
+    }
+
+    #[test]
+    fn available_effect_reports_the_item_count_without_listing_the_items() {
+        // 一覧が答えるのは「どの effect が在るか」だけである。項目名の配列を
+        // 載せると、応答量の大半をそれが占めたまま判断の材料は増えない。
+        let value = serde_json::to_value(sample_available_effect()).unwrap();
+        assert_eq!(value["item_count"], 1);
+        for forbidden in ["items", "item_names"] {
+            assert!(
+                value.get(forbidden).is_none(),
+                "{forbidden} が応答に現れました: {value}"
+            );
+        }
     }
 }

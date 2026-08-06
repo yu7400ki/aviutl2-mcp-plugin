@@ -6,14 +6,13 @@ use aviutl2_mcp_core::AuthSecret;
 use aviutl2_mcp_core::ScaledBudgets;
 use aviutl2_mcp_core::settings::{Settings, SettingsDocument};
 use aviutl2_mcp_core::{
-    AvailableEffect, AvailableEffectItem, Cursor, DisplayRange, EditInfo, EffectFlags,
-    EffectItemValues, EffectType, ErrorCode, ErrorObject, EvaluatedItem, Extent, FiniteF64,
-    FrameRange, GetCurrentSceneResult, GridBpm, InstanceId, InstanceState, LayerInfo,
-    ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
-    ListObjectAliasesResult, ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType,
-    ObjectAliasSummary, ObjectDetail, ObjectFingerprintInput, ObjectSummary, PALETTE_COLOR_COUNT,
-    PageMeta, PaletteEntry, RequestEnvelope, Rgba, SceneInfo, SectionRange, SelectionSnapshot,
-    TrackGroup,
+    AvailableEffect, Cursor, DisplayRange, EditInfo, EffectFlags, EffectItemValues, EffectType,
+    ErrorCode, ErrorObject, EvaluatedItem, Extent, FiniteF64, FrameRange, GetCurrentSceneResult,
+    GridBpm, InstanceId, InstanceState, LayerInfo, ListAvailableEffectsResult, ListFontsResult,
+    ListLayersResult, ListModulesResult, ListObjectAliasesResult, ListObjectsResult,
+    ListPalettesResult, ModuleEntry, ModuleType, ObjectAliasSummary, ObjectDetail,
+    ObjectFingerprintInput, ObjectSummary, PALETTE_COLOR_COUNT, PageMeta, PaletteEntry,
+    RequestEnvelope, Rgba, SceneInfo, SectionRange, SelectionSnapshot, TrackGroup,
 };
 
 use aviutl2_mcp_server::mcp::input::{
@@ -530,10 +529,7 @@ async fn list_available_effects_tool_sends_effect_type() {
             name: "ぼかし".to_string(),
             effect_type: EffectType::Filter,
             flags: EffectFlags::from_raw(9),
-            items: vec![AvailableEffectItem {
-                name: "範囲".to_string(),
-                item_type: aviutl2_mcp_core::EffectItemType::Integer,
-            }],
+            item_count: 1,
         }],
         page: sample_page_meta(),
     })

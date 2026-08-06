@@ -14,9 +14,9 @@ use crate::read::host::{
 };
 use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection};
 use aviutl2_mcp_core::{
-    AvailableEffect, AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, EffectType,
-    FiniteF64, GridBpm, ItemValue, ModuleEntry, ModuleType, Rgba, SectionRange, decode_host_text,
-    decode_track_value, parse_check_value,
+    AvailableEffect, EffectFlags, EffectItem, EffectItemType, EffectType, FiniteF64, GridBpm,
+    ItemValue, ModuleEntry, ModuleType, Rgba, SectionRange, decode_host_text, decode_track_value,
+    parse_check_value,
 };
 use std::collections::HashMap;
 use std::ops::Range;
@@ -73,13 +73,7 @@ impl ReadHost for SdkReadHost {
                 effect_type: EffectType::from_raw(i32::from(effect.effect_type)),
                 // 既知ビットのみを組み直した値であり、未知ビットは保持できない。
                 flags: EffectFlags::from_raw(effect.flag.to_bits() as u32),
-                items: items
-                    .into_iter()
-                    .map(|item| AvailableEffectItem {
-                        name: item.name,
-                        item_type: EffectItemType::from_raw(i32::from(item.item_type)),
-                    })
-                    .collect(),
+                item_count: items.len(),
             });
         }
         Ok(catalog)
@@ -838,8 +832,8 @@ fn movement_or_unknown(raw: String, track: Option<&aviutl2_mcp_core::TrackInfo>)
 mod tests {
     use super::*;
     use aviutl2_mcp_core::{
-        ErrorCode, ItemWriteError, PALETTE_COLOR_COUNT, TrackValue, TrackWriteTarget,
-        prepare_item_write,
+        AvailableEffectItem, ErrorCode, ItemWriteError, PALETTE_COLOR_COUNT, TrackValue,
+        TrackWriteTarget, prepare_item_write,
     };
 
     /// 移動を持たない項目の読み取り。

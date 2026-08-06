@@ -873,7 +873,7 @@ pub struct TrackGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effect::{AvailableEffectItem, EffectFlags, EffectItemType, EvaluatedItemKind};
+    use crate::effect::{EffectFlags, EffectItemType, EvaluatedItemKind};
     use crate::fingerprint::ObjectFingerprintInput;
     use crate::object::ObjectSummary;
     use crate::page::DEFAULT_PAGE_LIMIT;
@@ -2151,10 +2151,7 @@ mod tests {
                 name: "ぼかし".to_string(),
                 effect_type: EffectType::Filter,
                 flags: EffectFlags::from_raw(9),
-                items: vec![AvailableEffectItem {
-                    name: "範囲".to_string(),
-                    item_type: EffectItemType::Integer,
-                }],
+                item_count: 1,
             }],
             page: sample_page_meta(),
         };

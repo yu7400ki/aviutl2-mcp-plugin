@@ -412,7 +412,7 @@ impl Default for Knobs {
 /// SDK の代わりに定型データを返す編集ホスト。
 pub(crate) struct FakeEditHost {
     pub(crate) info: HostEditInfo,
-    pub(crate) catalog: Vec<AvailableEffect>,
+    pub(crate) catalog: Vec<FakeCatalogEntry>,
     /// 登録済みフォント名。
     pub(crate) fonts: Vec<String>,
     /// 登録済みモジュール。
@@ -700,7 +700,11 @@ impl EditHost for FakeEditHost {
     fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, EditError> {
         self.assert_ready("get_effects");
         self.record("effect_catalog");
-        Ok(self.catalog.clone())
+        Ok(self
+            .catalog
+            .iter()
+            .map(FakeCatalogEntry::available)
+            .collect())
     }
 
     fn alias_data_directory(&self) -> Option<PathBuf> {
@@ -846,7 +850,12 @@ impl ReadHost for FakeReadHost {
     }
 
     fn effect_catalog(&self) -> Result<Vec<AvailableEffect>, ReadError> {
-        Ok(self.0.catalog.clone())
+        Ok(self
+            .0
+            .catalog
+            .iter()
+            .map(FakeCatalogEntry::available)
+            .collect())
     }
 
     fn font_names(&self) -> Result<Vec<String>, ReadError> {
@@ -1333,8 +1342,8 @@ impl SceneEditor for FakeSceneEditor<'_> {
         self.host
             .catalog
             .iter()
-            .find(|available| available.name == *name)
-            .map(|available| available.items.clone())
+            .find(|entry| entry.name == *name)
+            .map(|entry| entry.items.clone())
             .ok_or(EditError::Sdk {
                 operation: "enum_effect_item",
             })
@@ -2371,19 +2380,12 @@ pub(crate) fn shape(index: usize) -> HostEffect {
 }
 
 /// [`shape`] をカタログへ載せる形。
-pub(crate) fn shape_catalog_entry() -> AvailableEffect {
-    AvailableEffect {
+pub(crate) fn shape_catalog_entry() -> FakeCatalogEntry {
+    FakeCatalogEntry {
         name: SHAPE.to_string(),
         effect_type: EffectType::Filter,
         flags: EffectFlags::from_raw(1),
-        items: shape(0)
-            .items
-            .into_iter()
-            .map(|item| AvailableEffectItem {
-                name: item.name,
-                item_type: item.item_type,
-            })
-            .collect(),
+        items: item_definitions(shape(0).items),
     }
 }
 
@@ -2438,19 +2440,12 @@ pub(crate) fn coordinate(index: usize, values: &[f64]) -> HostEffect {
 }
 
 /// [`coordinate`] をカタログへ載せる形。
-pub(crate) fn coordinate_catalog_entry() -> AvailableEffect {
-    AvailableEffect {
+pub(crate) fn coordinate_catalog_entry() -> FakeCatalogEntry {
+    FakeCatalogEntry {
         name: COORDINATE.to_string(),
         effect_type: EffectType::Filter,
         flags: EffectFlags::from_raw(1),
-        items: coordinate(0, &[0.0, 1.0])
-            .items
-            .into_iter()
-            .map(|item| AvailableEffectItem {
-                name: item.name,
-                item_type: item.item_type,
-            })
-            .collect(),
+        items: item_definitions(coordinate(0, &[0.0, 1.0]).items),
     }
 }
 
@@ -2565,10 +2560,46 @@ pub(crate) fn fake_scene() -> FakeScene {
     }
 }
 
-/// フェイクの effect カタログ。
-pub(crate) fn fake_catalog() -> Vec<AvailableEffect> {
-    vec![
+/// フェイクのカタログ 1 件。
+///
+/// 見出しと設定項目の定義を対にして持つ。応答へ載る見出しは項目を持たないが、
+/// 項目定義を引く経路は同じ effect について同じ一覧を返さなければならない。
+/// 別々に持つと、カタログへ足した effect の項目が引けないフェイクを作れてしまう。
+#[derive(Debug, Clone)]
+pub(crate) struct FakeCatalogEntry {
+    pub(crate) name: String,
+    pub(crate) effect_type: EffectType,
+    pub(crate) flags: EffectFlags,
+    pub(crate) items: Vec<AvailableEffectItem>,
+}
+
+impl FakeCatalogEntry {
+    /// 応答へ載る見出しへ写す。設定項目は数だけが現れる。
+    fn available(&self) -> AvailableEffect {
         AvailableEffect {
+            name: self.name.clone(),
+            effect_type: self.effect_type.clone(),
+            flags: self.flags,
+            item_count: self.items.len(),
+        }
+    }
+}
+
+/// 設定項目の現在値付きの一覧から、定義だけを取り出す。
+fn item_definitions(items: Vec<EffectItem>) -> Vec<AvailableEffectItem> {
+    items
+        .into_iter()
+        .map(|item| AvailableEffectItem {
+            name: item.name,
+            item_type: item.item_type,
+        })
+        .collect()
+}
+
+/// フェイクの effect カタログ。
+pub(crate) fn fake_catalog() -> Vec<FakeCatalogEntry> {
+    vec![
+        FakeCatalogEntry {
             name: "ぼかし".to_string(),
             effect_type: EffectType::Filter,
             flags: EffectFlags::from_raw(1),
@@ -2577,20 +2608,20 @@ pub(crate) fn fake_catalog() -> Vec<AvailableEffect> {
                 item_type: EffectItemType::Integer,
             }],
         },
-        AvailableEffect {
+        FakeCatalogEntry {
             name: "動画ファイル".to_string(),
             effect_type: EffectType::Input,
             flags: EffectFlags::from_raw(3),
             items: Vec::new(),
         },
-        AvailableEffect {
+        FakeCatalogEntry {
             name: "音声フェード".to_string(),
             effect_type: EffectType::Filter,
             // 音声だけを扱う。画像のフラグは立たない。
             flags: EffectFlags::from_raw(2),
             items: Vec::new(),
         },
-        AvailableEffect {
+        FakeCatalogEntry {
             name: "標準描画".to_string(),
             effect_type: EffectType::Output,
             flags: EffectFlags::from_raw(1),
