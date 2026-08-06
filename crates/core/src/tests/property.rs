@@ -22,6 +22,7 @@ use crate::number::FiniteF64;
 use crate::render::RenderFrameParams;
 use crate::selector::ObjectSelector;
 use crate::text_codec::{decode_host_text, encode_host_text};
+use crate::track_value::{TrackValue, decode_track_value, encode_track_value};
 use crate::validation::{
     MAX_PATH_UTF16_UNITS, PathSyntaxError, validate_object_alias_name, validate_path,
 };
@@ -397,8 +398,70 @@ fn item_value_strategy() -> impl Strategy<Value = ItemValue> {
         ".*".prop_map(|path| ItemValue::Folder { path }),
         ".*".prop_map(|name| ItemValue::Font { name }),
         ".*".prop_map(|value| ItemValue::Text { value }),
+        track_value_strategy().prop_map(ItemValue::Track),
         ".*".prop_map(|raw| ItemValue::Unknown { raw }),
     ]
+}
+
+/// 符号化が受け付ける移動方法の名前。
+///
+/// 区切り文字と制御文字を含まず、数値としても読めない名前だけを生成する。
+/// これらは符号化が拒否する形であり、往復の対象にならない。
+fn track_mode_strategy() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("直線移動".to_string()),
+        Just("曲線移動".to_string()),
+        Just("ランダム移動".to_string()),
+        Just("直線移動(時間制御)".to_string()),
+        string_regex(r"[^,|\pC]{1,8}").unwrap(),
+    ]
+    .prop_filter("符号化と復号が受け付ける名前", |mode| {
+        !mode.is_empty() && mode.trim().parse::<f64>().is_err()
+    })
+}
+
+/// 符号化が受け付ける有限な実数。
+///
+/// 桁数の上限で符号化が落ちないよう、値域を絞る。往復の性質は桁数に依らない。
+fn track_number_strategy() -> impl Strategy<Value = FiniteF64> {
+    (-1e12f64..1e12f64).prop_map(|value| FiniteF64::try_new(value).expect("有限数のみを生成する"))
+}
+
+/// 符号化が受け付ける移動の値。
+///
+/// 時間制御の指定は移動方法の名前から導く。食い違う組は符号化が拒否するため、
+/// 往復の対象にならない。
+fn track_value_strategy() -> impl Strategy<Value = TrackValue> {
+    let moving = (
+        prop::collection::vec(track_number_strategy(), 2..6),
+        track_mode_strategy(),
+        prop::collection::vec(track_number_strategy(), 0..4),
+        any::<(bool, bool, bool)>(),
+    )
+        .prop_map(
+            |(values, mode, params, (accelerate, decelerate, twopoint))| {
+                let timecontrol = mode.ends_with("(時間制御)");
+                TrackValue {
+                    values,
+                    mode: Some(mode),
+                    params,
+                    accelerate,
+                    decelerate,
+                    twopoint,
+                    timecontrol,
+                }
+            },
+        );
+    let still = track_number_strategy().prop_map(|value| TrackValue {
+        values: vec![value],
+        mode: None,
+        params: Vec::new(),
+        accelerate: false,
+        decelerate: false,
+        twopoint: false,
+        timecontrol: false,
+    });
+    prop_oneof![moving, still]
 }
 
 fn track_info_strategy() -> impl Strategy<Value = TrackInfo> {
@@ -777,6 +840,24 @@ proptest! {
                     prop_assert!(validate_item_value(&value).is_ok());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn track_values_round_trip_through_the_codec(value in track_value_strategy()) {
+        // 読み取りが返した値をそのまま書き戻せることは設定項目の契約である。
+        // 移動だけがその外に居ると、区間ごとの値を読めても書けない。
+        let encoded = encode_track_value(&value).expect("生成した値は符号化できる");
+        prop_assert_eq!(decode_track_value(&encoded), Some(value));
+    }
+
+    #[test]
+    fn track_decoding_answers_for_any_string(raw in ".*") {
+        // 復号が受け取るのはホストが返した文字列である。読めない並びに対して
+        // 落ちず、読めなかったことを返す。
+        if let Some(decoded) = decode_track_value(&raw) {
+            // 読めた値は書き戻せる。読めるのに書けない形を作らない。
+            prop_assert!(encode_track_value(&decoded).is_ok());
         }
     }
 

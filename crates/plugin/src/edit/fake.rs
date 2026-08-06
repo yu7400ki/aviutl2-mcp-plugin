@@ -2504,6 +2504,74 @@ mod tests {
         }
     }
 
+    /// トラックバーの数値項目 1 つだけを公開する一覧。
+    fn track_item() -> Vec<AvailableEffectItem> {
+        vec![AvailableEffectItem {
+            name: "X".to_string(),
+            item_type: EffectItemType::Number,
+        }]
+    }
+
+    /// 区間 1 個分の移動を持つ値。
+    fn sample_track(mode: &str, params: &[f64]) -> ItemValue {
+        let finite = |value: f64| FiniteF64::try_new(value).expect("有限値");
+        ItemValue::Track(TrackValue {
+            values: vec![finite(0.0), finite(100.0)],
+            mode: Some(mode.to_string()),
+            params: params.iter().copied().map(finite).collect(),
+            accelerate: false,
+            decelerate: false,
+            twopoint: false,
+            timecontrol: false,
+        })
+    }
+
+    #[test]
+    fn the_fake_host_evens_out_the_digits_of_a_movement() {
+        // 実機は移動の値も項目の小数桁へ揃えて返す。生の文字列の比較では
+        // 正しい書き込みが失敗になる。
+        let before = ItemValue::Number {
+            value: FiniteF64::try_new(1.0).expect("有限値"),
+        };
+        assert_eq!(
+            written_back(&EffectItemType::Number, "0,100,直線移動,0", &before),
+            "0.00,100.00,直線移動,0|"
+        );
+        // 移動の値も値域へ切り詰められる。
+        assert_eq!(
+            written_back(&EffectItemType::Number, "-1,500,直線移動,5", &before),
+            "0.00,100.00,直線移動,5|"
+        );
+        // パラメータを渡さない書き込みには既定値が入る。
+        assert_eq!(
+            written_back(&EffectItemType::Number, "0,100,ランダム移動,0", &before),
+            "0.00,100.00,ランダム移動,0|15.00"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "存在しない移動方法")]
+    fn the_fake_host_dies_on_a_mode_it_does_not_know() {
+        // 実機は一覧に無い移動方法でプロセスごと落ちる。黙って無視される形で
+        // 模すと、名前の検証を外しても検査が緑のまま通る。
+        host_write(&EffectItemType::Number, "0,100,存在しない移動,0", &fonts());
+    }
+
+    #[test]
+    fn a_movement_survives_the_write_and_the_read_back() {
+        for (mode, params) in [("直線移動", &[][..]), ("ランダム移動", &[30.0][..])] {
+            let value = sample_track(mode, params);
+            let write = prepare_item_write(&track_item(), "X", &value).expect("書き込み");
+            let stored =
+                host_write(&EffectItemType::Number, write.value(), &fonts()).expect("受理される");
+            assert_eq!(
+                write.read_back_matches(&raw_item_value(&stored)),
+                Some(true),
+                "{mode} の読み直しが要求と一致しません"
+            );
+        }
+    }
+
     #[test]
     fn a_rejected_choice_value_leaves_the_previous_one() {
         let before = ItemValue::Choice {

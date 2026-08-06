@@ -795,10 +795,27 @@ mod tests {
             ItemValue::Text {
                 value: "字幕".to_string(),
             },
+            ItemValue::Track(sample_track()),
             ItemValue::Unknown {
                 raw: "future=1".to_string(),
             },
         ]
+    }
+
+    /// 区間 1 個分の移動を持つ値。
+    fn sample_track() -> TrackValue {
+        TrackValue {
+            values: vec![
+                FiniteF64::try_new(-500.0).unwrap(),
+                FiniteF64::try_new(500.0).unwrap(),
+            ],
+            mode: Some("直線移動".to_string()),
+            params: Vec::new(),
+            accelerate: false,
+            decelerate: false,
+            twopoint: false,
+            timecontrol: false,
+        }
     }
 
     #[test]
@@ -849,6 +866,103 @@ mod tests {
         let result: Result<ItemValue, _> =
             serde_json::from_str(r#"{"type":"number","value":1e309}"#);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn item_value_track_is_a_flat_object() {
+        // 読み取りが返す形と、書き込みが受け取る形は同じである。入れ子にすると
+        // 応答をそのまま送り返せない。
+        assert_eq!(
+            serde_json::to_value(ItemValue::Track(sample_track())).unwrap(),
+            serde_json::json!({
+                "type": "track",
+                "values": [-500.0, 500.0],
+                "mode": "直線移動",
+                "params": [],
+                "accelerate": false,
+                "decelerate": false,
+                "twopoint": false,
+                "timecontrol": false,
+            })
+        );
+    }
+
+    #[test]
+    fn a_movement_is_only_accepted_by_trackbar_item_types() {
+        // 移動を書けるのは、任意フレームでの値をトラックバーとして評価できる
+        // 種別だけである。種別を足したときに、評価と書き込みの対応が黙って
+        // ずれないよう、走査して突き合わせる。
+        let value = ItemValue::Track(sample_track());
+        for item_type in EffectItemType::ALL
+            .iter()
+            .chain([&EffectItemType::Unknown(99)])
+        {
+            let accepted = item_type.evaluated_kind() == Some(EvaluatedItemKind::Track);
+            assert_eq!(
+                encode_item_value(item_type, &value).is_ok(),
+                accepted,
+                "{item_type} が移動を受け付けるかが評価の種別と食い違います"
+            );
+        }
+        assert_eq!(
+            encode_item_value(&EffectItemType::Number, &value),
+            Ok("-500,500,直線移動,0".to_string())
+        );
+        assert_eq!(
+            encode_item_value(&EffectItemType::Check, &value),
+            Err(ItemWriteError::ValueKindMismatch {
+                item_type: "check".to_string(),
+                value_kind: "track",
+            })
+        );
+    }
+
+    #[test]
+    fn a_movement_is_compared_as_a_movement_after_the_write() {
+        // 種別だけでは比べ方が決まらない。同じ種別へ数値を書けば数値として、
+        // 移動を書けば移動として比べる。
+        let items = vec![AvailableEffectItem {
+            name: "X".to_string(),
+            item_type: EffectItemType::Number,
+        }];
+        let write = prepare_item_write(&items, "X", &ItemValue::Track(sample_track()))
+            .expect("移動の書き込み");
+        assert_eq!(
+            write.read_back(),
+            ReadBackCheck::Compare(ReadBackComparison::Track)
+        );
+        // ホストが桁を整えた読み直しは一致とする。
+        assert_eq!(
+            write.read_back_matches("-500.00,500.00,直線移動,0|"),
+            Some(true)
+        );
+        // 値が切り詰められた読み直しは一致としない。
+        assert_eq!(
+            write.read_back_matches("0.00,500.00,直線移動,0|"),
+            Some(false)
+        );
+
+        let numeric = prepare_item_write(
+            &items,
+            "X",
+            &ItemValue::Number {
+                value: FiniteF64::try_new(12.5).unwrap(),
+            },
+        )
+        .expect("数値の書き込み");
+        assert_eq!(
+            numeric.read_back(),
+            ReadBackCheck::Compare(ReadBackComparison::Numeric)
+        );
+    }
+
+    #[test]
+    fn the_movement_comparison_needs_both_sides_to_be_readable() {
+        // 読めない文字列は、要求した移動が入ったことを示さない。
+        let comparison = ReadBackComparison::Track;
+        assert!(comparison.matches("-500,500,直線移動,0", "-500.00,500.00,直線移動,0"));
+        assert!(!comparison.matches("-500,500,直線移動,0", "0.00"));
+        assert!(!comparison.matches("-500,500,直線移動,0", "壊れた値"));
     }
 
     #[test]

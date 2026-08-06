@@ -2049,6 +2049,61 @@ mod tests {
     }
 
     #[test]
+    fn a_null_mode_with_one_value_removes_the_movement() {
+        // 移動を消す手段はこの形だけである。他に消し方が無いことを、静的な値へ
+        // 写ることで固定する。
+        let input: ItemValueInput = serde_json::from_value(json!({
+            "type": "track",
+            "values": [50.0],
+            "mode": null,
+            "params": [],
+            "accelerate": false,
+            "decelerate": false,
+            "twopoint": false,
+            "timecontrol": false,
+        }))
+        .expect("受理される");
+        let value = input.to_value().expect("変換できる");
+        assert_eq!(
+            value,
+            ItemValue::Track(TrackValue {
+                values: vec![FiniteF64::try_new(50.0).expect("有限値")],
+                mode: None,
+                params: Vec::new(),
+                accelerate: false,
+                decelerate: false,
+                twopoint: false,
+                timecontrol: false,
+            })
+        );
+        assert_eq!(aviutl2_mcp_core::validate_item_value(&value), Ok(()));
+    }
+
+    #[test]
+    fn a_movement_rejects_values_that_are_not_finite() {
+        // JSON は非有限数を字句として持たないため、この経路は復号では踏めない。
+        // それでも判定を置くのは、応答へ載せる型が有限値しか持てないからである。
+        let track = |values: Vec<f64>, params: Vec<f64>| ItemValueInput::Track {
+            values,
+            mode: Some("直線移動".to_string()),
+            params,
+            accelerate: false,
+            decelerate: false,
+            twopoint: false,
+            timecontrol: false,
+        };
+        for input in [
+            track(vec![0.0, f64::INFINITY], Vec::new()),
+            track(vec![0.0, 100.0], vec![f64::NAN]),
+        ] {
+            assert_eq!(
+                input.to_value().map_err(|error| error.code),
+                Err(ErrorCode::InvalidArgument)
+            );
+        }
+    }
+
+    #[test]
     fn item_value_input_accepts_unknown_fields() {
         // 設定値も selector と同じ往復型である。応答へ optional field が増えた
         // とき、読み取りが返した値をそのまま書き戻せなくなる非対称を作らない。
