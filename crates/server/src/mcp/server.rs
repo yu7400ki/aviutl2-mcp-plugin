@@ -5494,13 +5494,13 @@ mod tests {
                 state: aviutl2_mcp_core::InstanceState::Ready,
                 pid: 1234,
                 started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
-                project: Some(aviutl2_mcp_core::InstanceProject {
+                project: aviutl2_mcp_core::InstanceProject {
                     display_name: Some("名".repeat(500)),
                     path: None,
-                    epoch: None,
-                    revision: None,
-                    modified: None,
-                }),
+                    epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+                    revision: 0,
+                    modified: false,
+                },
             })
             .collect();
         ListInstancesResponse {

@@ -297,14 +297,11 @@ fn discovery_finds_live_mock_instance() {
 
     // project の epoch / revision / modified は descriptor に無く、ping 応答から
     // 得る。descriptor 由来の表示名とパスは維持される。
-    let project = instances[0]
-        .project
-        .as_ref()
-        .expect("project が失われています");
+    let project = &instances[0].project;
     assert!(project.path.is_some());
-    assert_eq!(project.epoch.as_deref(), Some(support::MOCK_PROJECT_EPOCH));
-    assert_eq!(project.revision, Some(support::MOCK_PROJECT_REVISION));
-    assert_eq!(project.modified, Some(support::MOCK_PROJECT_MODIFIED));
+    assert_eq!(project.epoch, support::MOCK_PROJECT_EPOCH);
+    assert_eq!(project.revision, support::MOCK_PROJECT_REVISION);
+    assert_eq!(project.modified, support::MOCK_PROJECT_MODIFIED);
 
     remove_test_registry(&dir);
 }
@@ -329,13 +326,10 @@ fn discovery_keeps_the_ping_project_state_without_a_descriptor_project() {
         .expect("registry ディレクトリを列挙できる");
     assert_eq!(instances.len(), 1);
 
-    let project = instances[0]
-        .project
-        .as_ref()
-        .expect("ping が運んだプロジェクトの状態が失われています");
-    assert_eq!(project.epoch.as_deref(), Some(support::MOCK_PROJECT_EPOCH));
-    assert_eq!(project.revision, Some(support::MOCK_PROJECT_REVISION));
-    assert_eq!(project.modified, Some(support::MOCK_PROJECT_MODIFIED));
+    let project = &instances[0].project;
+    assert_eq!(project.epoch, support::MOCK_PROJECT_EPOCH);
+    assert_eq!(project.revision, support::MOCK_PROJECT_REVISION);
+    assert_eq!(project.modified, support::MOCK_PROJECT_MODIFIED);
     // ファイルに由来する値は descriptor にしか無いため欠落する。
     assert_eq!(project.display_name, None);
     assert_eq!(project.path, None);

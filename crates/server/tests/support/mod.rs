@@ -484,7 +484,7 @@ pub fn build_response(request: &RequestEnvelope, behavior: &MockBehavior) -> Res
             return ResponseEnvelope::pong(
                 ProtocolVersion::CURRENT,
                 request.request_id,
-                &PongResult::new(behavior.instance_id, behavior.state).with_project(mock_project()),
+                &PongResult::new(behavior.instance_id, behavior.state, mock_project()),
             );
         }
         None => err_result(ErrorObject::new(

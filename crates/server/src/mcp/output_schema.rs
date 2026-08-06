@@ -377,7 +377,7 @@ fn instance_info() -> Value {
         ("state", string()),
         ("pid", unsigned()),
         ("started_at", string()),
-        ("project", nullable(instance_project())),
+        ("project", instance_project()),
     ])
 }
 
@@ -385,9 +385,9 @@ fn instance_project() -> Value {
     object(&[
         ("display_name", nullable_string()),
         ("path", nullable_string()),
-        ("epoch", nullable_string()),
-        ("revision", nullable_unsigned()),
-        ("modified", nullable_boolean()),
+        ("epoch", string()),
+        ("revision", unsigned()),
+        ("modified", boolean()),
     ])
 }
 
@@ -684,10 +684,6 @@ fn nullable_string() -> Value {
 
 fn boolean() -> Value {
     json!({ "type": "boolean" })
-}
-
-fn nullable_boolean() -> Value {
-    json!({ "type": ["boolean", "null"] })
 }
 
 fn integer() -> Value {
@@ -1016,13 +1012,13 @@ mod tests {
                 state: InstanceState::Ready,
                 pid: 1234,
                 started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
-                project: Some(InstanceProject {
+                project: InstanceProject {
                     display_name: Some("Test".to_string()),
                     path: Some(r"C:\test.aup2".to_string()),
-                    epoch: Some("epoch".to_string()),
-                    revision: Some(3),
-                    modified: Some(false),
-                }),
+                    epoch: "epoch".to_string(),
+                    revision: 3,
+                    modified: false,
+                },
             }],
             total_count: 1,
             count: 1,
@@ -1041,19 +1037,9 @@ mod tests {
     fn list_instances_schema_accepts_a_project_without_a_file() {
         // 未保存プロジェクトは表示名もパスも持たないが、実測した状態は運ばれる。
         let mut response = sample_instances_response();
-        let project = response.instances[0]
-            .project
-            .as_mut()
-            .expect("標本は project を持つ");
+        let project = &mut response.instances[0].project;
         project.display_name = None;
         project.path = None;
-        assert_conforms(list_instances(), &to_value(&response));
-    }
-
-    #[test]
-    fn list_instances_schema_accepts_an_absent_project() {
-        let mut response = sample_instances_response();
-        response.instances[0].project = None;
         assert_conforms(list_instances(), &to_value(&response));
     }
 

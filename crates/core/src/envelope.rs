@@ -233,35 +233,28 @@ pub struct PongProject {
 
 /// ping 応答の `result`。
 ///
-/// `project` は接続先が載せなかった場合に `None` となる。既定値で埋めると
-/// 「未取得」と実測値が区別できなくなるため、欠落のまま扱う。
+/// **`project` は必須である。** 接続先はプロジェクトの状態を SDK に触れずに
+/// 読めるため、ライフサイクル状態を問わず必ず載せられる。
 ///
-/// 未知フィールドを拒否せず、`project` を持たない縮約形も受理する。
+/// 未知フィールドは拒否しない。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PongResult {
     /// 接続先のライフサイクル状態。
     pub state: InstanceState,
     /// 接続先のインスタンス ID。
     pub instance_id: InstanceId,
-    /// プロジェクトの状態。取得できない場合は None。
-    #[serde(default)]
-    pub project: Option<PongProject>,
+    /// プロジェクトの状態。
+    pub project: PongProject,
 }
 
 impl PongResult {
-    /// プロジェクトの状態を伴わない ping 応答を作る。
-    pub fn new(instance_id: InstanceId, state: InstanceState) -> Self {
+    /// ping 応答を作る。
+    pub fn new(instance_id: InstanceId, state: InstanceState, project: PongProject) -> Self {
         Self {
             state,
             instance_id,
-            project: None,
+            project,
         }
-    }
-
-    /// プロジェクトの状態を添える。
-    pub fn with_project(mut self, project: PongProject) -> Self {
-        self.project = Some(project);
-        self
     }
 }
 
@@ -532,23 +525,26 @@ mod tests {
         let response = ResponseEnvelope::pong(
             ProtocolVersion::CURRENT,
             request_id,
-            &PongResult::new(instance_id, InstanceState::Ready),
+            &PongResult::new(instance_id, InstanceState::Ready, sample_pong_project()),
         );
         let s = serde_json::to_string(&response).unwrap();
         let response2: ResponseEnvelope = serde_json::from_str(&s).unwrap();
         assert_eq!(response, response2);
     }
 
-    #[test]
-    fn pong_carries_the_project_state() {
-        let instance_id = InstanceId::new_v4();
-        let project = PongProject {
+    fn sample_pong_project() -> PongProject {
+        PongProject {
             epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
             revision: 42,
             modified: true,
-        };
-        let result =
-            PongResult::new(instance_id, InstanceState::Ready).with_project(project.clone());
+        }
+    }
+
+    #[test]
+    fn pong_carries_the_project_state() {
+        let instance_id = InstanceId::new_v4();
+        let project = sample_pong_project();
+        let result = PongResult::new(instance_id, InstanceState::Ready, project.clone());
         let response = ResponseEnvelope::pong(ProtocolVersion::CURRENT, RequestId::new(), &result);
 
         let ResponseResult::Ok { result: value } = &response.result else {
@@ -556,23 +552,21 @@ mod tests {
         };
         let restored: PongResult = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(restored, result);
-        assert_eq!(restored.project, Some(project));
+        assert_eq!(restored.project, project);
         assert_eq!(response.instance_id, instance_id);
     }
 
     #[test]
-    fn pong_result_accepts_the_reduced_form() {
-        // project を持たない応答は「未取得」として受理する。既定値で埋めると
-        // 実測値と区別が付かなくなる。
+    fn pong_result_requires_the_project_state() {
+        // 接続先は SDK に触れずにプロジェクトの状態を読めるため、必ず載せる。
+        // 欠けた応答を受理すると、載せ忘れが「未取得」として素通りする。
         let instance_id = InstanceId::new_v4();
         let value = serde_json::json!({
             "state": "ready",
             "instance_id": instance_id,
         });
-        let result: PongResult = serde_json::from_value(value).unwrap();
-        assert_eq!(result.state, InstanceState::Ready);
-        assert_eq!(result.instance_id, instance_id);
-        assert_eq!(result.project, None);
+        let result: Result<PongResult, _> = serde_json::from_value(value);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -592,11 +586,11 @@ mod tests {
         let result: PongResult = serde_json::from_value(value).unwrap();
         assert_eq!(
             result.project,
-            Some(PongProject {
+            PongProject {
                 epoch: "e".to_string(),
                 revision: 1,
                 modified: false,
-            })
+            }
         );
     }
 

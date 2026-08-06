@@ -57,21 +57,16 @@ pub fn instances(response: &ListInstancesResponse) -> String {
 fn instance_line(info: &InstanceInfo) -> String {
     let project = info
         .project
-        .as_ref()
-        .and_then(|p| p.display_name.as_deref())
+        .display_name
+        .as_deref()
         .map(|name| clamp_chars(name, MAX_NAME_CHARS))
         .unwrap_or_else(|| "-".to_string());
     // 未保存の変更があり得るかどうかは保存を促すかどうかを分ける。真は
     // 「変更があり得る」ことを、偽だけが「変更が無い」ことを表す。structuredContent
     // を読まない呼び出し側にも届くよう、行に載せる。
-    let modified = info
-        .project
-        .as_ref()
-        .and_then(|p| p.modified)
-        .map(|modified| format!("modified={modified}"))
-        .unwrap_or_else(|| "modified=未取得".to_string());
+    let modified = info.project.modified;
     format!(
-        "- {} state={} pid={} project={project} {modified}",
+        "- {} state={} pid={} project={project} modified={modified}",
         info.instance_id,
         info.state.as_snake_case(),
         info.pid,
@@ -796,7 +791,7 @@ mod tests {
                 state: InstanceState::Ready,
                 pid: 1234,
                 started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
-                project: None,
+                project: sample_instance_project(),
             }],
             total_count: 1,
             count: 1,
@@ -807,32 +802,36 @@ mod tests {
         let text = instances(&response);
         assert!(text.contains(&id.to_string()));
         assert!(text.contains("ready"));
-        // project を持たない候補では未保存の変更の有無を判断できない。
-        assert!(text.contains("modified=未取得"), "{text}");
+        // 未保存の変更の有無は生存確認が必ず運ぶ。
+        assert!(text.contains("modified=false"), "{text}");
+    }
+
+    /// プロジェクトファイルを持たないインスタンスのプロジェクト状態。
+    fn sample_instance_project() -> InstanceProject {
+        InstanceProject {
+            display_name: None,
+            path: None,
+            epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+            revision: 0,
+            modified: false,
+        }
     }
 
     #[test]
     fn instances_text_reports_unsaved_changes() {
         // 未保存の変更の有無は保存を促すかどうかを分ける。text だけを読む
         // 呼び出し側にも届かなければならない。
-        for (modified, expected) in [
-            (Some(true), "modified=true"),
-            (Some(false), "modified=false"),
-            (None, "modified=未取得"),
-        ] {
+        for (modified, expected) in [(true, "modified=true"), (false, "modified=false")] {
             let response = ListInstancesResponse {
                 instances: vec![InstanceInfo {
                     instance_id: InstanceId::new_v4(),
                     state: InstanceState::Ready,
                     pid: 1234,
                     started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
-                    project: Some(InstanceProject {
-                        display_name: None,
-                        path: None,
-                        epoch: None,
-                        revision: None,
+                    project: InstanceProject {
                         modified,
-                    }),
+                        ..sample_instance_project()
+                    },
                 }],
                 total_count: 1,
                 count: 1,
@@ -841,7 +840,7 @@ mod tests {
                 next_offset: None,
             };
             let text = instances(&response);
-            assert!(text.contains(expected), "{modified:?}: {text}");
+            assert!(text.contains(expected), "{modified}: {text}");
         }
     }
 
@@ -853,13 +852,10 @@ mod tests {
                 state: InstanceState::Ready,
                 pid: 1234,
                 started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
-                project: Some(InstanceProject {
+                project: InstanceProject {
                     display_name: Some(long_name()),
-                    path: None,
-                    epoch: None,
-                    revision: None,
-                    modified: None,
-                }),
+                    ..sample_instance_project()
+                },
             })
             .collect();
         let response = ListInstancesResponse {

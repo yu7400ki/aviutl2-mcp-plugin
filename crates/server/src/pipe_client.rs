@@ -1622,6 +1622,7 @@ mod tests {
                     result: serde_json::json!({
                         "state": "ready",
                         "instance_id": InstanceId::new_v4(),
+                        "project": { "epoch": "e", "revision": 1, "modified": false },
                     }),
                 },
             );
@@ -1694,7 +1695,15 @@ mod tests {
             let response = ResponseEnvelope::pong(
                 request.protocol_version,
                 request.request_id,
-                &PongResult::new(instance_id, InstanceState::Ready),
+                &PongResult::new(
+                    instance_id,
+                    InstanceState::Ready,
+                    aviutl2_mcp_core::PongProject {
+                        epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+                        revision: 7,
+                        modified: false,
+                    },
+                ),
             );
             send_bytes(
                 handle.0,
@@ -1708,8 +1717,7 @@ mod tests {
             .ping(Instant::now() + Duration::from_secs(5))
             .expect("ping に失敗しました");
         assert_eq!(pong.state, InstanceState::Ready);
-        // 接続先が載せなかった値は欠落のままにする。
-        assert_eq!(pong.project, None);
+        assert_eq!(pong.project.revision, 7);
 
         let request = responder.join().unwrap();
         let deadline_unix_ms = request

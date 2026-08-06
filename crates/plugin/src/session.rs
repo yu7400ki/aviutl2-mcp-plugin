@@ -454,11 +454,15 @@ fn pong_result(
     read_adapter: &dyn ReadAdapter,
 ) -> PongResult {
     let status = read_adapter.project_status();
-    PongResult::new(instance_id, state).with_project(PongProject {
-        epoch: status.epoch,
-        revision: status.revision,
-        modified: status.modified,
-    })
+    PongResult::new(
+        instance_id,
+        state,
+        PongProject {
+            epoch: status.epoch,
+            revision: status.revision,
+            modified: status.modified,
+        },
+    )
 }
 
 /// 受理できる operation。
@@ -2908,16 +2912,16 @@ mod tests {
             InstanceState::Ready,
             InstanceState::Busy,
             InstanceState::Draining,
+            InstanceState::Gone,
         ] {
             let adapter = FakeAdapter::new();
             let result = pong_result(instance_id, state, &adapter);
 
             assert_eq!(result.instance_id, instance_id);
             assert_eq!(result.state, state);
-            let project = result.project.expect("project が載っていません");
-            assert_eq!(project.epoch, EPOCH);
-            assert_eq!(project.revision, REVISION);
-            assert!(project.modified);
+            assert_eq!(result.project.epoch, EPOCH);
+            assert_eq!(result.project.revision, REVISION);
+            assert!(result.project.modified);
             assert_eq!(adapter.calls(), vec!["project_status"]);
         }
     }

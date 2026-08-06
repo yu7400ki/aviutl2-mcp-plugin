@@ -115,7 +115,7 @@ pub struct InstanceInfo {
     pub pid: u32,
     /// 起動時刻。書式は [`crate::format_utc_timestamp`]。
     pub started_at: String,
-    pub project: Option<InstanceProject>,
+    pub project: InstanceProject,
 }
 
 /// `InstanceInfo` 内のプロジェクト情報。
@@ -123,9 +123,7 @@ pub struct InstanceInfo {
 /// 応答型の内側であるため未知フィールドを拒否しない。将来の MINOR で
 /// 追加されたフィールドを含む応答を、旧版の受信側が受理できるようにする。
 ///
-/// `epoch` / `revision` / `modified` は取得できていない状態を `None` で表す。
-/// 特に `modified` は「未保存の変更が無い」と「未取得」を混同すると保存確認の
-/// 要否を誤らせるため、既定値で埋めずに欠落として表す。
+/// `epoch` / `revision` / `modified` は生存確認の応答が必ず運ぶ。
 ///
 /// `display_name` と `path` はプロジェクトファイルに由来するため、未保存の
 /// プロジェクトではいずれも存在しない。名前を作って埋めると、実在するファイル名と
@@ -136,15 +134,15 @@ pub struct InstanceProject {
     pub display_name: Option<String>,
     /// プロジェクトファイルのパス。未保存プロジェクトでは None。
     pub path: Option<String>,
-    /// プロジェクトの epoch。未取得のときは None。
-    pub epoch: Option<String>,
-    /// プロジェクトの revision。未取得のときは None。
-    pub revision: Option<u64>,
-    /// 未保存の変更があるか。未取得のときは None。
+    /// プロジェクトの epoch。
+    pub epoch: String,
+    /// プロジェクトの revision。
+    pub revision: u64,
+    /// 未保存の変更があるか。
     ///
     /// 真は「変更があり得る」ことを表し、偽だけが「変更が無い」ことを表す。
     /// プロジェクトを開いた直後・新規作成した直後は、編集していなくても真になる。
-    pub modified: Option<bool>,
+    pub modified: bool,
 }
 
 #[cfg(test)]
@@ -206,13 +204,13 @@ mod tests {
             state: InstanceState::Busy,
             pid: 5678,
             started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
-            project: Some(InstanceProject {
+            project: InstanceProject {
                 display_name: Some("Project".to_string()),
                 path: Some(r"C:\project.aup".to_string()),
-                epoch: Some("78be92d1-c8c9-44c6-ae52-387548971468".to_string()),
-                revision: Some(42),
-                modified: Some(true),
-            }),
+                epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+                revision: 42,
+                modified: true,
+            },
         }
     }
 
@@ -234,28 +232,12 @@ mod tests {
     }
 
     #[test]
-    fn instance_info_accepts_reduced_project_shape() {
-        // display_name と path だけを持つ旧来の形を、拡張フィールド未取得として受理する。
-        let s = r#"{"instance_id":"8df98c04-e7c2-4f98-b3ce-fc1c39d76414","state":"ready","pid":1,"started_at":"x","project":{"display_name":"a","path":"b"}}"#;
-        let info: InstanceInfo = serde_json::from_str(s).unwrap();
-        let project = info.project.expect("project が読み取れる");
-        assert_eq!(project.display_name.as_deref(), Some("a"));
-        assert_eq!(project.path.as_deref(), Some("b"));
-        assert_eq!(project.epoch, None);
-        assert_eq!(project.revision, None);
-        assert_eq!(project.modified, None);
-    }
-
-    #[test]
-    fn instance_project_distinguishes_unknown_from_unmodified() {
-        // 「未取得」と「未保存の変更なし」は別の値として表現される。
-        let unknown: InstanceProject =
-            serde_json::from_str(r#"{"display_name":"a","path":null}"#).unwrap();
-        let unmodified: InstanceProject =
-            serde_json::from_str(r#"{"display_name":"a","path":null,"modified":false}"#).unwrap();
-        assert_eq!(unknown.modified, None);
-        assert_eq!(unmodified.modified, Some(false));
-        assert_ne!(unknown, unmodified);
+    fn instance_project_requires_the_measured_state() {
+        // epoch・revision・modified は生存確認の応答が必ず運ぶ。欠けた形を
+        // 既定値で埋めると、実測していない値を実測値として返すことになる。
+        let result: Result<InstanceProject, _> =
+            serde_json::from_str(r#"{"display_name":"a","path":"b"}"#);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -276,13 +258,13 @@ mod tests {
         // 未保存プロジェクトはファイルに由来する値を持たない。名前を作って埋めると
         // 実在するファイル名と区別が付かなくなる。
         let info = InstanceInfo {
-            project: Some(InstanceProject {
+            project: InstanceProject {
                 display_name: None,
                 path: None,
-                epoch: Some("78be92d1-c8c9-44c6-ae52-387548971468".to_string()),
-                revision: Some(0),
-                modified: Some(true),
-            }),
+                epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+                revision: 0,
+                modified: true,
+            },
             ..sample_instance_info()
         };
         let value = serde_json::to_value(&info).unwrap();

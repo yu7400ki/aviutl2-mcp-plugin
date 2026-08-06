@@ -598,21 +598,17 @@ fn process_created_at_matches(descriptor_value: &str, actual: DateTime<Utc>) -> 
 /// 現在シーンは ping 応答に含まれない。シーンは編集ハンドルを介してしか読めず、
 /// 生存確認だけでは取得できないため `None` とする。
 fn build_instance_info(descriptor: InstanceDescriptor, pong: PongResult) -> InstanceInfo {
-    let descriptor_project = descriptor.project;
-    let pong_project = pong.project;
-    let project = (descriptor_project.is_some() || pong_project.is_some()).then(|| {
-        let (display_name, path) = match descriptor_project {
-            Some(project) => (Some(project.display_name), Some(project.path)),
-            None => (None, None),
-        };
-        InstanceProject {
-            display_name,
-            path,
-            epoch: pong_project.as_ref().map(|p| p.epoch.clone()),
-            revision: pong_project.as_ref().map(|p| p.revision),
-            modified: pong_project.as_ref().map(|p| p.modified),
-        }
-    });
+    let (display_name, path) = match descriptor.project {
+        Some(project) => (Some(project.display_name), Some(project.path)),
+        None => (None, None),
+    };
+    let project = InstanceProject {
+        display_name,
+        path,
+        epoch: pong.project.epoch,
+        revision: pong.project.revision,
+        modified: pong.project.modified,
+    };
 
     InstanceInfo {
         instance_id: descriptor.instance_id,
@@ -745,40 +741,23 @@ mod tests {
     #[test]
     fn instance_info_takes_the_project_state_from_the_ping_result() {
         let id = InstanceId::new_v4();
-        let pong =
-            PongResult::new(id, InstanceState::Ready).with_project(aviutl2_mcp_core::PongProject {
+        let pong = PongResult::new(
+            id,
+            InstanceState::Ready,
+            aviutl2_mcp_core::PongProject {
                 epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
                 revision: 42,
                 modified: true,
-            });
+            },
+        );
 
         let info = build_instance_info(sample_descriptor(id), pong);
-        let project = info.project.expect("project が失われています");
-        assert_eq!(project.display_name.as_deref(), Some("Test"));
-        assert_eq!(project.path.as_deref(), Some(r"C:\test.aup"));
-        assert_eq!(
-            project.epoch.as_deref(),
-            Some("78be92d1-c8c9-44c6-ae52-387548971468")
-        );
-        assert_eq!(project.revision, Some(42));
-        assert_eq!(project.modified, Some(true));
+        assert_eq!(info.project.display_name.as_deref(), Some("Test"));
+        assert_eq!(info.project.path.as_deref(), Some(r"C:\test.aup"));
+        assert_eq!(info.project.epoch, "78be92d1-c8c9-44c6-ae52-387548971468");
+        assert_eq!(info.project.revision, 42);
+        assert!(info.project.modified);
         assert_eq!(info.state, InstanceState::Ready);
-    }
-
-    #[test]
-    fn instance_info_keeps_the_project_state_absent_when_the_ping_omits_it() {
-        // 既定値で埋めると「未取得」と実測値が区別できなくなる。特に modified は
-        // 「未保存の変更が無い」と読めてしまい、保存確認の要否を誤らせる。
-        let id = InstanceId::new_v4();
-        let info = build_instance_info(
-            sample_descriptor(id),
-            PongResult::new(id, InstanceState::Busy),
-        );
-
-        let project = info.project.expect("project が失われています");
-        assert_eq!(project.epoch, None);
-        assert_eq!(project.revision, None);
-        assert_eq!(project.modified, None);
     }
 
     #[test]
@@ -788,36 +767,23 @@ mod tests {
         let id = InstanceId::new_v4();
         let mut descriptor = sample_descriptor(id);
         descriptor.project = None;
-        let pong =
-            PongResult::new(id, InstanceState::Ready).with_project(aviutl2_mcp_core::PongProject {
+        let pong = PongResult::new(
+            id,
+            InstanceState::Ready,
+            aviutl2_mcp_core::PongProject {
                 epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
                 revision: 3,
                 modified: true,
-            });
+            },
+        );
 
         let info = build_instance_info(descriptor, pong);
-        let project = info
-            .project
-            .expect("ping が運んだプロジェクトの状態が失われています");
-        assert_eq!(
-            project.epoch.as_deref(),
-            Some("78be92d1-c8c9-44c6-ae52-387548971468")
-        );
-        assert_eq!(project.revision, Some(3));
-        assert_eq!(project.modified, Some(true));
+        assert_eq!(info.project.epoch, "78be92d1-c8c9-44c6-ae52-387548971468");
+        assert_eq!(info.project.revision, 3);
+        assert!(info.project.modified);
         // ファイルに由来する値は descriptor にしか無いため欠落する。
-        assert_eq!(project.display_name, None);
-        assert_eq!(project.path, None);
-    }
-
-    #[test]
-    fn instance_info_has_no_project_when_neither_side_reports_one() {
-        let id = InstanceId::new_v4();
-        let mut descriptor = sample_descriptor(id);
-        descriptor.project = None;
-
-        let info = build_instance_info(descriptor, PongResult::new(id, InstanceState::Starting));
-        assert_eq!(info.project, None);
+        assert_eq!(info.project.display_name, None);
+        assert_eq!(info.project.path, None);
     }
 
     #[test]
