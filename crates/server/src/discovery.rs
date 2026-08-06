@@ -104,7 +104,7 @@ impl ResolveInstanceError {
             // 区別する。前者は指定 ID の instance が存在しないことを意味する。
             ResolveInstanceError::NotRegistered => ErrorCode::InstanceNotFound,
             ResolveInstanceError::Excluded(reason) => reason.error_code(),
-            ResolveInstanceError::Rejected(error) => error.code.clone(),
+            ResolveInstanceError::Rejected(error) => error.code,
         }
     }
 

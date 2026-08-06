@@ -48,7 +48,7 @@ impl ErrorObject {
 }
 
 /// エラーコード。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     /// 未知の instance_id。
     InstanceNotFound,
@@ -93,24 +93,24 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
-    pub fn as_snake_case(&self) -> String {
+    pub fn as_snake_case(&self) -> &'static str {
         match self {
-            ErrorCode::InstanceNotFound => "instance_not_found".to_string(),
-            ErrorCode::InstanceStale => "instance_stale".to_string(),
-            ErrorCode::ProtocolMismatch => "protocol_mismatch".to_string(),
-            ErrorCode::AuthenticationFailed => "authentication_failed".to_string(),
-            ErrorCode::HostBusy => "host_busy".to_string(),
-            ErrorCode::Timeout => "timeout".to_string(),
-            ErrorCode::Cancelled => "cancelled".to_string(),
-            ErrorCode::InvalidArgument => "invalid_argument".to_string(),
-            ErrorCode::InternalError => "internal_error".to_string(),
-            ErrorCode::NotFound => "not_found".to_string(),
-            ErrorCode::AmbiguousSelector => "ambiguous_selector".to_string(),
-            ErrorCode::PreconditionFailed => "precondition_failed".to_string(),
-            ErrorCode::EditBlocked => "edit_blocked".to_string(),
-            ErrorCode::UnsupportedOperation => "unsupported_operation".to_string(),
-            ErrorCode::ToolDisabled => "tool_disabled".to_string(),
-            ErrorCode::SdkError => "sdk_error".to_string(),
+            ErrorCode::InstanceNotFound => "instance_not_found",
+            ErrorCode::InstanceStale => "instance_stale",
+            ErrorCode::ProtocolMismatch => "protocol_mismatch",
+            ErrorCode::AuthenticationFailed => "authentication_failed",
+            ErrorCode::HostBusy => "host_busy",
+            ErrorCode::Timeout => "timeout",
+            ErrorCode::Cancelled => "cancelled",
+            ErrorCode::InvalidArgument => "invalid_argument",
+            ErrorCode::InternalError => "internal_error",
+            ErrorCode::NotFound => "not_found",
+            ErrorCode::AmbiguousSelector => "ambiguous_selector",
+            ErrorCode::PreconditionFailed => "precondition_failed",
+            ErrorCode::EditBlocked => "edit_blocked",
+            ErrorCode::UnsupportedOperation => "unsupported_operation",
+            ErrorCode::ToolDisabled => "tool_disabled",
+            ErrorCode::SdkError => "sdk_error",
         }
     }
 
@@ -149,7 +149,7 @@ impl Serialize for ErrorCode {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&self.as_snake_case())
+        serializer.serialize_str(self.as_snake_case())
     }
 }
 

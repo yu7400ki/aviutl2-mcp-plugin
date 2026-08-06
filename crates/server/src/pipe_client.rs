@@ -96,7 +96,7 @@ impl PipeClientError {
             Self::Timeout => ErrorCode::Timeout,
             Self::AuthenticationFailed => ErrorCode::AuthenticationFailed,
             Self::ProtocolMismatch => ErrorCode::ProtocolMismatch,
-            Self::Remote(error) => error.code.clone(),
+            Self::Remote(error) => error.code,
         }
     }
 }
@@ -1673,7 +1673,7 @@ mod tests {
             ErrorCode::UnsupportedOperation,
         ] {
             let error = PipeClientError::Remote(Box::new(ErrorObject::new(
-                code.clone(),
+                code,
                 "message",
                 code.default_retryable(),
             )));

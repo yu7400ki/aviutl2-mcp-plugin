@@ -5413,7 +5413,7 @@ mod tests {
             ErrorCode::EditBlocked,
             ErrorCode::Timeout,
         ] {
-            let error = failure::from_code(code.clone(), "失敗");
+            let error = failure::from_code(code, "失敗");
             assert!(error.retryable, "{code}");
             let mcp_error = to_mcp_error(&error);
             assert_eq!(
@@ -5437,7 +5437,7 @@ mod tests {
             ErrorCode::UnsupportedOperation,
             ErrorCode::AuthenticationFailed,
         ] {
-            let mcp_error = to_mcp_error(&failure::from_code(code.clone(), "失敗"));
+            let mcp_error = to_mcp_error(&failure::from_code(code, "失敗"));
             assert_eq!(
                 mcp_error.code,
                 rmcp::model::ErrorCode::INTERNAL_ERROR,
