@@ -2304,6 +2304,25 @@ fn a_movement_is_removed_by_writing_a_value_without_a_mode() {
         .expect("移動を消した後の数値の書き込みが拒否されました");
 }
 
+#[test]
+fn a_write_stops_when_the_current_value_cannot_be_read() {
+    // 現在値を読めなければ移動の有無が分からない。読めないまま書き込むと、
+    // 判定を迂回して移動が消え得る。**読めないことは、通してよい理由にならない。**
+    let harness =
+        Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::ItemValueUnreadable)));
+    let error = harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector: harness.effect_selector(1, 100, "ぼかし", 0),
+            item: "範囲".to_string(),
+            value: ItemValue::Integer { value: 40 },
+        })
+        .expect_err("現在値を読めないまま書き込みました");
+
+    assert_eq!(error.error_code(), ErrorCode::SdkError);
+    harness.assert_untouched();
+}
+
 /// 編集手順が実際に返した「移動の有無が食い違う」失敗を、向きごとに集める。
 ///
 /// 名前を生む経路が製品に在ることの裏付けとして用いる。一覧から値を組み立てる
