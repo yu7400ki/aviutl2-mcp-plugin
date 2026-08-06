@@ -93,7 +93,7 @@ fn verified_summary(
     selector: &ObjectSelector,
 ) -> Result<ObjectSummary, ReadError> {
     let summary = object_summary(epoch, scene_id, object);
-    if summary.fingerprint != selector.fingerprint {
+    if summary.selector.fingerprint != selector.fingerprint {
         return Err(ReadError::FingerprintMismatch {
             current_object: Box::new(summary),
         });
@@ -275,8 +275,8 @@ mod tests {
         let base = object(1, 100, 200, Some("立ち絵"));
         let moved = object(1, 101, 200, Some("立ち絵"));
         assert_ne!(
-            object_summary("epoch", 0, &base).fingerprint,
-            object_summary("epoch", 0, &moved).fingerprint
+            object_summary("epoch", 0, &base).selector.fingerprint,
+            object_summary("epoch", 0, &moved).selector.fingerprint
         );
     }
 }

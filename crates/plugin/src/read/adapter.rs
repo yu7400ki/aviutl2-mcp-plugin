@@ -481,7 +481,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
                     operation: "get_effect_list",
                 },
             )?;
-            if effect.fingerprint != selector.fingerprint {
+            if effect.selector.fingerprint != selector.fingerprint {
                 return Err(ReadError::EffectFingerprintMismatch);
             }
 
@@ -2593,7 +2593,10 @@ mod tests {
         let snapshot = adapter.list_objects_page(0, None).unwrap();
         for summary in snapshot.items {
             let detail = adapter.get_object(&summary.selector).unwrap();
-            assert_eq!(detail.summary.fingerprint, summary.fingerprint);
+            assert_eq!(
+                detail.summary.selector.fingerprint,
+                summary.selector.fingerprint
+            );
         }
     }
 
@@ -3068,6 +3071,7 @@ mod tests {
                 .into_iter()
                 .find(|item| item.layer == 1 && item.frame_start == frame_start)
                 .unwrap_or_else(|| panic!("開始フレーム {frame_start} の対象がありません"))
+                .selector
                 .fingerprint
         };
 
@@ -3399,14 +3403,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn object_fingerprint_matches_between_summary_and_selector() {
-        let adapter = adapter();
-        for summary in adapter.list_objects_page(0, None).unwrap().items {
-            assert_eq!(summary.fingerprint, summary.selector.fingerprint);
-        }
-    }
-
     /// 一覧から算出した fingerprint と、詳細から算出した fingerprint が一致する
     /// ことを確かめる。
     ///
@@ -3422,7 +3418,10 @@ mod tests {
             let detail = adapter
                 .get_object(&summary.selector)
                 .expect("一覧が返したセレクターで詳細を引けません");
-            assert_eq!(detail.summary.fingerprint, summary.fingerprint);
+            assert_eq!(
+                detail.summary.selector.fingerprint,
+                summary.selector.fingerprint
+            );
             assert_eq!(detail.summary.selector, summary.selector);
         }
     }
@@ -3444,7 +3443,10 @@ mod tests {
 
         let detail = adapter.get_object(&summary.selector).unwrap();
         assert!(!detail.effects.is_empty());
-        assert_eq!(detail.summary.fingerprint, summary.fingerprint);
+        assert_eq!(
+            detail.summary.selector.fingerprint,
+            summary.selector.fingerprint
+        );
     }
 
     /// 立ち絵オブジェクトの effect を差し替えたホストを組み立てる。
@@ -3486,7 +3488,7 @@ mod tests {
                 host_with_effects(vec![file_effect("動画ファイル", 0, path)]),
                 Arc::clone(&project),
             );
-            let fingerprint = listed_sample(&adapter).fingerprint;
+            let fingerprint = listed_sample(&adapter).selector.fingerprint;
             assert!(
                 !adapter.host.calls().contains(&EFFECT_LIST),
                 "列挙が effect を読みました: {:?}",
@@ -3517,7 +3519,7 @@ mod tests {
             };
             let adapter =
                 HostReadAdapter::new(host_with_effects(vec![effect]), Arc::clone(&project));
-            let fingerprint = listed_sample(&adapter).fingerprint;
+            let fingerprint = listed_sample(&adapter).selector.fingerprint;
             assert!(
                 !adapter.host.calls().contains(&EFFECT_LIST),
                 "列挙が effect を読みました: {:?}",
@@ -3548,7 +3550,7 @@ mod tests {
             };
             let adapter =
                 HostReadAdapter::new(host_with_effects(vec![effect]), Arc::clone(&project));
-            let fingerprint = listed_sample(&adapter).fingerprint;
+            let fingerprint = listed_sample(&adapter).selector.fingerprint;
             assert!(
                 !adapter.host.calls().contains(&EFFECT_LIST),
                 "列挙が effect を読みました: {:?}",
@@ -3952,8 +3954,8 @@ mod tests {
         );
 
         assert_eq!(
-            listed_sample(&healthy).fingerprint,
-            listed_sample(&failing).fingerprint,
+            listed_sample(&healthy).selector.fingerprint,
+            listed_sample(&failing).selector.fingerprint,
             "effect の読み取り失敗で fingerprint が揺れました"
         );
     }
@@ -3973,7 +3975,7 @@ mod tests {
                 .unwrap()
                 .effects
                 .into_iter()
-                .map(|effect| effect.fingerprint)
+                .map(|effect| effect.selector.fingerprint)
                 .collect::<Vec<_>>()
         };
 

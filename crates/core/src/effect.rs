@@ -1,6 +1,6 @@
 //! effect の読み取り DTO と種別列挙。
 
-use crate::fingerprint::{EffectFingerprintInput, Fingerprint, effect_fingerprint};
+use crate::fingerprint::{EffectFingerprintInput, effect_fingerprint};
 use crate::item_value::ItemValue;
 use crate::kind::{kind_name, serialize_kind, visit_unknown_kind};
 use crate::number::FiniteF64;
@@ -11,8 +11,8 @@ use std::fmt;
 
 /// オブジェクトに付与された effect。
 ///
-/// トップレベルとセレクターの fingerprint は同一でなければならない。
-/// [`EffectInfo::new`] を用いると 1 度の算出結果が両方へ設定される。
+/// **fingerprint はセレクターの中だけに持つ。** トップレベルへ併記すると、
+/// 構造体リテラルからも逆直列化からも食い違う組を作れてしまう。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectInfo {
     /// effect 名。
@@ -29,16 +29,13 @@ pub struct EffectInfo {
     pub locked: bool,
     /// 設定項目と値。
     pub items: Vec<EffectItem>,
-    /// 再指定用のセレクター。
+    /// 再指定用のセレクター。同一性検証用の fingerprint はこの中にある。
     pub selector: EffectSelector,
-    /// 同一性検証用の fingerprint。
-    pub fingerprint: Fingerprint,
 }
 
 impl EffectInfo {
-    /// effect 情報とセレクターを、単一の fingerprint 算出結果から組み立てる。
+    /// effect 情報とセレクターを組み立てる。
     pub fn new(object: ObjectSelector, input: EffectFingerprintInput<'_>) -> Self {
-        let fingerprint = effect_fingerprint(input);
         Self {
             name: input.effect_name.to_string(),
             index: input.effect_index,
@@ -49,9 +46,8 @@ impl EffectInfo {
                 object,
                 effect_name: input.effect_name.to_string(),
                 effect_index: input.effect_index,
-                fingerprint: fingerprint.clone(),
+                fingerprint: effect_fingerprint(input),
             },
-            fingerprint,
         }
     }
 }
@@ -780,9 +776,13 @@ mod tests {
     }
 
     #[test]
-    fn effect_info_shares_one_fingerprint_with_selector() {
-        let info = sample_effect_info();
-        assert_eq!(info.fingerprint, info.selector.fingerprint);
+    fn effect_info_carries_the_fingerprint_only_in_the_selector() {
+        let value = serde_json::to_value(sample_effect_info()).unwrap();
+        assert!(
+            value.get("fingerprint").is_none(),
+            "{value} がトップレベルへ fingerprint を併記しています"
+        );
+        assert!(value["selector"]["fingerprint"].is_string());
     }
 
     #[test]

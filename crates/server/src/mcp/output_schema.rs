@@ -472,7 +472,6 @@ fn object_summary() -> Value {
         ("frame_end", unsigned()),
         ("name", nullable_string()),
         ("selector", object_selector()),
-        ("fingerprint", string()),
     ])
 }
 
@@ -508,7 +507,6 @@ fn effect_info() -> Value {
         ("locked", boolean()),
         ("items", array(effect_item())),
         ("selector", effect_selector()),
-        ("fingerprint", string()),
     ])
 }
 

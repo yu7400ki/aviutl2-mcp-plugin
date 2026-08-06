@@ -159,7 +159,7 @@ pub(crate) fn resolve_effect_of<'sec>(
         effect_info_at(&object.summary().selector, effects, position).ok_or(EditError::Sdk {
             operation: "get_effect_list",
         })?;
-    if info.fingerprint != selector.fingerprint {
+    if info.selector.fingerprint != selector.fingerprint {
         // オブジェクト側の照合はここへ来る前に通っている。読み直すべきは
         // effect の一覧であり、オブジェクトの概要は要求元が既に持っている値と
         // 同じである。

@@ -3,7 +3,7 @@
 //! frame 番号・layer 番号はいずれも 0 始まりである。
 
 use crate::effect::EffectInfo;
-use crate::fingerprint::{Fingerprint, ObjectFingerprintInput};
+use crate::fingerprint::ObjectFingerprintInput;
 use crate::selector::ObjectSelector;
 use serde::{Deserialize, Serialize};
 
@@ -24,8 +24,8 @@ pub struct LayerInfo {
 
 /// オブジェクトの概要。
 ///
-/// トップレベルとセレクターの fingerprint は同一でなければならない。
-/// [`ObjectSummary::new`] を用いると 1 度の算出結果が両方へ設定される。
+/// **fingerprint はセレクターの中だけに持つ。** トップレベルへ併記すると、
+/// 構造体リテラルからも逆直列化からも食い違う組を作れてしまう。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectSummary {
     /// 0 始まりのレイヤー番号。
@@ -36,16 +36,13 @@ pub struct ObjectSummary {
     pub frame_end: usize,
     /// オブジェクト名。標準名のままなら null。
     pub name: Option<String>,
-    /// 再指定用のセレクター。
+    /// 再指定用のセレクター。同一性検証用の fingerprint はこの中にある。
     pub selector: ObjectSelector,
-    /// 同一性検証用の fingerprint。
-    pub fingerprint: Fingerprint,
 }
 
 impl ObjectSummary {
-    /// 概要とセレクターを、単一の fingerprint 算出結果から組み立てる。
+    /// 概要とセレクターを組み立てる。
     pub fn new(project_epoch: impl Into<String>, input: ObjectFingerprintInput<'_>) -> Self {
-        let fingerprint = crate::fingerprint::object_fingerprint(input);
         Self {
             layer: input.layer,
             frame_start: input.frame_start,
@@ -57,9 +54,8 @@ impl ObjectSummary {
                 layer: input.layer,
                 frame: input.frame_start,
                 name: input.name.map(str::to_string),
-                fingerprint: fingerprint.clone(),
+                fingerprint: crate::fingerprint::object_fingerprint(input),
             },
-            fingerprint,
         }
     }
 }
@@ -188,9 +184,13 @@ mod tests {
     }
 
     #[test]
-    fn object_summary_shares_one_fingerprint_with_selector() {
-        let summary = sample_object_summary();
-        assert_eq!(summary.fingerprint, summary.selector.fingerprint);
+    fn object_summary_carries_the_fingerprint_only_in_the_selector() {
+        let value = serde_json::to_value(sample_object_summary()).unwrap();
+        assert!(
+            value.get("fingerprint").is_none(),
+            "{value} がトップレベルへ fingerprint を併記しています"
+        );
+        assert!(value["selector"]["fingerprint"].is_string());
     }
 
     #[test]

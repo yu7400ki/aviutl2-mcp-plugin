@@ -590,8 +590,8 @@ pub(crate) mod tests {
             serde_json::to_value(&summary.selector).unwrap()
         );
         assert_eq!(
-            current["fingerprint"],
-            serde_json::to_value(&summary.fingerprint).unwrap()
+            current["selector"]["fingerprint"],
+            serde_json::to_value(&summary.selector.fingerprint).unwrap()
         );
     }
 

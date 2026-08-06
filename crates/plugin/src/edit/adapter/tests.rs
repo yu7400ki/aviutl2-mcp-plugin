@@ -1295,7 +1295,7 @@ fn created_identity(outcome: &EditOutcome) -> Vec<(usize, usize, usize, Fingerpr
                 object.layer,
                 object.frame_start,
                 object.frame_end,
-                object.fingerprint.clone(),
+                object.selector.fingerprint.clone(),
             )
         })
         .collect()
@@ -1699,7 +1699,7 @@ fn locking_an_effect_changes_the_object_fingerprint() {
         "読み取りが effect のロックを返していません"
     );
     assert_ne!(
-        before_effect.fingerprint, after_effect.fingerprint,
+        before_effect.selector.fingerprint, after_effect.selector.fingerprint,
         "effect のロックを変えても effect の fingerprint が変わりません"
     );
     assert_eq!(
@@ -4546,10 +4546,6 @@ fn the_section_response_carries_the_selector_after_the_change() {
     assert_eq!(outcome.object.selector.layer, selector.layer);
     assert_eq!(outcome.object.selector.frame, selector.frame);
     assert_eq!(outcome.object.selector.project_epoch, harness.epoch());
-    assert_eq!(
-        outcome.object.fingerprint,
-        outcome.object.selector.fingerprint
-    );
     // 読み直した対象をそのまま次の編集へ渡せる。
     harness
         .edit
