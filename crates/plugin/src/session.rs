@@ -2398,6 +2398,10 @@ mod tests {
                 json!({ "expected_scene_id": SCENE_ID }),
             ),
             (ReadOperation::ListAvailableEffects, json!({})),
+            (
+                ReadOperation::GetSelection,
+                json!({ "expected_scene_id": SCENE_ID }),
+            ),
             (ReadOperation::ListFonts, json!({})),
             (ReadOperation::ListPalettes, json!({})),
             (ReadOperation::ListModules, json!({})),
@@ -2449,20 +2453,24 @@ mod tests {
 
     #[test]
     fn snapshot_revision_mismatch_is_precondition_failed() {
+        // 現在の revision から離れた値を送る。要求元が前ページの値を送り返す
+        // 経路と、まったく身に覚えの無い値を送る経路の双方が同じ失敗になる。
+        const STALE: u64 = 999;
+
         let paged = [
             (
                 ReadOperation::ListLayers,
-                json!({ "expected_scene_id": SCENE_ID, "snapshot_revision": REVISION - 1 }),
+                json!({ "expected_scene_id": SCENE_ID, "snapshot_revision": STALE }),
             ),
             (
                 ReadOperation::ListObjects,
-                json!({ "expected_scene_id": SCENE_ID, "snapshot_revision": REVISION - 1 }),
+                json!({ "expected_scene_id": SCENE_ID, "snapshot_revision": STALE }),
             ),
             // 選択はプロジェクトの状態であり revision に連動する。カタログの
             // 一覧と違い、照合の対象になる。
             (
                 ReadOperation::GetSelection,
-                json!({ "expected_scene_id": SCENE_ID, "snapshot_revision": REVISION - 1 }),
+                json!({ "expected_scene_id": SCENE_ID, "snapshot_revision": STALE }),
             ),
         ];
 
@@ -2475,8 +2483,13 @@ mod tests {
                 ErrorCode::PreconditionFailed,
                 "{operation:?} が古い snapshot_revision を受理しました"
             );
+            // 文言は要求元が次に何をすればよいかを述べる唯一の口である。
+            assert_eq!(
+                error.message, "一覧が変化したため、先頭のページから取り直してください",
+                "{operation:?}"
+            );
             assert!(error.retryable);
-            assert_eq!(error.details["requested_snapshot_revision"], REVISION - 1);
+            assert_eq!(error.details["requested_snapshot_revision"], STALE);
             assert_eq!(error.details["current_snapshot_revision"], REVISION);
         }
     }
