@@ -356,7 +356,7 @@ pub(crate) fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Option<Ve
 /// 深さの判定はパースより先に行う。パースそのものは深さで落ちないが、出来上
 /// がった表を解放する時点でスタックが尽きる。**受け取ってしまってからでは
 /// 捨てることもできない。**
-pub(crate) fn parse_table(text: &str) -> Option<Table> {
+fn parse_table(text: &str) -> Option<Table> {
     if !section_depth_within_limit(text) {
         return None;
     }
