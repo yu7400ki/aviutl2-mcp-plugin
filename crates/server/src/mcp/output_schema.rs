@@ -763,14 +763,15 @@ mod tests {
     use super::*;
     use crate::api::ListInstancesResponse;
     use aviutl2_mcp_core::{
-        AvailableEffect, Cursor, DisplayRange, EditInfo, EditOutcome, EffectFingerprintInput,
-        EffectFlags, EffectInfo, EffectItem, EffectItemType, EffectItemValues, EffectType,
-        EvaluatedItem, Extent, FiniteF64, FrameRange, GetCurrentSceneResult, GridBpm, InstanceId,
-        InstanceInfo, InstanceProject, InstanceState, ItemValue, LayerInfo,
-        ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
-        ListObjectAliasesResult, ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType,
-        ObjectAliasSummary, ObjectDetail, ObjectFingerprintInput, ObjectSummary, ObservedSelection,
-        PageMeta, PaletteEntry, Rgba, SceneInfo, SectionRange, SelectionField, SelectionSnapshot,
+        AvailableEffect, Cursor, DescribeEffectsResult, DisplayRange, EditInfo, EditOutcome,
+        EffectDescription, EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem,
+        EffectItemDescription, EffectItemType, EffectItemValues, EffectType, EvaluatedItem, Extent,
+        FiniteF64, FrameRange, GetCurrentSceneResult, GridBpm, InstanceId, InstanceInfo,
+        InstanceProject, InstanceState, ItemValue, LayerInfo, ListAvailableEffectsResult,
+        ListFontsResult, ListLayersResult, ListModulesResult, ListObjectAliasesResult,
+        ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType, ObjectAliasSummary,
+        ObjectDetail, ObjectFingerprintInput, ObjectSummary, ObservedSelection, PageMeta,
+        PaletteEntry, Rgba, SceneInfo, SectionRange, SelectionField, SelectionSnapshot,
         SelectionState, TrackGroup, TrackInfo, TrackValue,
     };
 
@@ -1183,6 +1184,41 @@ mod tests {
             page: sample_page_meta(),
         };
         assert_conforms(list_available_effects(), &to_value(&result));
+    }
+
+    #[test]
+    fn describe_effects_schema_matches_dto() {
+        // 説明を持つ effect と持たない effect、説明を持つ項目と持たない項目、
+        // 未知の種別、そして見つからなかった名前を 1 度に通す。
+        let result = DescribeEffectsResult {
+            effects: vec![
+                EffectDescription {
+                    name: "図形".to_string(),
+                    description: Some(
+                        "単色の図形を作成します\nsvgファイルから読み込めます".to_string(),
+                    ),
+                    items: vec![
+                        EffectItemDescription {
+                            name: "図形の種類".to_string(),
+                            item_type: EffectItemType::Figure,
+                            description: Some("図形の種類を選択します".to_string()),
+                        },
+                        EffectItemDescription {
+                            name: "未知".to_string(),
+                            item_type: EffectItemType::Unknown(42),
+                            description: None,
+                        },
+                    ],
+                },
+                EffectDescription {
+                    name: "グロー".to_string(),
+                    description: None,
+                    items: Vec::new(),
+                },
+            ],
+            not_found: vec!["ぐろー".to_string()],
+        };
+        assert_conforms(describe_effects(), &to_value(&result));
     }
 
     #[test]

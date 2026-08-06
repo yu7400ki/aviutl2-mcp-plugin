@@ -1602,13 +1602,20 @@ mod tests {
 
     /// 件数から設定項目の定義を作る。
     ///
-    /// 名前を effect 名と位置の単射にしてある。別の effect の項目を返した実装も、
-    /// 並びを崩した実装も結果に現れる。種別を交互にするのは、種別が名前と一緒に
-    /// 運ばれることを確かめるためである。
+    /// 名前に effect 名を含めてあり、別の effect の項目を返した実装は結果に
+    /// 現れる。
+    ///
+    /// **番号は隣り合う 2 つを入れ替えて振る。** 番号を並びのまま振ると、名前の
+    /// 昇順と列挙順が一致し、名前で並べ替える実装が恒等になって検査を素通りする。
+    /// 見栄えのために名前順へ整えるのは、列挙順を約束する応答にとって最も
+    /// 起こりやすい取り違えである。入れ替えた並びは昇順とも降順とも一致しない。
+    ///
+    /// 種別は列挙の位置で決める。名前だけを並べ替えた実装では、名前と種別の
+    /// 対応が崩れて結果に現れる。
     fn catalog_items(effect: &str, count: usize) -> Vec<AvailableEffectItem> {
         (0..count)
             .map(|index| AvailableEffectItem {
-                name: format!("{effect}の項目{index}"),
+                name: format!("{effect}の項目{}", swapped_number(index, count)),
                 item_type: if index.is_multiple_of(2) {
                     EffectItemType::Integer
                 } else {
@@ -1616,6 +1623,18 @@ mod tests {
                 },
             })
             .collect()
+    }
+
+    /// 隣り合う 2 つを入れ替えた番号を返す。
+    ///
+    /// 件数が奇数のときの末尾は相手が無いためそのまま残る。件数 1 では入れ替え
+    /// が起きず、並びの検査もできない——並びを見る対象には 2 件以上を使う。
+    fn swapped_number(index: usize, count: usize) -> usize {
+        if index.is_multiple_of(2) {
+            if index + 1 < count { index + 1 } else { index }
+        } else {
+            index - 1
+        }
     }
 
     fn catalog_entry(
@@ -1634,10 +1653,6 @@ mod tests {
         }
     }
 
-    /// フェイクの effect カタログ。
-    ///
-    /// 種別ごとに複数件を並べる。1 件ずつしか無いと、種別で絞ってから窓を切る
-    /// 順序と、窓を切ってから絞る順序の区別が付かない。
     /// ホストが同梱する説明の 1 節を組み立てる。
     ///
     /// 効果の説明と項目の説明を別の引数で受ける。片方を他方へ渡す取り違えは、
@@ -1652,6 +1667,10 @@ mod tests {
         }
     }
 
+    /// フェイクの effect カタログ。
+    ///
+    /// 種別ごとに複数件を並べる。1 件ずつしか無いと、種別で絞ってから窓を切る
+    /// 順序と、窓を切ってから絞る順序の区別が付かない。
     fn fake_catalog() -> Vec<FakeCatalogEntry> {
         vec![
             catalog_entry("ぼかし", EffectType::Filter, 1, 1),
@@ -3594,6 +3613,8 @@ mod tests {
         assert!(result.not_found.is_empty());
 
         // 項目の名前と種別はホストの列挙から来る。件数も並びもそのままである。
+        // フェイクの番号は名前の昇順とも降順とも一致しないため、見栄えのために
+        // 名前で並べ替えた実装はここに現れる。
         let glow: Vec<(&str, &EffectItemType)> = result.effects[0]
             .items
             .iter()
@@ -3602,14 +3623,35 @@ mod tests {
         assert_eq!(
             glow,
             vec![
-                ("グローの項目0", &EffectItemType::Integer),
-                ("グローの項目1", &EffectItemType::Check),
-                ("グローの項目2", &EffectItemType::Integer),
-                ("グローの項目3", &EffectItemType::Check),
+                ("グローの項目1", &EffectItemType::Integer),
+                ("グローの項目0", &EffectItemType::Check),
+                ("グローの項目3", &EffectItemType::Integer),
+                ("グローの項目2", &EffectItemType::Check),
             ],
             "項目の一覧が別の effect のものになっているか、並びが崩れています"
         );
         assert_eq!(result.effects[1].items.len(), 1);
+    }
+
+    #[test]
+    fn describe_effects_asks_the_host_for_the_catalog_once() {
+        // 登録の有無はカタログで決める。判定を effect ごとのループへ入れると、
+        // 全件の列挙が要求した名前の数だけ走る。
+        let adapter = adapter();
+        adapter
+            .describe_effects(&describe_params(&["グロー", "ぼかし", "存在しない効果"]))
+            .unwrap();
+
+        assert_eq!(
+            adapter
+                .host
+                .calls()
+                .iter()
+                .filter(|call| **call == "effect_catalog")
+                .count(),
+            1,
+            "カタログを要求ごとに 1 度だけ引いていません"
+        );
     }
 
     #[test]
@@ -3621,7 +3663,8 @@ mod tests {
                 "グロー".to_string(),
                 effect_help(
                     Some("光を拡散させます"),
-                    &[("グローの項目0", "拡散の量を指定します")],
+                    // 列挙の先頭に来る項目。番号は並びのままではない。
+                    &[("グローの項目1", "拡散の量を指定します")],
                 ),
             )],
             ..FakeHost::new()
@@ -3803,6 +3846,13 @@ mod tests {
         let effects = adapter();
         effects.list_available_effects_page(None).unwrap();
         assert_eq!(entries(&effects), 0, "list_available_effects");
+
+        // 設定項目の列挙も説明の取得も編集ハンドルの外側で完結する。
+        let described = adapter();
+        described
+            .describe_effects(&describe_params(&["グロー", "ぼかし"]))
+            .unwrap();
+        assert_eq!(entries(&described), 0, "describe_effects");
 
         // フォントとモジュールの列挙も編集ハンドルの機能である。
         let fonts = adapter();
