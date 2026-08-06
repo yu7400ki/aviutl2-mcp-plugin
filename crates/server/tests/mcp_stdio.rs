@@ -437,7 +437,7 @@ fn effect_catalog_paging_is_not_declared_as_revision_checked() {
     let field = &effects["inputSchema"]["properties"]["snapshot_revision"];
     assert!(
         field.is_object(),
-        "互換のため snapshot_revision は受理し続ける: {effects}"
+        "他の一覧を真似た要求を落とさないため snapshot_revision は受理し続ける: {effects}"
     );
     let field_description = field["description"].as_str().expect("説明がある");
     assert!(
