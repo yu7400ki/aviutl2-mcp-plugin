@@ -1312,8 +1312,13 @@ impl AviUtl2McpServer {
     /// となる。種別は get_object の item_type で確認できる。
     /// 書き込みは全ての種別で、書いた直後に読み直して要求した値が入ったかを照合する。
     /// 入っていなければ unsupported_operation となり details.reason は
-    /// item_value_not_applied、details.current_value に読み直した実値が入る。
-    /// これをそのまま送り直せば 1 往復で解決する。
+    /// item_value_not_applied、details.current_value にホストが現在保持している値が入る。
+    /// この失敗では書き込みは既に発行済みであり details.mutation_issued は true になる。
+    /// すなわち設定項目は要求した値にはならなかったが、変更前の値のままとも限らない。
+    /// current_value は要求の代わりに送り直す値ではない。それを送れば成功するが、
+    /// 設定項目は要求した値にならないままである。要求した値がホストに
+    /// 受け付けられなかったと解し、受け付けられる値を選び直すか、
+    /// current_value をそのまま受け入れるかを決める。
     /// 選択肢から選ぶ種別（select・combo・mask・figure）で選択肢に無い値、登録されていない
     /// フォント名、書式の合わない色はいずれもこの失敗になる。
     /// 数値が値域を外れてクランプされた場合と、小数が項目の桁数へ丸められた場合も
@@ -1321,6 +1326,7 @@ impl AviUtl2McpServer {
     /// 要求した値を得られていない点で同じ扱いにする。
     /// 選択肢の一覧を返す手段が無いため、有効な値は
     /// get_object が返す既存オブジェクトの値から得る。
+    /// 登録済みのフォント名は list_fonts が返す。色は 16 進 6 桁で指定する。
     /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
     /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     /// 対象が変化していた場合の precondition_failed では、details.current_object に
@@ -4002,24 +4008,57 @@ mod tests {
         );
     }
 
+    /// 設定値の種別ごとの分岐に付いた説明を取り出す。
+    fn item_value_description(kind: &str) -> String {
+        let tool = tool_named("set_object_item");
+        let variants = tool.input_schema["$defs"]["ItemValueInput"]["oneOf"]
+            .as_array()
+            .expect("設定値が判別子つきの union として宣言されていません")
+            .clone();
+        variants
+            .iter()
+            .find(|variant| variant["properties"]["type"]["const"] == kind)
+            .unwrap_or_else(|| panic!("{kind} 種別の分岐がありません"))["description"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{kind} 種別に説明がありません"))
+            .to_string()
+    }
+
+    #[test]
+    fn the_color_item_description_states_which_notation_the_host_accepts() {
+        // 説明は保証である。受理される書式を挙動から導く材料が要求元の側に
+        // 無い——外れた書式は失敗するが、何が正解かは失敗からは分からない。
+        // **実測で確定した 2 点だけを書く。** 8 桁のアルファ付きなどは観測して
+        // いないため、通るとも通らないとも述べない。
+        assert_eq!(
+            item_value_description("color"),
+            "色。16 進 6 桁（例 `ff8800`）で指定する。読み直すと小文字で返る。\n\
+             `#` を付けた表記と 3 桁の省略形は受け付けられず、指定した色にならない\n\
+             だけでなく元の色も失われて白（`ffffff`）になる。\n\
+             受け付けられなかったことは書き込みの応答が\n\
+             unsupported_operation で伝える。"
+        );
+    }
+
+    #[test]
+    fn the_font_item_description_points_at_the_registered_names() {
+        // 登録済みの名前を得る手段を示さなければ、要求元は当て推量を繰り返す。
+        // 外れた名前は失敗し、設定項目は変更前のまま残る。
+        assert_eq!(
+            item_value_description("font"),
+            "フォント名。list_fonts が返す登録済みの名前をそのまま指定する。\n\
+             登録されていない名前は書き込みが unsupported_operation となり、\n\
+             設定項目は変更前の値のまま残る。"
+        );
+    }
+
     #[test]
     fn the_text_item_description_states_what_survives_the_round_trip() {
         // 説明は保証である。書いた値がそのまま返ること、CRLF が LF になること、
         // 単独の CR を受け付けないことは、挙動から導く材料が要求元の側に無い。
         // 文言そのものを固定する。
-        let tool = tool_named("set_object_item");
-        let variants = tool.input_schema["$defs"]["ItemValueInput"]["oneOf"]
-            .as_array()
-            .expect("設定値が判別子つきの union として宣言されていません");
-        let text_variant = variants
-            .iter()
-            .find(|variant| variant["properties"]["type"]["const"] == "text")
-            .expect("text 種別の分岐がありません");
-        let description = text_variant["description"]
-            .as_str()
-            .expect("text 種別に説明がありません");
         assert_eq!(
-            description,
+            item_value_description("text"),
             "テキスト。改行とタブを含めて書き込め、読み直すと書いたとおりに返る。\n\
              バックスラッシュも書いたとおりに保たれるため、Windows パス・正規表現・\n\
              LaTeX をそのまま指定できる。CRLF は LF として保存される。単独の CR は\n\
@@ -4046,13 +4085,20 @@ mod tests {
                     // 有効な値の一覧を返す手段が無いため、外した値の直し方を
                     // 示さなければ要求元は当て推量を繰り返す。
                     "item_value_not_applied",
-                    "details.current_value に読み直した実値が入る",
+                    "details.current_value にホストが現在保持している値が入る",
                     "選択肢に無い値",
                     "get_object が返す既存オブジェクトの値から得る",
+                    "登録済みのフォント名は list_fonts が返す",
+                    "色は 16 進 6 桁で指定する",
                     // クランプと丸めも失敗になることを予期できなければ、要求元は
                     // 成功するはずの要求が落ちたと読む。
                     "クランプ",
                     "丸められた",
+                    // current_value をそのまま送り直すのは、要求を諦めることで
+                    // 成功させる動きである。推奨と読まれると、白へ化けた色を
+                    // 書き直して成功と判断する経路ができる。
+                    "current_value は要求の代わりに送り直す値ではない",
+                    "受け付けられる値を選び直すか",
                 ],
             ),
             ("set_effect_enabled", &["fingerprint", "出力 item"]),

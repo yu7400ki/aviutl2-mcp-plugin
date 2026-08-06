@@ -265,7 +265,11 @@ pub enum ItemValueInput {
         /// 値。
         value: bool,
     },
-    /// 色。
+    /// 色。16 進 6 桁（例 `ff8800`）で指定する。読み直すと小文字で返る。
+    /// `#` を付けた表記と 3 桁の省略形は受け付けられず、指定した色にならない
+    /// だけでなく元の色も失われて白（`ffffff`）になる。
+    /// 受け付けられなかったことは書き込みの応答が
+    /// unsupported_operation で伝える。
     Color {
         /// 値。
         #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]
@@ -293,7 +297,9 @@ pub enum ItemValueInput {
         #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]
         path: String,
     },
-    /// フォント名。
+    /// フォント名。list_fonts が返す登録済みの名前をそのまま指定する。
+    /// 登録されていない名前は書き込みが unsupported_operation となり、
+    /// 設定項目は変更前の値のまま残る。
     Font {
         /// フォント名。
         #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]
