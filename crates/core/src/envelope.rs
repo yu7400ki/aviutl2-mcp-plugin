@@ -44,11 +44,9 @@ impl<'de> Deserialize<'de> for RequestKind {
 }
 
 /// 応答 Envelope の種別。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseKind {
     Response,
-    /// 未知の kind 値を raw 保持。
-    Unknown(String),
 }
 
 impl Serialize for ResponseKind {
@@ -58,7 +56,6 @@ impl Serialize for ResponseKind {
     {
         match self {
             ResponseKind::Response => serializer.serialize_str("response"),
-            ResponseKind::Unknown(s) => serializer.serialize_str(s),
         }
     }
 }
@@ -72,7 +69,10 @@ impl<'de> Deserialize<'de> for ResponseKind {
         if s == "response" {
             Ok(ResponseKind::Response)
         } else {
-            Ok(ResponseKind::Unknown(s))
+            Err(de::Error::custom(format!(
+                "kind は \"response\" である必要があります: 実際は {:?}",
+                s
+            )))
         }
     }
 }
@@ -204,7 +204,7 @@ impl<'de> Deserialize<'de> for ResponseResult {
 /// 応答 Envelope。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResponseEnvelope {
-    /// "response" または未知の kind。
+    /// 応答の名乗り。`"response"` 以外を名乗るフレームは受理しない。
     pub kind: ResponseKind,
     /// 採用プロトコルバージョン。
     pub protocol_version: ProtocolVersion,
@@ -460,12 +460,19 @@ mod tests {
     }
 
     #[test]
-    fn response_kind_unknown_preserved() {
+    fn response_kind_invalid_rejected() {
         let s = "\"response_v2\"";
-        let kind: ResponseKind = serde_json::from_str(s).unwrap();
-        assert_eq!(kind, ResponseKind::Unknown("response_v2".to_string()));
-        let s2 = serde_json::to_string(&kind).unwrap();
-        assert_eq!(s2, "\"response_v2\"");
+        let result: Result<ResponseKind, _> = serde_json::from_str(s);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn response_envelope_rejects_a_foreign_kind() {
+        // 名乗りの検証は要求側と同じ位置で同じ強さを持つ。応答だけを素通し
+        // させると、フレームの取り違えが応答側でだけ検出されない。
+        let s = r#"{"kind":"response_v2","protocol_version":"1.0","request_id":"8df98c04-e7c2-4f98-b3ce-fc1c39d76414","instance_id":"8df98c04-e7c2-4f98-b3ce-fc1c39d76414","ok":true,"result":{}}"#;
+        let result: Result<ResponseEnvelope, _> = serde_json::from_str(s);
+        assert!(result.is_err());
     }
 
     #[test]

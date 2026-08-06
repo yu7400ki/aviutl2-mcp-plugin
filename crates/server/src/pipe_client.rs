@@ -1415,6 +1415,43 @@ mod tests {
     }
 
     #[test]
+    fn foreign_response_kind_poisons_connection() {
+        // 名乗りが違うフレームは、本文を解釈できないフレームと同じ扱いになる。
+        // 境界を取り違えたのか相手が契約から外れたのかは区別が付かない。
+        let (peer, client) = MockPeer::connected();
+        let instance_id = client.instance_id;
+
+        let responder = respond_once(&peer, move |request| {
+            let response = response_for(
+                request,
+                instance_id,
+                ResponseResult::Ok {
+                    result: serde_json::json!({}),
+                },
+            );
+            let mut value = serde_json::to_value(&response).unwrap();
+            value["kind"] = serde_json::json!("response_v2");
+            serde_json::to_vec(&value).unwrap()
+        });
+
+        let failure = client
+            .request(
+                "get_edit_info",
+                serde_json::json!({}),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect_err("response 以外を名乗る応答は拒否される");
+        responder.join().unwrap();
+        assert!(
+            matches!(failure, PipeClientError::Json),
+            "実際のエラー: {failure:?}"
+        );
+        assert_eq!(failure.error_code(), ErrorCode::InstanceStale);
+
+        assert_rejects_without_io(&client);
+    }
+
+    #[test]
     fn remote_error_keeps_connection_usable() {
         let (peer, client) = MockPeer::connected();
         let instance_id = client.instance_id;
