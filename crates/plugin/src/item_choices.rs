@@ -623,10 +623,9 @@ mod tests {
         .expect("作れる");
 
         let table = dir.load();
-        assert_eq!(
-            entries(&table),
-            BTreeSet::from([("読む".to_string(), "項目".to_string())])
-        );
+        let mut expected = entries(&builtin_table());
+        expected.insert(("読む".to_string(), "項目".to_string()));
+        assert_eq!(entries(&table), expected);
     }
 
     #[test]
@@ -640,7 +639,7 @@ mod tests {
         assert_eq!(text.len() as u64, MAX_SIDECAR_BYTES + 1);
         dir.write_sidecar(&format!("巨大{SIDECAR_SUFFIX}"), &text);
 
-        assert_eq!(dir.load().effect("テキスト"), None);
+        assert_eq!(dir.load(), builtin_table());
     }
 
     #[test]
