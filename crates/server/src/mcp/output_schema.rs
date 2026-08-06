@@ -2,7 +2,8 @@
 //!
 //! `structuredContent` として返す値は operation の result DTO をそのまま
 //! 直列化したものであり、本モジュールの schema はその形を記述する。
-//! 応答型は将来の MINOR 追加を受け入れるため、追加プロパティは禁じない。
+//! 応答型は受け手が使わない値が足されていても受理するため、追加プロパティは
+//! 禁じない。
 
 use aviutl2_mcp_core::PALETTE_COLOR_COUNT;
 use rmcp::model::JsonObject;

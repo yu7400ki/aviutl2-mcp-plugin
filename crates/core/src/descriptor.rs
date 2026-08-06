@@ -118,8 +118,8 @@ pub struct InstanceInfo {
 
 /// `InstanceInfo` 内のプロジェクト情報。
 ///
-/// 応答型の内側であるため未知フィールドを拒否しない。将来の MINOR で
-/// 追加されたフィールドを含む応答を、旧版の受信側が受理できるようにする。
+/// 応答型の内側であるため未知フィールドを拒否しない。受け手が使わない値 1 つの
+/// ために応答そのものを落とさない。
 ///
 /// `epoch` / `revision` / `modified` は生存確認の応答が必ず運ぶ。
 ///
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn instance_project_allows_unknown_optional_fields() {
-        // 応答型の内側でも将来の MINOR 追加を受理する。
+        // 応答型の内側は、使わない値が足されていても応答を落とさない。
         let info = sample_instance_info();
         let mut value = serde_json::to_value(&info).unwrap();
         value["project"]

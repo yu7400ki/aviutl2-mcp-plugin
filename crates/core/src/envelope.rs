@@ -216,8 +216,8 @@ pub struct ResponseEnvelope {
 
 /// ping 応答が運ぶプロジェクトの状態。
 ///
-/// 応答型の内側であるため未知フィールドを拒否しない。将来の MINOR で追加された
-/// フィールドを含む応答を、旧版の受信側が受理できるようにする。
+/// 応答型の内側であるため未知フィールドを拒否しない。受け手が使わない値 1 つの
+/// ために応答そのものを落とさない。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PongProject {
     /// プロジェクトの epoch。

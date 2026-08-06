@@ -191,10 +191,10 @@ pub struct ClientHello {
 
 /// plugin から client への認証応答。
 ///
-/// 応答型であるため未知フィールドを拒否しない。将来の MINOR で追加された
-/// フィールドを含む応答を、旧版の受信側がそのまま受理できるようにする。
-/// 要求型（[`ClientHello`] / [`ClientAuth`]）が未知フィールドを拒否するのと
-/// 非対称なのは意図的である。
+/// 応答型であるため未知フィールドを拒否しない。受け手が使わない値 1 つのために
+/// 応答そのものを落とさない。要求型（[`ClientHello`] / [`ClientAuth`]）が未知
+/// フィールドを拒否するのと非対称なのは意図的である——要求の誤りは要求元が
+/// 直せるが、応答に足された値は受け手に直す手が無い。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerAuth {
     /// negotiation 結果のプロトコルバージョン。
@@ -391,7 +391,7 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&auth).unwrap()).unwrap();
         assert_eq!(restored, auth);
 
-        // 応答型は将来の MINOR で追加されたフィールドを受理し、既知フィールドは保つ。
+        // 応答型は使わない値が足されていても受理し、既知フィールドは保つ。
         let restored: ServerAuth = serde_json::from_value(with_unknown_field(&auth)).unwrap();
         assert_eq!(restored, auth);
     }
