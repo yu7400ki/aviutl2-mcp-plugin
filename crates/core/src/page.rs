@@ -84,7 +84,8 @@ impl ValidatedPageRequest {
 /// 検証を通った要求は、要求そのものの表現へ戻せる。
 ///
 /// 要求を運ぶ経路は JSON へ直列化するため、ワイヤ上の形は [`PageRequest`] の
-/// ままである。検証を経て初めてその形が得られる。
+/// ままである。[`PageRequest`] 自体はこの変換を通さずにも作れる——検証を通した
+/// 結果からこの形へ戻すのは、要求を組み立てる側が守る規律である。
 impl From<ValidatedPageRequest> for PageRequest {
     fn from(request: ValidatedPageRequest) -> Self {
         Self {

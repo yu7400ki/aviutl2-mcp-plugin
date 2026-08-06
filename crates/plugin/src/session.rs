@@ -2609,8 +2609,8 @@ mod tests {
 
     #[test]
     fn the_object_alias_listing_does_not_verify_the_snapshot_revision() {
-        // 前ページが返した値をそのまま送り返しても拒否されない。素の
-        // PageRequest をそのまま渡すと落ちる。
+        // 前ページが返した値をそのまま送り返しても拒否されない。検証済みの
+        // 要求をそのまま渡すと落ちる。
         let adapter = FakeAdapter::new();
         let first = read(
             &adapter,
