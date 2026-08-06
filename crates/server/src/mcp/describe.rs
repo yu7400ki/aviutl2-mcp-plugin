@@ -201,10 +201,12 @@ pub fn available_effects(result: &ListAvailableEffectsResult) -> String {
             effect_type_label(&effect.effect_type),
             effect.item_count,
         );
-        // 説明はホストが持つ効果にしか付かない。改行の畳み込みと行の切り詰めは
-        // 行の追加が行うため、ここでは全文をそのまま繋ぐ。
+        // 説明はホストが持つ effect にしか付かない。他の項と同じ `key=value` の
+        // 形で境界を示す——説明は空白を含み、裸で繋ぐとどこから説明なのかが
+        // 読めない。行の末尾に置くため、値の中の空白は曖昧にならない。
+        // 改行の畳み込みと行の切り詰めは行の追加が行う。
         if let Some(description) = &effect.description {
-            line.push(' ');
+            line.push_str(" desc=");
             line.push_str(description);
         }
         text.push_line(line);
@@ -1010,14 +1012,17 @@ mod tests {
         let text = available_effects(&result);
 
         // 説明は 1 行へ畳んで載せる。発見の鍵が 2 行目にある説明があるため、
-        // 先頭行だけに切らない。
+        // 先頭行だけに切らない。境界は他の項と同じ `key=value` で示す。
         assert!(
             text.contains(
-                "- 図形 type=input items=4 単色の図形を作成します svgファイルから読み込めます"
+                "- 図形 type=input items=4 desc=単色の図形を作成します svgファイルから読み込めます"
             ),
             "{text}"
         );
+        // 説明を持たない effect には項ごと付かない。空の `desc=` は、説明が
+        // 空文字列であることと区別が付かない。
         assert!(text.contains("- ぼかし type=filter items=2\n"), "{text}");
+        assert!(!text.contains("desc=\n"), "{text}");
     }
 
     #[test]
