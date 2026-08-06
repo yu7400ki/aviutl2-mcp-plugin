@@ -3948,10 +3948,10 @@ mod tests {
     }
 
     #[test]
-    fn the_text_item_description_states_the_newline_round_trip_asymmetry() {
-        // 説明は保証である。改行は書き込めても読み直すとエスケープ表記になり、
-        // タブは実タブ文字のまま返る非対称を、要求元は説明を読むまで知りようが
-        // ない。挙動から導く材料が無いため、文言そのものを固定する。
+    fn the_text_item_description_states_what_survives_the_round_trip() {
+        // 説明は保証である。書いた値がそのまま返ること、CRLF が LF になること、
+        // 単独の CR を受け付けないことは、挙動から導く材料が要求元の側に無い。
+        // 文言そのものを固定する。
         let tool = tool_named("set_object_item");
         let variants = tool.input_schema["$defs"]["ItemValueInput"]["oneOf"]
             .as_array()
@@ -3965,9 +3965,10 @@ mod tests {
             .expect("text 種別に説明がありません");
         assert_eq!(
             description,
-            "テキスト。改行とタブを含めて書き込める。書いた改行は読み直すとエスケープ\n\
-             表記（バックスラッシュ ＋ n の 2 文字）で返り、タブは実タブ文字のまま返る。\n\
-             読み取った値をそのまま書き戻すと、そのエスケープ表記が二重に育ち得る。"
+            "テキスト。改行とタブを含めて書き込め、読み直すと書いたとおりに返る。\n\
+             バックスラッシュも書いたとおりに保たれるため、Windows パス・正規表現・\n\
+             LaTeX をそのまま指定できる。CRLF は LF として保存される。単独の CR は\n\
+             受け付けない——保存はされるが描画では行が分かれず、意図を推測できない。"
         );
     }
 
