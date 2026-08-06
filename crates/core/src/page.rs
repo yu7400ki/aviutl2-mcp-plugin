@@ -115,6 +115,10 @@ pub struct PageMeta {
     /// 要求オフセット。
     pub offset: u32,
     /// さらに次のページがあるか。
+    ///
+    /// **`next_offset.is_some()` の再掲であり、値は導出できる。** 反復の終端を
+    /// 判定する最も素直な口として、導出させずに載せる。生成口は [`take_page`]
+    /// 1 つであり、`next_offset` と食い違う組は作られない。
     pub has_more: bool,
     /// 次のオフセット。無ければ null。
     pub next_offset: Option<u32>,
