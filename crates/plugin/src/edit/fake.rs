@@ -865,6 +865,11 @@ impl ReadHost for FakeReadHost {
             })
     }
 
+    fn effect_description(&self, _effect_name: &str) -> Option<String> {
+        // 編集経路は説明を読まない。説明の供給源を持たない環境を写す。
+        None
+    }
+
     fn font_names(&self) -> Result<Vec<String>, ReadError> {
         Ok(self.0.fonts.clone())
     }

@@ -365,9 +365,9 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
         for effect in window {
             let item_count = guard(|| self.host.effect_item_count(&effect.name))?;
             items.push(AvailableEffect {
-                // 説明はホストが同梱するものだけを運ぶ。無い効果は null になり、
-                // 読めない環境では全件が null になる。
-                description: crate::effect_help::description_of(&effect.name).map(str::to_string),
+                // 説明はホストが同梱するものだけを運ぶ。無い effect は null に
+                // なり、供給源を読めない環境では全件が null になる。
+                description: catch(|| self.host.effect_description(&effect.name))?,
                 name: effect.name,
                 effect_type: effect.effect_type,
                 flags: effect.flags,
@@ -839,6 +839,11 @@ mod tests {
         grid_bpm: Vec<GridBpm>,
         layers: Vec<FakeLayer>,
         catalog: Vec<FakeCatalogEntry>,
+        /// ホスト環境が持つ effect の説明。
+        ///
+        /// **既定は空である。** 供給源を読めない環境がそのまま既定であり、説明が
+        /// 得られることを前提にした経路を作らない。
+        descriptions: Vec<(String, String)>,
         /// 設定項目の数を問い合わせた effect 名を、問い合わせた順に覚える。
         ///
         /// 窓の外の effect について問い合わせていないことを、件数でも名前でも
@@ -951,6 +956,7 @@ mod tests {
                 grid_bpm: vec![sample_grid_bpm()],
                 layers: fake_layers(),
                 catalog: fake_catalog(),
+                descriptions: Vec::new(),
                 item_count_queries: Mutex::new(Vec::new()),
                 panic_at: None,
                 object_read_fails_at: None,
@@ -1060,6 +1066,15 @@ mod tests {
                 .ok_or(ReadError::Sdk {
                     operation: "enum_effect_item",
                 })
+        }
+
+        fn effect_description(&self, effect_name: &str) -> Option<String> {
+            self.assert_ready("effect_description");
+            self.record("effect_description");
+            self.descriptions
+                .iter()
+                .find(|(name, _)| name == effect_name)
+                .map(|(_, description)| description.clone())
         }
 
         fn font_names(&self) -> Result<Vec<String>, ReadError> {
@@ -3322,13 +3337,9 @@ mod tests {
     }
 
     #[test]
-    fn list_available_effects_leaves_the_description_null_without_the_host_help_file() {
-        // 説明の供給源はホストが同梱するファイルだけである。ホストの実行ファイル
-        // の隣にそれが無い環境では説明が出ないが、一覧そのものは働き続ける。
-        assert!(
-            crate::effect_help::description_of("ぼかし").is_none(),
-            "この環境で説明が読めています。検査の前提が崩れています"
-        );
+    fn list_available_effects_leaves_the_description_null_without_a_source() {
+        // 説明の供給源はホストが同梱するファイルだけである。それを読めない環境
+        // では説明が出ないが、一覧そのものは働き続ける。
         let adapter = adapter();
         let result = adapter.list_available_effects_page(None).unwrap();
 
@@ -3343,6 +3354,55 @@ mod tests {
         assert_eq!(result.items[0].name, "ぼかし");
         assert_eq!(result.items[0].item_count, 1);
         assert_eq!(result.items[0].effect_type, EffectType::Filter);
+    }
+
+    #[test]
+    fn list_available_effects_carries_the_description_of_each_effect() {
+        // 説明を持つ effect にはその説明が、持たない effect には null が載る。
+        // 説明は全文で運ぶ——2 行目に発見の鍵がある説明が実在する。
+        let glow = "光を拡散させます\n発光量を指定します";
+        let adapter = adapter_with(|_| FakeHost {
+            descriptions: vec![
+                ("グロー".to_string(), glow.to_string()),
+                ("標準描画".to_string(), "描画のしかたを決めます".to_string()),
+            ],
+            ..FakeHost::new()
+        });
+        let result = adapter.list_available_effects_page(None).unwrap();
+
+        let described: Vec<(&str, Option<&str>)> = result
+            .items
+            .iter()
+            .map(|effect| (effect.name.as_str(), effect.description.as_deref()))
+            .collect();
+        assert_eq!(
+            described,
+            vec![
+                ("ぼかし", None),
+                ("動画ファイル", None),
+                ("グロー", Some(glow)),
+                ("画像ファイル", None),
+                ("標準描画", Some("描画のしかたを決めます")),
+            ],
+            "説明が別の effect へ付いているか、落ちています"
+        );
+    }
+
+    #[test]
+    fn list_available_effects_asks_for_the_description_only_for_the_requested_page() {
+        // 説明の取得も窓の分だけである。供給源の引き直しを応答へ載せない
+        // effect まで広げない。
+        let adapter = adapter();
+        let page = page_request(3, 1, None).window();
+        adapter.list_available_effects(None, &page).unwrap();
+
+        let asked = adapter
+            .host
+            .calls()
+            .iter()
+            .filter(|call| **call == "effect_description")
+            .count();
+        assert_eq!(asked, 1, "窓の外の effect について説明を引いています");
     }
 
     #[test]

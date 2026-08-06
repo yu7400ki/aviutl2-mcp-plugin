@@ -944,6 +944,10 @@ mod tests {
             Ok(0)
         }
 
+        fn effect_description(&self, _effect_name: &str) -> Option<String> {
+            None
+        }
+
         fn font_names(&self) -> Result<Vec<String>, crate::read::ReadError> {
             Ok(Vec::new())
         }

@@ -81,6 +81,11 @@ impl ReadHost for SdkReadHost {
             .len())
     }
 
+    fn effect_description(&self, effect_name: &str) -> Option<String> {
+        // 編集ハンドルを通らない。供給源はホストが同梱するファイルだけである。
+        crate::effect_help::description_of(effect_name).map(str::to_string)
+    }
+
     fn font_names(&self) -> Result<Vec<String>, ReadError> {
         // 列挙は打ち切れない。コールバックは戻り値を持たず、途中で止める手段が
         // 無いため、1 ページを返す要求でも全件が返る。
@@ -837,6 +842,22 @@ mod tests {
         AvailableEffectItem, ErrorCode, ItemWriteError, PALETTE_COLOR_COUNT, TrackValue,
         TrackWriteTarget, prepare_item_write,
     };
+
+    #[test]
+    fn the_effect_description_comes_from_the_host_help_file() {
+        // 説明は編集ハンドルからは得られない。供給源はホストが同梱するファイル
+        // だけであり、この境界はそれを引き写すだけである。
+        for name in ["図形", "ぼかし", "存在しない効果"] {
+            assert_eq!(
+                SdkReadHost.effect_description(name),
+                crate::effect_help::description_of(name).map(str::to_string),
+                "{name} の説明が供給源と別のところから来ています"
+            );
+        }
+        // 実行ファイルの隣に供給源が無い環境では説明が出ない。読み取り側の
+        // フェイクが説明の無い環境を既定にしている根拠である。
+        assert!(SdkReadHost.effect_description("図形").is_none());
+    }
 
     /// 移動を持たない項目の読み取り。
     fn read_value(item_type: &EffectItemType, raw: &str) -> ItemValue {
