@@ -882,10 +882,14 @@ impl AviUtl2McpServer {
     /// 名前で指定した effect の中身を取得する。
     /// effect_names には list_available_effects が返す名前を 1〜10 件指定する。
     /// 同じ名前を 2 度指定すると invalid_argument となる。
-    /// 1 件につき name・description・items（name / item_type / description）を返す。
+    /// 1 件につき name・description・items（name / item_type / description / choices）を返す。
     /// 設定項目の一覧はホストの列挙から得るため、必ず実際の effect と一致する。
     /// description はホストが同梱する説明であり、持たない effect と持たない項目は
     /// null になる。空欄を推測で補わない。
+    /// choices は選択肢の候補であり、values と source（builtin_table / sidecar）を持つ。
+    /// 候補を持たない項目は null になる。値を選べない項目という意味ではない。
+    /// choices はヒントであってゲートではない。候補に無い値でも書き込みは通り、
+    /// 候補に在る値が必ず通るとも限らない。可否を決めるのはホストである。
     /// 説明を持たない effect は多く、とくにフィルタ効果はほとんどが null である。
     /// 名前が似ている effect の使い分けは、説明ではなく items の顔ぶれで判断する。
     /// そのために複数の名前をまとめて指定して並べて比べられる。
@@ -3459,6 +3463,25 @@ mod tests {
             "推測で補わない",
             "items の顔ぶれ",
             "get_object",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "describe_effects の説明が {phrase} に触れていません: {description}"
+            );
+        }
+    }
+
+    #[test]
+    fn describe_effects_states_that_the_choices_are_a_hint_and_not_a_gate() {
+        // 候補をゲートとして読まれると、載っていない値を書けるのに書かない。
+        // 候補を出す目的そのものが失われる。
+        let description = description_of("describe_effects");
+        for phrase in [
+            "choices",
+            "builtin_table",
+            "sidecar",
+            "候補に無い値でも書き込みは通り",
+            "必ず通るとも限らない",
         ] {
             assert!(
                 description.contains(phrase),

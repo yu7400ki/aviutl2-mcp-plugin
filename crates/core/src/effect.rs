@@ -156,6 +156,41 @@ pub struct EffectItemDescription {
     /// 写さない**——項目の説明として効果の説明が出れば、受け取った側は誤った
     /// 文言を確信を持って使う。
     pub description: Option<String>,
+    /// 選択肢の候補。表に項目が無ければ null。
+    ///
+    /// 候補が null であることは「値を選べない項目である」ことを意味しない。
+    /// 表に無いだけであり、書き込みは従来どおり通る。
+    pub choices: Option<ItemChoices>,
+}
+
+/// 設定項目が取り得る値の候補。
+///
+/// **ヒントであってゲートではない。** ここに無い値でも書き込みは通り、ここに
+/// ある値が必ず通るとも限らない。可否を決めるのはホストであり、書き込みの経路は
+/// 書いた値を読み直して照合する。版ずれやプラグインの追加で表が実態から外れた
+/// とき、事前検証を掛けていれば「正しい値なのに通らない」へ退化する。候補を
+/// 知らないまま総当たりになる状態より悪い。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemChoices {
+    /// 候補の値。表に書かれた順で並ぶ。
+    pub values: Vec<String>,
+    /// 候補の由来。
+    pub source: ChoicesSource,
+}
+
+/// 選択肢の候補の由来。
+///
+/// **由来そのもので決まる。** ファイル名や中身から見分けるものではない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChoicesSource {
+    /// 実行ファイルへ埋め込まれた基底の表。
+    BuiltinTable,
+    /// 走査で見つけたサイドカーファイル。
+    ///
+    /// **書き手は特定できない。** プラグインの作者が配布物へ同梱したのか、
+    /// 利用者が自分で置いたのかを区別する手段が我々には無い。
+    Sidecar,
 }
 
 /// effect が対応する内容を表すフラグ。
@@ -934,11 +969,16 @@ mod tests {
                         "図形の種類を選択します\nボタンクリックでsvgファイルを選択出来ます"
                             .to_string(),
                     ),
+                    choices: Some(ItemChoices {
+                        values: vec!["円".to_string(), "四角形".to_string()],
+                        source: ChoicesSource::BuiltinTable,
+                    }),
                 },
                 EffectItemDescription {
                     name: "ライン幅".to_string(),
                     item_type: EffectItemType::Integer,
                     description: None,
+                    choices: None,
                 },
             ],
         }
@@ -976,5 +1016,30 @@ mod tests {
         // ことと説明を持たないことの区別が付かない。
         let value = serde_json::to_value(sample_effect_description()).unwrap();
         assert!(value["items"][1]["description"].is_null(), "{value}");
+    }
+
+    #[test]
+    fn an_item_carries_its_choices_with_the_source_they_came_from() {
+        // 由来は候補と同じ組で運ぶ。値だけを返すと、受け取った側は表の誤りを
+        // どこへ報告すればよいかを判断できない。
+        let value = serde_json::to_value(sample_effect_description()).unwrap();
+        assert_eq!(value["items"][0]["choices"]["values"][0], "円");
+        assert_eq!(value["items"][0]["choices"]["source"], "builtin_table");
+        // 表に無い項目は null である。空の配列で代えると、「候補が 1 つも無い
+        // 項目」と「表に載っていない項目」の区別が付かない。
+        assert!(value["items"][1]["choices"].is_null(), "{value}");
+    }
+
+    #[test]
+    fn the_choices_source_names_where_the_values_came_from() {
+        for (source, name) in [
+            (ChoicesSource::BuiltinTable, "\"builtin_table\""),
+            (ChoicesSource::Sidecar, "\"sidecar\""),
+        ] {
+            let s = serde_json::to_string(&source).unwrap();
+            assert_eq!(s, name);
+            let restored: ChoicesSource = serde_json::from_str(&s).unwrap();
+            assert_eq!(restored, source);
+        }
     }
 }

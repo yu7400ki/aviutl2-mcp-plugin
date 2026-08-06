@@ -9,8 +9,9 @@
 use crate::EDIT_HANDLE;
 use crate::read::error::ReadError;
 use crate::read::host::{
-    EditState, HostEditInfo, HostEffect, HostEffectHelp, HostEffectSummary, HostLayer, HostObject,
-    HostObjectDetail, HostObjectPlacement, ReadHost, SceneReader, SceneValueReader,
+    EditState, HostEditInfo, HostEffect, HostEffectChoices, HostEffectHelp, HostEffectSummary,
+    HostLayer, HostObject, HostObjectDetail, HostObjectPlacement, ReadHost, SceneReader,
+    SceneValueReader,
 };
 use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection};
 use aviutl2_mcp_core::{
@@ -97,6 +98,16 @@ impl ReadHost for SdkReadHost {
         crate::effect_help::help_of(effect_name)
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn effect_choices(&self, effect_name: &str) -> HostEffectChoices {
+        // 編集ハンドルを通らない。供給源は埋め込んだ基底とサイドカーだけである。
+        HostEffectChoices {
+            items: crate::item_choices::table()
+                .effect(effect_name)
+                .cloned()
+                .unwrap_or_default(),
+        }
     }
 
     fn font_names(&self) -> Result<Vec<String>, ReadError> {
@@ -872,6 +883,22 @@ mod tests {
         // 実行ファイルの隣に供給源が無い環境では説明が出ない。読み取り側の
         // フェイクが説明の無い環境を既定にしている根拠である。
         assert_eq!(SdkReadHost.effect_help("図形"), HostEffectHelp::default());
+    }
+
+    #[test]
+    fn the_effect_choices_come_from_the_merged_table() {
+        // 候補も編集ハンドルからは得られない。この境界は埋め込みの基底へ
+        // サイドカーを重ねた表を引き写すだけである。
+        for name in ["テキスト", "図形", "存在しない効果"] {
+            assert_eq!(
+                SdkReadHost.effect_choices(name).items,
+                crate::item_choices::table()
+                    .effect(name)
+                    .cloned()
+                    .unwrap_or_default(),
+                "{name} の候補が表と別のところから来ています"
+            );
+        }
     }
 
     /// 移動を持たない項目の読み取り。

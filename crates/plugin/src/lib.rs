@@ -14,6 +14,8 @@ pub mod effect_help;
 #[cfg(windows)]
 pub mod identity;
 #[cfg(windows)]
+pub mod item_choices;
+#[cfg(windows)]
 pub mod lifecycle;
 #[cfg(windows)]
 pub mod movement;

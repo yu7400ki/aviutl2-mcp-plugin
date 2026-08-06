@@ -75,8 +75,9 @@ pub use edit::{
 };
 pub use edit_info::{Cursor, DisplayRange, EditInfo, Extent, FrameRange, GridBpm, SceneInfo};
 pub use effect::{
-    AvailableEffect, AvailableEffectItem, EffectDescription, EffectFlags, EffectInfo, EffectItem,
-    EffectItemDescription, EffectItemType, EffectType, EvaluatedItemKind, TrackInfo,
+    AvailableEffect, AvailableEffectItem, ChoicesSource, EffectDescription, EffectFlags,
+    EffectInfo, EffectItem, EffectItemDescription, EffectItemType, EffectType, EvaluatedItemKind,
+    ItemChoices, TrackInfo,
 };
 pub use envelope::{
     PongProject, PongResult, RequestEnvelope, RequestKind, ResponseEnvelope, ResponseKind,

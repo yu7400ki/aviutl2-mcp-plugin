@@ -855,6 +855,7 @@ fn an_effect_source_does_not_go_through_the_media_path_check() {
             effect_type: EffectType::Filter,
             flags: EffectFlags::from_raw(1),
             items: Vec::new(),
+            choices: Default::default(),
         });
     });
     harness.host.clear_calls();

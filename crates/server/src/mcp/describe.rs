@@ -1117,11 +1117,13 @@ mod tests {
                                 "図形の種類を選択します\nボタンクリックでsvgファイルを選択出来ます"
                                     .to_string(),
                             ),
+                            choices: None,
                         },
                         EffectItemDescription {
                             name: "ライン幅".to_string(),
                             item_type: EffectItemType::Integer,
                             description: None,
+                            choices: None,
                         },
                     ],
                 },
@@ -1192,6 +1194,7 @@ mod tests {
                         name: long_name(),
                         item_type: EffectItemType::Integer,
                         description: Some(long_name()),
+                        choices: None,
                     })
                     .collect(),
             })

@@ -401,15 +401,17 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
             }
             let items = guard(|| self.host.effect_items(name))?;
             let help = catch(|| self.host.effect_help(name))?;
+            let choices = catch(|| self.host.effect_choices(name))?;
             effects.push(EffectDescription {
                 name: name.clone(),
                 description: help.description,
                 items: items
                     .into_iter()
                     .map(|item| EffectItemDescription {
-                        // 説明は項目名で引く。ホストの列挙に無い項目は現れず、
-                        // 説明の無い項目は null になる。
+                        // 説明も候補も項目名で引く。ホストの列挙に無い項目は
+                        // 現れず、持たない項目は null になる。
                         description: help.items.get(&item.name).cloned(),
+                        choices: choices.items.get(&item.name).cloned(),
                         name: item.name,
                         item_type: item.item_type,
                     })
@@ -803,16 +805,17 @@ fn selected_range(info: &HostEditInfo) -> Option<FrameRange> {
 mod tests {
     use super::*;
     use crate::read::host::{
-        HostEffect, HostEffectHelp, HostLayer, HostObject, HostObjectPlacement, SceneReader,
+        HostEffect, HostEffectChoices, HostEffectHelp, HostLayer, HostObject, HostObjectPlacement,
+        SceneReader,
     };
     use crate::test_support::{
         alias_with_effects, default_page_request, default_page_window, page_request,
         with_silent_panic_hook,
     };
     use aviutl2_mcp_core::{
-        AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
-        FiniteF64, GridBpm, ItemValue, PALETTE_COLOR_COUNT, Rgba, SectionRange, TrackInfo,
-        TrackValue,
+        AvailableEffectItem, ChoicesSource, EffectFlags, EffectItem, EffectItemType, ErrorCode,
+        Fingerprint, FiniteF64, GridBpm, ItemChoices, ItemValue, PALETTE_COLOR_COUNT, Rgba,
+        SectionRange, TrackInfo, TrackValue,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -889,6 +892,11 @@ mod tests {
         /// **既定は空である。** 供給源を読めない環境がそのまま既定であり、説明が
         /// 得られることを前提にした経路を作らない。
         help: Vec<(String, HostEffectHelp)>,
+        /// 表が持つ effect ごとの候補。
+        ///
+        /// **既定は空である。** 中身を持たない基底だけの環境がそのまま既定で
+        /// あり、候補が得られることを前提にした経路を作らない。
+        choices: Vec<(String, HostEffectChoices)>,
         /// 設定項目の数を問い合わせた effect 名を、問い合わせた順に覚える。
         ///
         /// 窓の外の effect について問い合わせていないことを、件数でも名前でも
@@ -1002,6 +1010,7 @@ mod tests {
                 layers: fake_layers(),
                 catalog: fake_catalog(),
                 help: Vec::new(),
+                choices: Vec::new(),
                 item_count_queries: Mutex::new(Vec::new()),
                 panic_at: None,
                 object_read_fails_at: None,
@@ -1132,6 +1141,16 @@ mod tests {
                 .iter()
                 .find(|(name, _)| name == effect_name)
                 .map(|(_, help)| help.clone())
+                .unwrap_or_default()
+        }
+
+        fn effect_choices(&self, effect_name: &str) -> HostEffectChoices {
+            self.assert_ready("effect_choices");
+            self.record("effect_choices");
+            self.choices
+                .iter()
+                .find(|(name, _)| name == effect_name)
+                .map(|(_, choices)| choices.clone())
                 .unwrap_or_default()
         }
 
@@ -1663,6 +1682,27 @@ mod tests {
             items: items
                 .iter()
                 .map(|(name, text)| (name.to_string(), text.to_string()))
+                .collect(),
+        }
+    }
+
+    /// effect 1 件分の候補を組み立てる。
+    ///
+    /// 由来を項目ごとに指定する。同じ effect の中に基底の候補とサイドカーの
+    /// 候補が混ざる形は、表を重ねれば普通に起こる。
+    fn effect_choices(items: &[(&str, &[&str], ChoicesSource)]) -> HostEffectChoices {
+        HostEffectChoices {
+            items: items
+                .iter()
+                .map(|(name, values, source)| {
+                    (
+                        (*name).to_string(),
+                        ItemChoices {
+                            values: values.iter().map(|value| (*value).to_string()).collect(),
+                            source: *source,
+                        },
+                    )
+                })
                 .collect(),
         }
     }
@@ -3790,6 +3830,113 @@ mod tests {
             .expect("項目の説明がある");
         assert_eq!(item.lines().count(), 2);
         assert!(item.lines().nth(1).unwrap().contains("svg"));
+    }
+
+    #[test]
+    fn describe_effects_carries_the_choices_of_each_item_with_their_source() {
+        // 候補を知らないことが損失の原因である。読み取り経路へ出さなければ、
+        // 要求元は候補の存在そのものに気付けない。
+        let adapter = adapter_with(|_| FakeHost {
+            choices: vec![(
+                "グロー".to_string(),
+                effect_choices(&[
+                    (
+                        "グローの項目1",
+                        &["通常", "加算"],
+                        ChoicesSource::BuiltinTable,
+                    ),
+                    ("グローの項目0", &["円", "四角形"], ChoicesSource::Sidecar),
+                ]),
+            )],
+            ..FakeHost::new()
+        });
+        let result = adapter
+            .describe_effects(&describe_params(&["グロー", "ぼかし"]))
+            .unwrap();
+
+        let described: Vec<(&str, Option<&ItemChoices>)> = result.effects[0]
+            .items
+            .iter()
+            .map(|item| (item.name.as_str(), item.choices.as_ref()))
+            .collect();
+        assert_eq!(
+            described,
+            vec![
+                (
+                    "グローの項目1",
+                    Some(&ItemChoices {
+                        values: vec!["通常".to_string(), "加算".to_string()],
+                        source: ChoicesSource::BuiltinTable,
+                    })
+                ),
+                (
+                    "グローの項目0",
+                    Some(&ItemChoices {
+                        values: vec!["円".to_string(), "四角形".to_string()],
+                        source: ChoicesSource::Sidecar,
+                    })
+                ),
+                // 表に無い項目は null である。空の配列で代えると、「候補が
+                // 1 つも無い項目」と「表に載っていない項目」の区別が付かない。
+                ("グローの項目3", None),
+                ("グローの項目2", None),
+            ],
+            "候補が別の項目へ付いているか、由来が入れ替わっています"
+        );
+        // 表を持たない effect の項目も null になる。
+        assert!(
+            result.effects[1]
+                .items
+                .iter()
+                .all(|item| item.choices.is_none()),
+            "表に無い effect へ候補が付きました"
+        );
+    }
+
+    #[test]
+    fn describe_effects_ignores_a_table_entry_for_an_item_that_does_not_exist_here() {
+        // 利用者は複数の環境で同じサイドカーを使う。この環境のホストが列挙
+        // しない項目は、表に在っても応答には現れない。落とさずに失敗へ倒すと、
+        // 環境をまたぐ配布物が tool を壊す。
+        let adapter = adapter_with(|_| FakeHost {
+            choices: vec![(
+                "ぼかし".to_string(),
+                effect_choices(&[
+                    ("ぼかしの項目0", &["通常"], ChoicesSource::Sidecar),
+                    ("この環境に無い項目", &["値"], ChoicesSource::Sidecar),
+                ]),
+            )],
+            ..FakeHost::new()
+        });
+        let result = adapter
+            .describe_effects(&describe_params(&["ぼかし"]))
+            .unwrap();
+
+        let names: Vec<&str> = result.effects[0]
+            .items
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["ぼかしの項目0"]);
+        assert!(result.effects[0].items[0].choices.is_some());
+    }
+
+    #[test]
+    fn describe_effects_asks_for_the_choices_once_per_effect() {
+        // 候補も効果ごとに 1 度で引く。項目ごとに引くと、同じ表を項目の数だけ
+        // 引き直す。
+        let adapter = adapter();
+        adapter
+            .describe_effects(&describe_params(&["グロー", "標準描画"]))
+            .unwrap();
+
+        let asked = adapter
+            .host
+            .calls()
+            .iter()
+            .filter(|call| **call == "effect_choices")
+            .count();
+        assert_eq!(asked, 2, "効果の数と候補を引いた回数が食い違っています");
     }
 
     #[test]

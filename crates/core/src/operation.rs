@@ -2411,6 +2411,7 @@ mod tests {
                     name: "強さ".to_string(),
                     item_type: crate::effect::EffectItemType::Integer,
                     description: Some("光の強さを指定します".to_string()),
+                    choices: None,
                 }],
             }],
             not_found: vec!["ぐろー".to_string()],

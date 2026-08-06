@@ -603,6 +603,10 @@ mod tests {
             HostEffectHelp::default()
         }
 
+        fn effect_choices(&self, _effect_name: &str) -> crate::read::host::HostEffectChoices {
+            crate::read::host::HostEffectChoices::default()
+        }
+
         fn font_names(&self) -> Result<Vec<String>, ReadError> {
             Ok(Vec::new())
         }

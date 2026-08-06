@@ -566,6 +566,21 @@ fn effect_item_description() -> Value {
         ("name", string()),
         ("item_type", effect_item_type()),
         ("description", nullable_string()),
+        ("choices", nullable(item_choices())),
+    ])
+}
+
+/// 設定項目の選択肢の候補。
+///
+/// 受け付ける値を宣言するものではない。候補に無い値も書き込みは通り、候補に
+/// ある値が必ず通るとも限らない。
+fn item_choices() -> Value {
+    object(&[
+        ("values", array(string())),
+        (
+            "source",
+            json!({ "type": "string", "enum": ["builtin_table", "sidecar"] }),
+        ),
     ])
 }
 
@@ -763,15 +778,15 @@ mod tests {
     use super::*;
     use crate::api::ListInstancesResponse;
     use aviutl2_mcp_core::{
-        AvailableEffect, Cursor, DescribeEffectsResult, DisplayRange, EditInfo, EditOutcome,
-        EffectDescription, EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem,
-        EffectItemDescription, EffectItemType, EffectItemValues, EffectType, EvaluatedItem, Extent,
-        FiniteF64, FrameRange, GetCurrentSceneResult, GridBpm, InstanceId, InstanceInfo,
-        InstanceProject, InstanceState, ItemValue, LayerInfo, ListAvailableEffectsResult,
-        ListFontsResult, ListLayersResult, ListModulesResult, ListObjectAliasesResult,
-        ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType, ObjectAliasSummary,
-        ObjectDetail, ObjectFingerprintInput, ObjectSummary, ObservedSelection, PageMeta,
-        PaletteEntry, Rgba, SceneInfo, SectionRange, SelectionField, SelectionSnapshot,
+        AvailableEffect, ChoicesSource, Cursor, DescribeEffectsResult, DisplayRange, EditInfo,
+        EditOutcome, EffectDescription, EffectFingerprintInput, EffectFlags, EffectInfo,
+        EffectItem, EffectItemDescription, EffectItemType, EffectItemValues, EffectType,
+        EvaluatedItem, Extent, FiniteF64, FrameRange, GetCurrentSceneResult, GridBpm, InstanceId,
+        InstanceInfo, InstanceProject, InstanceState, ItemChoices, ItemValue, LayerInfo,
+        ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
+        ListObjectAliasesResult, ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType,
+        ObjectAliasSummary, ObjectDetail, ObjectFingerprintInput, ObjectSummary, ObservedSelection,
+        PageMeta, PaletteEntry, Rgba, SceneInfo, SectionRange, SelectionField, SelectionSnapshot,
         SelectionState, TrackGroup, TrackInfo, TrackValue,
     };
 
@@ -1189,7 +1204,8 @@ mod tests {
     #[test]
     fn describe_effects_schema_matches_dto() {
         // 説明を持つ effect と持たない effect、説明を持つ項目と持たない項目、
-        // 未知の種別、そして見つからなかった名前を 1 度に通す。
+        // 候補を持つ項目と持たない項目、由来の 2 値、未知の種別、そして
+        // 見つからなかった名前を 1 度に通す。
         let result = DescribeEffectsResult {
             effects: vec![
                 EffectDescription {
@@ -1202,11 +1218,25 @@ mod tests {
                             name: "図形の種類".to_string(),
                             item_type: EffectItemType::Figure,
                             description: Some("図形の種類を選択します".to_string()),
+                            choices: Some(ItemChoices {
+                                values: vec!["円".to_string(), "四角形".to_string()],
+                                source: ChoicesSource::BuiltinTable,
+                            }),
+                        },
+                        EffectItemDescription {
+                            name: "合成モード".to_string(),
+                            item_type: EffectItemType::Select,
+                            description: None,
+                            choices: Some(ItemChoices {
+                                values: vec!["通常".to_string(), "加算".to_string()],
+                                source: ChoicesSource::Sidecar,
+                            }),
                         },
                         EffectItemDescription {
                             name: "未知".to_string(),
                             item_type: EffectItemType::Unknown(42),
                             description: None,
+                            choices: None,
                         },
                     ],
                 },
