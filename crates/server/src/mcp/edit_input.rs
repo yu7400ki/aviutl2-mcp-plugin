@@ -330,6 +330,7 @@ pub enum ItemValueInput {
     /// **移動を消す手段はこれだけである。** 移動を持つ項目へ number や integer を
     /// 書く要求は unsupported_operation となり、移動は消えない。
     /// トラックバー以外の設定項目にはこの形を書けず invalid_argument となる。
+    /// そのとき details.item_type と details.value_kind が種別と値の形を返す。
     /// 項目が現在移動を持つかは get_object が返す track が null かどうかで分かり、
     /// 値も移動を持つ項目でだけ track の形で返る。
     /// mode には AviUtl2 が持つ移動方法の名前を指定する。一覧に無い名前は

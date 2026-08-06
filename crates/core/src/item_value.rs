@@ -92,6 +92,12 @@ pub enum ItemValue {
 }
 
 impl ItemValue {
+    /// [`ItemValue::Unknown`] が名乗る値の形。
+    ///
+    /// 未対応種別の生値は設定項目の種別を引く前に拒否されるため、失敗が運べる
+    /// のは値の形だけである。名乗る名前を 2 か所に書かないための定数である。
+    pub const UNKNOWN_KIND: &'static str = "unknown";
+
     /// 値の形を表す名前を返す。JSON の判別子と同じ表記である。
     ///
     /// 値そのものを含まないため、エラー応答へ載せてよい。
@@ -107,7 +113,7 @@ impl ItemValue {
             ItemValue::Font { .. } => "font",
             ItemValue::Text { .. } => "text",
             ItemValue::Track(_) => "track",
-            ItemValue::Unknown { .. } => "unknown",
+            ItemValue::Unknown { .. } => ItemValue::UNKNOWN_KIND,
         }
     }
 }

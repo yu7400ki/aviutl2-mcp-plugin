@@ -1310,6 +1310,9 @@ impl AviUtl2McpServer {
     /// selector で続けて編集すると precondition_failed となる。
     /// 書き込みを公開していない設定項目種別があり、その場合は unsupported_operation
     /// となる。種別は get_object の item_type で確認できる。
+    /// 設定項目の種別が値の形を受け付けない場合は invalid_argument となり、
+    /// details.item_type に設定項目の種別が、details.value_kind に与えた値の形が入る。
+    /// トラックバー以外の設定項目へ track を書いた場合もこれになる。
     /// 移動を持つトラックバーへ number や integer を書く要求は unsupported_operation
     /// となり details.reason は track_movement_present になる。書けば移動もその
     /// パラメータも消えるためであり、消したい場合は mode を null にした track を送る。

@@ -2,7 +2,7 @@
 
 use crate::alias::{AliasAdmissionError, AliasRejection};
 use crate::read::ReadError;
-use aviutl2_mcp_core::{ErrorCode, ItemWriteError};
+use aviutl2_mcp_core::{ErrorCode, ItemValue, ItemWriteError};
 use serde_json::{Map, Value, json};
 
 /// 応答の補助情報へ載せる文字列の上限文字数。
@@ -749,12 +749,34 @@ impl EditError {
 
 /// 設定項目への書き込み失敗の補助情報を書き込む。
 ///
-/// 載せるのは項目名と失敗の種別だけである。値そのものと、種別の照合に用いた
-/// 表記は要求元の内容であり、応答へ反響させない。種別の名前はパスも文字列も
-/// 含まないため、パス値・文字列値の検証に落ちた場合もそのまま載せられる。
+/// 載せるのは項目名・設定項目の種別・値の形・失敗の種別だけである。値そのものは
+/// 要求元の内容であり、応答へ反響させない。種別の名前と値の形の名前はどちらも
+/// 値を含まないため、パス値・文字列値の検証に落ちた場合もそのまま載せられる。
+///
+/// **種別と値の形は、名前を持たない失敗の弁別子である。** 値の形が種別と対応
+/// しないことと未対応種別の生値は、名前を割り当てる代わりにこの 2 つのキーで
+/// 区別する（[`ItemWriteError::reason`]）。載せなければ、要求元に残るのは
+/// エラーコードと説明の文面だけになり、機械可読な手掛かりが 1 つも無くなる。
 fn fill_item_write_details(details: &mut Map<String, Value>, error: &ItemWriteError) {
-    if let ItemWriteError::ItemNotFound { item } = error {
-        details.insert("item".to_string(), json!(truncate(item)));
+    match error {
+        ItemWriteError::ItemNotFound { item } => {
+            details.insert("item".to_string(), json!(truncate(item)));
+        }
+        ItemWriteError::ValueKindMismatch {
+            item_type,
+            value_kind,
+        } => {
+            details.insert("item_type".to_string(), json!(truncate(item_type)));
+            details.insert("value_kind".to_string(), json!(value_kind));
+        }
+        // 種別を引く前に落ちるため、載せられるのは値の形だけである。
+        ItemWriteError::UnknownValue => {
+            details.insert("value_kind".to_string(), json!(ItemValue::UNKNOWN_KIND));
+        }
+        ItemWriteError::UnsupportedItemType { item_type } => {
+            details.insert("item_type".to_string(), json!(truncate(item_type)));
+        }
+        ItemWriteError::Text(_) | ItemWriteError::Path(_) | ItemWriteError::Track(_) => {}
     }
     if let Some(reason) = error.reason() {
         details.insert("reason".to_string(), json!(reason));
@@ -1490,6 +1512,10 @@ pub(crate) mod tests {
             "effect_name",
             "effect_index",
             "item",
+            // 設定項目の種別と、書き込もうとした値の形。どちらも名前だけであり、
+            // 値も表記も含まない。名前を持たない失敗の弁別子である。
+            "item_type",
+            "value_kind",
             "sdk_operation",
             "retry_requires",
             "mutation_issued",
@@ -1544,6 +1570,48 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn item_write_failures_without_a_reason_carry_a_machine_readable_discriminator() {
+        // 名前を持たない失敗は、種別と値の形で区別する。**どちらも載せなければ、
+        // 要求元に残るのはエラーコードと説明の文面だけになる。**
+        let mismatch = EditError::ItemWrite(ItemWriteError::ValueKindMismatch {
+            item_type: EffectItemType::Check.kind_name(),
+            value_kind: "track",
+        });
+        let details = mismatch.details();
+        assert!(
+            details.get("reason").is_none(),
+            "名前を持つ失敗になりました"
+        );
+        assert_eq!(details["item_type"], json!("check"));
+        assert_eq!(details["value_kind"], json!("track"));
+
+        let unknown = EditError::ItemWrite(ItemWriteError::UnknownValue);
+        let details = unknown.details();
+        assert!(
+            details.get("reason").is_none(),
+            "名前を持つ失敗になりました"
+        );
+        // 種別を引く前に落ちるため、値の形だけが載る。
+        assert_eq!(details["value_kind"], json!("unknown"));
+        assert!(details.get("item_type").is_none());
+
+        // 名前を持たない失敗が、応答の上で互いに区別できる。
+        assert_ne!(mismatch.details(), unknown.details());
+    }
+
+    #[test]
+    fn a_type_that_is_not_writable_names_the_type() {
+        // 名前だけでは、どの種別が書けないのかが分からない。種別の名前は値も
+        // 表記も含まないため、そのまま載せられる。
+        let error = EditError::ItemWrite(ItemWriteError::UnsupportedItemType {
+            item_type: EffectItemType::Scene.kind_name(),
+        });
+        let details = error.details();
+        assert_eq!(details["reason"], json!("item_type_not_writable"));
+        assert_eq!(details["item_type"], json!("scene"));
     }
 
     #[test]
