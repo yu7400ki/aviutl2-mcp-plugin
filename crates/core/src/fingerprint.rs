@@ -226,7 +226,6 @@ fn write_item_value(input: &mut FingerprintInput, value: &ItemValue) {
             input.boolean("item_value.track.accelerate", track.accelerate);
             input.boolean("item_value.track.decelerate", track.decelerate);
             input.boolean("item_value.track.twopoint", track.twopoint);
-            input.boolean("item_value.track.timecontrol", track.timecontrol);
         }
         ItemValue::Unknown { raw } => {
             input.text("item_value.kind", "unknown");
@@ -640,6 +639,75 @@ mod tests {
                 raw: "x".to_string()
             })
         );
+    }
+
+    #[test]
+    fn effect_fingerprint_distinguishes_every_part_of_a_movement() {
+        // 独立に生成した 2 つを比べる property test では、1 つのフィールドだけが
+        // 違う組がほとんど現れない。材料から 1 つ落としても気付けないため、
+        // 差分を 1 つずつ作って突き合わせる。
+        let base = crate::track_value::TrackValue {
+            values: vec![
+                FiniteF64::try_new(0.0).unwrap(),
+                FiniteF64::try_new(100.0).unwrap(),
+            ],
+            mode: Some("直線移動".to_string()),
+            params: vec![FiniteF64::try_new(15.0).unwrap()],
+            accelerate: false,
+            decelerate: false,
+            twopoint: false,
+        };
+        let make = |track: crate::track_value::TrackValue| {
+            effect_with(&[EffectItem {
+                name: "項目".to_string(),
+                item_type: EffectItemType::Number,
+                value: ItemValue::Track(track),
+                track: None,
+            }])
+        };
+        let variants = [
+            crate::track_value::TrackValue {
+                values: vec![
+                    FiniteF64::try_new(0.0).unwrap(),
+                    FiniteF64::try_new(50.0).unwrap(),
+                ],
+                ..base.clone()
+            },
+            crate::track_value::TrackValue {
+                mode: Some("曲線移動".to_string()),
+                ..base.clone()
+            },
+            crate::track_value::TrackValue {
+                mode: None,
+                ..base.clone()
+            },
+            crate::track_value::TrackValue {
+                params: vec![FiniteF64::try_new(30.0).unwrap()],
+                ..base.clone()
+            },
+            crate::track_value::TrackValue {
+                accelerate: true,
+                ..base.clone()
+            },
+            crate::track_value::TrackValue {
+                decelerate: true,
+                ..base.clone()
+            },
+            crate::track_value::TrackValue {
+                twopoint: true,
+                ..base.clone()
+            },
+        ];
+        let baseline = make(base.clone());
+        for variant in variants {
+            assert_ne!(
+                make(variant.clone()),
+                baseline,
+                "{variant:?} が材料に入っていません"
+            );
+        }
+        // 同じ値は同じ digest になる。差分の検出が「毎回違う」ではないことを示す。
+        assert_eq!(make(base.clone()), baseline);
     }
 
     #[test]

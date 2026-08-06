@@ -14,6 +14,8 @@ pub mod identity;
 #[cfg(windows)]
 pub mod lifecycle;
 #[cfg(windows)]
+pub mod movement;
+#[cfg(windows)]
 pub mod pipe;
 #[cfg(windows)]
 pub mod project;

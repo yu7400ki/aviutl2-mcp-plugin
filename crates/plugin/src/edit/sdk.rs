@@ -443,6 +443,10 @@ impl SceneEditor for SdkSceneEditor<'_> {
         Ok(to_inclusive_sections(ranges))
     }
 
+    fn movements(&self) -> Vec<String> {
+        crate::movement::movements().to_vec()
+    }
+
     fn create_object_section(
         &self,
         _ticket: MutationTicket<'_>,

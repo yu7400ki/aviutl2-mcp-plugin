@@ -22,7 +22,7 @@ use crate::number::FiniteF64;
 use crate::render::RenderFrameParams;
 use crate::selector::ObjectSelector;
 use crate::text_codec::{decode_host_text, encode_host_text};
-use crate::track_value::{TrackValue, decode_track_value, encode_track_value};
+use crate::track_value::{TrackValue, TrackWriteTarget, decode_track_value, encode_track_value};
 use crate::validation::{
     MAX_PATH_UTF16_UNITS, PathSyntaxError, validate_object_alias_name, validate_path,
 };
@@ -403,19 +403,22 @@ fn item_value_strategy() -> impl Strategy<Value = ItemValue> {
     ]
 }
 
-/// 符号化が受け付ける移動方法の名前。
+/// 移動方法の名前。
 ///
-/// 区切り文字と制御文字を含まず、数値としても読めない名前だけを生成する。
-/// これらは符号化が拒否する形であり、往復の対象にならない。
+/// **符号化が拒む形は生成しない。** 区切り文字と制御文字を含む名前と、数値として
+/// 読める名前は、どちらも符号化と復号の**両方**が拒む（片側だけが拒む形は
+/// もう無い）。往復の性質はそれらの外で成り立つものであり、生成しても
+/// 「符号化できない」を数えるだけになる。拒むこと自体は単体検査が固定する。
 fn track_mode_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("直線移動".to_string()),
         Just("曲線移動".to_string()),
         Just("ランダム移動".to_string()),
         Just("直線移動(時間制御)".to_string()),
+        Just("再生範囲".to_string()),
         string_regex(r"[^,|\pC]{1,8}").unwrap(),
     ]
-    .prop_filter("符号化と復号が受け付ける名前", |mode| {
+    .prop_filter("符号化も復号も受け付ける名前", |mode| {
         !mode.is_empty() && mode.trim().parse::<f64>().is_err()
     })
 }
@@ -428,9 +431,6 @@ fn track_number_strategy() -> impl Strategy<Value = FiniteF64> {
 }
 
 /// 符号化が受け付ける移動の値。
-///
-/// 時間制御の指定は移動方法の名前から導く。食い違う組は符号化が拒否するため、
-/// 往復の対象にならない。
 fn track_value_strategy() -> impl Strategy<Value = TrackValue> {
     let moving = (
         prop::collection::vec(track_number_strategy(), 2..6),
@@ -439,17 +439,13 @@ fn track_value_strategy() -> impl Strategy<Value = TrackValue> {
         any::<(bool, bool, bool)>(),
     )
         .prop_map(
-            |(values, mode, params, (accelerate, decelerate, twopoint))| {
-                let timecontrol = mode.ends_with("(時間制御)");
-                TrackValue {
-                    values,
-                    mode: Some(mode),
-                    params,
-                    accelerate,
-                    decelerate,
-                    twopoint,
-                    timecontrol,
-                }
+            |(values, mode, params, (accelerate, decelerate, twopoint))| TrackValue {
+                values,
+                mode: Some(mode),
+                params,
+                accelerate,
+                decelerate,
+                twopoint,
             },
         );
     let still = track_number_strategy().prop_map(|value| TrackValue {
@@ -459,9 +455,37 @@ fn track_value_strategy() -> impl Strategy<Value = TrackValue> {
         accelerate: false,
         decelerate: false,
         twopoint: false,
-        timecontrol: false,
     });
     prop_oneof![moving, still]
+}
+
+/// 生成した値をそのまま受け入れる対象。
+fn track_target_for(value: &TrackValue) -> (Vec<String>, usize) {
+    (
+        value.mode.clone().into_iter().collect(),
+        value.values.len().saturating_sub(1),
+    )
+}
+
+/// ホストが返し得る文字列を模した並び。
+///
+/// `.*` では書式の境目に当たる文字がほとんど現れず、復号の分岐を踏めない。
+/// 区切り・符号・指数・制御文字を含む字母から組み立てて、境目を狙って踏む。
+fn track_raw_strategy() -> impl Strategy<Value = String> {
+    let alphabet = prop_oneof![
+        Just(','),
+        Just('|'),
+        Just('.'),
+        Just('-'),
+        Just('0'),
+        Just('1'),
+        Just('e'),
+        Just(' '),
+        Just('直'),
+        Just('\u{1b}'),
+        Just('\0'),
+    ];
+    prop::collection::vec(alphabet, 0..12).prop_map(|chars| chars.into_iter().collect())
 }
 
 fn track_info_strategy() -> impl Strategy<Value = TrackInfo> {
@@ -820,7 +844,14 @@ proptest! {
     ) {
         // 種別と値のどの組み合わせでも panic せず、可否を返す。
         let item_type = EffectItemType::from_raw(raw);
-        let encoded = encode_item_value(&item_type, &value);
+        // 移動は対象を見なければ判定できない。生成した値をそのまま受け入れる
+        // 対象を渡し、対象で決まる規則ではなく符号化そのものを見る。
+        let (movements, section_count) = match &value {
+            ItemValue::Track(track) => track_target_for(track),
+            _ => (Vec::new(), 0),
+        };
+        let target = TrackWriteTarget { section_count, movements: &movements };
+        let encoded = encode_item_value(&item_type, &value, target);
         match &value {
             // 未対応種別の生値は種別によらず必ず拒否する。
             ItemValue::Unknown { .. } => {
@@ -847,18 +878,23 @@ proptest! {
     fn track_values_round_trip_through_the_codec(value in track_value_strategy()) {
         // 読み取りが返した値をそのまま書き戻せることは設定項目の契約である。
         // 移動だけがその外に居ると、区間ごとの値を読めても書けない。
-        let encoded = encode_track_value(&value).expect("生成した値は符号化できる");
+        let (movements, section_count) = track_target_for(&value);
+        let target = TrackWriteTarget { section_count, movements: &movements };
+        let encoded = encode_track_value(&value, target).expect("生成した値は符号化できる");
         prop_assert_eq!(decode_track_value(&encoded), Some(value));
     }
 
     #[test]
-    fn track_decoding_answers_for_any_string(raw in ".*") {
+    fn track_decoding_answers_for_any_string(raw in track_raw_strategy()) {
         // 復号が受け取るのはホストが返した文字列である。読めない並びに対して
         // 落ちず、読めなかったことを返す。
-        if let Some(decoded) = decode_track_value(&raw) {
-            // 読めた値は書き戻せる。読めるのに書けない形を作らない。
-            prop_assert!(encode_track_value(&decoded).is_ok());
-        }
+        let Some(decoded) = decode_track_value(&raw) else {
+            return Ok(());
+        };
+        // 読めた値は、対象さえ合えば書き戻せる。書式として書けない形は読まない。
+        let (movements, section_count) = track_target_for(&decoded);
+        let target = TrackWriteTarget { section_count, movements: &movements };
+        prop_assert!(encode_track_value(&decoded, target).is_ok(), "{raw:?}");
     }
 
     #[test]
@@ -1162,7 +1198,8 @@ proptest! {
         let requested = ItemValue::Text { value: value.clone() };
         prop_assume!(validate_item_value(&requested).is_ok());
 
-        let encoded = encode_item_value(&EffectItemType::Text, &requested)
+        let target = TrackWriteTarget { section_count: 0, movements: &[] };
+        let encoded = encode_item_value(&EffectItemType::Text, &requested, target)
             .expect("検証を通った値は符号化できる");
         prop_assert_eq!(host_store(&encoded), value.replace("\r\n", "\n"));
     }

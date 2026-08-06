@@ -320,12 +320,15 @@ pub enum ItemValueInput {
     /// トラックバーに数値を書くと全区間へ同じ値が入るため、中間点で値を変えるには
     /// この形を使う。
     /// values は区間の境界ごとの値で、区間数 + 1 個を指定する。中間点が 2 個なら
-    /// 3 区間となり 4 個である。個数が合わない指定は invalid_argument となる。
+    /// 3 区間となり 4 個である。区間の数は get_object が返す sections の件数である。
+    /// 個数が合わない指定は invalid_argument となる。
     /// mode を null にし values を 1 要素にすると移動が消えて静的な値になる。
     /// **移動を消す手段はこれだけである。**
-    /// mode には対象の設定項目が持つ移動方法の名前を指定する。一覧に無い名前は
+    /// mode には AviUtl2 が持つ移動方法の名前を指定する。一覧に無い名前は
     /// 受け付けない。時間制御はフラグではなく移動方法の名前の変種が担うため、
-    /// timecontrol を真にするには時間制御の変種を mode に指定する。
+    /// 時間制御を使うにはその変種の名前を mode に指定する。
+    /// get_object の track が返す timecontrol はホストの報告であり、ここで
+    /// 指定する先は無い。
     /// params を空にすると移動方法ごとの既定値が入る。
     Track {
         /// 区間の境界ごとの値。
@@ -341,8 +344,6 @@ pub enum ItemValueInput {
         decelerate: bool,
         /// 中間点を無視するか。
         twopoint: bool,
-        /// 時間制御が有効か。mode が時間制御の変種であるときだけ真にできる。
-        timecontrol: bool,
     },
     /// 未対応種別の生値。読み取りは返すが、書き込みには指定できない。
     Unknown {
@@ -380,7 +381,6 @@ impl ItemValueInput {
                 accelerate,
                 decelerate,
                 twopoint,
-                timecontrol,
             } => ItemValue::Track(TrackValue {
                 values: finite_values("values", values)?,
                 mode: mode.clone(),
@@ -388,7 +388,6 @@ impl ItemValueInput {
                 accelerate: *accelerate,
                 decelerate: *decelerate,
                 twopoint: *twopoint,
-                timecontrol: *timecontrol,
             }),
             ItemValueInput::Unknown { raw } => ItemValue::Unknown { raw: raw.clone() },
         })
@@ -1999,7 +1998,6 @@ mod tests {
                 accelerate: false,
                 decelerate: false,
                 twopoint: false,
-                timecontrol: false,
             }),
             ItemValue::Track(_) => ItemValue::Unknown {
                 raw: "future=1".to_string(),
@@ -2060,7 +2058,6 @@ mod tests {
             "accelerate": false,
             "decelerate": false,
             "twopoint": false,
-            "timecontrol": false,
         }))
         .expect("受理される");
         let value = input.to_value().expect("変換できる");
@@ -2073,7 +2070,6 @@ mod tests {
                 accelerate: false,
                 decelerate: false,
                 twopoint: false,
-                timecontrol: false,
             })
         );
         assert_eq!(aviutl2_mcp_core::validate_item_value(&value), Ok(()));
@@ -2090,7 +2086,6 @@ mod tests {
             accelerate: false,
             decelerate: false,
             twopoint: false,
-            timecontrol: false,
         };
         for input in [
             track(vec![0.0, f64::INFINITY], Vec::new()),

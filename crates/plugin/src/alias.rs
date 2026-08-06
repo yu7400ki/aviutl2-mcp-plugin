@@ -338,7 +338,7 @@ fn read_alias(dir: &AliasDirectory, name: &str) -> Result<String, AliasRejection
 /// 上限は開いた直後の大きさで判定し、読み取り自体にも同じ上限を掛ける。判定と
 /// 読み取りの間にファイルが伸びても、上限を超えて読むことはない。上限を超えて
 /// いれば `Ok(None)` を返す。
-fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Option<Vec<u8>>> {
+pub(crate) fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Option<Vec<u8>>> {
     let file = File::open(path)?;
     if file.metadata()?.len() > limit {
         return Ok(None);
@@ -356,7 +356,7 @@ fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Option<Vec<u8>>> {
 /// 深さの判定はパースより先に行う。パースそのものは深さで落ちないが、出来上
 /// がった表を解放する時点でスタックが尽きる。**受け取ってしまってからでは
 /// 捨てることもできない。**
-fn parse_table(text: &str) -> Option<Table> {
+pub(crate) fn parse_table(text: &str) -> Option<Table> {
     if !section_depth_within_limit(text) {
         return None;
     }

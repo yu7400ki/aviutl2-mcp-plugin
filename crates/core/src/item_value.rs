@@ -5,7 +5,8 @@ use crate::error::ErrorCode;
 use crate::number::FiniteF64;
 use crate::text_codec::encode_host_text;
 use crate::track_value::{
-    TrackValue, TrackValueError, decode_track_value, encode_track_value, track_read_back_matches,
+    TrackValue, TrackValueError, TrackWriteTarget, decode_track_value, encode_track_value,
+    track_read_back_matches, validate_track_syntax,
 };
 use crate::validation::{
     PathSyntaxError, TextSyntaxError, limit_item_value_bytes, validate_item_text,
@@ -378,11 +379,18 @@ impl ItemWrite {
 /// 2. `item` が `items` に存在することを確認する
 /// 3. 種別への書き込みが公開されているかを確認する
 /// 4. 種別と値の形が対応するかを確認する
-/// 5. 書き込む文字列へ変換し、読み直しの照合のしかたを種別から決める
+/// 5. 書き込む文字列へ変換し、読み直しの照合のしかたを種別と値から決める
+///
+/// `target` は移動を書き込む対象の性質である。**省略できる形にしない。**
+/// 移動の検証は対象を見なければ成立せず、渡さずに済む経路が 1 つでもあると、
+/// そこがホストを落とす文字列を組み立てる経路になる。移動を含まない値では
+/// 参照されないが、それでも受け取るのは「渡さない呼び出し」を書けなくする
+/// ためである。
 pub fn prepare_item_write(
     items: &[AvailableEffectItem],
     item: &str,
     value: &ItemValue,
+    target: TrackWriteTarget<'_>,
 ) -> Result<ItemWrite, ItemWriteError> {
     if matches!(value, ItemValue::Unknown { .. }) {
         return Err(ItemWriteError::UnknownValue);
@@ -394,7 +402,7 @@ pub fn prepare_item_write(
             item: item.to_string(),
         })?;
     Ok(ItemWrite {
-        value: encode_item_value(&entry.item_type, value)?,
+        value: encode_item_value(&entry.item_type, value, target)?,
         read_back: read_back_check(&entry.item_type, value),
     })
 }
@@ -410,6 +418,7 @@ pub fn prepare_item_write(
 pub(crate) fn encode_item_value(
     item_type: &EffectItemType,
     value: &ItemValue,
+    target: TrackWriteTarget<'_>,
 ) -> Result<String, ItemWriteError> {
     if matches!(value, ItemValue::Unknown { .. }) {
         return Err(ItemWriteError::UnknownValue);
@@ -425,16 +434,42 @@ pub(crate) fn encode_item_value(
             value_kind: value.kind(),
         });
     }
-    encode_value(value)
+    encode_value(value, target)
 }
 
-/// 種別を伴わずに判定できる範囲だけを検証する。
+/// 種別も対象も伴わずに判定できる範囲だけを検証する。
 ///
 /// 対象 effect の設定項目一覧を持たない層が、要求を受け付けた時点で
 /// 呼ぶための入口である。種別との対応は [`encode_item_value`] が見る。
+///
+/// **移動については書式の規則しか見ない。** 値の個数は対象の区間の数で決まり、
+/// 移動方法の名前は実行環境が受け付ける一覧で決まる。どちらも要求内容だけでは
+/// 判定できないため、[`prepare_item_write`] が対象を伴って見る。**ここを通った
+/// ことは、移動を書き込んでよいことを意味しない。**
 pub fn validate_item_value(value: &ItemValue) -> Result<(), ItemWriteError> {
-    encode_value(value).map(|_| ())
+    match value {
+        ItemValue::Track(track) => validate_track_syntax(track),
+        ItemValue::Unknown { .. }
+        | ItemValue::Integer { .. }
+        | ItemValue::Number { .. }
+        | ItemValue::Bool { .. }
+        | ItemValue::Text { .. }
+        | ItemValue::Color { .. }
+        | ItemValue::Choice { .. }
+        | ItemValue::Font { .. }
+        | ItemValue::File { .. }
+        | ItemValue::Folder { .. } => encode_value(value, NO_TRACK_TARGET).map(|_| ()),
+    }
 }
+
+/// 移動を含まない値の符号化へ渡す対象。
+///
+/// 参照されないことは、この定数を使う腕が移動を含まない値だけであることで
+/// 保証される。移動が紛れ込めば、区間数 0 と空の一覧が両方の検証を落とす。
+const NO_TRACK_TARGET: TrackWriteTarget<'static> = TrackWriteTarget {
+    section_count: 0,
+    movements: &[],
+};
 
 /// 書き込みを公開している種別か。
 ///
@@ -484,13 +519,16 @@ fn is_writable(item_type: &EffectItemType) -> bool {
 ///   正規化せず、テキストが渡すのは既に符号化済みの文字列であり、読み直しは
 ///   同じ表記で返る
 ///
+/// **値の形を先に見る。** トラックバーの種別は数値と移動の 2 通りの表記を
+/// 受け付けるため、種別だけでは比べ方が決まらない。移動を数値として比べると、
+/// 正しい書き込みが「数値として読めない」として失敗になる。
+///
 /// 書き込みを公開していない種別は照合しない。公開の可否は [`is_writable`] が
 /// 別に決めており、そちらで拒否されるためここへ由来する [`ItemWrite`] は生まれ
-/// ない。
-///
-/// **値の形も見る。** トラックバーの種別は数値と移動の 2 通りの表記を受け付ける
-/// ため、種別だけでは比べ方が決まらない。移動を数値として比べると、正しい
-/// 書き込みが「数値として読めない」として失敗になる。
+/// ない。**この対応が成り立つのは移動を含まない値についてだけである**——移動は
+/// 種別を見る前に答えを返すため、公開していない種別に対しても
+/// [`ReadBackCheck::Compare`] になる。その組は [`accepts`] が先に拒むため
+/// [`ItemWrite`] にはならないが、この関数を直接呼べば観測できる。
 ///
 /// **`_` を使わない網羅 `match` である。** 種別を足したときも値の形を足したとき
 /// も、照合するかを決めないまま既定へ落ちることがない。
@@ -586,14 +624,14 @@ fn accepts(item_type: &EffectItemType, value: &ItemValue) -> bool {
 /// はずの値を我々の側が拒むことになる。受け付けられなかったことは、書き込んだ
 /// 直後の読み直しが要求と違う値を返すことで分かる（[`read_back_check`]）。
 /// 観測に基づく規則だけで判定できる場所へ判定を置く、ということである。
-fn encode_value(value: &ItemValue) -> Result<String, ItemWriteError> {
+fn encode_value(value: &ItemValue, target: TrackWriteTarget<'_>) -> Result<String, ItemWriteError> {
     match value {
         ItemValue::Unknown { .. } => Err(ItemWriteError::UnknownValue),
         ItemValue::Integer { value } => Ok(value.to_string()),
         ItemValue::Number { value } => Ok(value.to_string()),
         ItemValue::Bool { value } => Ok(if *value { "1" } else { "0" }.to_string()),
         ItemValue::Text { value } => encode_multiline_text(value),
-        ItemValue::Track(track) => encode_track_value(track),
+        ItemValue::Track(track) => encode_track_value(track, target),
         ItemValue::Color { value } | ItemValue::Choice { value } => encode_text(value),
         ItemValue::Font { name } => encode_text(name),
         ItemValue::File { path } | ItemValue::Folder { path } => encode_path(path),
@@ -646,6 +684,40 @@ mod tests {
     use super::*;
     use crate::error::REASON_VALUES;
     use crate::validation::{MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS};
+
+    /// 検査で使う移動方法の一覧。
+    fn sample_movements() -> Vec<String> {
+        vec!["直線移動".to_string(), "曲線移動".to_string()]
+    }
+
+    /// 区間 1 個の対象。標本の移動は 2 要素であり、この対象へ書ける。
+    fn sample_target(movements: &[String]) -> TrackWriteTarget<'_> {
+        TrackWriteTarget {
+            section_count: 1,
+            movements,
+        }
+    }
+
+    /// 対象を伴わない呼び出しを検査の側で綴らないための包み。
+    ///
+    /// 製品コードは対象を必ず渡す。検査だけが同じ対象を何度も書くのを避ける。
+    fn encoded_value(
+        item_type: &EffectItemType,
+        value: &ItemValue,
+    ) -> Result<String, ItemWriteError> {
+        let movements = sample_movements();
+        encode_item_value(item_type, value, sample_target(&movements))
+    }
+
+    /// [`prepare_item_write`] を標本の対象で呼ぶ。
+    fn prepared_write(
+        items: &[AvailableEffectItem],
+        item: &str,
+        value: &ItemValue,
+    ) -> Result<ItemWrite, ItemWriteError> {
+        let movements = sample_movements();
+        prepare_item_write(items, item, value, sample_target(&movements))
+    }
 
     /// variant を表す名前を返す。
     ///
@@ -814,7 +886,6 @@ mod tests {
             accelerate: false,
             decelerate: false,
             twopoint: false,
-            timecontrol: false,
         }
     }
 
@@ -882,7 +953,6 @@ mod tests {
                 "accelerate": false,
                 "decelerate": false,
                 "twopoint": false,
-                "timecontrol": false,
             })
         );
     }
@@ -899,17 +969,17 @@ mod tests {
         {
             let accepted = item_type.evaluated_kind() == Some(EvaluatedItemKind::Track);
             assert_eq!(
-                encode_item_value(item_type, &value).is_ok(),
+                encoded_value(item_type, &value).is_ok(),
                 accepted,
                 "{item_type} が移動を受け付けるかが評価の種別と食い違います"
             );
         }
         assert_eq!(
-            encode_item_value(&EffectItemType::Number, &value),
+            encoded_value(&EffectItemType::Number, &value),
             Ok("-500,500,直線移動,0".to_string())
         );
         assert_eq!(
-            encode_item_value(&EffectItemType::Check, &value),
+            encoded_value(&EffectItemType::Check, &value),
             Err(ItemWriteError::ValueKindMismatch {
                 item_type: "check".to_string(),
                 value_kind: "track",
@@ -925,8 +995,8 @@ mod tests {
             name: "X".to_string(),
             item_type: EffectItemType::Number,
         }];
-        let write = prepare_item_write(&items, "X", &ItemValue::Track(sample_track()))
-            .expect("移動の書き込み");
+        let write =
+            prepared_write(&items, "X", &ItemValue::Track(sample_track())).expect("移動の書き込み");
         assert_eq!(
             write.read_back(),
             ReadBackCheck::Compare(ReadBackComparison::Track)
@@ -942,7 +1012,7 @@ mod tests {
             Some(false)
         );
 
-        let numeric = prepare_item_write(
+        let numeric = prepared_write(
             &items,
             "X",
             &ItemValue::Number {
@@ -1116,7 +1186,7 @@ mod tests {
             value: "文字列".to_string(),
         };
         !matches!(
-            encode_item_value(item_type, &probe),
+            encoded_value(item_type, &probe),
             Err(ItemWriteError::UnsupportedItemType { .. })
         )
     }
@@ -1125,7 +1195,7 @@ mod tests {
     fn write_accepts_the_documented_pairs() {
         for (item_type, value, encoded) in writable_pairs() {
             assert_eq!(
-                encode_item_value(&item_type, &value),
+                encoded_value(&item_type, &value),
                 Ok(encoded.to_string()),
                 "{item_type}"
             );
@@ -1143,7 +1213,7 @@ mod tests {
             .chain(non_writable_item_types())
         {
             assert_eq!(
-                encode_item_value(&item_type, &value),
+                encoded_value(&item_type, &value),
                 Err(ItemWriteError::UnknownValue),
                 "{item_type}"
             );
@@ -1154,7 +1224,7 @@ mod tests {
         );
         // 設定項目の実在確認より先に拒否する。
         assert_eq!(
-            prepare_item_write(&[], "存在しない項目", &value),
+            prepared_write(&[], "存在しない項目", &value),
             Err(ItemWriteError::UnknownValue)
         );
     }
@@ -1169,7 +1239,7 @@ mod tests {
                 continue;
             }
             assert_eq!(
-                encode_item_value(&item_type, &mismatched),
+                encoded_value(&item_type, &mismatched),
                 Err(ItemWriteError::ValueKindMismatch {
                     item_type: item_type.kind_name(),
                     value_kind: "text",
@@ -1232,7 +1302,7 @@ mod tests {
         ];
         for item_type in non_writable_item_types() {
             for value in &values {
-                let error = encode_item_value(&item_type, value)
+                let error = encoded_value(&item_type, value)
                     .expect_err("公開しない種別への書き込みが受理されました");
                 assert_eq!(
                     error,
@@ -1312,12 +1382,12 @@ mod tests {
             },
         ];
         for value in cases {
-            let select = encode_item_value(&EffectItemType::Select, &value);
+            let select = encoded_value(&EffectItemType::Select, &value);
             for item_type in choice_item_types() {
                 if item_type == EffectItemType::Select {
                     continue;
                 }
-                let other = encode_item_value(&item_type, &value);
+                let other = encoded_value(&item_type, &value);
                 // 種別名だけは異なるため、エラーはその点を除いて比べる。
                 match (&select, &other) {
                     (Ok(select), Ok(other)) => {
@@ -1404,7 +1474,7 @@ mod tests {
         let encoded = "1 行目\\n2 行目\\n\t字下げ".to_string();
         for item_type in [EffectItemType::Text, EffectItemType::String] {
             assert_eq!(
-                encode_item_value(
+                encoded_value(
                     &item_type,
                     &ItemValue::Text {
                         value: value.clone()
@@ -1426,7 +1496,7 @@ mod tests {
             (r"\", r"\\"),
         ] {
             assert_eq!(
-                encode_item_value(
+                encoded_value(
                     &EffectItemType::Text,
                     &ItemValue::Text {
                         value: value.to_string(),
@@ -1447,7 +1517,7 @@ mod tests {
         };
         let error = ItemWriteError::Text(TextSyntaxError::LoneCarriageReturn);
         assert_eq!(
-            encode_item_value(&EffectItemType::Text, &rejected),
+            encoded_value(&EffectItemType::Text, &rejected),
             Err(error.clone())
         );
         assert_eq!(validate_item_value(&rejected), Err(error.clone()));
@@ -1455,7 +1525,7 @@ mod tests {
         assert_eq!(error.reason(), Some("lone_carriage_return"));
 
         assert_eq!(
-            encode_item_value(
+            encoded_value(
                 &EffectItemType::Text,
                 &ItemValue::Text {
                     value: "1 行目\r\n2 行目".to_string(),
@@ -1601,7 +1671,7 @@ mod tests {
             let value = ItemValue::Number {
                 value: FiniteF64::try_new(raw).unwrap(),
             };
-            let encoded = encode_item_value(&EffectItemType::Number, &value).unwrap();
+            let encoded = encoded_value(&EffectItemType::Number, &value).unwrap();
             assert!(
                 !encoded.contains('e') && !encoded.contains('E'),
                 "指数表記になりました: {encoded}"
@@ -1618,11 +1688,11 @@ mod tests {
     #[test]
     fn write_encodes_check_as_zero_or_one() {
         assert_eq!(
-            encode_item_value(&EffectItemType::Check, &ItemValue::Bool { value: false }),
+            encoded_value(&EffectItemType::Check, &ItemValue::Bool { value: false }),
             Ok("0".to_string())
         );
         assert_eq!(
-            encode_item_value(&EffectItemType::Check, &ItemValue::Bool { value: true }),
+            encoded_value(&EffectItemType::Check, &ItemValue::Bool { value: true }),
             Ok("1".to_string())
         );
     }
@@ -1641,7 +1711,7 @@ mod tests {
         ];
 
         assert_eq!(
-            prepare_item_write(
+            prepared_write(
                 &items,
                 "X",
                 &ItemValue::Number {
@@ -1652,7 +1722,7 @@ mod tests {
             Ok("1.5".to_string())
         );
         assert_eq!(
-            prepare_item_write(
+            prepared_write(
                 &items,
                 "Y",
                 &ItemValue::Number {
@@ -1664,7 +1734,7 @@ mod tests {
             })
         );
         assert_eq!(
-            prepare_item_write(
+            prepared_write(
                 &items,
                 "シーン",
                 &ItemValue::Text {
@@ -1815,7 +1885,7 @@ mod tests {
                 item_type: EffectItemType::Color,
             },
         ];
-        let choice = prepare_item_write(
+        let choice = prepared_write(
             &items,
             "図形の種類",
             &ItemValue::Choice {
@@ -1830,7 +1900,7 @@ mod tests {
         assert_eq!(choice.read_back_matches("四角形"), Some(true));
         assert_eq!(choice.read_back_matches("円"), Some(false));
 
-        let color = prepare_item_write(
+        let color = prepared_write(
             &items,
             "色",
             &ItemValue::Color {
@@ -1856,11 +1926,10 @@ mod tests {
             item_type: EffectItemType::Check,
         }];
         let write =
-            prepare_item_write(&items, "反転", &ItemValue::Bool { value: true }).expect("書き込み");
+            prepared_write(&items, "反転", &ItemValue::Bool { value: true }).expect("書き込み");
         assert_eq!(
             write.value(),
-            encode_item_value(&EffectItemType::Check, &ItemValue::Bool { value: true })
-                .expect("変換")
+            encoded_value(&EffectItemType::Check, &ItemValue::Bool { value: true }).expect("変換")
         );
         assert_eq!(
             write.read_back(),
@@ -1888,14 +1957,14 @@ mod tests {
         // 設定値そのものは応答へ反響させない。
         let secret = "秘密の値";
         let errors = [
-            encode_item_value(
+            encoded_value(
                 &EffectItemType::Integer,
                 &ItemValue::Text {
                     value: secret.to_string(),
                 },
             )
             .unwrap_err(),
-            encode_item_value(
+            encoded_value(
                 &EffectItemType::Scene,
                 &ItemValue::Text {
                     value: secret.to_string(),

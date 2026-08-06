@@ -432,6 +432,14 @@ pub(crate) struct FakeEditHost {
     layer_names: Mutex<Vec<Option<String>>>,
     /// 設定項目の書き込みへ渡された値を、渡された順に覚える。
     item_values: Mutex<Vec<String>>,
+    /// ホストが受け付ける移動方法の名前。
+    movements: Mutex<Vec<String>>,
+    /// 実機ならプロセスを落としていた移動方法を、渡された順に覚える。
+    ///
+    /// **panic だけに頼らない。** 編集の入口は panic を捕捉して失敗の応答へ
+    /// 畳むため、adapter を通す経路では「落ちる入力が通り抜けたこと」が
+    /// 内部失敗と見分けられなくなる。記録は捕捉に飲まれない。
+    fatal_movements: Mutex<Vec<String>>,
     /// 登録済みエイリアスを収めたデータディレクトリ。
     ///
     /// 既定は `None` である。設定ハンドルを初期化できない環境がそのまま既定で
@@ -473,6 +481,8 @@ impl FakeEditHost {
             calls: Mutex::new(Vec::new()),
             layer_names: Mutex::new(Vec::new()),
             item_values: Mutex::new(Vec::new()),
+            movements: Mutex::new(TRACK_MODES.iter().map(|name| name.to_string()).collect()),
+            fatal_movements: Mutex::new(Vec::new()),
             alias_data_dir: Mutex::new(None),
         }
     }
@@ -541,6 +551,28 @@ impl FakeEditHost {
     /// 組み立て直していれば、ここに現れる文字列が元値と一致しなくなる。
     pub(crate) fn item_value_arguments(&self) -> Vec<String> {
         self.item_values.lock().unwrap().clone()
+    }
+
+    /// ホストが受け付ける移動方法の名前を差し替える。
+    ///
+    /// 空にすると「一覧を引けない環境」になる。実機では設定ファイルを読めない
+    /// 場合がこれにあたる。
+    pub(crate) fn set_movements(&self, movements: Vec<String>) {
+        *self.movements.lock().unwrap() = movements;
+    }
+
+    /// 実機ならプロセスを落としていた移動方法を、渡された順に返す。
+    ///
+    /// **空でなければ、検証を通り抜けた入力がホストへ届いている。** panic は
+    /// 編集の入口が捕捉して失敗の応答へ畳むため、応答だけを見る検査では
+    /// 内部失敗と区別できない。この記録は捕捉に飲まれない。
+    pub(crate) fn fatal_movement_writes(&self) -> Vec<String> {
+        self.fatal_movements.lock().unwrap().clone()
+    }
+
+    /// 実機ならプロセスを落としていた移動方法を覚える。
+    fn record_fatal_movement(&self, mode: String) {
+        self.fatal_movements.lock().unwrap().push(mode);
     }
 
     /// レイヤーのロック状態を切り替える。
@@ -1467,6 +1499,10 @@ impl SceneEditor for FakeSceneEditor<'_> {
             .sections())
     }
 
+    fn movements(&self) -> Vec<String> {
+        self.host.movements.lock().unwrap().clone()
+    }
+
     fn create_object_section(
         &self,
         _ticket: MutationTicket<'_>,
@@ -1627,10 +1663,18 @@ impl SceneEditor for FakeSceneEditor<'_> {
         // フォント名の妥当性は登録済みの一覧で決まる。種別だけでは書き換えの
         // 結果が決まらない設定項目がある。
         let fonts = self.host.fonts.clone();
+        let movements = self.host.movements.lock().unwrap().clone();
+        let host = self.host;
         self.with_effect(effect, move |effect| {
-            if let Some(entry) = effect.items.iter_mut().find(|entry| entry.name == item)
-                && let Some(written) = host_write(&entry.item_type, &value, &fonts)
-            {
+            let Some(entry) = effect.items.iter_mut().find(|entry| entry.name == item) else {
+                return;
+            };
+            // 落ちる入力がここへ届いたことを、panic とは別に記録する。編集の
+            // 入口は panic を捕捉するため、記録が無いと応答からは見分けられない。
+            if let Some(mode) = fatal_movement(&entry.item_type, &value, &movements) {
+                host.record_fatal_movement(mode);
+            }
+            if let Some(written) = host_write(&entry.item_type, &value, &fonts) {
                 entry.value = written;
             }
         })
@@ -2065,8 +2109,8 @@ fn host_write(item_type: &EffectItemType, value: &str, fonts: &[String]) -> Opti
 ///
 /// **一覧に無い名前を書くと実機はプロセスごと落ちる。** ホストが投げた C++ の
 /// 例外が `extern "C"` の境界を越えて入り、巻き戻せずに abort する。フェイクは
-/// これを panic で模す。落ちる形を「黙って無視される」として模すと、名前の検証を
-/// 外しても検査が緑のまま通る。
+/// これを記録と panic の 2 つで模す。落ちる形を「黙って無視される」として模すと、
+/// 名前の検証を外しても検査が緑のまま通る。
 pub(crate) const TRACK_MODES: [&str; 3] = ["直線移動", "曲線移動", "ランダム移動"];
 
 /// ホストがパラメータ無しの書き込みに対して補う既定値を持つ移動方法。
@@ -2074,14 +2118,29 @@ pub(crate) const TRACK_MODES: [&str; 3] = ["直線移動", "曲線移動", "ラ�
 /// 実機で `ランダム移動,0` を書くと `ランダム移動,0|15` として保存される。
 pub(crate) const TRACK_DEFAULT_PARAM: (&str, f64) = ("ランダム移動", 15.0);
 
+/// 書き込まれた文字列が、実機ならプロセスを落とす移動方法を名乗るか。
+///
+/// 落とす名前を返す。落とさない書き込みでは `None`。
+fn fatal_movement(item_type: &EffectItemType, value: &str, movements: &[String]) -> Option<String> {
+    if item_type.evaluated_kind() != Some(EvaluatedItemKind::Track) {
+        return None;
+    }
+    let mode = decode_track_value(value)?.mode?;
+    (!movements.iter().any(|known| known == &mode)).then_some(mode)
+}
+
 /// ホストが移動を含む値として読み取りへ返す生の文字列。
 ///
 /// 値の桁は設定項目の小数桁へ揃う。実機で `-600,600,直線移動,0` を書くと
 /// 読み直しは `-600.00,600.00,直線移動,0` になる。
+///
+/// 値を 1 つも持たない移動はホストの状態としてあり得ないが、フェイクの初期状態を
+/// 直接組み立てれば作れる。空の文字列を返して落とさない——落ちる形を模すのは
+/// 一覧に無い移動方法だけであり、それ以外で落ちると原因を取り違える。
 fn raw_track_value(track: &TrackValue) -> String {
     let decimals = |value: &FiniteF64| format!("{:.*}", ITEM_VALUE_DECIMALS, value.get());
     let Some(mode) = track.mode.as_deref() else {
-        return decimals(&track.values[0]);
+        return track.values.first().map(decimals).unwrap_or_default();
     };
     let mut fields: Vec<String> = track.values.iter().map(decimals).collect();
     fields.push(mode.to_string());
@@ -2428,7 +2487,7 @@ pub(crate) fn fake_catalog() -> Vec<AvailableEffect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::prepare_item_write;
+    use aviutl2_mcp_core::{TrackWriteTarget, prepare_item_write};
 
     /// テキスト種別の設定項目を 1 つだけ公開する一覧。
     fn text_item() -> Vec<AvailableEffectItem> {
@@ -2522,8 +2581,20 @@ mod tests {
             accelerate: false,
             decelerate: false,
             twopoint: false,
-            timecontrol: false,
         })
+    }
+
+    /// フェイクが受け付ける移動方法の名前。
+    fn track_movements() -> Vec<String> {
+        TRACK_MODES.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// 移動を含まない値を渡すときの対象。
+    fn no_track_target() -> TrackWriteTarget<'static> {
+        TrackWriteTarget {
+            section_count: 0,
+            movements: &[],
+        }
     }
 
     #[test]
@@ -2561,7 +2632,12 @@ mod tests {
     fn a_movement_survives_the_write_and_the_read_back() {
         for (mode, params) in [("直線移動", &[][..]), ("ランダム移動", &[30.0][..])] {
             let value = sample_track(mode, params);
-            let write = prepare_item_write(&track_item(), "X", &value).expect("書き込み");
+            let movements = track_movements();
+            let target = TrackWriteTarget {
+                section_count: 1,
+                movements: &movements,
+            };
+            let write = prepare_item_write(&track_item(), "X", &value, target).expect("書き込み");
             let stored =
                 host_write(&EffectItemType::Number, write.value(), &fonts()).expect("受理される");
             assert_eq!(
@@ -2618,6 +2694,7 @@ mod tests {
                 &ItemValue::Text {
                     value: value.to_string(),
                 },
+                no_track_target(),
             )
             .expect("書き込み");
             let stored =

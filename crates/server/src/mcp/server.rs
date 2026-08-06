@@ -3931,6 +3931,17 @@ mod tests {
     /// 判定を書き写さず、公開されている入口へ選択肢の値を渡して受理されるかで
     /// 決める。書き込みを公開する種別と、種別が受け付ける値の形の、どちらが
     /// 動いてもここが動く。
+    /// 移動を含まない値を渡すときの対象。
+    ///
+    /// 移動の検証は対象を見なければ成立しないが、ここで見るのは種別と値の形の
+    /// 対応であり、移動は渡さない。
+    fn no_track_target() -> aviutl2_mcp_core::TrackWriteTarget<'static> {
+        aviutl2_mcp_core::TrackWriteTarget {
+            section_count: 0,
+            movements: &[],
+        }
+    }
+
     fn item_types_accepting_a_choice() -> Vec<String> {
         let mut names = Vec::new();
         for item_type in EffectItemType::ALL {
@@ -3941,7 +3952,7 @@ mod tests {
             let value = ItemValue::Choice {
                 value: "四角形".to_string(),
             };
-            if prepare_item_write(&items, "項目", &value).is_ok() {
+            if prepare_item_write(&items, "項目", &value, no_track_target()).is_ok() {
                 names.push(item_type.kind_name());
             }
         }
@@ -3980,7 +3991,7 @@ mod tests {
             // 種別への書き込みを公開しているかは、値の形の照合より先に決まる。
             // 形が合わない値を渡しても判定は変わらない。
             let writable = !matches!(
-                prepare_item_write(&items, "項目", &probe),
+                prepare_item_write(&items, "項目", &probe, no_track_target()),
                 Err(ItemWriteError::UnsupportedItemType { .. })
             );
             if writable

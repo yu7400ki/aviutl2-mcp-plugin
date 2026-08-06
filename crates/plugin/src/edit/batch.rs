@@ -29,7 +29,7 @@
 
 use crate::edit::adapter::{
     attribute, ensure_destination_free, ensure_layers_unlocked, index, reread_with_effects,
-    unlisted_item, verify_written_item,
+    track_write_target, unlisted_item, verify_written_item,
 };
 use crate::edit::error::{EditError, RollbackOutcome, UnsupportedReason};
 use crate::edit::host::{ObjectPosition, SceneEditor};
@@ -264,7 +264,8 @@ fn plan_step<'sec>(
         } => {
             let (object, effect) = resolve_effect(editor, boundary, selector)?;
             let items = editor.effect_items(&effect)?;
-            let write = match prepare_item_write(&items, item, value) {
+            let target = track_write_target(editor, &object)?;
+            let write = match prepare_item_write(&items, item, value, target.as_write_target()) {
                 Ok(write) => write,
                 Err(ItemWriteError::ItemNotFound { item }) => {
                     return Err(unlisted_item(editor, &effect, &item));
@@ -844,6 +845,10 @@ impl SceneEditor for CachingEditor<'_> {
         object: &ResolvedObject<'_>,
     ) -> Result<Vec<aviutl2_mcp_core::SectionRange>, EditError> {
         self.inner.object_sections(object)
+    }
+
+    fn movements(&self) -> Vec<String> {
+        self.inner.movements()
     }
 
     fn create_object_section(

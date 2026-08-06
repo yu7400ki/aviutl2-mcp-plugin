@@ -2109,6 +2109,126 @@ fn changed_item(outcome: &EditOutcome, item: &str) -> ItemValue {
         .clone()
 }
 
+/// 区間 1 個分の移動を持つ値。
+fn movement(values: &[f64], mode: &str) -> ItemValue {
+    ItemValue::Track(aviutl2_mcp_core::TrackValue {
+        values: values
+            .iter()
+            .map(|value| FiniteF64::try_new(*value).expect("有限値"))
+            .collect(),
+        mode: Some(mode.to_string()),
+        params: Vec::new(),
+        accelerate: false,
+        decelerate: false,
+        twopoint: false,
+    })
+}
+
+/// トラックバーへ移動を書き込む要求を組み立てる。
+fn set_movement(harness: &Harness, value: ItemValue) -> SetObjectItemParams {
+    SetObjectItemParams {
+        selector: harness.effect_selector(1, 100, "ぼかし", 0),
+        item: "範囲".to_string(),
+        value,
+    }
+}
+
+#[test]
+fn a_movement_the_host_knows_is_written_and_read_back() {
+    // 一覧にある移動方法は書ける。ホストが桁を整えて返しても照合は通る。
+    let harness = Harness::new();
+    let outcome = harness
+        .edit
+        .set_object_item(&set_movement(
+            &harness,
+            movement(&[0.0, 50.0, 100.0], "直線移動"),
+        ))
+        .expect("一覧にある移動方法が拒否されました");
+
+    assert_eq!(
+        changed_item(&outcome, "範囲"),
+        movement(&[0.0, 50.0, 100.0], "直線移動")
+    );
+    assert!(harness.host.fatal_movement_writes().is_empty());
+}
+
+#[test]
+fn a_movement_with_an_unknown_mode_never_reaches_the_host() {
+    // 一覧に無い移動方法を書くと実機はプロセスごと落ちる。**止められるのは
+    // 書き込みの手前だけである。** 記録が空でなければ、検証を通り抜けた入力が
+    // ホストへ届いている。panic は編集の入口が捕捉して失敗の応答へ畳むため、
+    // 応答の形だけを見ても届いたことは分からない。
+    let harness = Harness::new();
+    let error = harness
+        .edit
+        .set_object_item(&set_movement(
+            &harness,
+            movement(&[0.0, 50.0, 100.0], "存在しない移動"),
+        ))
+        .expect_err("存在しない移動方法が受理されました");
+
+    assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+    assert_eq!(error.details()["reason"], json!("track_mode_unknown"));
+    assert_eq!(
+        harness.host.fatal_movement_writes(),
+        Vec::<String>::new(),
+        "落ちる移動方法がホストへ届きました"
+    );
+}
+
+#[test]
+fn a_movement_whose_value_count_does_not_match_the_sections_is_refused() {
+    // ホストは個数の不一致を拒否せず、余った値を評価せずに保存する。要求した
+    // 区間の値が入らないことに気付く手段が要求元に無い。
+    // 標本の対象は中間点を 1 つ持つ。区間 2 個に対して値は 3 個である。
+    let harness = Harness::new();
+    harness
+        .edit
+        .set_object_item(&set_movement(
+            &harness,
+            movement(&[0.0, 50.0, 100.0], "直線移動"),
+        ))
+        .expect("区間の数と合う値が拒否されました");
+
+    let error = harness
+        .edit
+        .set_object_item(&set_movement(&harness, movement(&[0.0, 100.0], "直線移動")))
+        .expect_err("区間の数と合わない値が受理されました");
+
+    assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+    assert_eq!(error.details()["reason"], json!("track_value_count"));
+    assert!(harness.host.fatal_movement_writes().is_empty());
+}
+
+#[test]
+fn no_movement_can_be_written_when_the_list_is_unavailable() {
+    // 一覧を引けない環境では移動を 1 つも書けない。検証できないまま通すと、
+    // その場でホストのプロセスが落ちる。
+    let harness = Harness::new();
+    harness.host.set_movements(Vec::new());
+    let error = harness
+        .edit
+        .set_object_item(&set_movement(
+            &harness,
+            movement(&[0.0, 50.0, 100.0], "直線移動"),
+        ))
+        .expect_err("一覧が空でも移動が受理されました");
+
+    assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+    assert_eq!(error.details()["reason"], json!("track_mode_unknown"));
+    assert!(harness.host.fatal_movement_writes().is_empty());
+
+    // 一覧を要さない書き込みは影響を受けない。
+    harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector: harness.effect_selector(1, 100, "ぼかし", 0),
+            item: "範囲".to_string(),
+            value: ItemValue::Integer { value: 30 },
+        })
+        .expect("移動を含まない書き込みまで拒否されました");
+}
+
 #[test]
 fn a_choice_value_the_host_ignores_is_reported_as_a_failure() {
     // SDK は選択肢を列挙する手段を持たず、選択肢に無い値を渡しても失敗を返さず

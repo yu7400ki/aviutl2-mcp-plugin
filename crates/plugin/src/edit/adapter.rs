@@ -36,7 +36,7 @@ use aviutl2_mcp_core::{
     ObjectSelector, ObjectSource, ObjectSummary, ObservedSelection, RangeChange, ReadBackCheck,
     SceneSettingsOutcome, SectionRange, SelectionField, SelectionState, SetEffectEnabledParams,
     SetGridBpmParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSceneSettingsParams, SetSelectionParams, prepare_item_write,
+    SetSceneSettingsParams, SetSelectionParams, TrackWriteTarget, prepare_item_write,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -588,6 +588,46 @@ fn created_placements(
 /// ことになるからである。取り違えの向きは、要求元が名前を疑う側に留まる。
 ///
 /// 追加の呼び出しはこの失敗経路でだけ 1 回行う。成功する要求の費用は変わらない。
+/// 移動を書き込む対象の性質を、いま読み直して組み立てる。
+///
+/// 区間の数は [`SceneEditor::object_sections`] が返す並びの要素数である。
+/// `get_object` が `sections` として返すのと同じ経路であり、要求元が読んだ
+/// 区間の数がそのまま「値の個数 - 1」になる。
+///
+/// 移動方法の一覧はホストから引く（[`SceneEditor::movements`]）。
+///
+/// **値の形で呼び分けない。** 移動を含まない値では中身が参照されないが、
+/// 呼び分けを置くと、その判定を誤った経路が検証を通らずに符号化へ届く。
+/// 一覧に無い移動方法はホストのプロセスを落とすため、迂回できる経路を作らない。
+pub(crate) fn track_write_target(
+    editor: &dyn SceneEditor,
+    object: &ResolvedObject<'_>,
+) -> Result<TrackTarget, EditError> {
+    Ok(TrackTarget {
+        section_count: editor.object_sections(object)?.len(),
+        movements: editor.movements(),
+    })
+}
+
+/// 読み直した対象の性質を所有する形。
+///
+/// [`TrackWriteTarget`] は一覧を借用するため、読み直した値をそのまま返せない。
+/// 所有する側をここに置き、借用は呼び出し側の局所で作る。
+pub(crate) struct TrackTarget {
+    section_count: usize,
+    movements: Vec<String>,
+}
+
+impl TrackTarget {
+    /// 書き込みの検証へ渡す形を借用として作る。
+    pub(crate) fn as_write_target(&self) -> TrackWriteTarget<'_> {
+        TrackWriteTarget {
+            section_count: self.section_count,
+            movements: &self.movements,
+        }
+    }
+}
+
 pub(crate) fn unlisted_item(
     editor: &dyn SceneEditor,
     effect: &ResolvedEffect<'_>,
@@ -901,7 +941,13 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             // 設定項目の実在と種別の照合は、対象 effect が公開する一覧に対して
             // 行う。要求内容だけでは判定できない。
             let items = editor.effect_items(&effect)?;
-            let write = match prepare_item_write(&items, &params.item, &params.value) {
+            let target = track_write_target(editor, &object)?;
+            let write = match prepare_item_write(
+                &items,
+                &params.item,
+                &params.value,
+                target.as_write_target(),
+            ) {
                 Ok(write) => write,
                 Err(ItemWriteError::ItemNotFound { item }) => {
                     return Err(unlisted_item(editor, &effect, &item));

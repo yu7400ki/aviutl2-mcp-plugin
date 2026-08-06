@@ -8,13 +8,16 @@
 //! 値をそのまま書き戻せなくなる。書き込みだけがこの書式を知れば読み取りは生の
 //! 文字列を返し続け、読み取りだけが知れば読めた値を書く手段が無い。
 //!
-//! **書き込みの検証も同じ場所に置く。** 不正な移動方法の名前と、欠落した
-//! フラグは、ホストのプロセスを落とす。落とす形を作れるのは符号化であり、
-//! 作らせない規則が別の場所にあると、片方だけを直したときに黙って乖離する。
+//! **書き込みの検証も同じ場所に置き、符号化から迂回できない形にする。** 不正な
+//! 移動方法の名前と、欠落したフラグは、ホストのプロセスを落とす。落とす形を
+//! 作れるのは符号化であり、作らせない規則を別の口に置くと、その口を通らない
+//! 呼び出しがそのまま落とす文字列を組み立てられる。
 
 use crate::item_value::ItemWriteError;
 use crate::number::FiniteF64;
-use crate::validation::{TextSyntaxError, limit_item_value_bytes, validate_item_text};
+use crate::validation::{
+    TextSyntaxError, limit_item_value_bytes, validate_control_free, validate_item_text,
+};
 use serde::{Deserialize, Serialize};
 
 /// 値・移動方法・フラグを区切る文字。
@@ -32,11 +35,8 @@ const FLAG_DECELERATE: u32 = 2;
 /// 中間点無視のビット。
 const FLAG_TWOPOINT: u32 = 4;
 
-/// 時間制御を表す移動方法の名前の接尾辞。
-///
-/// **時間制御はフラグではない。** フラグの 3 ビット目を立てても 4 つのフラグは
-/// どれも変わらず、移動方法の名前の変種だけが時間制御を有効にする。
-const TIME_CONTROL_SUFFIX: &str = "(時間制御)";
+/// 移動を持つ値が取り得る最小の要素数。区間 1 個の境界の数である。
+const MIN_MOVING_VALUES: usize = 2;
 
 /// トラックバー項目の値。
 ///
@@ -45,9 +45,13 @@ const TIME_CONTROL_SUFFIX: &str = "(時間制御)";
 ///
 /// **[`crate::effect::TrackInfo`] とは別の型である。** `TrackInfo` は読み取りが
 /// 設定項目の脇へ添える情報で、所属グループ（`group_num` / `group_index` /
-/// `group_name`）を持ち、区間ごとの値を持たない。グループは項目の並びの性質で
-/// あって値ではなく、書き込みでは指定する先が無い。両者を 1 つの型にすると、
-/// 書けないフィールドを書き込みの入力が受け取ることになる。
+/// `group_name`）と時間制御の有無を持ち、区間ごとの値を持たない。いずれも
+/// ホストの報告であって書き込みで指定する先が無く、1 つの型にすると書けない
+/// フィールドを書き込みの入力が要求することになる。
+///
+/// **時間制御はこの型に無い。** 時間制御を有効にするのは移動方法の名前の変種で
+/// あり、`mode` を運べば情報は失われない。`TrackInfo` が返す `timecontrol` は
+/// ホストの報告であり、書き込みで指定する先が無い。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackValue {
     /// 区間の境界ごとの値。
@@ -70,12 +74,6 @@ pub struct TrackValue {
     pub decelerate: bool,
     /// 中間点を無視するか。
     pub twopoint: bool,
-    /// 時間制御が有効か。
-    ///
-    /// **書き込みの操作子ではない。** 時間制御は移動方法の名前の変種が担うため、
-    /// この値を真にしても移動は変わらない。真にできるのは `mode` が時間制御の
-    /// 変種を指しているときだけで、食い違いは書き込みの検証が拒否する。
-    pub timecontrol: bool,
 }
 
 /// トラックバーの移動を表す値の検証失敗。
@@ -92,12 +90,12 @@ pub enum TrackValueError {
     /// 移動方法の名前が既知の一覧に無い。
     #[error("移動方法の名前が既知の一覧にありません")]
     UnknownMode,
+    /// 移動方法の名前が数値として読める。
+    #[error("移動方法の名前に数値として読める文字列は指定できません")]
+    ModeReadsAsNumber,
     /// 移動を持たない値に、移動の付帯情報が指定された。
     #[error("移動を持たない値にフラグとパラメータは指定できません")]
     MovementWithoutMode,
-    /// 時間制御の指定が移動方法の名前と食い違う。
-    #[error("時間制御の指定が移動方法の名前と一致しません")]
-    TimeControlMismatch,
 }
 
 impl TrackValueError {
@@ -111,8 +109,8 @@ impl TrackValueError {
             actual: 2,
         },
         TrackValueError::UnknownMode,
+        TrackValueError::ModeReadsAsNumber,
         TrackValueError::MovementWithoutMode,
-        TrackValueError::TimeControlMismatch,
     ];
 
     /// 失敗の種別を表す機械可読な名前を返す。
@@ -122,32 +120,36 @@ impl TrackValueError {
         match self {
             TrackValueError::ValueCount { .. } => "track_value_count",
             TrackValueError::UnknownMode => "track_mode_unknown",
+            TrackValueError::ModeReadsAsNumber => "track_mode_reads_as_number",
             TrackValueError::MovementWithoutMode => "track_movement_without_mode",
-            TrackValueError::TimeControlMismatch => "track_time_control_mismatch",
         }
     }
 }
 
 /// 移動を書き込む対象の性質。
 ///
-/// 区間の数も、その項目が受け付ける移動方法も、対象のオブジェクトと設定項目を
-/// 見なければ決まらない。値だけでは判定できないため、呼び出し側が渡す。
+/// 区間の数も、ホストが受け付ける移動方法も、対象と実行環境を見なければ決まら
+/// ない。値だけでは判定できないため、呼び出し側が渡す。
+///
+/// **省略できる形にしない。** 省略を許すと、渡さない呼び出しが検証を通らずに
+/// 符号化へ届く。ホストは一覧に無い移動方法でプロセスごと落ちるため、検証を
+/// 迂回できる経路が 1 つでもあれば、そこが落とす経路になる。
+///
+/// `section_count` は [`crate::object::ObjectDetail::sections`] の要素数と一致
+/// する。値の個数が区間の境界の数（alias の `frame=` の要素数）と一致するという
+/// 観測から、「区間数 + 1」を導いている。
+///
+/// `movements` が空であれば、移動を持つ値は 1 つも書けない。移動方法の一覧を
+/// 引けない環境で移動を通すと、その場でプロセスが落ちる。
 #[derive(Debug, Clone, Copy)]
 pub struct TrackWriteTarget<'a> {
     /// 対象オブジェクトの区間の数。中間点が 2 個なら 3。
     pub section_count: usize,
-    /// 対象の設定項目が受け付ける移動方法の名前。
-    pub known_modes: &'a [String],
-}
-
-/// 移動方法の名前が時間制御の変種か。
-fn is_time_control(mode: &str) -> bool {
-    mode.ends_with(TIME_CONTROL_SUFFIX)
+    /// ホストが受け付ける移動方法の名前。
+    pub movements: &'a [String],
 }
 
 /// フラグのビット列を組み立てる。
-///
-/// 時間制御は含まれない。含めても 4 つのフラグのどれも変わらないためである。
 fn flag_bits(value: &TrackValue) -> u32 {
     let bit = |enabled: bool, mask: u32| if enabled { mask } else { 0 };
     bit(value.accelerate, FLAG_ACCELERATE)
@@ -162,9 +164,11 @@ fn flag_bits(value: &TrackValue) -> u32 {
 /// - 移動を持たない値は 1 要素であり、フラグもパラメータも持たない
 /// - 移動方法の名前は区切り文字を含まない。含むと値の個数の数え方が狂い、
 ///   末尾から移動方法を取るホストの解析が別の位置を指す
+/// - 移動方法の名前は数値として読めない。**区切り文字とまったく同じ失敗を
+///   起こす。** 末尾から数えて移動方法の位置に数値が来ると、ホストはそれを
+///   移動方法の名前として引き当てられずに例外を投げる
 /// - 移動を持つ値は 2 要素以上である。区間は必ず 1 つ以上あるためで、
 ///   正確な個数は区間の数を渡す [`validate_track_value`] が見る
-/// - 時間制御の指定は移動方法の名前と一致する
 pub(crate) fn validate_track_syntax(value: &TrackValue) -> Result<(), ItemWriteError> {
     let Some(mode) = value.mode.as_deref() else {
         if value.values.len() != 1 {
@@ -174,7 +178,7 @@ pub(crate) fn validate_track_syntax(value: &TrackValue) -> Result<(), ItemWriteE
             }
             .into());
         }
-        if !value.params.is_empty() || flag_bits(value) != 0 || value.timecontrol {
+        if !value.params.is_empty() || flag_bits(value) != 0 {
             return Err(TrackValueError::MovementWithoutMode.into());
         }
         return Ok(());
@@ -186,6 +190,9 @@ pub(crate) fn validate_track_syntax(value: &TrackValue) -> Result<(), ItemWriteE
     if mode.contains(FIELD_SEPARATOR) || mode.contains(PARAM_SEPARATOR) {
         return Err(TextSyntaxError::ForbiddenCharacter.into());
     }
+    if reads_as_number(mode) {
+        return Err(TrackValueError::ModeReadsAsNumber.into());
+    }
     if value.values.len() < MIN_MOVING_VALUES {
         return Err(TrackValueError::ValueCount {
             expected: MIN_MOVING_VALUES,
@@ -193,21 +200,16 @@ pub(crate) fn validate_track_syntax(value: &TrackValue) -> Result<(), ItemWriteE
         }
         .into());
     }
-    if value.timecontrol != is_time_control(mode) {
-        return Err(TrackValueError::TimeControlMismatch.into());
-    }
     Ok(())
 }
-
-/// 移動を持つ値が取り得る最小の要素数。区間 1 個の境界の数である。
-const MIN_MOVING_VALUES: usize = 2;
 
 /// 対象の性質と突き合わせて、書き込んでよい値かを判定する。
 ///
 /// [`validate_track_syntax`] の規則に加えて次を見る。
 ///
-/// - 移動を持つ値の要素数は「区間数 + 1」である。ホストは個数の不一致を拒否せず、
-///   余った値は保存されるが評価に使われない。**止められるのはここだけである**
+/// - 移動を持つ値の要素数は「区間数 + 1」である。**多い場合をホストは拒否せず、
+///   余った値は保存されるが評価に使われない**（観測）。**少ない場合の挙動は
+///   観測していない。** どちらにせよ止められるのはここだけである
 /// - 移動方法の名前が、呼び出し側が渡した一覧に含まれる
 ///
 /// **移動方法の検証は「選択肢はヒントであってゲートではない」という規則の例外で
@@ -216,10 +218,10 @@ const MIN_MOVING_VALUES: usize = 2;
 /// は事情が違う。一覧に無い名前を渡すとホストは例外を投げ、それが `extern "C"`
 /// の境界を越えてプロセスごと落ちる。**通す選択肢が無い。**
 ///
-/// **一覧は項目ごとに違う。** 同じ名前の一覧で全項目を検証すると、その項目だけが
+/// **一覧は項目ごとに違い得る。** 同じ一覧で全項目を検証すると、その項目だけが
 /// 持つ移動方法を拒み、逆に他の項目にしか無い名前を通す。前者は書けるはずの値が
-/// 書けなくなるだけだが、後者はホストを落とす。一覧は対象の設定項目から引いた
-/// ものを渡す。
+/// 書けなくなるだけだが、後者はホストを落とす。呼び出し側は取り得る名前の全体を
+/// 渡すのではなく、実行環境が受け付ける名前を渡す。
 pub fn validate_track_value(
     value: &TrackValue,
     target: TrackWriteTarget<'_>,
@@ -236,13 +238,16 @@ pub fn validate_track_value(
         }
         .into());
     }
-    if !target.known_modes.iter().any(|known| known == mode) {
+    if !target.movements.iter().any(|known| known == mode) {
         return Err(TrackValueError::UnknownMode.into());
     }
     Ok(())
 }
 
 /// 値をホストへ渡す文字列へ符号化する。
+///
+/// **検証を内側で行う。** 対象の性質を受け取らなければ符号化できないため、
+/// 検証を通っていない文字列がホストへ届く経路が型として存在しない。
 ///
 /// **数値は [`ItemValue::Number`](crate::item_value::ItemValue::Number) と同じ
 /// 表記で書く。** 指数表記を用いず、元の値へ戻せる最短の桁数で書き出す。ホストは
@@ -257,11 +262,20 @@ pub fn validate_track_value(
 /// **`params` が空のときは `|` を書かない。** パラメータを持たない移動方法を
 /// `|` 無しで書いた要求が受理され、ホストが既定値を補って保存することは観測して
 /// いる。`|` だけを書いた要求が受理されるかは観測していないため、観測した形だけ
-/// を出す。受理されない形を出すと落ちるのはホストのプロセスである。
+/// を出す。
+///
+/// **空でない `params` は `|` を伴って書く。この形の要求が受理されることは観測
+/// していない。** 書けると判断した根拠は 2 つで、どちらも推論である——ホストが
+/// 保存した形がまさに `ランダム移動,0|15` であること、および SDK が設定値の
+/// setter へ渡す文字列をエイリアスファイルの設定値と同じ書式と定めていること。
+/// 書かない選択肢は無い。読み取ったパラメータを落とすと、読めた値を書き戻せない。
 ///
 /// 移動を持たない値は単一の数値になる。移動方法もフラグも書かない。
-pub fn encode_track_value(value: &TrackValue) -> Result<String, ItemWriteError> {
-    validate_track_syntax(value)?;
+pub fn encode_track_value(
+    value: &TrackValue,
+    target: TrackWriteTarget<'_>,
+) -> Result<String, ItemWriteError> {
+    validate_track_value(value, target)?;
     let encoded = match value.mode.as_deref() {
         None => value.values[0].to_string(),
         Some(mode) => {
@@ -304,18 +318,21 @@ pub fn encode_track_value(value: &TrackValue) -> Result<String, ItemWriteError> 
 ///
 /// - 区切りが無く 1 つの有限な数値であれば、移動を持たない値とする
 /// - 4 つ以上の欄があれば、末尾をフラグ、その 1 つ前を移動方法の名前、残りを
-///   値とする。フラグは非負整数、名前は空でなく**数値として読めない**ことを
-///   要求する。名前が数値として読めることを許すと `1,2,3,4` のような並びが
-///   移動として解釈される
-/// - 値が 1 つしかない移動は読まない。**符号化が書けない形を読めてしまうと、
-///   読めた値を書き戻せなくなる。** 区間は必ず 1 つ以上あるため、移動を持つ値の
-///   境界は 2 つ以上になる
+///   値とする。フラグは非負整数、名前は空でなく、数値として読めず、制御文字を
+///   含まないことを要求する
+/// - 値が 1 つしかない移動は読まない。区間は必ず 1 つ以上あるため、移動を持つ
+///   値の境界は 2 つ以上になる
 /// - `|` より後ろはパラメータとする。`|` の後ろが空のときはパラメータ無しと
 ///   する。ホストはパラメータを持たない移動方法を `直線移動,0|` の形で返す
 ///
+/// **個数・移動方法の位置・文字種は符号化の定義域へ揃えてある。** 読めた値は
+/// 書式としては書き戻せる。**揃っていないのは長さの上限だけである**——上限は
+/// 符号化後の文字列に掛かるため、ホストが上限を超える文字列を返した場合は、
+/// 読めても書き戻せない。移動方法の一覧と区間の数も、対象を見なければ判定でき
+/// ないため復号は見ない。
+///
 /// フラグの 3 ビット目以降は捨てる。**捨てても失われる情報は無い**——ホストの
-/// 4 つのフラグはどれも 3 ビット目に対応せず、そのビットを立てても移動は
-/// 変わらない。時間制御は移動方法の名前の変種が担うため、名前から決める。
+/// フラグはどれも 3 ビット目に対応せず、そのビットを立てても移動は変わらない。
 pub fn decode_track_value(raw: &str) -> Option<TrackValue> {
     let (head, tail) = match raw.split_once(PARAM_SEPARATOR) {
         Some((head, tail)) => (head, Some(tail)),
@@ -341,7 +358,6 @@ pub fn decode_track_value(raw: &str) -> Option<TrackValue> {
             accelerate: false,
             decelerate: false,
             twopoint: false,
-            timecontrol: false,
         });
     }
     if fields.len() < MIN_MOVING_VALUES + 2 {
@@ -349,7 +365,7 @@ pub fn decode_track_value(raw: &str) -> Option<TrackValue> {
     }
     let flags: u32 = fields[fields.len() - 1].trim().parse().ok()?;
     let mode = fields[fields.len() - 2];
-    if mode.is_empty() || parse_finite(mode).is_some() {
+    if mode.is_empty() || reads_as_number(mode) || validate_control_free(mode).is_err() {
         return None;
     }
     let values = fields[..fields.len() - 2]
@@ -364,13 +380,20 @@ pub fn decode_track_value(raw: &str) -> Option<TrackValue> {
         accelerate: flags & FLAG_ACCELERATE != 0,
         decelerate: flags & FLAG_DECELERATE != 0,
         twopoint: flags & FLAG_TWOPOINT != 0,
-        timecontrol: is_time_control(mode),
     })
 }
 
 /// 十進表記を有限な実数として読む。
 fn parse_finite(raw: &str) -> Option<FiniteF64> {
     raw.trim().parse::<f64>().ok().and_then(FiniteF64::try_new)
+}
+
+/// 移動方法の名前の位置にある文字列が、数値として読めるか。
+///
+/// 符号化と復号が同じ判定を用いる。片方だけが数値として読むと、書けるのに
+/// 読めない名前ができ、書き戻しの照合が必ず不一致になる。
+fn reads_as_number(mode: &str) -> bool {
+    parse_finite(mode).is_some()
 }
 
 /// 書き込んだ値と読み直した値が、同じ移動を表すか。
@@ -382,15 +405,20 @@ fn parse_finite(raw: &str) -> Option<FiniteF64> {
 ///
 /// **パラメータは、書いた側が空のときだけ比べない。** 空のパラメータはホストの
 /// 既定値を求める指定であり、読み直しが返すのはホストが選んだ値である。比べると
-/// 成功した書き込みが失敗として返る。空でないパラメータは要求した値であるため
-/// 比べる。
+/// 成功した書き込みが失敗として返る。
+///
+/// **空でないときに比べるのは、観測 1 件からの推論である。** 観測したのは
+/// 「パラメータを 1 つも書かない要求に既定値が補われる」ことだけで、足りない分
+/// だけを補う移動方法があるかは観測していない。あれば、要求より長い読み直しが
+/// 不一致になり、成功した書き込みが失敗として返る。それでもこの規則を採るのは、
+/// 比べない側の誤りが「要求と違うパラメータが入ったことを黙って見逃す」ことだから
+/// である。**偽の失敗は、黙った破壊より安全な側である。**
 pub(crate) fn track_read_back_matches(written: &TrackValue, observed: &TrackValue) -> bool {
     if written.values != observed.values
         || written.mode != observed.mode
         || written.accelerate != observed.accelerate
         || written.decelerate != observed.decelerate
         || written.twopoint != observed.twopoint
-        || written.timecontrol != observed.timecontrol
     {
         return false;
     }
@@ -416,7 +444,6 @@ mod tests {
             accelerate: false,
             decelerate: false,
             twopoint: false,
-            timecontrol: false,
         }
     }
 
@@ -428,36 +455,88 @@ mod tests {
             accelerate: false,
             decelerate: false,
             twopoint: false,
-            timecontrol: false,
         }
     }
 
-    fn known_modes() -> Vec<String> {
-        ["直線移動", "曲線移動", "ランダム移動", "直線移動(時間制御)"]
-            .iter()
-            .map(|name| name.to_string())
-            .collect()
+    fn movements() -> Vec<String> {
+        [
+            "直線移動",
+            "曲線移動",
+            "ランダム移動",
+            "直線移動(時間制御)",
+            "再生範囲",
+        ]
+        .iter()
+        .map(|name| name.to_string())
+        .collect()
     }
 
-    fn target(section_count: usize, modes: &[String]) -> TrackWriteTarget<'_> {
+    fn target(section_count: usize, movements: &[String]) -> TrackWriteTarget<'_> {
         TrackWriteTarget {
             section_count,
-            known_modes: modes,
+            movements,
         }
+    }
+
+    /// 生成した値をそのまま受け入れる対象。符号化そのものを見るときに使う。
+    fn matching_target<'a>(value: &TrackValue, movements: &'a [String]) -> TrackWriteTarget<'a> {
+        TrackWriteTarget {
+            section_count: value.values.len().saturating_sub(1),
+            movements,
+        }
+    }
+
+    fn encoded(value: &TrackValue) -> Result<String, ItemWriteError> {
+        let movements = movements();
+        encode_track_value(value, matching_target(value, &movements))
     }
 
     #[test]
     fn the_encoding_matches_the_alias_notation() {
         assert_eq!(
-            encode_track_value(&moving(&[-500.0, 500.0], "直線移動")),
+            encoded(&moving(&[-500.0, 500.0], "直線移動")),
             Ok("-500,500,直線移動,0".to_string())
         );
         assert_eq!(
-            encode_track_value(&moving(&[0.0, 100.0, 0.0], "曲線移動")),
+            encoded(&moving(&[0.0, 100.0, 0.0], "曲線移動")),
             Ok("0,100,0,曲線移動,0".to_string())
         );
         // 移動を持たない値は単一の数値になる。区間の数に依らない。
-        assert_eq!(encode_track_value(&static_value(0.0)), Ok("0".to_string()));
+        assert_eq!(encoded(&static_value(0.0)), Ok("0".to_string()));
+    }
+
+    #[test]
+    fn each_flag_owns_its_own_bit() {
+        // ビットの割り当てを 1 つずつ固定する。複数を同時に立てた組み合わせ
+        // だけを見ると、bit0 と bit2 を入れ替えても検査が通ってしまう。
+        let cases = [
+            (
+                TrackValue {
+                    accelerate: true,
+                    ..moving(&[0.0, 100.0], "直線移動")
+                },
+                "0,100,直線移動,1",
+            ),
+            (
+                TrackValue {
+                    decelerate: true,
+                    ..moving(&[0.0, 100.0], "直線移動")
+                },
+                "0,100,直線移動,2",
+            ),
+            (
+                TrackValue {
+                    twopoint: true,
+                    ..moving(&[0.0, 100.0], "直線移動")
+                },
+                "0,100,直線移動,4",
+            ),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(encoded(&value), Ok(expected.to_string()));
+            // 復号も同じ割り当てで読む。往復だけでは割り当てを固定できない。
+            assert_eq!(decode_track_value(expected), Some(value));
+        }
     }
 
     #[test]
@@ -466,56 +545,38 @@ mod tests {
         let mut value = moving(&[-500.0, 500.0], "直線移動");
         value.accelerate = true;
         value.twopoint = true;
-        assert_eq!(
-            encode_track_value(&value),
-            Ok("-500,500,直線移動,5".to_string())
-        );
+        assert_eq!(encoded(&value), Ok("-500,500,直線移動,5".to_string()));
         assert_eq!(
             decode_track_value("-500,500,直線移動,5"),
             Some(value.clone())
         );
 
         value.decelerate = true;
-        assert_eq!(
-            encode_track_value(&value),
-            Ok("-500,500,直線移動,7".to_string())
-        );
+        assert_eq!(encoded(&value), Ok("-500,500,直線移動,7".to_string()));
         // 15 は 3 ビット目も立っているが、読める 3 つのフラグは 7 と同じである。
         assert_eq!(decode_track_value("-500,500,直線移動,15"), Some(value));
     }
 
     #[test]
     fn the_fourth_bit_maps_to_none_of_the_flags() {
-        // 実測: `,8` を書いても 4 つのフラグはすべて偽のままである。
+        // 実測: `,8` を書いても 3 つのフラグはすべて偽のままである。
         let decoded = decode_track_value("-600.00,600.00,直線移動,8").expect("解析できる");
         assert!(!decoded.accelerate);
         assert!(!decoded.decelerate);
         assert!(!decoded.twopoint);
-        assert!(!decoded.timecontrol);
         // 符号化はそのビットを立てる手段を持たない。
-        assert_eq!(
-            encode_track_value(&decoded),
-            Ok("-600,600,直線移動,0".to_string())
-        );
+        assert_eq!(encoded(&decoded), Ok("-600,600,直線移動,0".to_string()));
     }
 
     #[test]
-    fn time_control_is_a_variant_of_the_mode_name_and_not_a_flag() {
+    fn time_control_is_a_variant_of_the_mode_name() {
+        // 実測: `直線移動(時間制御)` を書くと時間制御が有効になる。フラグの欄は
+        // 0 のままであり、時間制御を表すビットは無い。名前を運べば足りる。
         let decoded = decode_track_value("0,100,直線移動(時間制御),0").expect("解析できる");
-        assert!(decoded.timecontrol);
         assert_eq!(decoded.mode.as_deref(), Some("直線移動(時間制御)"));
-        // フラグの欄は 0 のままである。時間制御はビットで表さない。
         assert_eq!(
-            encode_track_value(&decoded),
+            encoded(&decoded),
             Ok("0,100,直線移動(時間制御),0".to_string())
-        );
-
-        // 名前が変種でないのに時間制御を名乗る値は書けない。
-        let mut mismatched = moving(&[0.0, 100.0], "直線移動");
-        mismatched.timecontrol = true;
-        assert_eq!(
-            encode_track_value(&mismatched),
-            Err(TrackValueError::TimeControlMismatch.into())
         );
     }
 
@@ -523,16 +584,13 @@ mod tests {
     fn the_parameters_follow_the_flags_after_a_bar() {
         let mut value = moving(&[0.0, 100.0], "ランダム移動");
         value.params = finite(&[30.0]);
-        assert_eq!(
-            encode_track_value(&value),
-            Ok("0,100,ランダム移動,0|30".to_string())
-        );
+        assert_eq!(encoded(&value), Ok("0,100,ランダム移動,0|30".to_string()));
         assert_eq!(decode_track_value("0,100,ランダム移動,0|30"), Some(value));
 
         let mut two = moving(&[0.0, 100.0], "ランダム移動");
         two.params = finite(&[30.0, -1.5]);
         assert_eq!(
-            encode_track_value(&two),
+            encoded(&two),
             Ok("0,100,ランダム移動,0|30,-1.5".to_string())
         );
         assert_eq!(
@@ -545,7 +603,7 @@ mod tests {
     fn an_empty_parameter_list_is_written_without_the_bar() {
         // `|` 無しの形は受理されることを観測している。`|` だけを書いた形は
         // 観測していないため出さない。
-        let encoded = encode_track_value(&moving(&[0.0, 100.0], "ランダム移動")).expect("符号化");
+        let encoded = encoded(&moving(&[0.0, 100.0], "ランダム移動")).expect("符号化");
         assert_eq!(encoded, "0,100,ランダム移動,0");
         assert!(!encoded.contains(PARAM_SEPARATOR));
         // ホストは既定値を補った形で返す。読み直しはその形も読める。
@@ -584,6 +642,9 @@ mod tests {
             ",直線移動,0",
             // 移動方法の位置が数値である。
             "1,2,3,4",
+            "0,100,1e3,0",
+            // 移動方法の名前に制御文字が含まれる。
+            "0,100,直線\u{1b}移動,0",
             // 移動を持つのに値が 1 つしかない。符号化が書けない形は読まない。
             "100,直線移動,0",
             // フラグが整数でない。
@@ -603,24 +664,33 @@ mod tests {
 
     #[test]
     fn the_value_count_must_match_the_number_of_sections() {
-        let modes = known_modes();
+        let movements = movements();
         // 区間 3 個なら値は 4 個。
         let value = moving(&[0.0, 1.0, 2.0, 3.0], "直線移動");
-        assert_eq!(validate_track_value(&value, target(3, &modes)), Ok(()));
+        assert_eq!(validate_track_value(&value, target(3, &movements)), Ok(()));
         assert_eq!(
-            validate_track_value(&value, target(2, &modes)),
+            validate_track_value(&value, target(2, &movements)),
             Err(TrackValueError::ValueCount {
                 expected: 3,
                 actual: 4,
             }
             .into())
         );
-        // ホストは個数の不一致を拒否しない。止められるのはここだけである。
+        // ホストは多い側を拒否しない。止められるのはここだけである。
         assert_eq!(
-            validate_track_value(&moving(&[0.0, 1.0, 2.0], "直線移動"), target(1, &modes)),
+            validate_track_value(&moving(&[0.0, 1.0, 2.0], "直線移動"), target(1, &movements)),
             Err(TrackValueError::ValueCount {
                 expected: 2,
                 actual: 3,
+            }
+            .into())
+        );
+        // 符号化は検証を内側で行う。個数が合わない値は文字列にならない。
+        assert_eq!(
+            encode_track_value(&value, target(2, &movements)),
+            Err(TrackValueError::ValueCount {
+                expected: 3,
+                actual: 4,
             }
             .into())
         );
@@ -628,11 +698,11 @@ mod tests {
 
     #[test]
     fn a_value_without_movement_holds_exactly_one_number() {
-        let modes = known_modes();
+        let movements = movements();
         // 区間の数に依らず 1 個である。
         for section_count in [1, 3, 8] {
             assert_eq!(
-                validate_track_value(&static_value(0.0), target(section_count, &modes)),
+                validate_track_value(&static_value(0.0), target(section_count, &movements)),
                 Ok(())
             );
         }
@@ -641,7 +711,7 @@ mod tests {
             ..static_value(0.0)
         };
         assert_eq!(
-            validate_track_value(&two, target(1, &modes)),
+            validate_track_value(&two, target(1, &movements)),
             Err(TrackValueError::ValueCount {
                 expected: 1,
                 actual: 2,
@@ -652,7 +722,7 @@ mod tests {
 
     #[test]
     fn movement_details_need_a_mode() {
-        let modes = known_modes();
+        let movements = movements();
         let cases = [
             TrackValue {
                 accelerate: true,
@@ -667,21 +737,17 @@ mod tests {
                 ..static_value(0.0)
             },
             TrackValue {
-                timecontrol: true,
-                ..static_value(0.0)
-            },
-            TrackValue {
                 params: finite(&[15.0]),
                 ..static_value(0.0)
             },
         ];
         for value in cases {
             assert_eq!(
-                validate_track_value(&value, target(1, &modes)),
+                validate_track_value(&value, target(1, &movements)),
                 Err(TrackValueError::MovementWithoutMode.into())
             );
             assert_eq!(
-                encode_track_value(&value),
+                encode_track_value(&value, target(1, &movements)),
                 Err(TrackValueError::MovementWithoutMode.into())
             );
         }
@@ -689,38 +755,72 @@ mod tests {
 
     #[test]
     fn a_mode_outside_the_known_set_is_rejected() {
-        let modes = known_modes();
+        let movements = movements();
         assert_eq!(
-            validate_track_value(&moving(&[0.0, 1.0], "存在しない移動"), target(1, &modes)),
+            validate_track_value(
+                &moving(&[0.0, 1.0], "存在しない移動"),
+                target(1, &movements)
+            ),
             Err(TrackValueError::UnknownMode.into())
         );
-        // 一覧は項目ごとに違う。空の一覧はどの名前も通さない。
+        // 一覧を引けなければ移動は 1 つも書けない。通す選択肢は無い。
         assert_eq!(
             validate_track_value(&moving(&[0.0, 1.0], "直線移動"), target(1, &[])),
             Err(TrackValueError::UnknownMode.into())
         );
         assert_eq!(
-            validate_track_value(&moving(&[0.0, 1.0], "直線移動"), target(1, &modes)),
+            encode_track_value(
+                &moving(&[0.0, 1.0], "存在しない移動"),
+                target(1, &movements)
+            ),
+            Err(TrackValueError::UnknownMode.into())
+        );
+        assert_eq!(
+            validate_track_value(&moving(&[0.0, 1.0], "直線移動"), target(1, &movements)),
             Ok(())
         );
     }
 
     #[test]
+    fn a_mode_name_that_reads_as_a_number_is_rejected_before_the_host_sees_it() {
+        // 区切り文字と同じ失敗を起こす。ホストは末尾から数えた位置に数値を
+        // 見つけて例外を投げる。一覧に載っていても通さない。
+        let movements: Vec<String> = ["12", "-1.5", "1e3", " 7 "]
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        for mode in &movements {
+            let value = moving(&[0.0, 1.0], mode);
+            assert_eq!(
+                encode_track_value(&value, target(1, &movements)),
+                Err(TrackValueError::ModeReadsAsNumber.into()),
+                "{mode}"
+            );
+            // 復号も同じ名前を読まない。片側だけが読むと照合が必ず外れる。
+            assert_eq!(decode_track_value(&format!("0,1,{mode},0")), None, "{mode}");
+        }
+    }
+
+    #[test]
     fn a_mode_name_may_not_carry_the_separators() {
+        let movements = movements();
         // 区切りを含む名前は値の個数の数え方を狂わせる。
         for mode in ["直線移動,0", "直線|移動"] {
             assert_eq!(
-                encode_track_value(&moving(&[0.0, 1.0], mode)),
+                encode_track_value(&moving(&[0.0, 1.0], mode), target(1, &movements)),
                 Err(TextSyntaxError::ForbiddenCharacter.into()),
                 "{mode}"
             );
         }
         assert_eq!(
-            encode_track_value(&moving(&[0.0, 1.0], "")),
+            encode_track_value(&moving(&[0.0, 1.0], ""), target(1, &movements)),
             Err(TextSyntaxError::Empty.into())
         );
         assert_eq!(
-            encode_track_value(&moving(&[0.0, 1.0], "直線\u{1b}移動")),
+            encode_track_value(
+                &moving(&[0.0, 1.0], "直線\u{1b}移動"),
+                target(1, &movements)
+            ),
             Err(TextSyntaxError::ContainsControl.into())
         );
     }
@@ -761,18 +861,15 @@ mod tests {
         flagged.accelerate = true;
         flagged.twopoint = true;
         flagged.params = finite(&[15.0, -1.0]);
-        let time_control = TrackValue {
-            timecontrol: true,
-            ..moving(&[0.0, 100.0, 50.0, 0.0], "直線移動(時間制御)")
-        };
         for value in [
             static_value(0.0),
             static_value(-12.5),
             moving(&[0.0, 100.0], "直線移動"),
-            time_control,
+            moving(&[0.0, 100.0, 50.0, 0.0], "直線移動(時間制御)"),
+            moving(&[0.0, 0.92], "再生範囲"),
             flagged,
         ] {
-            let encoded = encode_track_value(&value).expect("符号化");
+            let encoded = encoded(&value).expect("符号化");
             assert_eq!(
                 decode_track_value(&encoded),
                 Some(value.clone()),
@@ -792,8 +889,8 @@ mod tests {
             vec![
                 "track_value_count",
                 "track_mode_unknown",
+                "track_mode_reads_as_number",
                 "track_movement_without_mode",
-                "track_time_control_mismatch",
             ]
         );
     }

@@ -801,7 +801,9 @@ fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::{ErrorCode, ItemWriteError, PALETTE_COLOR_COUNT, prepare_item_write};
+    use aviutl2_mcp_core::{
+        ErrorCode, ItemWriteError, PALETTE_COLOR_COUNT, TrackWriteTarget, prepare_item_write,
+    };
 
     fn placement(frame_start: usize, frame_end: usize) -> HostObjectPlacement {
         HostObjectPlacement {
@@ -1509,7 +1511,18 @@ mod tests {
                 item_type: item_type.clone(),
             }];
             assert_eq!(
-                prepare_item_write(&items, "項目", &value).map(|write| write.value().to_string()),
+                prepare_item_write(
+                    &items,
+                    "項目",
+                    &value,
+                    // 読み取りは今のところ移動を返さない。移動を含まない値では
+                    // 対象の中身が参照されないため、空の対象で足りる。
+                    TrackWriteTarget {
+                        section_count: 0,
+                        movements: &[],
+                    },
+                )
+                .map(|write| write.value().to_string()),
                 expected_write,
                 "{item_type} の書き戻し"
             );

@@ -230,6 +230,17 @@ pub trait SceneEditor {
     /// 番号で編集を指せなくなる。
     fn object_sections(&self, object: &ResolvedObject<'_>) -> Result<Vec<SectionRange>, EditError>;
 
+    /// ホストが受け付ける移動方法の名前を返す。
+    ///
+    /// SDK には一覧を引く手段が無く、供給源は実行環境の設定ファイルである。
+    /// 読み取りの応答ではなくホストの性質としてここへ置くのは、トラックバーの
+    /// 移動を書く経路が必ずこの一覧を通ることを、フェイクを差し込んだ検査でも
+    /// 同じ形で確かめられるようにするためである。
+    ///
+    /// **一覧に無い名前を書くとホストのプロセスが落ちる。** 空の一覧は「移動を
+    /// 1 つも書けない」を意味し、書き込みは拒否される。
+    fn movements(&self) -> Vec<String>;
+
     /// 指定フレームへ中間点を追加する。
     fn create_object_section(
         &self,
