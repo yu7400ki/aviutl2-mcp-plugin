@@ -1313,10 +1313,9 @@ impl AviUtl2McpServer {
     /// 移動を持つトラックバーへ number や integer を書く要求は unsupported_operation
     /// となり details.reason は track_movement_present になる。書けば移動もその
     /// パラメータも消えるためであり、消したい場合は mode を null にした track を送る。
-    /// 移動を持たないトラックバーへ mode を指定した track を書く要求も
-    /// unsupported_operation となり details.reason は track_movement_absent になる。
-    /// どちらも details.current_value にホストが現在保持している値が入り、
-    /// 書き込みは発行されない（details.mutation_issued は付かない）。
+    /// details.current_value にホストが現在保持している値が入り、書き込みは
+    /// 発行されない（details.mutation_issued は付かない）。
+    /// 移動を持たないトラックバーへ track を書く要求は通り、新しく移動が付く。
     /// 書き込みは全ての種別で、書いた直後に読み直して要求した値が入ったかを照合する。
     /// 入っていなければ unsupported_operation となり details.reason は
     /// item_value_not_applied、details.current_value にホストが現在保持している値が入る。

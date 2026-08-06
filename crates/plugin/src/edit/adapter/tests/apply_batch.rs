@@ -789,24 +789,21 @@ fn the_plan_phase_reads_the_item_value_once_per_item_sub_operation() {
 }
 
 #[test]
-fn the_same_movement_mismatch_fails_the_same_way_alone_and_in_a_batch() {
-    // 移動を消す書き込みも、移動を持たない項目への移動も、単独と一括適用で
-    // 同じように拒否する。判定が 2 か所へ分かれると、片方だけが黙って通る。
-    let cases: [(&str, ItemValue); 2] = [
-        (
-            MOVING_ITEM,
-            ItemValue::Number {
-                value: FiniteF64::try_new(0.0).expect("有限値"),
-            },
-        ),
-        (STATIC_ITEM, movement(&[0.0, 50.0, 100.0], "直線移動")),
-    ];
+fn the_same_movement_write_is_judged_the_same_way_alone_and_in_a_batch() {
+    // 移動を消す書き込みは、単独でも一括適用でも同じように拒否する。判定が
+    // 2 か所へ分かれると、片方だけが黙って通る。
+    let cases: [(&str, ItemValue); 1] = [(
+        MOVING_ITEM,
+        ItemValue::Number {
+            value: FiniteF64::try_new(0.0).expect("有限値"),
+        },
+    )];
     for (item, value) in cases {
         let alone = harness_with_track_effect();
         let single = alone
             .edit
             .set_object_item(&set_track_item(&alone, item, value.clone()))
-            .expect_err("移動の有無が食い違う書き込みが単独で成功しました");
+            .expect_err("移動を消す書き込みが単独で成功しました");
 
         let together = harness_with_track_effect();
         let batched = together
@@ -816,7 +813,7 @@ fn the_same_movement_mismatch_fails_the_same_way_alone_and_in_a_batch() {
                 item: item.to_string(),
                 value: value.clone(),
             }]))
-            .expect_err("移動の有無が食い違う書き込みが一括適用で成功しました");
+            .expect_err("移動を消す書き込みが一括適用で成功しました");
 
         assert_eq!(single.error_code(), batched.error_code(), "{item}");
         assert_eq!(

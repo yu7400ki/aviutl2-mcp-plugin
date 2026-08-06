@@ -36,8 +36,8 @@ use aviutl2_mcp_core::{
     ObjectSelector, ObjectSource, ObjectSummary, ObservedSelection, RangeChange, ReadBackCheck,
     SceneSettingsOutcome, SectionRange, SelectionField, SelectionState, SetEffectEnabledParams,
     SetGridBpmParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSceneSettingsParams, SetSelectionParams, TrackWriteTarget, check_movement_write,
-    movement_check_reads_current_value, prepare_item_write,
+    SetSceneSettingsParams, SetSelectionParams, TrackWriteTarget,
+    movement_check_reads_current_value, prepare_item_write, write_drops_existing_movement,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -616,10 +616,14 @@ impl TrackTarget {
     }
 }
 
-/// 対象がいま持つ移動と、書き込む値が両立することを確かめる。
+/// 書き込みが対象の移動を消さないことを確かめる。
 ///
-/// 判定そのものは [`check_movement_write`] が持つ。単独の変更と一括適用は
+/// 判定そのものは [`write_drops_existing_movement`] が持つ。単独の変更と一括適用は
 /// どちらもこの 1 か所を通り、同じ入力に対して同じ失敗を返す。
+///
+/// **移動を書く要求は拒まない。** 対象がいま移動を持つかによらず通り、持たない
+/// 項目には新しく移動が付く。移動を持ち得ない種別への移動は、種別と値の形の
+/// 照合が先に拒む（[`prepare_item_write`]）。
 ///
 /// `current` はホストが返した生の文字列である。**要求元が与えた値ではない。**
 /// 対象がいまどの移動を持つかはこの文字列にしか現れず、応答へ載せるのも同じ
@@ -636,12 +640,12 @@ pub(crate) fn ensure_movement_write(
     let Some(entry) = items.iter().find(|entry| entry.name == item) else {
         return Ok(());
     };
-    check_movement_write(&entry.item_type, value, current).map_err(|mismatch| {
-        EditError::MovementMismatch {
-            mismatch,
+    match write_drops_existing_movement(&entry.item_type, value, current) {
+        true => Err(EditError::MovementWouldBeLost {
             current_value: current.to_string(),
-        }
-    })
+        }),
+        false => Ok(()),
+    }
 }
 
 /// 対象の現在値を読み直したうえで [`ensure_movement_write`] を掛ける。
@@ -652,8 +656,9 @@ pub(crate) fn ensure_movement_write(
 /// 公開する項目の数だけ問い合わせることになる——1 件を書くために全項目の現状を
 /// 読むのは、要る情報の量と釣り合わない。
 ///
-/// **移動を持ち得ない種別では読まない。** 判定は変わらず、設定項目の書き込み
-/// 1 件あたりの SDK 呼び出しだけが増える。
+/// **読むのは、移動を持ち得る種別へ移動を含まない値を書くときだけである**
+/// （[`movement_check_reads_current_value`]）。移動を書く要求は現在値によらず
+/// 通るため読まない——**アニメーションを作る経路に追加の呼び出しは無い。**
 ///
 /// **一括適用はこの関数を通らない。** 逆操作の材料として同じ値を既に読んで
 /// いるため、読み直さずに [`ensure_movement_write`] だけを呼ぶ。sub-operation
@@ -668,7 +673,7 @@ fn ensure_movement_write_now(
     let reads = items
         .iter()
         .find(|entry| entry.name == item)
-        .is_some_and(|entry| movement_check_reads_current_value(&entry.item_type));
+        .is_some_and(|entry| movement_check_reads_current_value(&entry.item_type, value));
     if !reads {
         return Ok(());
     }
