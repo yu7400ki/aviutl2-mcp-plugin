@@ -114,6 +114,10 @@ pub struct AvailableEffectItem {
 ///
 /// 既知ビットを bool で展開する。**ビット列そのものは載せない**——生成元が
 /// 復元できるのは既知ビットだけであり、未知ビットを運ぶ手段が無いためである。
+///
+/// **製品コードは 4 つとも読まない。** 読むのは `list_available_effects` の応答を
+/// 受け取った要求元であり、どの effect を使うかを選ぶ材料そのものである。
+/// 4 つとも実態と食い違わないため、読み手が製品に無いことは落とす理由にならない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectFlags {
     /// 画像をサポートする。
