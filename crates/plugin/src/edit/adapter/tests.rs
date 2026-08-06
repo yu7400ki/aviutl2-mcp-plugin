@@ -2488,8 +2488,6 @@ fn the_selection_is_applied_in_a_fixed_order() {
             SelectionField::Focus
         ]
     );
-    // 反映値は編集と原子的に観測されたものではない。
-    assert!(state.observed_after_edit);
     // ホストが範囲外の値をクランプしても失敗にしない。応答は実際の値を返す。
     assert_eq!(state.cursor.frame, MAX_FRAME);
     assert!(state.cursor.layer <= MAX_LAYER);

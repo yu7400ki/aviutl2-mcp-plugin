@@ -955,6 +955,10 @@ pub struct LayerStateOutcome {
 /// **この変更は取り消し単位を作らない。** 実行後に取り消し操作を行うと、
 /// カーソルや選択範囲ではなく、その前に行った編集が取り消される。カーソルを
 /// 動かしたあとに取り消した利用者は、直前の編集を失う。
+///
+/// **反映値は編集の区間を抜けたあとの読み取りで得る。** 観測までの間に他所からの
+/// 変更が入り得ることは tool 説明と text content が述べる——応答ごとに変わる値では
+/// なく、この tool の性質だからである。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SelectionState {
     /// プロジェクトの epoch。
@@ -1001,13 +1005,6 @@ pub struct SelectionState {
     /// 「空だった」のか「送られなかった」のかを区別できず、補集合を求めない
     /// という目的そのものが崩れる。
     pub not_applied: Vec<SelectionField>,
-    /// 反映値が編集と原子的に観測されたものではないことを示す。
-    ///
-    /// 常に `true` である。反映値は編集の区間を抜けたあとの読み取りで得る
-    /// ため、観測までの間に他所からの変更が入り得る。将来、区間内での
-    /// 再読み取りが可能になったときに原子的な観測へ切り替えられるよう、
-    /// 値の意味をクライアントが解釈できる形で残す。
-    pub observed_after_edit: bool,
 }
 
 /// 編集の区間を抜けたあとに読み取った選択状態の値。
@@ -1046,7 +1043,6 @@ impl SelectionState {
             display: observed.display,
             applied,
             not_applied,
-            observed_after_edit: true,
         }
     }
 }
@@ -3081,23 +3077,6 @@ mod tests {
         );
         let restored: SelectionState = serde_json::from_value(with_unknown_field(&state)).unwrap();
         assert_eq!(restored, state);
-    }
-
-    #[test]
-    fn selection_state_is_always_observed_after_the_edit() {
-        let state = SelectionState::observed(
-            EPOCH,
-            42,
-            ObservedSelection {
-                cursor: Cursor { frame: 0, layer: 0 },
-                selected_range: None,
-                focus: None,
-                display: sample_display_range(),
-            },
-            vec![SelectionField::Cursor],
-            Vec::new(),
-        );
-        assert!(state.observed_after_edit);
     }
 
     #[test]

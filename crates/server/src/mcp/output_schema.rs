@@ -334,7 +334,6 @@ pub fn set_selection() -> Value {
         ("display", display_range()),
         ("applied", array(selection_field())),
         ("not_applied", array(selection_field())),
-        ("observed_after_edit", boolean()),
     ])
 }
 
