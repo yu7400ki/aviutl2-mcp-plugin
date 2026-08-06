@@ -457,9 +457,9 @@ fn issue(
                     editor.set_effect_item(ticket, effect, item, write.value())
                 })
                 .map_err(IssueFailure::unapplied)?;
-            // 選択肢から選ぶ種別だけは、適用の直後に 1 回読み直して照合する。
-            // 単独の変更で失敗する入力が一括適用では成功する経路を作らないため
-            // であり、費用は sub-operation 1 件あたり 1 回に留まる。
+            // 適用の直後に 1 回読み直して照合する。単独の変更で失敗する入力が
+            // 一括適用では成功する経路を作らないためであり、費用は
+            // sub-operation 1 件あたり 1 回に留まる。
             verify_written_item(editor, permit, boundary, effect, item, write)
                 .map_err(IssueFailure::applied)
         }

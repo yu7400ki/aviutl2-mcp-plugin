@@ -75,8 +75,8 @@ fn count(calls: &[&'static str], call: &str) -> usize {
 fn every_target_is_resolved_before_the_first_change_is_issued() {
     // 対象の捕捉は解決処理だけが行う。変更の後に現れれば、適用相か巻き戻し相が
     // 解決し直していることになる。逆操作の材料も許可より前に揃っている必要が
-    // あり、成功した要求では巻き戻しが無いので、記録された値の読み取りは
-    // すべて変更より前に来る。
+    // ある。**変更より後の値の読み取りは書き込み後の照合であり、材料の読み取り
+    // ではない。** 両者は同じ SDK 呼び出しを使うため、位置と件数で切り分ける。
     let harness = Harness::new();
     let params = batch(vec![
         move_op(harness.selector(0, 0), 1, 500),
@@ -95,11 +95,17 @@ fn every_target_is_resolved_before_the_first_change_is_issued() {
             !matches!(*call, "bind_object" | "bind_effect"),
             "変更を発行した後に対象を解決し直しました: {calls:?}"
         );
-        assert_ne!(
-            *call, ITEM_VALUE,
-            "変更を発行した後に逆操作の材料を読みました: {calls:?}"
-        );
     }
+    assert_eq!(
+        count(&calls[..first], ITEM_VALUE),
+        1,
+        "逆操作の材料が変更より前に読まれていません: {calls:?}"
+    );
+    assert_eq!(
+        count(&calls[first..], ITEM_VALUE),
+        1,
+        "変更より後の読み取りが照合の 1 回を超えています: {calls:?}"
+    );
 }
 
 #[test]
@@ -732,7 +738,8 @@ fn a_choice_value_the_host_ignores_fails_the_batch_and_rolls_it_back() {
         .expect_err("選択肢に無い値が一括適用で受理されました");
 
     assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
-    assert_eq!(error.details()["reason"], json!("choice_value_rejected"));
+    assert_eq!(error.details()["reason"], json!("item_value_not_applied"));
+    assert_eq!(error.details()["current_value"], json!(CHOICE_VALUES[0]));
     assert_eq!(error.details()["failed_index"], json!(1));
     assert_eq!(error.details()["rolled_back"], json!(true));
     assert_eq!(error.details()["rolled_back_count"], json!(2));
@@ -771,10 +778,11 @@ fn a_choice_value_the_host_accepts_passes_through_the_batch() {
 }
 
 #[test]
-fn the_apply_phase_reads_back_once_per_choice_sub_operation() {
+fn the_apply_phase_reads_back_once_per_item_sub_operation() {
     // 照合の費用は sub-operation 1 件あたり 1 回に留まる。逆操作の材料を読む
-    // 事前解決相と数を混ぜないため、最初の変更より後だけを数える。選択肢を
-    // 持たない sub-operation は 1 回も足さない。
+    // 事前解決相と数を混ぜないため、最初の変更より後だけを数える。**照合が
+    // 全種別へ掛かるため、設定項目を変える sub-operation はすべて 1 回ずつ
+    // 数える。**
     let harness = Harness::with(|host| {
         host.catalog.push(shape_catalog_entry());
         let effects = &mut host.scene.get_mut().unwrap().layers[1].objects[1].effects;
@@ -797,6 +805,8 @@ fn the_apply_phase_reads_back_once_per_choice_sub_operation() {
                 value: CHOICE_VALUES[1].to_string(),
             },
         },
+        // 設定項目を変えない sub-operation は 1 回も足さない。
+        move_op(harness.selector(0, 0), 0, 500),
     ]);
     harness.host.clear_calls();
     harness.edit.apply_batch(&params).expect("一括適用の失敗");
@@ -805,31 +815,72 @@ fn the_apply_phase_reads_back_once_per_choice_sub_operation() {
     let first = first_mutation(&calls).expect("変更 API が呼ばれていません");
     assert_eq!(
         count(&calls[first..], ITEM_VALUE),
-        2,
-        "適用相の読み直しが選択肢を持つ sub-operation の件数と違います: {calls:?}"
+        3,
+        "適用相の読み直しが設定項目を変える sub-operation の件数と違います: {calls:?}"
     );
 }
 
+/// 設定項目を変える sub-operation を組み立てる。
+fn set_shape_item_op(harness: &Harness, item: &str, value: ItemValue) -> BatchOperation {
+    BatchOperation::SetObjectItem {
+        selector: harness.effect_selector(1, 300, SHAPE, 0),
+        item: item.to_string(),
+        value,
+    }
+}
+
 #[test]
-fn the_same_choice_value_fails_the_same_way_alone_and_in_a_batch() {
+fn the_same_item_value_fails_the_same_way_alone_and_in_a_batch() {
     // 受理する集合が単独編集と一括適用で違ってはならない。同じ入力に対して
-    // 同じ code と同じ名前を返すことで固定する。
-    let rejected = "存在しない形";
-    let alone = harness_with_choice_effect();
-    let single = alone
-        .edit
-        .set_object_item(&set_choice(&alone, rejected))
-        .expect_err("選択肢に無い値が成功として返りました");
+    // 同じ code と同じ名前と同じ実値を返すことで固定する。**照合を広げた種別
+    // すべてについて見る。** 1 種別だけを見ていると、判定が 2 か所へ分かれた
+    // ときに残りの種別が一括適用でだけ通り抜ける。
+    let mut cases: Vec<(&str, ItemValue)> = vec![(
+        "図形の種類",
+        ItemValue::Choice {
+            value: "存在しない形".to_string(),
+        },
+    )];
+    cases.extend(
+        rewritten_item_cases()
+            .into_iter()
+            .map(|(item, requested, _)| (item, requested)),
+    );
 
-    let together = harness_with_choice_effect();
-    let batched = together
-        .edit
-        .apply_batch(&batch(vec![set_choice_op(&together, rejected)]))
-        .expect_err("選択肢に無い値が一括適用で受理されました");
+    for (item, requested) in cases {
+        let alone = harness_with_choice_effect();
+        let single = alone
+            .edit
+            .set_object_item(&SetObjectItemParams {
+                selector: alone.effect_selector(1, 300, SHAPE, 0),
+                item: item.to_string(),
+                value: requested.clone(),
+            })
+            .expect_err("ホストが書き換えた値が単独で成功として返りました");
 
-    assert_eq!(single.error_code(), batched.error_code());
-    assert_eq!(single.details()["reason"], batched.details()["reason"]);
-    assert_eq!(batched.details()["failed_index"], json!(0));
+        let together = harness_with_choice_effect();
+        let batched = together
+            .edit
+            .apply_batch(&batch(vec![set_shape_item_op(
+                &together,
+                item,
+                requested.clone(),
+            )]))
+            .expect_err("ホストが書き換えた値が一括適用で受理されました");
+
+        assert_eq!(single.error_code(), batched.error_code(), "{item}");
+        assert_eq!(
+            single.details()["reason"],
+            batched.details()["reason"],
+            "{item}"
+        );
+        assert_eq!(
+            single.details()["current_value"],
+            batched.details()["current_value"],
+            "{item}"
+        );
+        assert_eq!(batched.details()["failed_index"], json!(0), "{item}");
+    }
 }
 
 #[test]

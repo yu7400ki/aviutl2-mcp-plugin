@@ -7,11 +7,12 @@
 use super::*;
 use crate::alias::tests::{TempDir, write_fixture};
 use crate::edit::fake::{
-    CHOICE_VALUES, CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, EFFECT_LIST, FakeEditHost, FakeLayer,
-    FakeObject, FakeReadHost, Fault, ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX,
-    MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER, MAX_SCENE_HEIGHT, MAX_SCENE_SAMPLE_RATE, MAX_SCENE_WIDTH,
-    MOVE_FRAME_SHIFT, MUTATIONS, OBSERVED_SCENE, PanicPoint, READ_SECTION, RENAMED_SCENE_NAME,
-    SCENE_ID, SCENE_NAME, SECTION_RANGES, SHAPE, shape, shape_catalog_entry,
+    CHOICE_VALUES, CLOSURE_ESCAPED, CREATE_FRAME_SHIFT, DEFAULT_COLOR, DEFAULT_FONT, EFFECT_LIST,
+    FakeEditHost, FakeLayer, FakeObject, FakeReadHost, Fault, ITEM_VALUE, Knobs, LAYER_ATTRIBUTES,
+    LAYER_LOCK, LAYER_MAX, MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER, MAX_SCENE_HEIGHT,
+    MAX_SCENE_SAMPLE_RATE, MAX_SCENE_WIDTH, MOVE_FRAME_SHIFT, MUTATIONS, OBSERVED_SCENE,
+    PanicPoint, READ_SECTION, RENAMED_SCENE_NAME, SCENE_ID, SCENE_NAME, SECTION_RANGES, SHAPE,
+    shape, shape_catalog_entry,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::{default_page_request, default_page_window, with_silent_panic_hook};
@@ -1884,9 +1885,12 @@ fn edits_that_target_an_effect_read_them() {
 }
 
 #[test]
-fn a_normalized_item_value_is_reported_instead_of_being_treated_as_a_failure() {
+fn an_item_value_the_host_clamps_is_reported_as_a_failure() {
+    // クライアントは要求した値を得ていない。成功として返すと、逸脱に気付く
+    // 手段が要求元にも利用者にも無い。**読み直した実値を添えることで、要求元は
+    // それをそのまま送り直せる。**
     let harness = Harness::new();
-    let outcome = harness
+    let error = harness
         .edit
         .set_object_item(&SetObjectItemParams {
             selector: harness.effect_selector(1, 100, "ぼかし", 0),
@@ -1895,7 +1899,31 @@ fn a_normalized_item_value_is_reported_instead_of_being_treated_as_a_failure() {
                 value: MAX_ITEM_VALUE + 150,
             },
         })
-        .expect("正規化された値が失敗として扱われました");
+        .expect_err("切り詰められた値が成功として返りました");
+
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(error.details()["reason"], json!("item_value_not_applied"));
+    assert_eq!(
+        error.details()["current_value"],
+        json!(MAX_ITEM_VALUE.to_string())
+    );
+}
+
+#[test]
+fn an_item_value_within_the_host_limits_is_reported_as_read_back() {
+    // 応答が返すのはホストが保持している値である。要求値をそのまま返すと、
+    // 照合を通った後でも応答が実態を表さなくなる。
+    let harness = Harness::new();
+    let outcome = harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector: harness.effect_selector(1, 100, "ぼかし", 0),
+            item: "範囲".to_string(),
+            value: ItemValue::Integer {
+                value: MAX_ITEM_VALUE,
+            },
+        })
+        .expect("値域の内側の値が失敗として扱われました");
 
     let effect = outcome.effect.expect("変更後の effect");
     let item = effect
@@ -1907,8 +1935,7 @@ fn a_normalized_item_value_is_reported_instead_of_being_treated_as_a_failure() {
         item.value,
         ItemValue::Integer {
             value: MAX_ITEM_VALUE
-        },
-        "応答が書いた値をそのまま返しています"
+        }
     );
 }
 
@@ -1981,11 +2008,9 @@ fn an_item_missing_from_the_listing_but_readable_is_not_writable() {
 }
 
 #[test]
-fn a_successful_write_that_needs_no_verification_never_probes_the_value() {
-    // 書き込んだ値を読み直すのは、選択肢から選ぶ種別の照合と失敗経路だけで
-    // ある。**それ以外の種別では成功する要求の費用が変わらない。** 選択肢から
-    // 選ぶ種別が成功経路でも 1 回読み直すことは別に固定してあり、この検査を
-    // 根拠にその読み直しを削ってはならない。
+fn a_successful_write_reads_the_value_back_exactly_once() {
+    // ホストは書き込みの成否を返さない。成功経路でも読み直さなければ、要求した
+    // 値が入ったことを誰も確かめていない。**費用は 1 回に留める。**
     let harness = harness_with_unlisted_item();
     let selector = harness.effect_selector(1, 100, "ぼかし", 0);
     harness.host.clear_calls();
@@ -1999,9 +2024,15 @@ fn a_successful_write_that_needs_no_verification_never_probes_the_value() {
         })
         .expect("設定項目の変更に失敗しました");
 
-    assert!(
-        !harness.host.calls().contains(&ITEM_VALUE),
-        "照合を要しない種別の成功経路で項目の値を読み直しました: {:?}",
+    assert_eq!(
+        harness
+            .host
+            .calls()
+            .iter()
+            .filter(|call| **call == ITEM_VALUE)
+            .count(),
+        1,
+        "照合の読み直しは 1 回だけです: {:?}",
         harness.host.calls()
     );
 }
@@ -2103,11 +2134,116 @@ fn a_choice_value_the_host_ignores_is_reported_as_a_failure() {
         );
         assert_eq!(
             error.details()["reason"],
-            json!("choice_value_rejected"),
+            json!("item_value_not_applied"),
+            "{item}"
+        );
+        // 読み直した実値が載る。要求元はそのまま送り直せる。
+        assert_eq!(
+            error.details()["current_value"],
+            json!(CHOICE_VALUES[0]),
             "{item}"
         );
         assert!(!error.retryable(), "{item} は読み直しても有効になりません");
     }
+}
+
+/// 実機でホストが値を書き換えた 3 件と、桁の丸め。
+///
+/// 要求する値・読み直される実値の組で持つ。いずれも「書けたのに要求した値が
+/// 入っていない」状態であり、種別が違っても同じ失敗として返る。
+fn rewritten_item_cases() -> Vec<(&'static str, ItemValue, &'static str)> {
+    vec![
+        // 書式の合わない色は、変更前の値ではなく白へ落ちる。
+        (
+            "色",
+            ItemValue::Color {
+                value: "#ff0000".to_string(),
+            },
+            DEFAULT_COLOR,
+        ),
+        // 未登録のフォント名は黙殺され、変更前の値が残る。
+        (
+            "フォント",
+            ItemValue::Font {
+                name: "NoSuchFont12345".to_string(),
+            },
+            DEFAULT_FONT,
+        ),
+        // 値域を外れた数値は切り詰められる。
+        (
+            "サイズ",
+            ItemValue::Number {
+                value: FiniteF64::try_new((MAX_ITEM_VALUE + 400) as f64).expect("有限値"),
+            },
+            "100.00",
+        ),
+        // 桁の多い小数は項目の桁へ丸められる。切り詰めと区別する材料がこちら側に
+        // 無く、どちらも要求した値を得ていない。
+        (
+            "サイズ",
+            ItemValue::Number {
+                value: FiniteF64::try_new(1.2345).expect("有限値"),
+            },
+            "1.23",
+        ),
+    ]
+}
+
+#[test]
+fn a_value_the_host_rewrites_is_reported_as_a_failure() {
+    // ホストは書き込みの成否を返さない。読み直して照合しなければ、値が書き
+    // 換えられたことを利用者もクライアントも知る手段が無い。
+    for (item, requested, current) in rewritten_item_cases() {
+        let harness = harness_with_choice_effect();
+        let error = harness
+            .edit
+            .set_object_item(&SetObjectItemParams {
+                selector: harness.effect_selector(1, 300, SHAPE, 0),
+                item: item.to_string(),
+                value: requested,
+            })
+            .expect_err("ホストが書き換えた値が成功として返りました");
+
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::UnsupportedOperation,
+            "{item}"
+        );
+        assert_eq!(
+            error.details()["reason"],
+            json!("item_value_not_applied"),
+            "{item}"
+        );
+        assert_eq!(error.details()["current_value"], json!(current), "{item}");
+    }
+}
+
+#[test]
+fn the_failure_carries_the_host_value_and_not_the_requested_one() {
+    // 応答へ反響させてよいのはホストの現在の状態だけである。要求された値は
+    // 要求元の内容であり、載せない。
+    let harness = harness_with_choice_effect();
+    let requested = "NoSuchFont12345";
+    let error = harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector: harness.effect_selector(1, 300, SHAPE, 0),
+            item: "フォント".to_string(),
+            value: ItemValue::Font {
+                name: requested.to_string(),
+            },
+        })
+        .expect_err("未登録のフォント名が成功として返りました");
+
+    let details = error.details().to_string();
+    assert!(
+        details.contains(DEFAULT_FONT),
+        "読み直した実値が載っていません: {details}"
+    );
+    assert!(
+        !details.contains(requested),
+        "要求された値が反響しています: {details}"
+    );
 }
 
 #[test]
@@ -2185,24 +2321,25 @@ fn a_choice_value_read_from_the_object_can_be_written_straight_back() {
 }
 
 #[test]
-fn a_value_the_host_normalizes_is_not_treated_as_a_choice_rejection() {
-    // 色と実数はホストが、テキストは書き込み経路が表記を正規化する。渡した値
-    // との一致を求めると、正常な正規化を失敗と誤診断する。**読み直した値が要求
-    // と違っても成功すること**を種別ごとに固定する。
+fn a_value_the_host_writes_back_in_another_notation_is_not_a_mismatch() {
+    // ホストは受理した値の表記も整える——色は小文字へ、実数は項目の桁へ揃える。
+    // テキストは書き込み経路が符号化した表記のまま返る。**比較を種別ごとに
+    // 定めたのは、これらを失敗と誤診断しないためである。** 一致の判定をバイト
+    // 比較へ倒すと、ここが偽陽性の一覧になる。
     let cases = [
         (
             "色",
             ItemValue::Color {
-                value: "#FFAA00".to_string(),
+                value: "FFAA00".to_string(),
             },
             ItemValue::Color {
-                value: "#ffaa00".to_string(),
+                value: "ffaa00".to_string(),
             },
         ),
         (
             "サイズ",
             ItemValue::Number {
-                value: FiniteF64::try_new((MAX_ITEM_VALUE + 150) as f64).expect("有限値"),
+                value: FiniteF64::try_new(MAX_ITEM_VALUE as f64).expect("有限値"),
             },
             ItemValue::Number {
                 value: FiniteF64::try_new(MAX_ITEM_VALUE as f64).expect("有限値"),
@@ -2218,11 +2355,7 @@ fn a_value_the_host_normalizes_is_not_treated_as_a_choice_rejection() {
             },
         ),
     ];
-    for (item, requested, normalized) in cases {
-        assert_ne!(
-            requested, normalized,
-            "{item} は正規化されておらず、比較の有無を判別できません"
-        );
+    for (item, requested, stored) in cases {
         let harness = harness_with_choice_effect();
         let outcome = harness
             .edit
@@ -2231,17 +2364,18 @@ fn a_value_the_host_normalizes_is_not_treated_as_a_choice_rejection() {
                 item: item.to_string(),
                 value: requested,
             })
-            .unwrap_or_else(|error| panic!("{item} の正規化が失敗として扱われました: {error}"));
+            .unwrap_or_else(|error| panic!("{item} の書き込みが失敗として扱われました: {error}"));
 
-        assert_eq!(changed_item(&outcome, item), normalized, "{item}");
+        assert_eq!(changed_item(&outcome, item), stored, "{item}");
     }
 }
 
 #[test]
-fn a_rejected_choice_value_is_told_apart_from_a_change_that_did_not_apply() {
-    // 選択肢を列挙できない以上、当て推量が外れることは常態である。ヘッダーが
-    // 変更を拒む旨を記していない setter の不一致と畳むと、要求元は「異常」と
-    // 「よくある入力誤り」を区別できない。
+fn a_value_the_host_rewrote_is_told_apart_from_a_change_that_did_not_apply() {
+    // 値域も選択肢も列挙できない以上、当て推量が外れることは常態である。
+    // ヘッダーが変更を拒む旨を記していない setter の不一致と畳むと、要求元は
+    // 「異常」と「よくある入力誤り」を区別できない。前者は報告する対象であり、
+    // 後者は読み直した実値を見て送り直す対象である。
     let choice = harness_with_choice_effect();
     let rejected = choice
         .edit
@@ -2259,13 +2393,82 @@ fn a_rejected_choice_value_is_told_apart_from_a_change_that_did_not_apply() {
         .expect_err("無視された改名が成功として返りました");
 
     assert_eq!(rejected.error_code(), not_applied.error_code());
-    assert_eq!(rejected.details()["reason"], json!("choice_value_rejected"));
+    assert_eq!(
+        rejected.details()["reason"],
+        json!("item_value_not_applied")
+    );
     assert_eq!(not_applied.details()["reason"], json!("change_not_applied"));
     assert_ne!(
         rejected.details()["reason"],
         not_applied.details()["reason"],
         "2 つの失敗が同じ名前を名乗っています"
     );
+}
+
+#[test]
+fn every_kind_of_rewrite_shares_one_reason() {
+    // 「ホストが拒んだ」と「ホストが別の値へ倒した」を区別する材料がこちら側に
+    // 無い。どちらも読み直しが要求と違うとしか観測できないため、種別ごとに名前を
+    // 割らない。
+    let mut reasons: Vec<String> = Vec::new();
+    for (item, requested, _) in rewritten_item_cases() {
+        let harness = harness_with_choice_effect();
+        let error = harness
+            .edit
+            .set_object_item(&SetObjectItemParams {
+                selector: harness.effect_selector(1, 300, SHAPE, 0),
+                item: item.to_string(),
+                value: requested,
+            })
+            .expect_err("ホストが書き換えた値が成功として返りました");
+        reasons.push(error.details()["reason"].to_string());
+    }
+    let choice = harness_with_choice_effect();
+    reasons.push(
+        choice
+            .edit
+            .set_object_item(&set_choice(&choice, "存在しない形"))
+            .expect_err("選択肢に無い値が成功として返りました")
+            .details()["reason"]
+            .to_string(),
+    );
+    assert!(!reasons.is_empty());
+    assert!(
+        reasons.iter().all(|reason| *reason == reasons[0]),
+        "書き換えの種類ごとに名前が分かれています: {reasons:?}"
+    );
+}
+
+/// 編集手順が実際に返した「読み直しが要求と違う」失敗を集める。
+///
+/// 名前を生む経路が製品に在ることの裏付けとして用いる。一覧から値を組み立てる
+/// のでは、返す呼び出しが 1 つも無くても検査が通ってしまう。
+pub(crate) fn produced_item_value_mismatch_failures() -> Vec<EditError> {
+    rewritten_item_cases()
+        .into_iter()
+        .map(|(item, requested, _)| {
+            let harness = harness_with_choice_effect();
+            harness
+                .edit
+                .set_object_item(&SetObjectItemParams {
+                    selector: harness.effect_selector(1, 300, SHAPE, 0),
+                    item: item.to_string(),
+                    value: requested,
+                })
+                .expect_err("ホストが書き換えた値が成功として返りました")
+        })
+        .collect()
+}
+
+#[test]
+fn the_item_value_mismatch_has_a_request_that_produces_it() {
+    for failure in produced_item_value_mismatch_failures() {
+        assert_eq!(
+            failure.details()["reason"],
+            json!("item_value_not_applied"),
+            "別の失敗が返りました"
+        );
+    }
 }
 
 #[test]
@@ -5649,15 +5852,6 @@ fn unsupported_target_case(reason: &UnsupportedReason) -> Vec<EditError> {
                         name: Some("新しい名前".to_string()),
                     })
                     .expect_err("無言で無視された改名が成功として返りました"),
-            ]
-        }
-        UnsupportedReason::ChoiceValueRejected => {
-            let harness = harness_with_choice_effect();
-            vec![
-                harness
-                    .edit
-                    .set_object_item(&set_choice(&harness, "存在しない形"))
-                    .expect_err("選択肢に無い値が成功として返りました"),
             ]
         }
         UnsupportedReason::InverseUnavailable => {

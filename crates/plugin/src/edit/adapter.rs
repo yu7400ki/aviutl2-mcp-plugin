@@ -33,7 +33,7 @@ use aviutl2_mcp_core::{
     DeleteObjectSectionParams, DisplayRange, DisplayStart, EditOutcome, EffectInfo, EffectType,
     FocusChange, FrameRange, GridBpmOutcome, ItemWrite, ItemWriteError, LayerInfo,
     LayerStateOutcome, MoveObjectParams, MoveObjectSectionParams, ObjectSectionsOutcome,
-    ObjectSelector, ObjectSource, ObjectSummary, ObservedSelection, RangeChange,
+    ObjectSelector, ObjectSource, ObjectSummary, ObservedSelection, RangeChange, ReadBackCheck,
     SceneSettingsOutcome, SectionRange, SelectionField, SelectionState, SetEffectEnabledParams,
     SetGridBpmParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
     SetSceneSettingsParams, SetSelectionParams, prepare_item_write,
@@ -444,16 +444,19 @@ pub(crate) fn reread_with_effects(
     Ok((summary, detail.effects))
 }
 
-/// 書き込んだ設定値が受け付けられたことを、読み直して確かめる。
+/// 書き込んだ設定値が要求どおり入ったことを、読み直して確かめる。
 ///
-/// 確かめるのは選択肢から選ぶ種別だけである。SDK は選択肢を列挙する手段を持た
-/// ず、選択肢に無い値を渡しても失敗を返さずに黙って無視するため、読み直さない
-/// 限り「書けたのに反映されていない」状態を成功として報告してしまう。対象と
-/// する種別は [`ItemWrite`] が持つ。
+/// SDK の書き込みは成否を返さない。値域を外れた数値は切り詰められ、小数は項目の
+/// 桁へ丸められ、書式の合わない色は既定値へ落ち、未登録のフォント名と選択肢に
+/// 無い値は黙って捨てられる。読み直さない限り、いずれも「書けたのに要求した値が
+/// 入っていない」状態を成功として報告してしまう。
 ///
 /// 比べるのは **SDK へ渡した文字列と読み直した文字列**である。書き込みの前後を
 /// 比べても、同じ値を書いた場合と値が無視された場合はどちらも前後が等しくなり、
-/// 区別できない。
+/// 区別できない。比較の規則は種別ごとに違い、[`ItemWrite`] が持つ。
+///
+/// 読み直しは sub-operation 1 件あたり 1 回である。**照合しない種別は読み直しも
+/// しない。** 費用は照合の有無と一致する。
 ///
 /// 単独の変更と一括適用が同じ入力に対して同じ失敗を返すよう、判定はこの 1 か所
 /// だけに置く。
@@ -465,19 +468,14 @@ pub(crate) fn verify_written_item(
     item: &str,
     write: &ItemWrite,
 ) -> Result<(), EditError> {
-    if !write.verifies_read_back() {
+    let ReadBackCheck::Compare(comparison) = write.read_back() else {
         return Ok(());
-    }
+    };
     let observed = attribute(permit, boundary, editor.effect_item_value(effect, item))?;
-    if write.read_back_matches(&observed) {
+    if write.read_back_matches(comparison, &observed) {
         return Ok(());
     }
-    Err(permit.attribute(
-        boundary,
-        EditError::UnsupportedTarget {
-            reason: UnsupportedReason::ChoiceValueRejected,
-        },
-    ))
+    Err(permit.attribute(boundary, EditError::ItemValueNotApplied { observed }))
 }
 
 /// 変更後の対象から、指定位置の effect 情報を読み直す。
@@ -916,9 +914,8 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             })?;
             verify_written_item(editor, &permit, &boundary, &effect, &params.item, &write)?;
 
-            // 選択肢から選ぶ種別以外では、読み直した値を成否の判定に使わない。
-            // ホスト側で正規化され得るため、書いた文字列との一致を求めると正常な
-            // 正規化を失敗と誤診断する。読み直した値は正規化値として応答へ載せる。
+            // 照合を通った値を、種別に応じた形へ解釈し直して応答へ載せる。表記は
+            // ホストが整えたものであり、要求した値そのものである。
             let (summary, info) = attribute(
                 &permit,
                 &boundary,

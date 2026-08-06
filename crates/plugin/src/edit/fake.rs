@@ -444,7 +444,7 @@ impl FakeEditHost {
         Self {
             info: fake_edit_info(),
             catalog: fake_catalog(),
-            fonts: vec!["MS UI Gothic".to_string(), "游ゴシック".to_string()],
+            fonts: FONT_NAMES.iter().map(|name| name.to_string()).collect(),
             modules: vec![ModuleEntry {
                 module_type: ModuleType::ScriptObject,
                 name: "テキスト".to_string(),
@@ -1623,9 +1623,12 @@ impl SceneEditor for FakeSceneEditor<'_> {
             .push(value.to_string());
         let item = item.to_string();
         let value = value.to_string();
+        // フォント名の妥当性は登録済みの一覧で決まる。種別だけでは書き換えの
+        // 結果が決まらない設定項目がある。
+        let fonts = self.host.fonts.clone();
         self.with_effect(effect, move |effect| {
             if let Some(entry) = effect.items.iter_mut().find(|entry| entry.name == item)
-                && let Some(written) = host_write(&entry.item_type, &value)
+                && let Some(written) = host_write(&entry.item_type, &value, &fonts)
             {
                 entry.value = written;
             }
@@ -1916,8 +1919,26 @@ pub(crate) const MAX_FRAME: usize = 999;
 pub(crate) const DISPLAY_FRAME_NUM: usize = 600;
 /// ホストが返す表示レイヤー数。表示開始レイヤーとは一致しない。
 pub(crate) const DISPLAY_LAYER_NUM: usize = 4;
-/// ホストが設定項目の値を丸める上限。
+/// ホストが設定項目の値を切り詰める上限。
 pub(crate) const MAX_ITEM_VALUE: i64 = 100;
+
+/// ホストが設定項目の値を切り詰める下限。
+///
+/// 上限とは別に置く。実機は下限側も同じように切り詰めるため、片側だけを模すと
+/// 負の値の扱いを取り違えても気付けない。
+pub(crate) const MIN_ITEM_VALUE: i64 = 0;
+
+/// ホストが実数の設定項目を丸める小数桁数。
+///
+/// 読み直しの表記もこの桁で揃う。書いた `100` が `100.00` として読めることが、
+/// 書き込み後の照合を数値として行わなければならない理由である。
+pub(crate) const ITEM_VALUE_DECIMALS: usize = 2;
+
+/// ホストが書式の合わない色に対して入れる既定値。
+///
+/// **変更前の値ではない。** 不正な色を書くと、要求した色にならないだけでなく
+/// 元の色も失われる。
+pub(crate) const DEFAULT_COLOR: &str = "ffffff";
 
 /// ホストが受け付ける選択肢の値。
 ///
@@ -1925,19 +1946,28 @@ pub(crate) const MAX_ITEM_VALUE: i64 = 100;
 /// 一覧に無い値の書き込みは黙って無視される。
 pub(crate) const CHOICE_VALUES: [&str; 2] = ["円", "四角形"];
 
+/// 登録済みのフォント名。
+///
+/// フォント種別の設定項目はこの一覧の値だけを受け付ける。
+pub(crate) const FONT_NAMES: [&str; 2] = ["MS UI Gothic", "游ゴシック"];
+
+/// フォント種別の設定項目が初期状態で持つ値。
+pub(crate) const DEFAULT_FONT: &str = FONT_NAMES[0];
+
 /// ホストが項目名に対して返す生の設定値。
 ///
-/// 保持している値をそのまま文字列にする。種別ごとに別の表記へ写すと、書き込みが
-/// 渡した文字列と読み直した文字列を比べる検査が成立しない。
+/// **ホストは書いた文字列をそのまま返すとは限らない。** 実数は項目の小数桁数へ
+/// 揃えた表記で返り、書いた `100` は `100.00` として読める。書き込み後の照合が
+/// バイト比較のままだと、この一点だけで正しい書き込みが失敗として返る。
 ///
-/// **テキスト種別だけは例外で、エスケープ表記へ包んで返す。** ホストは `\` と
-/// 改行を包んだ表記でしか値を返さない。[`host_write`] が同じ表記を解いて保持する
-/// ため、2 つは対になっており、包みが増えることも減ることもない。
+/// **テキスト種別はエスケープ表記へ包んで返す。** ホストは `\` と改行を包んだ
+/// 表記でしか値を返さない。[`host_write`] が同じ表記を解いて保持するため、2 つは
+/// 対になっており、包みが増えることも減ることもない。
 fn raw_item_value(value: &ItemValue) -> String {
     match value {
         ItemValue::Unknown { raw } => raw.clone(),
         ItemValue::Integer { value } => value.to_string(),
-        ItemValue::Number { value } => value.to_string(),
+        ItemValue::Number { value } => format!("{:.*}", ITEM_VALUE_DECIMALS, value.get()),
         ItemValue::Bool { value } => if *value { "1" } else { "0" }.to_string(),
         ItemValue::Text { value } => encode_host_text(value),
         ItemValue::Color { value } | ItemValue::Choice { value } => value.clone(),
@@ -1946,11 +1976,19 @@ fn raw_item_value(value: &ItemValue) -> String {
     }
 }
 
-/// ホストが書き込む値。受け付けない値では `None` を返し、状態を変えない。
+/// ホストが書き込みの結果として保持する値。
 ///
-/// 選択肢から選ぶ種別は、選択肢に無い値を失敗を返さずに無視する。ほかの種別は
-/// 種別に対応する値として受け付け、一部は表記を正規化する——整数と実数の上限
-/// への丸め、色の小文字化である。**正規化した値は書いた文字列と一致しない。**
+/// **ホストは素直ではない。** 要求を受け付けない形は 2 つあり、どちらも失敗を
+/// 返さない。
+///
+/// - **元の値のまま動かない**もの。選択肢に無い値と、登録されていないフォント名。
+///   `None` がこれを表し、呼び出し側は状態を変えない
+/// - **別の値へ倒れる**もの。書式の合わない色は既定値の白へ落ち、値域を外れた
+///   数値は境界へ切り詰められ、桁の多い小数は項目の桁へ丸められる。`Some` が
+///   倒れた先の値を運ぶ
+///
+/// 色の書式は 16 進 6 桁だけである。`#` を伴う表記も 3 桁の省略形もホストから
+/// 見れば不正であり、元の値ではなく白へ落ちる。受理した色は小文字で保持する。
 ///
 /// テキスト種別は渡された表記を解いて保持する。ホストは `\\` を 1 つの `\` へ、
 /// `\n` を改行へ戻してから保存し、[`raw_item_value`] が読み取りへ返すときに同じ
@@ -1959,7 +1997,7 @@ fn raw_item_value(value: &ItemValue) -> String {
 ///
 /// 書き込みを公開していない種別は生の文字列のまま保つ。読み取り経路がそれらを
 /// 生値として返すため、書き込みだけが別の形へ写ると場面の状態が種別と食い違う。
-fn host_write(item_type: &EffectItemType, value: &str) -> Option<ItemValue> {
+fn host_write(item_type: &EffectItemType, value: &str, fonts: &[String]) -> Option<ItemValue> {
     match item_type {
         EffectItemType::Select
         | EffectItemType::Combo
@@ -1968,15 +2006,16 @@ fn host_write(item_type: &EffectItemType, value: &str) -> Option<ItemValue> {
             value: value.to_string(),
         }),
         EffectItemType::Color => Some(ItemValue::Color {
-            value: value.to_lowercase(),
+            value: match is_host_color(value) {
+                true => value.to_ascii_lowercase(),
+                false => DEFAULT_COLOR.to_string(),
+            },
         }),
         EffectItemType::Number => Some(ItemValue::Number {
-            value: value
-                .parse::<f64>()
-                .ok()
-                .map(|parsed| parsed.min(MAX_ITEM_VALUE as f64))
-                .and_then(FiniteF64::try_new)
-                .unwrap_or_else(|| FiniteF64::try_new(0.0).expect("有限値")),
+            value: FiniteF64::try_new(round_to_item_decimals(clamp_item_value(
+                value.parse::<f64>().unwrap_or_default(),
+            )))
+            .expect("有限値"),
         }),
         EffectItemType::Text | EffectItemType::String => Some(ItemValue::Text {
             value: decode_host_text(value),
@@ -1990,11 +2029,18 @@ fn host_write(item_type: &EffectItemType, value: &str) -> Option<ItemValue> {
         EffectItemType::Folder => Some(ItemValue::Folder {
             path: value.to_string(),
         }),
-        EffectItemType::Font => Some(ItemValue::Font {
-            name: value.to_string(),
-        }),
+        // 登録されていないフォント名は黙殺され、元の値も fingerprint も動かない。
+        EffectItemType::Font => fonts
+            .iter()
+            .any(|font| font == value)
+            .then(|| ItemValue::Font {
+                name: value.to_string(),
+            }),
         EffectItemType::Integer => Some(ItemValue::Integer {
-            value: value.parse::<i64>().unwrap_or_default().min(MAX_ITEM_VALUE),
+            value: value
+                .parse::<i64>()
+                .unwrap_or_default()
+                .clamp(MIN_ITEM_VALUE, MAX_ITEM_VALUE),
         }),
         EffectItemType::Scene
         | EffectItemType::Range
@@ -2003,6 +2049,23 @@ fn host_write(item_type: &EffectItemType, value: &str) -> Option<ItemValue> {
             raw: value.to_string(),
         }),
     }
+}
+
+/// ホストが色として受け付ける表記か。16 進 6 桁だけを受ける。
+fn is_host_color(value: &str) -> bool {
+    value.len() == 6 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// 数値を設定項目の値域へ切り詰める。
+fn clamp_item_value(value: f64) -> f64 {
+    value.clamp(MIN_ITEM_VALUE as f64, MAX_ITEM_VALUE as f64)
+}
+
+/// 実数を設定項目の小数桁数へ丸める。
+fn round_to_item_decimals(value: f64) -> f64 {
+    format!("{value:.ITEM_VALUE_DECIMALS$}")
+        .parse::<f64>()
+        .expect("十進表記")
 }
 
 /// 同名 effect の順序を出現順で振り直す。
@@ -2053,10 +2116,13 @@ pub(crate) fn blur(index: usize, range: i64) -> HostEffect {
     }
 }
 
-/// 選択肢から選ぶ設定項目と、ホストが表記を正規化する設定項目を並べて持つ effect。
+/// 選択肢から選ぶ設定項目と、ホストが値を書き換える設定項目を並べて持つ effect。
 ///
 /// 選択肢から選ぶ種別は 1 つに絞らない。ホストの挙動は種別によらず同じであり、
 /// 1 種別だけを置くと種別ごとに経路が分かれても気付けない。
+///
+/// 色・フォント・実数・テキストを併せて持つ。ホストが値を書き換える形は種別
+/// ごとに違い、1 種別だけでは書き込み後の照合を種別ごとに定めた意味が見えない。
 ///
 /// 既定の状態には含めない。選択肢の検証を要する試験だけが
 /// [`shape_catalog_entry`] と対にして差し込む。
@@ -2095,7 +2161,15 @@ pub(crate) fn shape(index: usize) -> HostEffect {
                 name: "色".to_string(),
                 item_type: EffectItemType::Color,
                 value: ItemValue::Color {
-                    value: "#ffffff".to_string(),
+                    value: DEFAULT_COLOR.to_string(),
+                },
+                track: None,
+            },
+            EffectItem {
+                name: "フォント".to_string(),
+                item_type: EffectItemType::Font,
+                value: ItemValue::Font {
+                    name: DEFAULT_FONT.to_string(),
                 },
                 track: None,
             },
@@ -2278,7 +2352,7 @@ pub(crate) fn fake_catalog() -> Vec<AvailableEffect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::prepare_item_write;
+    use aviutl2_mcp_core::{ReadBackCheck, prepare_item_write};
 
     /// テキスト種別の設定項目を 1 つだけ公開する一覧。
     fn text_item() -> Vec<AvailableEffectItem> {
@@ -2288,10 +2362,92 @@ mod tests {
         }]
     }
 
+    /// 登録済みフォントの一覧。
+    fn fonts() -> Vec<String> {
+        FONT_NAMES.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// ホストへ書いた結果として読み取りへ返る生の文字列。
+    fn written_back(item_type: &EffectItemType, value: &str, before: &ItemValue) -> String {
+        match host_write(item_type, value, &fonts()) {
+            Some(written) => raw_item_value(&written),
+            // 受け付けない値では状態が変わらない。読み取りには変更前の値が返る。
+            None => raw_item_value(before),
+        }
+    }
+
+    #[test]
+    fn the_fake_host_rewrites_the_values_the_real_one_rewrites() {
+        // 実機で観測した書き換えを並べる。**ホストが素直だという前提を捨てる
+        // ことが、この一覧の目的である。**
+        let before_color = ItemValue::Color {
+            value: "66ccff".to_string(),
+        };
+        let before_font = ItemValue::Font {
+            name: DEFAULT_FONT.to_string(),
+        };
+        let before_number = ItemValue::Number {
+            value: FiniteF64::try_new(1.0).expect("有限値"),
+        };
+        let cases = [
+            // 書式の合わない色は、変更前の値ではなく白へ落ちる。
+            (EffectItemType::Color, "#ff0000", &before_color, "ffffff"),
+            (EffectItemType::Color, "f00", &before_color, "ffffff"),
+            // 受理される色は小文字で返る。バイト比較では偽の不一致になる。
+            (EffectItemType::Color, "FF8800", &before_color, "ff8800"),
+            // 未登録のフォント名は黙殺され、変更前の値が残る。
+            (
+                EffectItemType::Font,
+                "NoSuchFont12345",
+                &before_font,
+                DEFAULT_FONT,
+            ),
+            (
+                EffectItemType::Font,
+                FONT_NAMES[1],
+                &before_font,
+                FONT_NAMES[1],
+            ),
+            // 値域を外れた数値は両側とも切り詰められる。
+            (EffectItemType::Number, "500", &before_number, "100.00"),
+            (EffectItemType::Number, "-1", &before_number, "0.00"),
+            // 桁の多い小数は項目の桁へ丸められる。
+            (EffectItemType::Number, "1.2345", &before_number, "1.23"),
+            // 受理される数値も、桁を整えた表記で返る。
+            (EffectItemType::Number, "100", &before_number, "100.00"),
+            (EffectItemType::Number, "12.5", &before_number, "12.50"),
+            (EffectItemType::Integer, "500", &before_number, "100"),
+            (EffectItemType::Integer, "-1", &before_number, "0"),
+        ];
+        for (item_type, value, before, expected) in cases {
+            assert_eq!(
+                written_back(&item_type, value, before),
+                expected,
+                "{item_type} へ {value} を書いた結果が違います"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rejected_choice_value_leaves_the_previous_one() {
+        let before = ItemValue::Choice {
+            value: CHOICE_VALUES[0].to_string(),
+        };
+        assert_eq!(
+            written_back(&EffectItemType::Select, "存在しない形", &before),
+            CHOICE_VALUES[0]
+        );
+        assert_eq!(
+            written_back(&EffectItemType::Select, CHOICE_VALUES[1], &before),
+            CHOICE_VALUES[1]
+        );
+    }
+
     #[test]
     fn the_fake_host_wraps_backslashes_and_line_feeds_like_the_real_one() {
         // 書いた文字列を解いて保持し、読み取りへは包み直して返す。
-        let written = host_write(&EffectItemType::Text, r"C:\\temp\nの先").expect("受理される");
+        let written =
+            host_write(&EffectItemType::Text, r"C:\\temp\nの先", &fonts()).expect("受理される");
         assert_eq!(
             written,
             ItemValue::Text {
@@ -2320,7 +2476,8 @@ mod tests {
                 },
             )
             .expect("書き込み");
-            let stored = host_write(&EffectItemType::Text, write.value()).expect("受理される");
+            let stored =
+                host_write(&EffectItemType::Text, write.value(), &fonts()).expect("受理される");
             assert_eq!(
                 stored,
                 ItemValue::Text {
@@ -2328,8 +2485,11 @@ mod tests {
                 },
                 "{value:?} がホストの保持で崩れました"
             );
+            let ReadBackCheck::Compare(comparison) = write.read_back() else {
+                panic!("テキスト種別が照合されません");
+            };
             assert!(
-                write.read_back_matches(&raw_item_value(&stored)),
+                write.read_back_matches(comparison, &raw_item_value(&stored)),
                 "{value:?} の読み直しが渡した文字列と一致しません"
             );
         }

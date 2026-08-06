@@ -5,10 +5,12 @@ use crate::read::ReadError;
 use aviutl2_mcp_core::{ErrorCode, ItemWriteError};
 use serde_json::{Map, Value, json};
 
-/// 応答の補助情報へ載せる名前の上限文字数。
+/// 応答の補助情報へ載せる文字列の上限文字数。
 ///
 /// effect 名・設定項目名は要求元が指定を訂正するのに要るが、長さは要求元が
-/// 決めるため、そのまま反響させると応答が膨らむ。
+/// 決めるため、そのまま反響させると応答が膨らむ。ホストから読み直した設定値も
+/// 同じ理由で切り詰める——長さを決めるのはホストであり、応答の大きさをこちら
+/// 側で抑えられなくなる。
 const MAX_NAME_CHARS: usize = 1_024;
 
 /// 同じ要求をどう作り直せば通り得るか。
@@ -61,17 +63,6 @@ pub enum UnsupportedReason {
     ///
     /// ホストが無言で拒否した場合にここへ来る。成功として返してはならない。
     ChangeNotApplied,
-    /// 選択肢から選ぶ設定項目へ、選択肢に無い値を書こうとした。
-    ///
-    /// SDK は選択肢を列挙する手段を持たず、選択肢に無い値を渡しても失敗を
-    /// 返さずに黙って無視する。書き込んだ直後の読み直しだけが検出できる。
-    ///
-    /// [`UnsupportedReason::ChangeNotApplied`] と畳まない。あちらは変更を
-    /// 拒む旨をヘッダーが記していない API で起きる想定外の不一致であり、
-    /// こちらは選択肢を知る手段が無い以上、当て推量が外れて頻発する。
-    /// 要求元が取る行動も違う——前者は異常として報告し、後者は既存の
-    /// オブジェクトから有効な値を読んで別の値を試す。
-    ChoiceValueRejected,
     /// 逆操作の材料を変更前に読み取れない。
     ///
     /// 逆操作を組み立てられない変更は発行しない。実行してから組み立てられないと
@@ -90,7 +81,6 @@ impl UnsupportedReason {
         UnsupportedReason::MediaNotSupported,
         UnsupportedReason::ItemTypeNotWritable,
         UnsupportedReason::ChangeNotApplied,
-        UnsupportedReason::ChoiceValueRejected,
         UnsupportedReason::InverseUnavailable,
     ];
 
@@ -103,7 +93,6 @@ impl UnsupportedReason {
             UnsupportedReason::MediaNotSupported => "media_not_supported",
             UnsupportedReason::ItemTypeNotWritable => "item_type_not_writable",
             UnsupportedReason::ChangeNotApplied => "change_not_applied",
-            UnsupportedReason::ChoiceValueRejected => "choice_value_rejected",
             UnsupportedReason::InverseUnavailable => "inverse_unavailable",
         }
     }
@@ -122,9 +111,6 @@ impl std::fmt::Display for UnsupportedReason {
                 "この種別の設定項目への書き込みには対応していません"
             }
             UnsupportedReason::ChangeNotApplied => "要求した変更が反映されませんでした",
-            UnsupportedReason::ChoiceValueRejected => {
-                "指定した値は設定項目の選択肢として受け付けられませんでした"
-            }
             UnsupportedReason::InverseUnavailable => "逆操作の材料を読み取れませんでした",
         };
         f.write_str(text)
@@ -386,6 +372,29 @@ pub enum EditError {
     /// 設定項目への書き込みを受け付けられない。
     #[error(transparent)]
     ItemWrite(ItemWriteError),
+    /// 書き込んだ設定値を読み直したところ、要求した値になっていなかった。
+    ///
+    /// ホストは書き込みの成否を返さない。値域を外れた数値の切り詰め、小数の
+    /// 丸め、書式の合わない色の既定値への置き換え、未登録のフォント名と選択肢に
+    /// 無い値の黙殺は、いずれも読み直しでしか観測できない。
+    ///
+    /// **種別ごとに理由を分けない。** 「ホストが拒んだ」と「ホストが別の値へ
+    /// 倒した」を区別する材料がこちら側に無く、どちらも「読み直しが要求と違う」
+    /// としか観測できない。照合の仕組みが 1 つである以上、名前も 1 つである。
+    ///
+    /// [`UnsupportedReason::ChangeNotApplied`] とは畳まない。あちらは変更を拒む
+    /// 旨をヘッダーが記していない API で起きる想定外の不一致であり、こちらは
+    /// 値域も選択肢も知る手段が無い以上、当て推量が外れて頻発する。要求元が取る
+    /// 行動も違う——前者は異常として報告し、後者は読み直した実値を見て別の値を
+    /// 送り直す。
+    #[error("書き込んだ設定値が読み直した値と一致しません")]
+    ItemValueNotApplied {
+        /// 読み直したホストの現在の値。
+        ///
+        /// **要求された値ではない。** ホストの現在の状態であり、そのまま送り
+        /// 直せば 1 往復で解決する。
+        observed: String,
+    },
     /// 対象または SDK が変更に対応しない。
     #[error("{reason}")]
     UnsupportedTarget {
@@ -516,6 +525,7 @@ impl EditError {
             EditError::EffectNotFound { .. } => ErrorCode::NotFound,
             EditError::DuplicateTarget => ErrorCode::InvalidArgument,
             EditError::ItemWrite(error) => error.error_code(),
+            EditError::ItemValueNotApplied { .. } => ErrorCode::UnsupportedOperation,
             EditError::UnsupportedTarget { .. } => ErrorCode::UnsupportedOperation,
             EditError::AliasRejected(rejection) => rejection.error_code(),
             EditError::SectionChangeRejected { .. } | EditError::Sdk { .. } => ErrorCode::SdkError,
@@ -635,6 +645,13 @@ impl EditError {
                 details.insert("reason".to_string(), json!("duplicate_target"));
             }
             EditError::ItemWrite(error) => fill_item_write_details(details, error),
+            // 載せるのはホストが返した実値だけである。**要求された値は反響させ
+            // ない。** 読み直した値はホストの現在の状態であって要求元の内容では
+            // ないため、そのまま次の要求へ使える材料として載せてよい。
+            EditError::ItemValueNotApplied { observed } => {
+                details.insert("reason".to_string(), json!("item_value_not_applied"));
+                details.insert("current_value".to_string(), json!(truncate(observed)));
+            }
             EditError::UnsupportedTarget { reason } => {
                 details.insert("reason".to_string(), json!(reason.as_str()));
             }
@@ -722,9 +739,9 @@ fn merge(details: &mut Map<String, Value>, source: Value) {
     }
 }
 
-/// 名前を応答へ載せられる長さへ切り詰める。
-fn truncate(name: &str) -> String {
-    name.chars().take(MAX_NAME_CHARS).collect()
+/// 応答へ載せられる長さへ切り詰める。
+fn truncate(text: &str) -> String {
+    text.chars().take(MAX_NAME_CHARS).collect()
 }
 
 #[cfg(test)]
@@ -810,10 +827,10 @@ pub(crate) mod tests {
                 reason: UnsupportedReason::ChangeNotApplied,
             },
             EditError::UnsupportedTarget {
-                reason: UnsupportedReason::ChoiceValueRejected,
-            },
-            EditError::UnsupportedTarget {
                 reason: UnsupportedReason::InverseUnavailable,
+            },
+            EditError::ItemValueNotApplied {
+                observed: "ffffff".to_string(),
             },
             // 受け入れ規則の 4 条件は、名前を持つものと持たないものの双方を通す。
             EditError::AliasRejected(AliasRejection::NotFound),
@@ -898,6 +915,7 @@ pub(crate) mod tests {
             EditError::EffectNotFound { .. } => "EffectNotFound",
             EditError::DuplicateTarget => "DuplicateTarget",
             EditError::ItemWrite(_) => "ItemWrite",
+            EditError::ItemValueNotApplied { .. } => "ItemValueNotApplied",
             EditError::UnsupportedTarget { .. } => "UnsupportedTarget",
             EditError::AliasRejected(_) => "AliasRejected",
             EditError::SectionPrecondition { .. } => "SectionPrecondition",
@@ -924,6 +942,7 @@ pub(crate) mod tests {
             "EffectNotFound",
             "DuplicateTarget",
             "ItemWrite",
+            "ItemValueNotApplied",
             "UnsupportedTarget",
             "AliasRejected",
             "SectionPrecondition",
@@ -963,7 +982,6 @@ pub(crate) mod tests {
             UnsupportedReason::MediaNotSupported,
             UnsupportedReason::ItemTypeNotWritable,
             UnsupportedReason::ChangeNotApplied,
-            UnsupportedReason::ChoiceValueRejected,
             UnsupportedReason::InverseUnavailable,
         ];
         for reason in unsupported {
@@ -974,7 +992,6 @@ pub(crate) mod tests {
                 | UnsupportedReason::MediaNotSupported
                 | UnsupportedReason::ItemTypeNotWritable
                 | UnsupportedReason::ChangeNotApplied
-                | UnsupportedReason::ChoiceValueRejected
                 | UnsupportedReason::InverseUnavailable => {}
             }
         }
@@ -1438,6 +1455,9 @@ pub(crate) mod tests {
             // 読み直した対象の概要と、それが内包するセレクター。概要は要約で
             // あり alias も設定値もパスも持たない。
             "current_object",
+            // 書き込みの照合で読み直したホストの現在の設定値。要求された値では
+            // なく、そのまま送り直せる材料である。
+            "current_value",
             "name",
             "selector",
             "fingerprint",

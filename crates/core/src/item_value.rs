@@ -201,14 +201,107 @@ impl ItemWriteError {
     }
 }
 
-/// 設定項目へ書き込む文字列と、書き込み後の照合の要否。
+/// 書き込んだ直後に読み直した文字列をどう扱うか。
+///
+/// **真偽値では「照合しない」と「照合して一致した」を同じ値で表してしまう。**
+/// 照合しない種別を追加したときに、それが成功と見分けられなくなる。2 つの状態を
+/// 別の variant に置き、比較の規則は照合する側だけが持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadBackCheck {
+    /// 種別ごとの比較で照合する。
+    Compare(ReadBackComparison),
+    /// 照合しない。
+    Declared {
+        /// 照合しない理由。
+        reason: ReadBackNotVerified,
+    },
+}
+
+/// 読み直した文字列と、SDK へ渡した文字列の比べ方。
+///
+/// ホストは種別ごとに表記を整える。整えた結果は要求した値そのものであり、
+/// バイト列の完全一致を全種別へ課すと、正しい書き込みが失敗として返る。
+///
+/// **数値の比較に許容誤差を置かない。** 誤差を許すと、値域への切り詰めと小数
+/// 桁への丸めを一致として見逃す。`100` と `100.00` が等しいのは、どちらも同じ
+/// `f64` へ解釈されるからであって、近いからではない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadBackComparison {
+    /// 文字列として完全に一致するか。
+    Exact,
+    /// 十進表記を数値として解釈して一致するか。
+    Numeric,
+    /// 真偽値として解釈して一致するか。
+    Boolean,
+    /// 大文字小文字を無視して一致するか。
+    IgnoreAsciiCase,
+}
+
+impl ReadBackComparison {
+    /// SDK へ渡した文字列と読み直した文字列が、この規則で一致するか。
+    ///
+    /// 数値・真偽値は、どちらか一方でも解釈できなければ一致としない。解釈でき
+    /// ない文字列は要求した値を得られたことを示さないためである。
+    pub fn matches(self, written: &str, observed: &str) -> bool {
+        match self {
+            ReadBackComparison::Exact => written == observed,
+            ReadBackComparison::IgnoreAsciiCase => written.eq_ignore_ascii_case(observed),
+            ReadBackComparison::Numeric => {
+                match (parse_number_value(written), parse_number_value(observed)) {
+                    (Some(written), Some(observed)) => written == observed,
+                    _ => false,
+                }
+            }
+            ReadBackComparison::Boolean => {
+                match (parse_check_value(written), parse_check_value(observed)) {
+                    (Some(written), Some(observed)) => written == observed,
+                    _ => false,
+                }
+            }
+        }
+    }
+}
+
+/// 書き込んだ値を読み直して照合しない理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadBackNotVerified {
+    /// 書き込みを公開していない種別。
+    ///
+    /// 書き込む文字列を組み立てる前に [`encode_item_value`] が拒否するため、
+    /// この理由を持つ [`ItemWrite`] は生まれない。それでも腕として書くのは、
+    /// 種別を足したときに照合の規則を決めないまま既定へ落ちることを防ぐためで
+    /// ある。公開の可否を後から変えるなら、ここも合わせて書き換えることになる。
+    ItemTypeNotWritable,
+}
+
+/// チェックボックスの生文字列を真偽値として解釈する。
+///
+/// ホストが返す表記と書き込みが渡す表記の双方を受ける。解釈できない文字列では
+/// `None` を返す。
+pub fn parse_check_value(raw: &str) -> Option<bool> {
+    match raw.trim() {
+        "0" | "false" => Some(false),
+        "1" | "true" => Some(true),
+        _ => None,
+    }
+}
+
+/// 数値の生文字列を有限な実数として解釈する。
+fn parse_number_value(raw: &str) -> Option<f64> {
+    raw.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+/// 設定項目へ書き込む文字列と、書き込み後の照合のしかた。
 ///
 /// 照合する文字列は SDK へ渡すもの**そのもの**である。要求に現れた値を別に
 /// 保持しないため、照合の材料が要求側の値へすり替わる余地が無い。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemWrite {
     value: String,
-    verify_read_back: bool,
+    read_back: ReadBackCheck,
 }
 
 impl ItemWrite {
@@ -217,14 +310,20 @@ impl ItemWrite {
         &self.value
     }
 
-    /// 書き込んだ直後に読み直し、渡した文字列との一致を確かめる種別か。
-    pub fn verifies_read_back(&self) -> bool {
-        self.verify_read_back
+    /// 書き込んだ直後の読み直しをどう扱うか。
+    ///
+    /// 要求内容ではなく、対象 effect が公開する種別だけで決まる。
+    pub fn read_back(&self) -> ReadBackCheck {
+        self.read_back
     }
 
     /// 読み直した文字列が、SDK へ渡した文字列と一致するか。
-    pub fn read_back_matches(&self, observed: &str) -> bool {
-        observed == self.value
+    ///
+    /// `comparison` には [`ItemWrite::read_back`] が返した
+    /// [`ReadBackCheck::Compare`] の中身を渡す。照合しない種別からは比較そのもの
+    /// が得られないため、「照合しない」が「一致した」として通る経路が無い。
+    pub fn read_back_matches(&self, comparison: ReadBackComparison, observed: &str) -> bool {
+        comparison.matches(&self.value, observed)
     }
 }
 
@@ -237,7 +336,7 @@ impl ItemWrite {
 /// 2. `item` が `items` に存在することを確認する
 /// 3. 種別への書き込みが公開されているかを確認する
 /// 4. 種別と値の形が対応するかを確認する
-/// 5. 書き込む文字列へ変換し、照合の要否を種別から決める
+/// 5. 書き込む文字列へ変換し、読み直しの照合のしかたを種別から決める
 pub fn prepare_item_write(
     items: &[AvailableEffectItem],
     item: &str,
@@ -254,7 +353,7 @@ pub fn prepare_item_write(
         })?;
     Ok(ItemWrite {
         value: encode_item_value(&entry.item_type, value)?,
-        verify_read_back: verifies_read_back(&entry.item_type),
+        read_back: read_back_check(&entry.item_type),
     })
 }
 
@@ -303,7 +402,7 @@ pub fn validate_item_value(value: &ItemValue) -> Result<(), ItemWriteError> {
 ///
 /// 選択肢から選ぶ 4 種別は表記が確定しているため公開する。読み取りはいずれも
 /// [`ItemValue::Choice`] で返し、有効な値を知る手段は既存のオブジェクトから
-/// 読むことである。選択肢に無い値を渡したことは [`verifies_read_back`] が
+/// 読むことである。選択肢に無い値を渡したことは [`read_back_check`] が
 /// 要求する照合で分かる。
 fn is_writable(item_type: &EffectItemType) -> bool {
     matches!(
@@ -324,39 +423,53 @@ fn is_writable(item_type: &EffectItemType) -> bool {
     )
 }
 
-/// 書き込んだ値を読み直し、渡した文字列との一致を確かめる種別か。
+/// 書き込んだ値を読み直したときの扱いを種別から決める。
 ///
-/// 選択肢から選ぶ 4 種別だけを対象とする。SDK は選択肢を列挙する手段を持たず、
-/// 選択肢に無い値を渡しても失敗を返さずに黙って無視するため、読み直さない限り
-/// 反映されなかったことを知る手段が無い。
+/// ホストは書き込みの成否を返さない。値域を外れた数値は切り詰め、小数は項目の
+/// 桁へ丸め、書式の合わない色は既定値へ落とし、未登録のフォント名と選択肢に
+/// 無い値は黙って捨てる。**読み直さない限り、要求した値が入らなかったことを知る
+/// 手段が無い。** したがって書き込みを公開する種別はすべて照合する。
 ///
-/// 他の種別は対象にしない。色や数値の表記、テキストの改行はホストが正規化し
-/// 得るため、渡した文字列との一致を求めると正常な正規化を失敗と誤診断する。
+/// 比較の規則は種別ごとに違う。ホストは受け付けた値の表記も整えるため、バイト
+/// 列の完全一致を全種別へ課すと、正しい書き込みまで失敗として返る。
 ///
-/// 書き込みを公開していない種別についても述べる。公開の可否は [`is_writable`]
-/// が別に決めており、ここは種別そのものの性質だけを言う。
+/// - 整数・実数は数値として比べる。ホストが桁を整えるため、`100` と `100.00` は
+///   同じ値である
+/// - チェックは真偽値として比べる
+/// - 色は 16 進表記の大文字小文字を無視して比べる。ホストは受理した色を小文字で
+///   返す
+/// - フォント名・テキスト・パス・選択肢は完全一致で比べる。ホストはこれらを
+///   正規化せず、テキストが渡すのは既に符号化済みの文字列であり、読み直しは
+///   同じ表記で返る
 ///
-/// **`_` を使わない網羅 `match` である。** 種別を足すと、照合するかを書くまで
-/// コンパイルできない。
-fn verifies_read_back(item_type: &EffectItemType) -> bool {
+/// 書き込みを公開していない種別は照合しない。公開の可否は [`is_writable`] が
+/// 別に決めており、そちらで拒否されるためここへ由来する [`ItemWrite`] は生まれ
+/// ない。
+///
+/// **`_` を使わない網羅 `match` である。** 種別を足したときに、照合するかを
+/// 決めないまま既定へ落ちることがない。
+pub fn read_back_check(item_type: &EffectItemType) -> ReadBackCheck {
     match item_type {
-        EffectItemType::Select
-        | EffectItemType::Combo
-        | EffectItemType::Mask
-        | EffectItemType::Figure => true,
-        EffectItemType::Integer
-        | EffectItemType::Number
-        | EffectItemType::Check
+        EffectItemType::Integer | EffectItemType::Number => {
+            ReadBackCheck::Compare(ReadBackComparison::Numeric)
+        }
+        EffectItemType::Check => ReadBackCheck::Compare(ReadBackComparison::Boolean),
+        EffectItemType::Color => ReadBackCheck::Compare(ReadBackComparison::IgnoreAsciiCase),
+        EffectItemType::Font
         | EffectItemType::Text
         | EffectItemType::String
         | EffectItemType::File
         | EffectItemType::Folder
-        | EffectItemType::Font
-        | EffectItemType::Color
-        | EffectItemType::Scene
+        | EffectItemType::Select
+        | EffectItemType::Combo
+        | EffectItemType::Mask
+        | EffectItemType::Figure => ReadBackCheck::Compare(ReadBackComparison::Exact),
+        EffectItemType::Scene
         | EffectItemType::Range
         | EffectItemType::Data
-        | EffectItemType::Unknown(_) => false,
+        | EffectItemType::Unknown(_) => ReadBackCheck::Declared {
+            reason: ReadBackNotVerified::ItemTypeNotWritable,
+        },
     }
 }
 
@@ -1359,26 +1472,122 @@ mod tests {
         );
     }
 
-    #[test]
-    fn only_the_four_choice_types_are_verified_by_reading_back() {
-        // 照合の対象は選択肢から選ぶ 4 種別に限る。ほかの種別はホストが表記を
-        // 正規化し得るため、一致を求めると正常な正規化を失敗と誤診断する。
-        //
-        // 既知の全種別と未知種別を走査して照合する側を集めるため、この 1 つの
-        // 比較が全種別についての要否を決める。種別を足したときにここを書き
-        // 換えないまま通ることは、生産側の網羅 `match` が防ぐ。
-        let verified: Vec<EffectItemType> = EffectItemType::ALL
-            .iter()
-            .chain([&EffectItemType::Unknown(99)])
-            .filter(|item_type| verifies_read_back(item_type))
-            .cloned()
-            .collect();
-        assert_eq!(verified, choice_item_types());
+    /// 種別ごとに、読み直しをどう扱うかを述べる。
+    ///
+    /// [`EffectItemType`] に対する網羅 `match` であり `_` を使わない。**種別を
+    /// 足すとここが落ち、照合のしかたを書くまでコンパイルできない。**
+    fn expects_read_back(item_type: &EffectItemType) -> ReadBackCheck {
+        match item_type {
+            EffectItemType::Integer | EffectItemType::Number => {
+                ReadBackCheck::Compare(ReadBackComparison::Numeric)
+            }
+            EffectItemType::Check => ReadBackCheck::Compare(ReadBackComparison::Boolean),
+            EffectItemType::Color => ReadBackCheck::Compare(ReadBackComparison::IgnoreAsciiCase),
+            EffectItemType::Text
+            | EffectItemType::String
+            | EffectItemType::File
+            | EffectItemType::Folder
+            | EffectItemType::Font
+            | EffectItemType::Select
+            | EffectItemType::Combo
+            | EffectItemType::Mask
+            | EffectItemType::Figure => ReadBackCheck::Compare(ReadBackComparison::Exact),
+            EffectItemType::Scene
+            | EffectItemType::Range
+            | EffectItemType::Data
+            | EffectItemType::Unknown(_) => ReadBackCheck::Declared {
+                reason: ReadBackNotVerified::ItemTypeNotWritable,
+            },
+        }
     }
 
     #[test]
-    fn the_prepared_write_carries_the_verification_of_its_item_type() {
-        // 照合の要否は要求内容ではなく、対象 effect が公開する種別で決まる。
+    fn every_item_type_declares_how_its_read_back_is_compared() {
+        // 既知の全種別と未知種別を走査し、宣言と突き合わせる。実装だけを直した
+        // 場合も、宣言だけを直した場合も落ちる。網羅 `match` はどちらか一方の
+        // 書き換え漏れを捕まえないため、走査で補う。
+        for item_type in EffectItemType::ALL
+            .iter()
+            .chain([&EffectItemType::Unknown(99)])
+        {
+            assert_eq!(
+                read_back_check(item_type),
+                expects_read_back(item_type),
+                "{item_type} の照合のしかたが宣言と異なります"
+            );
+        }
+    }
+
+    #[test]
+    fn every_writable_item_type_is_verified_by_reading_back() {
+        // ホストは書き込みの成否を返さない。公開している種別のどれか 1 つでも
+        // 照合から漏れると、その種別だけが「書けたのに入っていない」を成功として
+        // 報告する。
+        for item_type in EffectItemType::ALL {
+            if !expects_writable(item_type) {
+                continue;
+            }
+            assert!(
+                matches!(read_back_check(item_type), ReadBackCheck::Compare(_)),
+                "{item_type} が書き込み後に照合されません"
+            );
+        }
+    }
+
+    #[test]
+    fn the_comparison_absorbs_the_notation_the_host_returns() {
+        // ホストが整えた表記は要求した値そのものである。バイト比較を課すと
+        // 正しい書き込みが失敗になる。
+        let matching = [
+            (ReadBackComparison::Numeric, "100", "100.00"),
+            (ReadBackComparison::Numeric, "12.5", "12.500"),
+            (ReadBackComparison::Numeric, "-3", "-3.00"),
+            (ReadBackComparison::Numeric, "0", "-0.0"),
+            (ReadBackComparison::Boolean, "1", "true"),
+            (ReadBackComparison::Boolean, "0", "false"),
+            (ReadBackComparison::IgnoreAsciiCase, "FF8800", "ff8800"),
+            (ReadBackComparison::IgnoreAsciiCase, "ff8800", "FF8800"),
+            (ReadBackComparison::Exact, "四角形", "四角形"),
+            (ReadBackComparison::Exact, r"C:\movie.mp4", r"C:\movie.mp4"),
+        ];
+        for (comparison, written, observed) in matching {
+            assert!(
+                comparison.matches(written, observed),
+                "{comparison:?}: {written} と {observed} が一致しません"
+            );
+        }
+    }
+
+    #[test]
+    fn the_comparison_rejects_a_value_the_host_changed() {
+        // 切り詰めも丸めも「要求した値を得ていない」点で同じである。許容誤差を
+        // 置くと、そのどちらも一致として通ってしまう。
+        let differing = [
+            (ReadBackComparison::Numeric, "500", "100"),
+            (ReadBackComparison::Numeric, "-1", "0"),
+            (ReadBackComparison::Numeric, "12.345", "12.35"),
+            (ReadBackComparison::Numeric, "100", "100.01"),
+            // 数値として読めない読み直しは、要求した値を得たことを示さない。
+            (ReadBackComparison::Numeric, "100", "ひゃく"),
+            (ReadBackComparison::Boolean, "1", "0"),
+            (ReadBackComparison::Boolean, "1", "はい"),
+            (ReadBackComparison::IgnoreAsciiCase, "#ff0000", "ffffff"),
+            (ReadBackComparison::IgnoreAsciiCase, "f00", "ff0000"),
+            (ReadBackComparison::Exact, "NoSuchFont12345", "Yu Gothic UI"),
+            (ReadBackComparison::Exact, "四角形", "円"),
+            (ReadBackComparison::Exact, "MEIRYO", "Meiryo"),
+        ];
+        for (comparison, written, observed) in differing {
+            assert!(
+                !comparison.matches(written, observed),
+                "{comparison:?}: {written} と {observed} が一致しました"
+            );
+        }
+    }
+
+    #[test]
+    fn the_prepared_write_carries_the_comparison_of_its_item_type() {
+        // 照合のしかたは要求内容ではなく、対象 effect が公開する種別で決まる。
         let items = vec![
             AvailableEffectItem {
                 name: "図形の種類".to_string(),
@@ -1397,19 +1606,27 @@ mod tests {
             },
         )
         .expect("選択肢の書き込み");
-        assert!(choice.verifies_read_back());
-        assert!(choice.read_back_matches("四角形"));
-        assert!(!choice.read_back_matches("円"));
+        assert_eq!(
+            choice.read_back(),
+            ReadBackCheck::Compare(ReadBackComparison::Exact)
+        );
+        assert!(choice.read_back_matches(ReadBackComparison::Exact, "四角形"));
+        assert!(!choice.read_back_matches(ReadBackComparison::Exact, "円"));
 
         let color = prepare_item_write(
             &items,
             "色",
             &ItemValue::Color {
-                value: "#FFAA00".to_string(),
+                value: "FFAA00".to_string(),
             },
         )
         .expect("色の書き込み");
-        assert!(!color.verifies_read_back());
+        assert_eq!(
+            color.read_back(),
+            ReadBackCheck::Compare(ReadBackComparison::IgnoreAsciiCase)
+        );
+        assert!(color.read_back_matches(ReadBackComparison::IgnoreAsciiCase, "ffaa00"));
+        assert!(!color.read_back_matches(ReadBackComparison::IgnoreAsciiCase, "ffffff"));
     }
 
     #[test]
@@ -1427,8 +1644,25 @@ mod tests {
             encode_item_value(&EffectItemType::Check, &ItemValue::Bool { value: true })
                 .expect("変換")
         );
-        assert!(write.read_back_matches("1"));
-        assert!(!write.read_back_matches("true"));
+        assert_eq!(
+            write.read_back(),
+            ReadBackCheck::Compare(ReadBackComparison::Boolean)
+        );
+        assert!(write.read_back_matches(ReadBackComparison::Boolean, "1"));
+        // 真偽値としての比較であるため、ホストが別の表記で返しても一致する。
+        assert!(write.read_back_matches(ReadBackComparison::Boolean, "true"));
+        assert!(!write.read_back_matches(ReadBackComparison::Boolean, "0"));
+    }
+
+    #[test]
+    fn parse_check_reads_both_notations_the_host_uses() {
+        assert_eq!(parse_check_value("0"), Some(false));
+        assert_eq!(parse_check_value("1"), Some(true));
+        assert_eq!(parse_check_value("false"), Some(false));
+        assert_eq!(parse_check_value("true"), Some(true));
+        assert_eq!(parse_check_value(" 1 "), Some(true));
+        assert_eq!(parse_check_value("2"), None);
+        assert_eq!(parse_check_value(""), None);
     }
 
     #[test]

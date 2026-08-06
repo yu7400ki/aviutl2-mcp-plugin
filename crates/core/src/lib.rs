@@ -99,7 +99,8 @@ pub use handshake::{
 };
 pub use identifier::{InstanceId, ProtocolVersion, RequestId, pipe_name_for};
 pub use item_value::{
-    ItemValue, ItemWrite, ItemWriteError, prepare_item_write, validate_item_value,
+    ItemValue, ItemWrite, ItemWriteError, ReadBackCheck, ReadBackComparison, ReadBackNotVerified,
+    parse_check_value, prepare_item_write, read_back_check, validate_item_value,
 };
 pub use json::{JsonStrictError, deserialize_json, parse_json};
 pub use module::{ModuleEntry, ModuleType};
