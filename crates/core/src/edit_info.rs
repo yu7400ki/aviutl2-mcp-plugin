@@ -101,8 +101,14 @@ pub struct DisplayRange {
     /// 表示開始レイヤー番号。
     pub layer_start: usize,
     /// 表示フレーム数。
+    ///
+    /// **製品はこの値を読まない。** `set_selection` の適用判定は開始位置だけで
+    /// 行う（値が概数であるため）。載せるのは要求元が表示範囲のおおよその広さを
+    /// 知るためである。
     pub frame_num: usize,
     /// 表示レイヤー数。
+    ///
+    /// [`Self::frame_num`] と同じく製品は読まない。載せる理由も同じである。
     pub layer_num: usize,
 }
 
