@@ -792,7 +792,7 @@ fn the_plan_phase_reads_the_item_value_once_per_item_sub_operation() {
 fn the_same_movement_write_is_judged_the_same_way_alone_and_in_a_batch() {
     // 受理する集合が単独編集と一括適用で違ってはならない。**通る入力も並べる**
     // ——拒否だけを見ていると、両方が同じように拒みすぎていても気付けない。
-    let cases: [(&str, ItemValue); 3] = [
+    let cases: [(&str, ItemValue); 5] = [
         // 移動を消す数値の書き込み。どちらも拒否する。
         (
             MOVING_ITEM,
@@ -814,6 +814,10 @@ fn the_same_movement_write_is_judged_the_same_way_alone_and_in_a_batch() {
         ),
         // 移動を持たない項目へ移動を付ける。どちらも通す。
         (STATIC_ITEM, movement(&[0.0, 50.0, 100.0], "直線移動")),
+        // 値の個数が対象の区間数と合わない。どちらも拒否する。
+        (MOVING_ITEM, movement(&[0.0, 50.0], "直線移動")),
+        // 移動方法の名前がホストの一覧に無い。どちらも拒否する。
+        (MOVING_ITEM, movement(&[0.0, 50.0, 100.0], "存在しない移動")),
     ];
     for (item, value) in cases {
         let alone = harness_with_track_effect();
@@ -842,6 +846,24 @@ fn the_same_movement_write_is_judged_the_same_way_alone_and_in_a_batch() {
                 assert_eq!(
                     single.details()["current_value"],
                     batched.details()["current_value"],
+                    "{item}"
+                );
+                // 値の形の情報（個数・移動方法の一覧）も単独と一括で同じで
+                // なければならない。存在しない失敗ではどちらも欠け、
+                // `Value::Null` 同士の比較になる。
+                assert_eq!(
+                    single.details().get("expected_value_count"),
+                    batched.details().get("expected_value_count"),
+                    "{item}"
+                );
+                assert_eq!(
+                    single.details().get("actual_value_count"),
+                    batched.details().get("actual_value_count"),
+                    "{item}"
+                );
+                assert_eq!(
+                    single.details().get("known_movements"),
+                    batched.details().get("known_movements"),
                     "{item}"
                 );
                 assert_eq!(batched.details()["failed_index"], json!(0), "{item}");

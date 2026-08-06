@@ -2,7 +2,7 @@
 
 use crate::alias::{AliasAdmissionError, AliasRejection};
 use crate::read::ReadError;
-use aviutl2_mcp_core::{ErrorCode, ItemValue, ItemWriteError};
+use aviutl2_mcp_core::{ErrorCode, ItemValue, ItemWriteError, TrackValueError};
 use serde_json::{Map, Value, json};
 
 /// 応答の補助情報へ載せる文字列の上限文字数。
@@ -776,10 +776,30 @@ fn fill_item_write_details(details: &mut Map<String, Value>, error: &ItemWriteEr
         ItemWriteError::UnsupportedItemType { item_type } => {
             details.insert("item_type".to_string(), json!(truncate(item_type)));
         }
-        ItemWriteError::Text(_) | ItemWriteError::Path(_) | ItemWriteError::Track(_) => {}
+        ItemWriteError::Track(error) => fill_track_error_details(details, error),
+        ItemWriteError::Text(_) | ItemWriteError::Path(_) => {}
     }
     if let Some(reason) = error.reason() {
         details.insert("reason".to_string(), json!(reason));
+    }
+}
+
+/// トラックバーの移動の検証失敗が持つ、要求元が直せる形の手掛かりを書き込む。
+///
+/// **どちらも要求元が指定した値そのものではない。** `expected`/`actual` は値の
+/// 個数であって値の並びではなく、`known` は判定に使ったホストの状態であって
+/// 要求元が指定した移動方法の名前ではない。[`ItemValue::kind`] が値の形の名前を
+/// 載せてよい理由と同じで、値を運ばない形の情報だからである。
+fn fill_track_error_details(details: &mut Map<String, Value>, error: &TrackValueError) {
+    match error {
+        TrackValueError::ValueCount { expected, actual } => {
+            details.insert("expected_value_count".to_string(), json!(expected));
+            details.insert("actual_value_count".to_string(), json!(actual));
+        }
+        TrackValueError::UnknownMode { known } => {
+            details.insert("known_movements".to_string(), json!(known));
+        }
+        TrackValueError::ModeReadsAsNumber | TrackValueError::MovementWithoutMode => {}
     }
 }
 
@@ -859,6 +879,17 @@ pub(crate) mod tests {
             }),
             EditError::ItemWrite(ItemWriteError::Text(TextSyntaxError::ContainsNul)),
             EditError::ItemWrite(ItemWriteError::Path(PathSyntaxError::NotAbsolute)),
+            // 移動の値の個数が対象の区間数と合わない。個数は値ではなく形の
+            // 情報であるため、期待値と実際の値をそのまま運ぶ。
+            EditError::ItemWrite(ItemWriteError::Track(TrackValueError::ValueCount {
+                expected: 3,
+                actual: 2,
+            })),
+            // 移動方法の名前がホストの一覧に無い。判定に使った一覧をそのまま
+            // 運ぶ。要求元が指定した名前ではない。
+            EditError::ItemWrite(ItemWriteError::Track(TrackValueError::UnknownMode {
+                known: vec!["直線移動".to_string(), "曲線移動".to_string()],
+            })),
             EditError::UnsupportedTarget {
                 reason: UnsupportedReason::EffectNotRegistered,
             },
@@ -1120,6 +1151,10 @@ pub(crate) mod tests {
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::InvalidArgument,
                 ErrorCode::InvalidArgument,
+                ErrorCode::InvalidArgument,
+                ErrorCode::InvalidArgument,
+                // 移動の値の個数と、移動方法の名前が一覧に無いこと。どちらも
+                // 要求内容の誤りであり、対象を読み直しても解消しない。
                 ErrorCode::InvalidArgument,
                 ErrorCode::InvalidArgument,
                 ErrorCode::UnsupportedOperation,
@@ -1495,6 +1530,12 @@ pub(crate) mod tests {
         // ホストから読み直した設定値は、同じ値が成功応答にも載るものであり、
         // 失敗の応答でだけ伏せる理由が無い。要求元が書いた設定値・alias・
         // パスをそのまま返すキーは足さない。
+        //
+        // 個数はそのどちらでもない**値の形の情報**である。`actual_value_count`
+        // は要求に現れた配列の長さであって要素の値ではなく、
+        // `expected_value_count` はホストの状態（対象の区間数）から決まる数で
+        // ある。[`ItemValue::kind`] が種別名を載せてよい理由（値そのものを
+        // 含まない）と同じ理由で、どちらも足してよい。
         const ALLOWED: &[&str] = &[
             "frame_start",
             "frame_end",
@@ -1516,6 +1557,12 @@ pub(crate) mod tests {
             // 値も表記も含まない。名前を持たない失敗の弁別子である。
             "item_type",
             "value_kind",
+            // トラックバーの移動の検証が返す、値の形の情報。要求に現れた配列の
+            // 長さと、対象の区間数から決まる期待値、判定に使ったホストの
+            // 移動方法の一覧。いずれも要求元が指定した値そのものではない。
+            "expected_value_count",
+            "actual_value_count",
+            "known_movements",
             "sdk_operation",
             "retry_requires",
             "mutation_issued",
@@ -1612,6 +1659,51 @@ pub(crate) mod tests {
         let details = error.details();
         assert_eq!(details["reason"], json!("item_type_not_writable"));
         assert_eq!(details["item_type"], json!("scene"));
+    }
+
+    #[test]
+    fn a_track_value_count_failure_names_the_expected_and_actual_counts() {
+        // reason だけでは、要求元は何個にすれば通るかを知れない。区間数から
+        // 決まる期待値と、要求に現れた実際の個数の両方を運ぶ。
+        let error = EditError::ItemWrite(ItemWriteError::Track(TrackValueError::ValueCount {
+            expected: 4,
+            actual: 2,
+        }));
+        let details = error.details();
+        assert_eq!(details["reason"], json!("track_value_count"));
+        assert_eq!(details["expected_value_count"], json!(4));
+        assert_eq!(details["actual_value_count"], json!(2));
+    }
+
+    #[test]
+    fn a_track_mode_unknown_failure_names_the_movements_the_host_accepts() {
+        // 判定に使った一覧をそのまま運ぶ。要求元はこれを見て、対象を読み直さ
+        // ずに通り得る名前を選び直せる。
+        let error = EditError::ItemWrite(ItemWriteError::Track(TrackValueError::UnknownMode {
+            known: vec!["直線移動".to_string(), "曲線移動".to_string()],
+        }));
+        let details = error.details();
+        assert_eq!(details["reason"], json!("track_mode_unknown"));
+        assert_eq!(details["known_movements"], json!(["直線移動", "曲線移動"]));
+    }
+
+    #[test]
+    fn a_track_mode_unknown_failure_never_carries_the_requested_name() {
+        // known_movements はホストの一覧であり、拒否された要求の名前ではない。
+        // 一覧に無いからこそ拒否されているのだから、要求の名前が紛れ込めば
+        // それ自体が矛盾になる。
+        let requested = "存在しない移動";
+        let error = EditError::ItemWrite(ItemWriteError::Track(TrackValueError::UnknownMode {
+            known: vec!["直線移動".to_string(), "曲線移動".to_string()],
+        }));
+        let details = error.details();
+        assert!(
+            !details["known_movements"]
+                .as_array()
+                .expect("配列です")
+                .contains(&json!(requested)),
+            "{details}"
+        );
     }
 
     #[test]
