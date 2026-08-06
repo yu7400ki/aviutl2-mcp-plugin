@@ -3337,6 +3337,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_effect_catalog_description_names_where_item_names_come_from() {
+        // 一覧は設定項目の名前を返さない。どこで得られるかを書かなければ、
+        // 名前を推測で組み立てるか、そもそも項目を触らないかのどちらかになる。
+        let description = description_of("list_available_effects");
+        assert!(
+            description.contains("get_object"),
+            "項目名の入手先が説明にありません: {description}"
+        );
+        assert!(
+            description.contains("description"),
+            "説明が付かない effect があることが書かれていません: {description}"
+        );
+    }
+
     /// 説明の一部を取り出す。
     fn description_of(name: &str) -> String {
         tool_named(name)
