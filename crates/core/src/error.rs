@@ -79,8 +79,6 @@ pub enum ErrorCode {
     ToolDisabled,
     /// SDK エラー。
     SdkError,
-    /// 未知のコードを破棄せず raw 保持。
-    Unknown(String),
 }
 
 impl ErrorCode {
@@ -102,7 +100,6 @@ impl ErrorCode {
             ErrorCode::UnsupportedOperation => "unsupported_operation".to_string(),
             ErrorCode::ToolDisabled => "tool_disabled".to_string(),
             ErrorCode::SdkError => "sdk_error".to_string(),
-            ErrorCode::Unknown(s) => s.clone(),
         }
     }
 
@@ -131,8 +128,7 @@ impl ErrorCode {
             // 再送しても設定が変わるまで同じ結果になる。有効化は利用者が
             // AviUtl2 のプラグイン設定で行う操作である。
             | ErrorCode::ToolDisabled
-            | ErrorCode::SdkError
-            | ErrorCode::Unknown(_) => false,
+            | ErrorCode::SdkError => false,
         }
     }
 }
@@ -147,6 +143,13 @@ impl Serialize for ErrorCode {
 }
 
 impl<'de> Deserialize<'de> for ErrorCode {
+    /// 一覧に無いコードは [`ErrorCode::InternalError`] として読む。
+    ///
+    /// このコードを送るのは我々自身であり、一覧に無い名前が届くのは互換の
+    /// 証拠ではなく我々のバグである。raw を保持して素通しすると要求元は
+    /// 分岐を書けない名前を受け取るため、バグが名乗るべきコードへ寄せる。
+    /// 復号そのものは失敗させない——失敗を伝える応答を読めずに落とすと、
+    /// 何が起きたかを伝える手段ごと失われる。
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -169,7 +172,7 @@ impl<'de> Deserialize<'de> for ErrorCode {
             "unsupported_operation" => ErrorCode::UnsupportedOperation,
             "tool_disabled" => ErrorCode::ToolDisabled,
             "sdk_error" => ErrorCode::SdkError,
-            _ => ErrorCode::Unknown(s),
+            _ => ErrorCode::InternalError,
         })
     }
 }
@@ -295,12 +298,14 @@ mod tests {
     }
 
     #[test]
-    fn error_code_unknown_preserved() {
+    fn a_code_outside_the_set_is_read_as_an_internal_error() {
+        // 一覧に無いコードを送るのは我々自身の誤りであり、要求元が分岐を
+        // 書けない名前を渡すよりバグとして名乗る方がよい。
         let s = "\"future_code\"";
         let code: ErrorCode = serde_json::from_str(s).unwrap();
-        assert_eq!(code, ErrorCode::Unknown("future_code".to_string()));
+        assert_eq!(code, ErrorCode::InternalError);
         let s2 = serde_json::to_string(&code).unwrap();
-        assert_eq!(s2, "\"future_code\"");
+        assert_eq!(s2, "\"internal_error\"");
     }
 
     #[test]
@@ -327,7 +332,6 @@ mod tests {
             ErrorCode::UnsupportedOperation,
             ErrorCode::ToolDisabled,
             ErrorCode::SdkError,
-            ErrorCode::Unknown("future_code".to_string()),
         ] {
             assert!(!code.default_retryable(), "{code} はリトライ不可である");
         }

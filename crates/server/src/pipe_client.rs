@@ -1670,7 +1670,6 @@ mod tests {
             ErrorCode::EditBlocked,
             ErrorCode::NotFound,
             ErrorCode::UnsupportedOperation,
-            ErrorCode::Unknown("future_code".to_string()),
         ] {
             let error = PipeClientError::Remote(Box::new(ErrorObject::new(
                 code.clone(),
