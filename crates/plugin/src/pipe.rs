@@ -952,7 +952,7 @@ mod tests {
         fn enter_read_section<T, F>(&self, f: F) -> Result<T, crate::read::ReadError>
         where
             T: Send + 'static,
-            F: FnOnce(&dyn crate::read::host::SceneReader) -> T + Send,
+            F: FnOnce(&dyn crate::read::host::SceneValueReader) -> T + Send,
         {
             Ok(f(&PanickingScene))
         }
@@ -968,18 +968,6 @@ mod tests {
 
         fn grid_bpm(&self) -> Result<Vec<aviutl2_mcp_core::GridBpm>, crate::read::ReadError> {
             Ok(Vec::new())
-        }
-
-        fn palette_names(&self) -> Result<Vec<String>, crate::read::ReadError> {
-            panic!("参照区間の内側で panic させます")
-        }
-
-        fn current_palette_name(&self) -> Option<String> {
-            panic!("参照区間の内側で panic させます")
-        }
-
-        fn palette_colors(&self, _name: &str) -> Option<Vec<aviutl2_mcp_core::Rgba>> {
-            panic!("参照区間の内側で panic させます")
         }
 
         fn layer(
@@ -1004,22 +992,6 @@ mod tests {
             panic!("参照区間の内側で panic させます")
         }
 
-        fn selected_placements(
-            &self,
-        ) -> Result<Vec<crate::read::host::HostObjectPlacement>, crate::read::ReadError> {
-            panic!("参照区間の内側で panic させます")
-        }
-
-        fn focused_object(
-            &self,
-        ) -> Result<Option<crate::read::host::HostObject>, crate::read::ReadError> {
-            panic!("参照区間の内側で panic させます")
-        }
-
-        fn focus_section(&self) -> Result<Option<usize>, crate::read::ReadError> {
-            panic!("参照区間の内側で panic させます")
-        }
-
         fn object_identity(
             &self,
             _layer: usize,
@@ -1033,6 +1005,36 @@ mod tests {
             _layer: usize,
             _frame_start: usize,
         ) -> Result<crate::read::host::HostObjectDetail, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+    }
+
+    impl crate::read::host::SceneValueReader for PanickingScene {
+        fn palette_names(&self) -> Result<Vec<String>, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn current_palette_name(&self) -> Option<String> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn palette_colors(&self, _name: &str) -> Option<Vec<aviutl2_mcp_core::Rgba>> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn selected_placements(
+            &self,
+        ) -> Result<Vec<crate::read::host::HostObjectPlacement>, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn focused_object(
+            &self,
+        ) -> Result<Option<crate::read::host::HostObject>, crate::read::ReadError> {
+            panic!("参照区間の内側で panic させます")
+        }
+
+        fn focus_section(&self) -> Result<Option<usize>, crate::read::ReadError> {
             panic!("参照区間の内側で panic させます")
         }
 

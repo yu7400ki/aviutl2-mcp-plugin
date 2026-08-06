@@ -15,7 +15,7 @@ use crate::edit::host::{
 use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
 use crate::read::ReadError;
-use crate::read::host::{EditState, HostEditInfo, ReadHost, SceneReader};
+use crate::read::host::{EditState, HostEditInfo, ReadHost, SceneReader, SceneValueReader};
 use crate::read::sdk::{
     SdkReadHost, SdkSceneReader, host_edit_info, non_negative, to_inclusive_sections,
 };

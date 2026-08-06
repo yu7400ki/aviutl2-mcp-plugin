@@ -89,6 +89,9 @@ pub trait SceneEditor {
     /// 編集区間の内側での読み取り。
     ///
     /// 解決・read-back・応答の組み立てを同一区間内で完結できる。
+    ///
+    /// 渡すのは [`SceneReader`] だけである。応答へ載せる値を読む
+    /// [`crate::read::host::SceneValueReader`] は編集経路のどこからも呼ばれない。
     fn reader(&self) -> &dyn SceneReader;
 
     /// 区間へ入った時点の編集情報。

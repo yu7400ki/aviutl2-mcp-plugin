@@ -10,7 +10,7 @@ use crate::EDIT_HANDLE;
 use crate::read::error::ReadError;
 use crate::read::host::{
     EditState, HostEditInfo, HostEffect, HostLayer, HostObject, HostObjectDetail,
-    HostObjectPlacement, ReadHost, SceneReader,
+    HostObjectPlacement, ReadHost, SceneReader, SceneValueReader,
 };
 use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection};
 use aviutl2_mcp_core::{
@@ -101,7 +101,7 @@ impl ReadHost for SdkReadHost {
     fn enter_read_section<T, F>(&self, f: F) -> Result<T, ReadError>
     where
         T: Send + 'static,
-        F: FnOnce(&dyn SceneReader) -> T + Send,
+        F: FnOnce(&dyn SceneValueReader) -> T + Send,
     {
         // クロージャを保持する領域は呼び出しごとに解放されないため、
         // 捕らえるのは `f` だけに留める。
@@ -132,21 +132,6 @@ impl SceneReader for SdkSceneReader<'_> {
             .get_grid_bpm_list()
             .map_err(|_| sdk("get_grid_bpm_list"))?;
         list.into_iter().map(grid_bpm).collect()
-    }
-
-    fn palette_names(&self) -> Result<Vec<String>, ReadError> {
-        // 列挙は編集ハンドルの機能だが、色と同じ区間の内側で呼ぶ。分けると、
-        // 名前を集めてから色を読むまでの間にパレットが差し替わり得る。
-        Ok(EDIT_HANDLE.get_palette_names())
-    }
-
-    fn current_palette_name(&self) -> Option<String> {
-        // 一覧に対する付随情報であり、取得できないこともある。
-        self.section.get_palette_name().ok()
-    }
-
-    fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>> {
-        self.section.get_palette_info(name).ok().map(palette_colors)
     }
 
     fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {
@@ -195,6 +180,50 @@ impl SceneReader for SdkSceneReader<'_> {
         })
     }
 
+    fn object_identity(&self, layer: usize, frame_start: usize) -> Result<HostObject, ReadError> {
+        let handle = self.locate_object(layer, frame_start)?;
+        ensure_start_frame(self.object_at(handle)?, frame_start)
+    }
+
+    fn object_detail(
+        &self,
+        layer: usize,
+        frame_start: usize,
+    ) -> Result<HostObjectDetail, ReadError> {
+        let handle = self.locate_object(layer, frame_start)?;
+        let object = ensure_start_frame(self.object_at(handle)?, frame_start)?;
+        let effects = self.effects_of(handle)?;
+
+        let sections = to_inclusive_sections(
+            self.section
+                .get_object_section_ranges(handle)
+                .map_err(|_| sdk("get_object_section_frame"))?,
+        );
+
+        Ok(HostObjectDetail {
+            object,
+            effects,
+            sections,
+        })
+    }
+}
+
+impl SceneValueReader for SdkSceneReader<'_> {
+    fn palette_names(&self) -> Result<Vec<String>, ReadError> {
+        // 列挙は編集ハンドルの機能だが、色と同じ区間の内側で呼ぶ。分けると、
+        // 名前を集めてから色を読むまでの間にパレットが差し替わり得る。
+        Ok(EDIT_HANDLE.get_palette_names())
+    }
+
+    fn current_palette_name(&self) -> Option<String> {
+        // 一覧に対する付随情報であり、取得できないこともある。
+        self.section.get_palette_name().ok()
+    }
+
+    fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>> {
+        self.section.get_palette_info(name).ok().map(palette_colors)
+    }
+
     fn selected_placements(&self) -> Result<Vec<HostObjectPlacement>, ReadError> {
         // ハンドルは区間の内側で位置へ写し切る。戻り値へ持ち出さないため、
         // ここから先の経路にハンドルは現れない。
@@ -224,33 +253,6 @@ impl SceneReader for SdkSceneReader<'_> {
         self.section
             .get_focus_object_section()
             .map_err(|_| sdk("get_focus_object_section"))
-    }
-
-    fn object_identity(&self, layer: usize, frame_start: usize) -> Result<HostObject, ReadError> {
-        let handle = self.locate_object(layer, frame_start)?;
-        ensure_start_frame(self.object_at(handle)?, frame_start)
-    }
-
-    fn object_detail(
-        &self,
-        layer: usize,
-        frame_start: usize,
-    ) -> Result<HostObjectDetail, ReadError> {
-        let handle = self.locate_object(layer, frame_start)?;
-        let object = ensure_start_frame(self.object_at(handle)?, frame_start)?;
-        let effects = self.effects_of(handle)?;
-
-        let sections = to_inclusive_sections(
-            self.section
-                .get_object_section_ranges(handle)
-                .map_err(|_| sdk("get_object_section_frame"))?,
-        );
-
-        Ok(HostObjectDetail {
-            object,
-            effects,
-            sections,
-        })
     }
 
     fn effect_track_values(

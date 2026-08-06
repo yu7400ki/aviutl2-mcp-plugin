@@ -1,9 +1,9 @@
 //! SDK 側の読み取り経路を表す境界。
 //!
-//! [`ReadHost`] は編集ハンドルが提供する操作、[`SceneReader`] は参照区間の内側で
-//! 参照できるプロジェクトデータを表す。opaque handle はどちらの境界にも現れず、
-//! 対象は「レイヤー番号と開始フレーム」で指し示す。参照区間の内側でハンドルを
-//! 再解決するのは実装側の責務である。
+//! [`ReadHost`] は編集ハンドルが提供する操作、[`SceneReader`] と
+//! [`SceneValueReader`] は参照区間の内側で参照できるプロジェクトデータを表す。
+//! opaque handle はどの境界にも現れず、対象は「レイヤー番号と開始フレーム」で
+//! 指し示す。参照区間の内側でハンドルを再解決するのは実装側の責務である。
 
 use crate::read::error::ReadError;
 use aviutl2_mcp_core::{
@@ -152,9 +152,18 @@ pub struct HostEffect {
     pub items: Vec<EffectItem>,
 }
 
-/// 参照区間の内側で参照できるプロジェクトデータ。
+/// 参照区間の内側で対象を解決するために参照するプロジェクトデータ。
 ///
 /// 返す値は全て所有型であり、参照区間を抜けた後も利用できる。
+///
+/// **ここに置くのは「対象を解決するために読む」ものだけである。** セレクターの
+/// 突き合わせ・fingerprint の照合・ガードの判定に要る読み取りは、読み取り
+/// operation と編集 operation の双方が通る。一方で応答へ載せる値を読むだけの
+/// 経路は読み取り operation にしか無く、そちらは [`SceneValueReader`] が持つ。
+///
+/// **割れているのは実装の負担が役目に比例するようにするためである。** 編集経路
+/// の実装はこの trait だけを備えればよく、読み取り tool が増えても編集側に
+/// 到達不能なメソッドが積まない。
 pub trait SceneReader {
     /// 現在シーンの名前。取得できない場合は `None`。
     fn scene_name(&self) -> Option<String>;
@@ -164,29 +173,6 @@ pub trait SceneReader {
     /// 4 つのフィールドを揃えて返す。一部だけを返すと、読み取った一覧をそのまま
     /// 書き戻す経路で残りが失われる。
     fn grid_bpm(&self) -> Result<Vec<GridBpm>, ReadError>;
-
-    /// 登録済みパレット名を全件返す。
-    ///
-    /// 列挙そのものは参照区間を要しないが、ここへ置くことで名前と色を同じ区間の
-    /// 内側で読める。分ければ、名前を集めてから色を読むまでの間にパレットが
-    /// 差し替わり、食い違った組を返し得る。
-    fn palette_names(&self) -> Result<Vec<String>, ReadError>;
-
-    /// 現在のパレット名。取得できない場合は `None`。
-    ///
-    /// ラベル付きの場合は `[ラベル名.パレット名]` の形式で返る。分解しない。
-    ///
-    /// 一覧に対する付随情報であり、取れないことは一覧の失敗ではない。
-    fn current_palette_name(&self) -> Option<String>;
-
-    /// パレットの色を返す。情報を取得できない名前は `None`。
-    ///
-    /// 件数は常に [`aviutl2_mcp_core::PALETTE_COLOR_COUNT`] である。
-    ///
-    /// **`None` は失敗ではない。** 列挙が返した名前で情報が取れないのは異常だが、
-    /// その 1 件のために一覧全体を落とさない。呼び出し側は該当の名前を一覧から
-    /// 落とす。
-    fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>>;
 
     /// レイヤーの属性。
     ///
@@ -218,36 +204,6 @@ pub trait SceneReader {
     /// 途中で走査を打ち切った不完全な一覧は返さない。全件を返せない場合は失敗する。
     fn object_placements(&self, layer: usize) -> Result<Vec<HostObjectPlacement>, ReadError>;
 
-    /// タイムライン上で選択されているオブジェクトの位置と名前を返す。
-    ///
-    /// alias も effect も読まない。位置だけを先に集めることで、並べ替えと
-    /// ページの切り出しを済ませてから、応答へ載せる分の同一性の材料だけを
-    /// [`Self::object_identity`] で読める。
-    ///
-    /// **並び順を保証しない。** ホストが返す順序は規定されておらず、要求ごとに
-    /// 変わり得る。並べ替えは呼び出し側が行う。
-    fn selected_placements(&self) -> Result<Vec<HostObjectPlacement>, ReadError>;
-
-    /// オブジェクト設定ウィンドウで選択されているオブジェクトを返す。未選択は `None`。
-    ///
-    /// タイムライン上の選択とは別の概念であり、[`Self::selected_placements`] の
-    /// 結果に含まれるとは限らない。
-    ///
-    /// 1 件しか無くページの切り出しも掛からないため、位置と同一性の材料を分けて
-    /// 読まない。
-    fn focused_object(&self) -> Result<Option<HostObject>, ReadError>;
-
-    /// フォーカス対象の区間番号を返す。ホストが番号を持たなければ `None`。
-    ///
-    /// **[`Self::focused_object`] との整合を保証しない。** ホストは対象を返さない
-    /// まま番号だけを返し得る。ここが返すのはホストが名乗った値そのものであり、
-    /// 実装は転送するだけである。
-    ///
-    /// **呼び出し側の責務**: 番号は対象の性質であるため、[`Self::focused_object`]
-    /// と突き合わせ、対象が無ければ番号も落とす。対象と番号が食い違った組を
-    /// 応答へ載せない。
-    fn focus_section(&self) -> Result<Option<usize>, ReadError>;
-
     /// 開始フレームが完全一致するオブジェクトの同一性の材料を返す。
     ///
     /// alias を読み、配下 effect は読まない。fingerprint はこの結果か
@@ -275,10 +231,75 @@ pub trait SceneReader {
         layer: usize,
         frame_start: usize,
     ) -> Result<HostObjectDetail, ReadError>;
+}
+
+/// 応答へ載せる値だけを読む、読み取り operation 専用の境界。
+///
+/// **[`SceneReader`] から分けてあるのは、これらを呼ぶ経路が読み取り operation に
+/// しか無いためである。** 対象の解決にもガードの判定にも要らないので、編集経路が
+/// 実装しても呼ばれることはない。備えさせれば、読み取り tool を 1 つ足すたびに
+/// 編集側へ到達不能な委譲が 1 つ積む。
+///
+/// 実装が [`SceneReader`] も兼ねるのは、値を読む前に対象を解決する必要がある
+/// ためである。読み取り operation は 1 つの参照区間の内側で解決と読み取りを
+/// 続けて行うので、両方を同じ相手へ問える。
+pub trait SceneValueReader: SceneReader {
+    /// 登録済みパレット名を全件返す。
+    ///
+    /// 列挙そのものは参照区間を要しないが、ここへ置くことで名前と色を同じ区間の
+    /// 内側で読める。分ければ、名前を集めてから色を読むまでの間にパレットが
+    /// 差し替わり、食い違った組を返し得る。
+    fn palette_names(&self) -> Result<Vec<String>, ReadError>;
+
+    /// 現在のパレット名。取得できない場合は `None`。
+    ///
+    /// ラベル付きの場合は `[ラベル名.パレット名]` の形式で返る。分解しない。
+    ///
+    /// 一覧に対する付随情報であり、取れないことは一覧の失敗ではない。
+    fn current_palette_name(&self) -> Option<String>;
+
+    /// パレットの色を返す。情報を取得できない名前は `None`。
+    ///
+    /// 件数は常に [`aviutl2_mcp_core::PALETTE_COLOR_COUNT`] である。
+    ///
+    /// **`None` は失敗ではない。** 列挙が返した名前で情報が取れないのは異常だが、
+    /// その 1 件のために一覧全体を落とさない。呼び出し側は該当の名前を一覧から
+    /// 落とす。
+    fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>>;
+
+    /// タイムライン上で選択されているオブジェクトの位置と名前を返す。
+    ///
+    /// alias も effect も読まない。位置だけを先に集めることで、並べ替えと
+    /// ページの切り出しを済ませてから、応答へ載せる分の同一性の材料だけを
+    /// [`SceneReader::object_identity`] で読める。
+    ///
+    /// **並び順を保証しない。** ホストが返す順序は規定されておらず、要求ごとに
+    /// 変わり得る。並べ替えは呼び出し側が行う。
+    fn selected_placements(&self) -> Result<Vec<HostObjectPlacement>, ReadError>;
+
+    /// オブジェクト設定ウィンドウで選択されているオブジェクトを返す。未選択は `None`。
+    ///
+    /// タイムライン上の選択とは別の概念であり、[`Self::selected_placements`] の
+    /// 結果に含まれるとは限らない。
+    ///
+    /// 1 件しか無くページの切り出しも掛からないため、位置と同一性の材料を分けて
+    /// 読まない。
+    fn focused_object(&self) -> Result<Option<HostObject>, ReadError>;
+
+    /// フォーカス対象の区間番号を返す。ホストが番号を持たなければ `None`。
+    ///
+    /// **[`Self::focused_object`] との整合を保証しない。** ホストは対象を返さない
+    /// まま番号だけを返し得る。ここが返すのはホストが名乗った値そのものであり、
+    /// 実装は転送するだけである。
+    ///
+    /// **呼び出し側の責務**: 番号は対象の性質であるため、[`Self::focused_object`]
+    /// と突き合わせ、対象が無ければ番号も落とす。対象と番号が食い違った組を
+    /// 応答へ載せない。
+    fn focus_section(&self) -> Result<Option<usize>, ReadError>;
 
     /// トラックバー項目を、指定フレームで評価した値を返す。
     ///
-    /// `effect_position` は [`Self::object_detail`] が返す effect 列での 0 始まり
+    /// `effect_position` は [`SceneReader::object_detail`] が返す effect 列での 0 始まり
     /// の位置である。**フレームは小数部を保ったまま渡す。** 小数部はフレーム間の
     /// 位置を指しており、丸めると中間点の間の値を問えなくなる。
     ///
@@ -365,8 +386,12 @@ pub trait ReadHost: Send + Sync {
     fn modules(&self) -> Result<Vec<ModuleEntry>, ReadError>;
 
     /// 参照区間へ 1 度だけ入り、クロージャの結果を持ち出す。
+    ///
+    /// クロージャが受け取るのは [`SceneValueReader`] である。この境界を通るのは
+    /// 読み取り operation だけであり、解決だけを要する呼び出しは上位トレイトへ
+    /// 落として使える。
     fn enter_read_section<T, F>(&self, f: F) -> Result<T, ReadError>
     where
         T: Send + 'static,
-        F: FnOnce(&dyn SceneReader) -> T + Send;
+        F: FnOnce(&dyn SceneValueReader) -> T + Send;
 }

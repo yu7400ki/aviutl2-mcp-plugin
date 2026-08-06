@@ -599,7 +599,7 @@ mod tests {
         fn enter_read_section<T, F>(&self, _f: F) -> Result<T, ReadError>
         where
             T: Send + 'static,
-            F: FnOnce(&dyn crate::read::host::SceneReader) -> T + Send,
+            F: FnOnce(&dyn crate::read::host::SceneValueReader) -> T + Send,
         {
             self.record("call_read_section");
             Err(ReadError::NotReady)

@@ -7,7 +7,7 @@ use crate::project::ProjectState;
 use crate::read::error::ReadError;
 use crate::read::host::{
     EditState, HostEditInfo, HostEffect, HostObject, HostObjectDetail, HostObjectPlacement,
-    ReadHost, SceneReader,
+    ReadHost, SceneReader, SceneValueReader,
 };
 use crate::read::{Page, ProjectStatus, ReadAdapter, Snapshot};
 use aviutl2_mcp_core::{
@@ -91,7 +91,7 @@ impl<H: ReadHost> HostReadAdapter<H> {
     fn read_section<T, F>(&self, f: F) -> Result<T, ReadError>
     where
         T: Send + 'static,
-        F: FnOnce(&dyn SceneReader) -> Result<T, ReadError> + Send,
+        F: FnOnce(&dyn SceneValueReader) -> Result<T, ReadError> + Send,
     {
         let entered = catch(|| {
             self.host
@@ -656,7 +656,7 @@ fn ensure_frames_within(summary: &ObjectSummary, frames: &[f64]) -> Result<(), R
 /// グループのトラック数と所属アイテム名の件数は一致するとは限らない。一致を
 /// 強制せず、両方をそのまま返して要求元に見せる。
 fn track_group(
-    scene: &dyn SceneReader,
+    scene: &dyn SceneValueReader,
     summary: &ObjectSummary,
     selector: &EffectSelector,
     item: &EffectItem,
@@ -1248,7 +1248,7 @@ mod tests {
         fn enter_read_section<T, F>(&self, f: F) -> Result<T, ReadError>
         where
             T: Send + 'static,
-            F: FnOnce(&dyn SceneReader) -> T + Send,
+            F: FnOnce(&dyn SceneValueReader) -> T + Send,
         {
             self.assert_ready("call_read_section");
             self.record("enter_read_section");
@@ -1293,24 +1293,6 @@ mod tests {
 
         fn grid_bpm(&self) -> Result<Vec<GridBpm>, ReadError> {
             Ok(self.host.grid_bpm.clone())
-        }
-
-        fn palette_names(&self) -> Result<Vec<String>, ReadError> {
-            self.host.record("palette_names");
-            Ok(self.host.palettes.clone())
-        }
-
-        fn current_palette_name(&self) -> Option<String> {
-            self.host.record("current_palette_name");
-            self.host.current_palette.clone()
-        }
-
-        fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>> {
-            self.host.record("palette_colors");
-            if self.host.palettes_without_colors.iter().any(|n| n == name) {
-                return None;
-            }
-            Some(fake_palette_colors(name))
         }
 
         fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {
@@ -1358,32 +1340,6 @@ mod tests {
                 .unwrap_or_default())
         }
 
-        fn selected_placements(&self) -> Result<Vec<HostObjectPlacement>, ReadError> {
-            self.host.record("selected_placements");
-            self.host
-                .selected
-                .iter()
-                .map(|&(layer, frame_start)| {
-                    Ok(self.find(layer, frame_start)?.identity.placement.clone())
-                })
-                .collect()
-        }
-
-        fn focused_object(&self) -> Result<Option<HostObject>, ReadError> {
-            self.host.record("focused_object");
-            match self.host.focus {
-                Some((layer, frame_start)) => {
-                    Ok(Some(self.find(layer, frame_start)?.identity.clone()))
-                }
-                None => Ok(None),
-            }
-        }
-
-        fn focus_section(&self) -> Result<Option<usize>, ReadError> {
-            self.host.record("focus_section");
-            Ok(self.host.focus_section)
-        }
-
         fn object_identity(
             &self,
             layer: usize,
@@ -1429,6 +1385,52 @@ mod tests {
                     end: object.identity.placement.frame_end,
                 }],
             })
+        }
+    }
+
+    impl SceneValueReader for FakeScene<'_> {
+        fn palette_names(&self) -> Result<Vec<String>, ReadError> {
+            self.host.record("palette_names");
+            Ok(self.host.palettes.clone())
+        }
+
+        fn current_palette_name(&self) -> Option<String> {
+            self.host.record("current_palette_name");
+            self.host.current_palette.clone()
+        }
+
+        fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>> {
+            self.host.record("palette_colors");
+            if self.host.palettes_without_colors.iter().any(|n| n == name) {
+                return None;
+            }
+            Some(fake_palette_colors(name))
+        }
+
+        fn selected_placements(&self) -> Result<Vec<HostObjectPlacement>, ReadError> {
+            self.host.record("selected_placements");
+            self.host
+                .selected
+                .iter()
+                .map(|&(layer, frame_start)| {
+                    Ok(self.find(layer, frame_start)?.identity.placement.clone())
+                })
+                .collect()
+        }
+
+        fn focused_object(&self) -> Result<Option<HostObject>, ReadError> {
+            self.host.record("focused_object");
+            match self.host.focus {
+                Some((layer, frame_start)) => {
+                    Ok(Some(self.find(layer, frame_start)?.identity.clone()))
+                }
+                None => Ok(None),
+            }
+        }
+
+        fn focus_section(&self) -> Result<Option<usize>, ReadError> {
+            self.host.record("focus_section");
+            Ok(self.host.focus_section)
         }
 
         fn effect_track_values(

@@ -43,8 +43,8 @@ use crate::read::host::{
     SceneReader,
 };
 use aviutl2_mcp_core::{
-    AvailableEffectItem, BatchOperation, BatchOutcome, BatchStepOutcome, FiniteF64, FrameRange,
-    GridBpm, ItemWrite, ItemWriteError, ObjectSelector, ObjectSummary, Rgba, prepare_item_write,
+    AvailableEffectItem, BatchOperation, BatchOutcome, BatchStepOutcome, FrameRange, GridBpm,
+    ItemWrite, ItemWriteError, ObjectSelector, ObjectSummary, prepare_item_write,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -677,18 +677,6 @@ impl SceneReader for CachingEditor<'_> {
         self.inner.reader().grid_bpm()
     }
 
-    fn palette_names(&self) -> Result<Vec<String>, ReadError> {
-        self.inner.reader().palette_names()
-    }
-
-    fn current_palette_name(&self) -> Option<String> {
-        self.inner.reader().current_palette_name()
-    }
-
-    fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>> {
-        self.inner.reader().palette_colors(name)
-    }
-
     fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {
         self.inner.reader().layer(layer)
     }
@@ -710,18 +698,6 @@ impl SceneReader for CachingEditor<'_> {
             .borrow_mut()
             .insert(layer, placements.clone());
         Ok(placements)
-    }
-
-    fn selected_placements(&self) -> Result<Vec<HostObjectPlacement>, ReadError> {
-        self.inner.reader().selected_placements()
-    }
-
-    fn focused_object(&self) -> Result<Option<HostObject>, ReadError> {
-        self.inner.reader().focused_object()
-    }
-
-    fn focus_section(&self) -> Result<Option<usize>, ReadError> {
-        self.inner.reader().focus_section()
     }
 
     fn object_identity(&self, layer: usize, frame_start: usize) -> Result<HostObject, ReadError> {
@@ -753,57 +729,6 @@ impl SceneReader for CachingEditor<'_> {
             .borrow_mut()
             .insert((layer, frame_start), detail.clone());
         Ok(detail)
-    }
-
-    fn effect_track_values(
-        &self,
-        layer: usize,
-        frame_start: usize,
-        effect_position: usize,
-        item_names: &[&str],
-        frames: &[f64],
-    ) -> Result<Vec<Vec<FiniteF64>>, ReadError> {
-        self.inner.reader().effect_track_values(
-            layer,
-            frame_start,
-            effect_position,
-            item_names,
-            frames,
-        )
-    }
-
-    fn effect_check_values(
-        &self,
-        layer: usize,
-        frame_start: usize,
-        effect_position: usize,
-        item_names: &[&str],
-        frames: &[usize],
-    ) -> Result<Vec<Vec<bool>>, ReadError> {
-        self.inner.reader().effect_check_values(
-            layer,
-            frame_start,
-            effect_position,
-            item_names,
-            frames,
-        )
-    }
-
-    fn track_group_item_names(
-        &self,
-        layer: usize,
-        frame_start: usize,
-        effect_name: &str,
-        effect_index: usize,
-        group_name: &str,
-    ) -> Result<Vec<String>, ReadError> {
-        self.inner.reader().track_group_item_names(
-            layer,
-            frame_start,
-            effect_name,
-            effect_index,
-            group_name,
-        )
     }
 }
 

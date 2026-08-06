@@ -17,7 +17,7 @@ use crate::project::ProjectState;
 use crate::read::ReadError;
 use crate::read::host::{
     EditState, HostEditInfo, HostEffect, HostLayer, HostObject, HostObjectDetail,
-    HostObjectPlacement, ReadHost, SceneReader,
+    HostObjectPlacement, ReadHost, SceneReader, SceneValueReader,
 };
 use crate::test_support::alias_with_effects;
 use aviutl2_mcp_core::{
@@ -827,7 +827,7 @@ impl ReadHost for FakeReadHost {
     fn enter_read_section<T, F>(&self, f: F) -> Result<T, ReadError>
     where
         T: Send + 'static,
-        F: FnOnce(&dyn SceneReader) -> T + Send,
+        F: FnOnce(&dyn SceneValueReader) -> T + Send,
     {
         self.0.record(READ_SECTION);
         let editor = FakeSceneEditor {
@@ -924,27 +924,6 @@ impl SceneReader for FakeSceneEditor<'_> {
         Ok(self.host.scene.lock().unwrap().grid_bpm.clone())
     }
 
-    fn palette_names(&self) -> Result<Vec<String>, ReadError> {
-        Ok(self
-            .host
-            .palettes
-            .iter()
-            .map(|palette| palette.name.clone())
-            .collect())
-    }
-
-    fn current_palette_name(&self) -> Option<String> {
-        self.host.current_palette.clone()
-    }
-
-    fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>> {
-        self.host
-            .palettes
-            .iter()
-            .find(|palette| palette.name == name)
-            .map(|palette| palette.colors.clone())
-    }
-
     fn layer(&self, layer: usize) -> Result<HostLayer, ReadError> {
         self.host.record(LAYER_ATTRIBUTES);
         let scene = self.host.scene.lock().unwrap();
@@ -1000,37 +979,6 @@ impl SceneReader for FakeSceneEditor<'_> {
             .unwrap_or_default())
     }
 
-    fn selected_placements(&self) -> Result<Vec<HostObjectPlacement>, ReadError> {
-        self.host.record(SELECTED_PLACEMENTS);
-        let scene = self.host.scene.lock().unwrap();
-        scene
-            .selected
-            .iter()
-            .map(|&id| {
-                scene
-                    .by_id(id)
-                    .map(|object| object.placement.clone())
-                    .ok_or(ReadError::Sdk {
-                        operation: "get_selected_object",
-                    })
-            })
-            .collect()
-    }
-
-    fn focused_object(&self) -> Result<Option<HostObject>, ReadError> {
-        self.host.record(FOCUSED_OBJECT);
-        let scene = self.host.scene.lock().unwrap();
-        Ok(scene
-            .focus
-            .and_then(|id| scene.by_id(id))
-            .map(FakeObject::identity))
-    }
-
-    fn focus_section(&self) -> Result<Option<usize>, ReadError> {
-        self.host.record(FOCUS_SECTION);
-        Ok(self.host.scene.lock().unwrap().focus_section)
-    }
-
     fn object_identity(&self, layer: usize, frame_start: usize) -> Result<HostObject, ReadError> {
         self.host.record("object_identity");
         self.on_object_read()?;
@@ -1060,6 +1008,60 @@ impl SceneReader for FakeSceneEditor<'_> {
                 detected_by: "find_object",
             })?
             .detail())
+    }
+}
+
+impl SceneValueReader for FakeSceneEditor<'_> {
+    fn palette_names(&self) -> Result<Vec<String>, ReadError> {
+        Ok(self
+            .host
+            .palettes
+            .iter()
+            .map(|palette| palette.name.clone())
+            .collect())
+    }
+
+    fn current_palette_name(&self) -> Option<String> {
+        self.host.current_palette.clone()
+    }
+
+    fn palette_colors(&self, name: &str) -> Option<Vec<Rgba>> {
+        self.host
+            .palettes
+            .iter()
+            .find(|palette| palette.name == name)
+            .map(|palette| palette.colors.clone())
+    }
+
+    fn selected_placements(&self) -> Result<Vec<HostObjectPlacement>, ReadError> {
+        self.host.record(SELECTED_PLACEMENTS);
+        let scene = self.host.scene.lock().unwrap();
+        scene
+            .selected
+            .iter()
+            .map(|&id| {
+                scene
+                    .by_id(id)
+                    .map(|object| object.placement.clone())
+                    .ok_or(ReadError::Sdk {
+                        operation: "get_selected_object",
+                    })
+            })
+            .collect()
+    }
+
+    fn focused_object(&self) -> Result<Option<HostObject>, ReadError> {
+        self.host.record(FOCUSED_OBJECT);
+        let scene = self.host.scene.lock().unwrap();
+        Ok(scene
+            .focus
+            .and_then(|id| scene.by_id(id))
+            .map(FakeObject::identity))
+    }
+
+    fn focus_section(&self) -> Result<Option<usize>, ReadError> {
+        self.host.record(FOCUS_SECTION);
+        Ok(self.host.scene.lock().unwrap().focus_section)
     }
 
     fn effect_track_values(

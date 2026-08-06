@@ -5111,14 +5111,14 @@ fn the_fake_names_the_call_that_could_not_produce_a_value() {
     // `sdk_operation` は失敗の出所を伝える値である。種別が違えば呼ばれる関数も
     // 違うのだから、名乗る関数も違う。フェイクが片方の名前で固定していると、
     // 出所の取り違えに気付ける経路がどこにも無くなる。
-    use crate::read::host::{ReadHost, SceneReader};
+    use crate::read::host::{ReadHost, SceneValueReader};
 
     let harness = Harness::new();
     let object = harness.summary(1, 100);
     let host = FakeReadHost(harness.host.clone());
 
     let named = |missing_as_check: bool| {
-        host.enter_read_section(move |scene: &dyn SceneReader| {
+        host.enter_read_section(move |scene: &dyn SceneValueReader| {
             let error = if missing_as_check {
                 scene
                     .effect_check_values(object.layer, object.frame_start, 0, &["無い項目"], &[0])
