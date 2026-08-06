@@ -290,9 +290,11 @@ pub fn movement_check_reads_current_value(item_type: &EffectItemType) -> bool {
 ///   無いのに移動が消える
 /// - 移動を持たない項目へ、移動が来た。ホストは先頭の値だけを使う
 ///
-/// **[`movement_check_reads_current_value`] が偽の種別では常に通す。** 読まずに
-/// 呼べる形にしておくと、現在値の代わりに空文字を渡す呼び出しが判定を素通り
-/// する。判定の対象を関数の内側に置き、呼び出し側が決められないようにする。
+/// **どの種別を判定するかは、この関数の内側で決める。** 呼び出し側が決める形に
+/// すると、その判定を誤った経路が確かめられないまま書き込みへ届く。
+/// [`movement_check_reads_current_value`] を別に問えるようにしてあるのは、現在値を
+/// 読む費用を掛けるかを呼び出し側が決められるようにするためであり、そこでの
+/// 取りこぼしはここが受け止める。
 pub fn check_movement_write(
     item_type: &EffectItemType,
     value: &ItemValue,
