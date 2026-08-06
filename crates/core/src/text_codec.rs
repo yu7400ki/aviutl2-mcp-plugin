@@ -72,11 +72,11 @@ mod tests {
     /// `\t` が素通りすることから導かれる規則である。**codec を呼ばずに書く。**
     /// 呼ぶと、codec が規則からずれたときに検査も一緒にずれる。
     fn host_store(written: &str) -> String {
-        let bytes: Vec<char> = written.chars().collect();
+        let chars: Vec<char> = written.chars().collect();
         let mut stored = String::new();
         let mut index = 0;
-        while index < bytes.len() {
-            match (bytes[index], bytes.get(index + 1)) {
+        while index < chars.len() {
+            match (chars[index], chars.get(index + 1)) {
                 ('\\', Some('\\')) => {
                     stored.push('\\');
                     index += 2;

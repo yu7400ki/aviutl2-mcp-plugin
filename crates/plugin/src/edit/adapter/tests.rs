@@ -2186,9 +2186,9 @@ fn a_choice_value_read_from_the_object_can_be_written_straight_back() {
 
 #[test]
 fn a_value_the_host_normalizes_is_not_treated_as_a_choice_rejection() {
-    // 色・実数・テキストはホストが表記を正規化し得る。渡した文字列との一致を
-    // 求めると、正常な正規化を失敗と誤診断する。**読み直した値が要求と違っても
-    // 成功すること**を種別ごとに固定する。
+    // 色と実数はホストが、テキストは書き込み経路が表記を正規化する。渡した値
+    // との一致を求めると、正常な正規化を失敗と誤診断する。**読み直した値が要求
+    // と違っても成功すること**を種別ごとに固定する。
     let cases = [
         (
             "色",

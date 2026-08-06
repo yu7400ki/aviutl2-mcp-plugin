@@ -303,6 +303,8 @@ pub enum ItemValueInput {
     /// バックスラッシュも書いたとおりに保たれるため、Windows パス・正規表現・
     /// LaTeX をそのまま指定できる。CRLF は LF として保存される。単独の CR は
     /// 受け付けない——保存はされるが描画では行が分かれず、意図を推測できない。
+    /// 長さの上限は保存される表記に掛かり、`\` と改行はそれぞれ 2 バイトを
+    /// 占める。
     Text {
         /// 値。
         #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]

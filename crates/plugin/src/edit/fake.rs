@@ -2278,7 +2278,7 @@ pub(crate) fn fake_catalog() -> Vec<AvailableEffect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aviutl2_mcp_core::{AvailableEffectItem, prepare_item_write};
+    use aviutl2_mcp_core::prepare_item_write;
 
     /// テキスト種別の設定項目を 1 つだけ公開する一覧。
     fn text_item() -> Vec<AvailableEffectItem> {
