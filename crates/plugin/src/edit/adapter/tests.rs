@@ -18,9 +18,9 @@ use crate::edit::fake::{
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::{default_page_request, default_page_window, with_silent_panic_hook};
 use aviutl2_mcp_core::{
-    ApplyBatchParams, BatchOperation, CreateObjectSectionParams, CursorPosition,
+    ApplyBatchParams, BatchOperation, ChoicesSource, CreateObjectSectionParams, CursorPosition,
     DeleteObjectSectionParams, Destination, EditOperation, EffectFlags, EffectItem, EffectItemType,
-    EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemValue,
+    EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemChoices, ItemValue,
     LayerNameChange, MAX_GRID_BPM_ENTRIES, MoveObjectSectionParams, ObjectSectionsOutcome,
     ObjectSelector, Placement, SceneSize,
 };
@@ -2742,6 +2742,101 @@ fn the_failure_carries_the_host_value_and_not_the_requested_one() {
         !details.contains(requested),
         "要求された値が反響しています: {details}"
     );
+}
+
+/// 候補の表だけが主張する値。**ホストが受け付ける値とは重ならない。**
+const HINTED_VALUES: [&str; 2] = ["表だけにある形", "表だけにあるもう 1 つの形"];
+
+/// 候補の表を持たせた [`shape_catalog_entry`]。
+///
+/// 表はカタログの側に持つ。読み取り経路が候補を引く先と同じ場所であり、
+/// 書き込みの経路がそこを見るようになれば、この表を変えた結果が成否に現れる。
+fn shape_catalog_entry_with_choices(values: &[&str]) -> FakeCatalogEntry {
+    let choices = shape_catalog_entry()
+        .items
+        .into_iter()
+        .map(|item| {
+            (
+                item.name,
+                ItemChoices {
+                    values: values.iter().map(|value| (*value).to_string()).collect(),
+                    source: ChoicesSource::Sidecar,
+                },
+            )
+        })
+        .collect();
+    FakeCatalogEntry {
+        choices,
+        ..shape_catalog_entry()
+    }
+}
+
+/// 候補の表を差し替えたうえで、選択肢の項目へ 1 件書き込む。
+///
+/// 表の中身を変えても結果が変わらないことを比べられるよう、成否と失敗の種別を
+/// 1 つの値へ畳んで返す。
+fn write_choice_with_table(
+    table: Option<&[&str]>,
+    item: &str,
+    value: &str,
+) -> Result<String, String> {
+    let harness = Harness::with(|host| {
+        host.catalog.push(match table {
+            Some(values) => shape_catalog_entry_with_choices(values),
+            None => shape_catalog_entry(),
+        });
+        host.scene.get_mut().unwrap().layers[1].objects[1]
+            .effects
+            .push(shape(0));
+    });
+    harness
+        .edit
+        .set_object_item(&set_choice_item(&harness, item, value))
+        .map(|outcome| raw_item_value(&changed_item(&outcome, item)))
+        .map_err(|error| format!("{:?} {}", error.error_code(), error.details()["reason"]))
+}
+
+#[test]
+fn the_choices_table_never_decides_whether_a_write_goes_through() {
+    // **候補はヒントであってゲートではない。** 表に無い値でも書き込みは通し、
+    // 表に在る値が必ず通るとも約束しない。可否を決めるのはホストであり、表が
+    // 実態から外れたときに事前検証を掛けていれば、正しい値が通らなくなる。
+    //
+    // 移動方法の一覧とは性質が違う。あちらは一覧に無い名前を書くとホストの
+    // プロセスが落ちるため通す選択肢が無いが、候補を外した書き込みは最悪でも
+    // ホストが値を無視するだけである。
+    for value in HINTED_VALUES {
+        assert!(
+            !CHOICE_VALUES.contains(&value),
+            "表だけの値としてホストが受け付ける値を使っています"
+        );
+    }
+
+    for item in CHOICE_ITEMS {
+        for value in [CHOICE_VALUES[1], HINTED_VALUES[0]] {
+            // 表を持たない環境での結果を基準に取る。
+            let baseline = write_choice_with_table(None, item, value);
+            for table in [
+                // 表が別の値だけを主張する。
+                &HINTED_VALUES[..],
+                // 表が 1 件も候補を持たない。
+                &[][..],
+                // 表が書こうとしている値を含む。
+                &[value][..],
+            ] {
+                assert_eq!(
+                    write_choice_with_table(Some(table), item, value),
+                    baseline,
+                    "{item} へ {value} を書く成否が表の中身で変わりました"
+                );
+            }
+        }
+    }
+
+    // 基準そのものはホストの受け付ける値で決まっている。両方が同じ結果になる
+    // 表では、表が効いていないことを確かめられない。
+    assert!(write_choice_with_table(None, CHOICE_ITEMS[0], CHOICE_VALUES[1]).is_ok());
+    assert!(write_choice_with_table(None, CHOICE_ITEMS[0], HINTED_VALUES[0]).is_err());
 }
 
 #[test]
