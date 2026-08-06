@@ -16,7 +16,7 @@ use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection
 use aviutl2_mcp_core::{
     AvailableEffect, AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, EffectType,
     FiniteF64, GridBpm, ItemValue, ModuleEntry, ModuleType, Rgba, SectionRange, decode_host_text,
-    parse_check_value,
+    decode_track_value, parse_check_value,
 };
 use std::collections::HashMap;
 use std::ops::Range;
@@ -467,11 +467,11 @@ impl SdkSceneReader<'_> {
         let mut items = Vec::with_capacity(definitions.len());
         for definition in definitions {
             let item_type = EffectItemType::from_raw(i32::from(definition.item_type));
-            let raw = self
-                .section
-                .get_effect_item_value(effect, &definition.name)
-                .map_err(|_| sdk("get_effect_item_value"))?;
-            // トラックバー以外の項目では失敗するため、移動情報が無いものとして扱う。
+            // **値より先に読む。** 移動の有無は生文字列の読み方を決めるため、
+            // 値の解釈はこれを持っていなければ行えない。
+            //
+            // トラックバー以外の項目では失敗するため、移動情報が無いものとして
+            // 扱う。移動を持たないトラックバーは成功して `None` を返す。
             let track = self
                 .section
                 .get_effect_track_info(effect, &definition.name)
@@ -479,8 +479,12 @@ impl SdkSceneReader<'_> {
                 .flatten()
                 .map(track_info)
                 .transpose()?;
+            let raw = self
+                .section
+                .get_effect_item_value(effect, &definition.name)
+                .map_err(|_| sdk("get_effect_item_value"))?;
             items.push(EffectItem {
-                value: item_value(&item_type, raw),
+                value: item_value(&item_type, raw, track.as_ref()),
                 name: definition.name,
                 item_type,
                 track,
@@ -764,16 +768,26 @@ fn track_info(
 /// エスケープ表記で扱わない種別（パス・色・フォント名・選択肢）には掛けない。
 /// **これらの値をホストが一切書き換えないという意味ではない**——色は受理した
 /// 表記を小文字へ揃えて返す。掛けないのは、包みが最初から無いからである。
-fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
+///
+/// 移動を持つトラックバーの値は 1 つの数値にならない。ホストは区間ごとの値と
+/// 移動方法を 1 本の文字列で返すため、数値として解釈できない値がここへ来る。
+/// **数値として読める値の扱いは変わらない**——静的なトラックバーは
+/// [`ItemValue::Number`] のままであり、移動を持つ項目だけが
+/// [`ItemValue::Track`] になる（[`movement_or_unknown`]）。
+fn item_value(
+    item_type: &EffectItemType,
+    raw: String,
+    track: Option<&aviutl2_mcp_core::TrackInfo>,
+) -> ItemValue {
     match item_type {
         EffectItemType::Integer => match raw.trim().parse::<i64>() {
             Ok(value) => ItemValue::Integer { value },
-            Err(_) => ItemValue::Unknown { raw },
+            Err(_) => movement_or_unknown(raw, track),
         },
         EffectItemType::Number => {
             match raw.trim().parse::<f64>().ok().and_then(FiniteF64::try_new) {
                 Some(value) => ItemValue::Number { value },
-                None => ItemValue::Unknown { raw },
+                None => movement_or_unknown(raw, track),
             }
         }
         EffectItemType::Check => match parse_check_value(&raw) {
@@ -798,12 +812,59 @@ fn item_value(item_type: &EffectItemType, raw: String) -> ItemValue {
     }
 }
 
+/// 数値として読めなかった値を、移動として復号する。
+///
+/// **移動を持つ項目だけが対象である。** ホストは移動方法の名前を持たない
+/// トラックバーに対して移動情報を返さないため、`track` が `null` の値は本当に
+/// 未知である。そこまで復号を広げると、区切りを含むだけの生値が移動として
+/// 読まれ、書き戻したときにホストへ渡るのは我々が捏造した移動になる。
+///
+/// 復号できない文字列も未知のまま返す。読めなかったことは、読めたふりより
+/// 安全である。
+///
+/// 復号できても移動方法の名前を持たない値は返さない。`track` が非 `null` で
+/// あることと矛盾しており、どちらが実態かをこちら側では決められない。
+fn movement_or_unknown(raw: String, track: Option<&aviutl2_mcp_core::TrackInfo>) -> ItemValue {
+    match track
+        .and_then(|_| decode_track_value(&raw))
+        .filter(|decoded| decoded.mode.is_some())
+    {
+        Some(decoded) => ItemValue::Track(decoded),
+        None => ItemValue::Unknown { raw },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use aviutl2_mcp_core::{
-        ErrorCode, ItemWriteError, PALETTE_COLOR_COUNT, TrackWriteTarget, prepare_item_write,
+        ErrorCode, ItemWriteError, PALETTE_COLOR_COUNT, TrackValue, TrackWriteTarget,
+        prepare_item_write,
     };
+
+    /// 移動を持たない項目の読み取り。
+    fn read_value(item_type: &EffectItemType, raw: &str) -> ItemValue {
+        item_value(item_type, raw.to_string(), None)
+    }
+
+    /// 移動を持つ項目の読み取り。
+    ///
+    /// ホストが返す移動情報の中身は値の解釈に使わない。使うのは「移動を持つ」
+    /// という事実だけであり、区間ごとの値は生文字列の側にしかない。
+    fn read_moving_value(item_type: &EffectItemType, raw: &str) -> ItemValue {
+        let track = aviutl2_mcp_core::TrackInfo {
+            mode: "直線移動".to_string(),
+            params: Vec::new(),
+            accelerate: false,
+            decelerate: false,
+            twopoint: false,
+            timecontrol: false,
+            group_num: 1,
+            group_index: 0,
+            group_name: None,
+        };
+        item_value(item_type, raw.to_string(), Some(&track))
+    }
 
     fn placement(frame_start: usize, frame_end: usize) -> HostObjectPlacement {
         HostObjectPlacement {
@@ -1210,33 +1271,33 @@ mod tests {
     #[test]
     fn item_value_follows_item_type() {
         assert_eq!(
-            item_value(&EffectItemType::Integer, "42".to_string()),
+            read_value(&EffectItemType::Integer, "42"),
             ItemValue::Integer { value: 42 }
         );
         assert_eq!(
-            item_value(&EffectItemType::Number, "1.5".to_string()),
+            read_value(&EffectItemType::Number, "1.5"),
             ItemValue::Number {
                 value: FiniteF64::try_new(1.5).unwrap()
             }
         );
         assert_eq!(
-            item_value(&EffectItemType::Check, "1".to_string()),
+            read_value(&EffectItemType::Check, "1"),
             ItemValue::Bool { value: true }
         );
         assert_eq!(
-            item_value(&EffectItemType::File, r"C:\movie.mp4".to_string()),
+            read_value(&EffectItemType::File, r"C:\movie.mp4"),
             ItemValue::File {
                 path: r"C:\movie.mp4".to_string()
             }
         );
         assert_eq!(
-            item_value(&EffectItemType::Select, "通常".to_string()),
+            read_value(&EffectItemType::Select, "通常"),
             ItemValue::Choice {
                 value: "通常".to_string(),
             }
         );
         assert_eq!(
-            item_value(&EffectItemType::String, "字幕".to_string()),
+            read_value(&EffectItemType::String, "字幕"),
             ItemValue::Text {
                 value: "字幕".to_string()
             }
@@ -1249,7 +1310,7 @@ mod tests {
         // 扱わない種別へ掛けると、`\` を含む値が壊れる。
         for item_type in [EffectItemType::Text, EffectItemType::String] {
             assert_eq!(
-                item_value(&item_type, r"C:\\temp\nの先".to_string()),
+                read_value(&item_type, r"C:\\temp\nの先"),
                 ItemValue::Text {
                     value: "C:\\temp\nの先".to_string(),
                 },
@@ -1257,13 +1318,13 @@ mod tests {
             );
         }
         assert_eq!(
-            item_value(&EffectItemType::File, r"C:\\temp".to_string()),
+            read_value(&EffectItemType::File, r"C:\\temp"),
             ItemValue::File {
                 path: r"C:\\temp".to_string(),
             }
         );
         assert_eq!(
-            item_value(&EffectItemType::Select, r"\n".to_string()),
+            read_value(&EffectItemType::Select, r"\n"),
             ItemValue::Choice {
                 value: r"\n".to_string(),
             }
@@ -1278,13 +1339,125 @@ mod tests {
             EffectItemType::Check,
         ] {
             assert_eq!(
-                item_value(&item_type, "?".to_string()),
+                read_value(&item_type, "?"),
                 ItemValue::Unknown {
                     raw: "?".to_string()
                 },
                 "{item_type} が生文字列を保持しません"
             );
         }
+    }
+
+    #[test]
+    fn a_moving_trackbar_reads_as_a_movement() {
+        // ホストは区間ごとの値と移動方法を 1 本の文字列で返す。生値のまま返すと
+        // 書き戻せる形にならず、往復の不変条件がこの 1 種類の値でだけ破れる。
+        let mut expected = TrackValue {
+            values: vec![
+                FiniteF64::try_new(-600.0).expect("有限値"),
+                FiniteF64::try_new(600.0).expect("有限値"),
+            ],
+            mode: Some("直線移動".to_string()),
+            params: Vec::new(),
+            accelerate: false,
+            decelerate: false,
+            twopoint: false,
+        };
+        assert_eq!(
+            read_moving_value(&EffectItemType::Number, "-600.00,600.00,直線移動,0"),
+            ItemValue::Track(expected.clone())
+        );
+        // フラグもパラメータも運ぶ。落とすと書き戻しで移動が変わる。
+        expected.accelerate = true;
+        expected.twopoint = true;
+        expected.params = vec![FiniteF64::try_new(15.0).expect("有限値")];
+        assert_eq!(
+            read_moving_value(&EffectItemType::Number, "-600.00,600.00,直線移動,5|15.00"),
+            ItemValue::Track(expected)
+        );
+    }
+
+    #[test]
+    fn a_static_trackbar_stays_a_number() {
+        // 移動を持たない項目は区間の数に依らず 1 値である。全トラックバーを
+        // 移動として返すと、移動を持たない大多数の項目まで応答が膨らむ。
+        assert_eq!(
+            read_value(&EffectItemType::Number, "0.00"),
+            ItemValue::Number {
+                value: FiniteF64::try_new(0.0).expect("有限値"),
+            }
+        );
+        // 移動を持つ項目でも、数値として読める値は数値のままである。
+        assert_eq!(
+            read_moving_value(&EffectItemType::Number, "12.50"),
+            ItemValue::Number {
+                value: FiniteF64::try_new(12.5).expect("有限値"),
+            }
+        );
+        assert_eq!(
+            read_moving_value(&EffectItemType::Integer, "42"),
+            ItemValue::Integer { value: 42 }
+        );
+    }
+
+    #[test]
+    fn a_value_without_a_movement_stays_unknown() {
+        // 復号の対象は移動を持つ項目だけである。広げると、区切りを含むだけの
+        // 生値が移動として読まれ、書き戻しでホストへ渡るのは捏造した移動になる。
+        for raw in ["-600.00,600.00,直線移動,0", "0,1", "?"] {
+            assert_eq!(
+                read_value(&EffectItemType::Number, raw),
+                ItemValue::Unknown {
+                    raw: raw.to_string()
+                },
+                "{raw} が移動として読まれました"
+            );
+        }
+        // 移動を持つ項目でも、復号できない値は未知のままである。
+        for raw in ["-600.00,600.00,直線移動", "0,100,直線移動,x"] {
+            assert_eq!(
+                read_moving_value(&EffectItemType::Number, raw),
+                ItemValue::Unknown {
+                    raw: raw.to_string()
+                },
+                "{raw} が移動として読まれました"
+            );
+        }
+        // 移動方法の名前を持たない値も返さない。移動情報が非 null であることと
+        // 矛盾しており、どちらが実態かをこちら側では決められない。
+        assert_eq!(
+            read_moving_value(&EffectItemType::Integer, "0.50"),
+            ItemValue::Unknown {
+                raw: "0.50".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_movement_that_was_read_can_be_written_straight_back() {
+        // 読み取りが返した値をそのまま書き戻せる。ホストが桁を整えても、
+        // 復号は同じ移動へ辿り着く。
+        let value = read_moving_value(&EffectItemType::Number, "-600.00,600.00,直線移動,0");
+        let items = vec![AvailableEffectItem {
+            name: "X".to_string(),
+            item_type: EffectItemType::Number,
+        }];
+        let movements = vec!["直線移動".to_string()];
+        let write = prepare_item_write(
+            &items,
+            "X",
+            &value,
+            TrackWriteTarget {
+                section_count: 1,
+                movements: &movements,
+            },
+        )
+        .expect("読み取った移動が書き戻せません");
+        assert_eq!(write.value(), "-600,600,直線移動,0");
+        assert_eq!(
+            write.read_back_matches("-600.00,600.00,直線移動,0"),
+            Some(true)
+        );
     }
 
     #[test]
@@ -1296,7 +1469,7 @@ mod tests {
             EffectItemType::Unknown(99),
         ] {
             assert_eq!(
-                item_value(&item_type, "raw".to_string()),
+                read_value(&item_type, "raw"),
                 ItemValue::Unknown {
                     raw: "raw".to_string()
                 },
@@ -1316,7 +1489,7 @@ mod tests {
             EffectItemType::Figure,
         ] {
             assert_eq!(
-                item_value(&item_type, "四角形".to_string()),
+                read_value(&item_type, "四角形"),
                 ItemValue::Choice {
                     value: "四角形".to_string(),
                 },
@@ -1346,6 +1519,10 @@ mod tests {
     /// **テキスト種別の生値にはエスケープ表記を含める。** 生値をそのまま値へ
     /// 載せる種別と同じ入力にすると、復号と符号化のどちらを外しても表が通り、
     /// 対称性の検査が働かなくなる。
+    ///
+    /// 表の生値はいずれも移動を持たない項目のものである。移動の往復は種別では
+    /// なく移動の有無で分かれるため、種別を軸にしたこの表とは別に見る
+    /// （[`a_movement_that_was_read_can_be_written_straight_back`]）。
     fn read_then_write_back() -> Vec<(
         EffectItemType,
         &'static str,
@@ -1504,7 +1681,7 @@ mod tests {
             "表が種別を網羅していません"
         );
         for (item_type, raw, expected_read, expected_write) in table {
-            let value = item_value(&item_type, raw.to_string());
+            let value = read_value(&item_type, raw);
             assert_eq!(value, expected_read, "{item_type} の読み取り");
             let items = vec![AvailableEffectItem {
                 name: "項目".to_string(),
@@ -1515,8 +1692,8 @@ mod tests {
                     &items,
                     "項目",
                     &value,
-                    // 読み取りは今のところ移動を返さない。移動を含まない値では
-                    // 対象の中身が参照されないため、空の対象で足りる。
+                    // 表の値はいずれも移動を含まない。対象の中身が参照されない
+                    // ため、空の対象で足りる。
                     TrackWriteTarget {
                         section_count: 0,
                         movements: &[],
@@ -1533,7 +1710,7 @@ mod tests {
     fn non_finite_numbers_are_not_accepted() {
         for raw in ["NaN", "inf", "-inf"] {
             assert_eq!(
-                item_value(&EffectItemType::Number, raw.to_string()),
+                read_value(&EffectItemType::Number, raw),
                 ItemValue::Unknown {
                     raw: raw.to_string()
                 }
@@ -1546,14 +1723,14 @@ mod tests {
         // 解釈できない表記を真偽値へ丸めると、書き戻したときに別の値になる。
         for raw in ["2", "", "yes"] {
             assert_eq!(
-                item_value(&EffectItemType::Check, raw.to_string()),
+                read_value(&EffectItemType::Check, raw),
                 ItemValue::Unknown {
                     raw: raw.to_string()
                 }
             );
         }
         assert_eq!(
-            item_value(&EffectItemType::Check, "true".to_string()),
+            read_value(&EffectItemType::Check, "true"),
             ItemValue::Bool { value: true }
         );
     }

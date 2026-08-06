@@ -751,6 +751,7 @@ mod tests {
     use aviutl2_mcp_core::{
         AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
         FiniteF64, GridBpm, ItemValue, PALETTE_COLOR_COUNT, Rgba, SectionRange, TrackInfo,
+        TrackValue,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1664,18 +1665,31 @@ mod tests {
         }
     }
 
-    /// トラックバーの設定項目を作る。
+    /// 移動を持つトラックバーの設定項目を作る。
+    ///
+    /// **移動情報と移動を含む値は対で現れる。** ホストは移動方法の名前を持たない
+    /// トラックバーに対して移動情報を返さないため、片方だけを持つ項目は実機では
+    /// 起こらない。値を数値のままにすると、実機には無い組み合わせの上で読み取りを
+    /// 検査することになる。
     ///
     /// `group` はグループ名・グループ内の位置・グループのトラック数の組である。
     fn track_item(name: &str, group: Option<(&str, usize, usize)>) -> EffectItem {
         EffectItem {
             name: name.to_string(),
             item_type: EffectItemType::Number,
-            value: ItemValue::Number {
-                value: FiniteF64::try_new(0.0).expect("有限値"),
-            },
+            value: ItemValue::Track(TrackValue {
+                values: [0.0, 100.0]
+                    .iter()
+                    .map(|value| FiniteF64::try_new(*value).expect("有限値"))
+                    .collect(),
+                mode: Some(MOVEMENT_MODE.to_string()),
+                params: Vec::new(),
+                accelerate: false,
+                decelerate: false,
+                twopoint: false,
+            }),
             track: Some(TrackInfo {
-                mode: "直線移動".to_string(),
+                mode: MOVEMENT_MODE.to_string(),
                 params: Vec::new(),
                 accelerate: false,
                 decelerate: false,
@@ -1687,6 +1701,24 @@ mod tests {
             }),
         }
     }
+
+    /// 移動を持たないトラックバーの設定項目を作る。
+    ///
+    /// 値は区間の数に依らず 1 つであり、移動情報は返らない。**所属グループも
+    /// 移動情報の中にしか無いため、移動を持たない項目からは読めない。**
+    fn static_track_item(name: &str) -> EffectItem {
+        EffectItem {
+            name: name.to_string(),
+            item_type: EffectItemType::Number,
+            value: ItemValue::Number {
+                value: FiniteF64::try_new(0.0).expect("有限値"),
+            },
+            track: None,
+        }
+    }
+
+    /// フェイクの項目が名乗る移動方法。
+    const MOVEMENT_MODE: &str = "直線移動";
 
     /// チェックボックスの設定項目を作る。
     fn check_item(name: &str) -> EffectItem {
@@ -1712,7 +1744,9 @@ mod tests {
 
     /// 評価できる項目と評価できない項目を混ぜた effect。
     ///
-    /// X と Y は同じグループに属し、拡大率はどのグループにも属さない。
+    /// X と Y は同じグループに属する移動を持つ項目、拡大率は移動を持たない項目で
+    /// ある。**移動の有無は同じ種別の中で分かれる。** 片方だけを置くと、種別で
+    /// 判定する実装と移動の有無で判定する実装を見分けられない。
     fn mixed_effect() -> HostEffect {
         HostEffect {
             name: "標準描画".to_string(),
@@ -1722,7 +1756,7 @@ mod tests {
             items: vec![
                 track_item("X", Some((TRACK_GROUP, 0, 3))),
                 track_item("Y", Some((TRACK_GROUP, 1, 3))),
-                track_item("拡大率", None),
+                static_track_item("拡大率"),
                 check_item("反転"),
                 text_item("説明"),
             ],
@@ -2747,6 +2781,36 @@ mod tests {
         assert_eq!(detail.effects.len(), 1);
         assert_eq!(detail.effects[0].name, "動画ファイル");
         assert_eq!(detail.effects[0].selector.object, detail.summary.selector);
+    }
+
+    #[test]
+    fn get_object_returns_a_movement_as_a_movement() {
+        // 移動を持つ項目は区間ごとの値と移動方法を運び、移動を持たない項目は
+        // 1 つの数値のままである。同じ種別の中で分かれるため、応答の形を
+        // 種別だけで決めていれば片方が食い違う。
+        let adapter = mixed_adapter();
+        let selector = listed_sample(&adapter).selector;
+        let detail = adapter.get_object(&selector).expect("対象の詳細");
+        let items = &detail.effects[0].items;
+        let value = |name: &str| {
+            items
+                .iter()
+                .find(|item| item.name == name)
+                .unwrap_or_else(|| panic!("設定項目 {name} がありません"))
+                .value
+                .clone()
+        };
+
+        let ItemValue::Track(track) = value("X") else {
+            panic!("移動を持つ項目が移動として返りません: {:?}", value("X"));
+        };
+        assert_eq!(track.mode.as_deref(), Some(MOVEMENT_MODE));
+        assert_eq!(track.values.len(), 2);
+        assert!(
+            matches!(value("拡大率"), ItemValue::Number { .. }),
+            "移動を持たない項目まで移動として返りました: {:?}",
+            value("拡大率")
+        );
     }
 
     /// 候補の絞り込みが、候補以外の詳細を読まずに済むことを確かめる。
