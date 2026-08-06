@@ -3,7 +3,7 @@
 //! MCP SDK 未使用。内部関数または CLI 経由で呼び出す。
 
 use crate::discovery::{DiscoveryConfig, find_instances};
-use aviutl2_mcp_core::{DEFAULT_PAGE_LIMIT, ErrorCode, InstanceInfo, PageRequest, take_page};
+use aviutl2_mcp_core::{DEFAULT_PAGE_LIMIT, ErrorCode, InstanceInfo, PageRequest, take_window};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -106,16 +106,16 @@ pub fn list_instances(
     discovery: DiscoveryConfig,
 ) -> Result<ListInstancesResponse, ListInstancesError> {
     // 範囲外の要求で registry を走査しないよう、生存確認の前に検証する。
-    let page_request = request
+    let window = request
         .page()
         .validate()
-        .map_err(|_| ListInstancesError::InvalidArgument)?;
+        .map_err(|_| ListInstancesError::InvalidArgument)?
+        .window();
 
     let all = find_instances(registry_dir, discovery, true)
         .map_err(|e| ListInstancesError::RegistryUnreadable(e.io_error_kind()))?;
 
-    let (instances, page) = take_page(&all, &page_request, NO_SNAPSHOT_REVISION)
-        .map_err(|_| ListInstancesError::InvalidArgument)?;
+    let (instances, page) = take_window(&all, &window, NO_SNAPSHOT_REVISION);
 
     Ok(ListInstancesResponse {
         instances,
