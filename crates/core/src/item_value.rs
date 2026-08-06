@@ -194,7 +194,7 @@ impl ItemWriteError {
         all.extend(
             TrackValueError::ALL
                 .iter()
-                .copied()
+                .cloned()
                 .map(ItemWriteError::Track),
         );
         all
@@ -861,7 +861,7 @@ mod tests {
         }
         for error in TrackValueError::ALL {
             assert_eq!(
-                ItemWriteError::Track(*error).reason(),
+                ItemWriteError::Track(error.clone()).reason(),
                 Some(error.reason()),
                 "{error}"
             );
@@ -876,7 +876,7 @@ mod tests {
             },
             ItemWriteError::Text(TextSyntaxError::ContainsNul),
             ItemWriteError::Path(PathSyntaxError::UncPath),
-            ItemWriteError::Track(TrackValueError::UnknownMode),
+            ItemWriteError::Track(TrackValueError::UnknownMode { known: Vec::new() }),
         ];
         for error in named {
             let reason = error.reason().expect("名前を持つ失敗です");

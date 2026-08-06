@@ -77,7 +77,7 @@ pub struct TrackValue {
 }
 
 /// トラックバーの移動を表す値の検証失敗。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TrackValueError {
     /// 値の個数が規則の要求と合わない。
     #[error("移動の値は {expected} 個必要ですが {actual} 個です")]
@@ -89,7 +89,14 @@ pub enum TrackValueError {
     },
     /// 移動方法の名前が既知の一覧に無い。
     #[error("移動方法の名前が既知の一覧にありません")]
-    UnknownMode,
+    UnknownMode {
+        /// 判定に用いた、ホストが受け付ける移動方法の名前の一覧。
+        ///
+        /// 要求元が指定した名前ではなく、[`TrackWriteTarget::movements`] が
+        /// 運んでいたホストの状態である。要求元がここへ書き直せば通り得る値の
+        /// 集合そのものであるため、エラー応答へ載せてよい。
+        known: Vec<String>,
+    },
     /// 移動方法の名前が数値として読める。
     #[error("移動方法の名前に数値として読める文字列は指定できません")]
     ModeReadsAsNumber,
@@ -108,7 +115,7 @@ impl TrackValueError {
             expected: 3,
             actual: 2,
         },
-        TrackValueError::UnknownMode,
+        TrackValueError::UnknownMode { known: Vec::new() },
         TrackValueError::ModeReadsAsNumber,
         TrackValueError::MovementWithoutMode,
     ];
@@ -119,7 +126,7 @@ impl TrackValueError {
     pub fn reason(&self) -> &'static str {
         match self {
             TrackValueError::ValueCount { .. } => "track_value_count",
-            TrackValueError::UnknownMode => "track_mode_unknown",
+            TrackValueError::UnknownMode { .. } => "track_mode_unknown",
             TrackValueError::ModeReadsAsNumber => "track_mode_reads_as_number",
             TrackValueError::MovementWithoutMode => "track_movement_without_mode",
         }
@@ -239,7 +246,10 @@ pub fn validate_track_value(
         .into());
     }
     if !target.movements.iter().any(|known| known == mode) {
-        return Err(TrackValueError::UnknownMode.into());
+        return Err(TrackValueError::UnknownMode {
+            known: target.movements.to_vec(),
+        }
+        .into());
     }
     Ok(())
 }
@@ -756,24 +766,33 @@ mod tests {
     #[test]
     fn a_mode_outside_the_known_set_is_rejected() {
         let movements = movements();
+        // 拒否は、判定に使った一覧をそのまま運ぶ。要求元はここへ書き直せば
+        // 通り得る名前を、対象を読み直さずに知れる。
         assert_eq!(
             validate_track_value(
                 &moving(&[0.0, 1.0], "存在しない移動"),
                 target(1, &movements)
             ),
-            Err(TrackValueError::UnknownMode.into())
+            Err(TrackValueError::UnknownMode {
+                known: movements.clone()
+            }
+            .into())
         );
-        // 一覧を引けなければ移動は 1 つも書けない。通す選択肢は無い。
+        // 一覧を引けなければ移動は 1 つも書けない。通す選択肢は無い。一覧が
+        // 空であることも、その空の一覧としてそのまま運ぶ。
         assert_eq!(
             validate_track_value(&moving(&[0.0, 1.0], "直線移動"), target(1, &[])),
-            Err(TrackValueError::UnknownMode.into())
+            Err(TrackValueError::UnknownMode { known: Vec::new() }.into())
         );
         assert_eq!(
             encode_track_value(
                 &moving(&[0.0, 1.0], "存在しない移動"),
                 target(1, &movements)
             ),
-            Err(TrackValueError::UnknownMode.into())
+            Err(TrackValueError::UnknownMode {
+                known: movements.clone()
+            }
+            .into())
         );
         assert_eq!(
             validate_track_value(&moving(&[0.0, 1.0], "直線移動"), target(1, &movements)),
@@ -899,8 +918,16 @@ mod tests {
     fn track_failures_do_not_repeat_the_value() {
         // 移動方法の名前も値も応答へ反響させない。
         let secret = "秘密の移動";
-        let error = validate_track_value(&moving(&[0.0, 1.0], secret), target(1, &[]))
+        let movements = movements();
+        let error = validate_track_value(&moving(&[0.0, 1.0], secret), target(1, &movements))
             .expect_err("拒否されます");
         assert!(!error.to_string().contains(secret), "{error}");
+        // `known` が運ぶのは判定に使った一覧であり、拒否した要求の名前では
+        // ない。一覧に無いからこそ拒否されているのだから、含まれるはずがない。
+        let ItemWriteError::Track(TrackValueError::UnknownMode { known }) = error else {
+            panic!("UnknownMode ではありません: {error:?}");
+        };
+        assert!(!known.contains(&secret.to_string()), "{known:?}");
+        assert_eq!(known, movements);
     }
 }
