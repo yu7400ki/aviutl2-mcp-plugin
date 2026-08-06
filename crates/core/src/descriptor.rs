@@ -1,6 +1,5 @@
 //! descriptor DTO と InstanceInfo。
 
-use crate::edit_info::SceneRef;
 use crate::identifier::{InstanceId, ProtocolVersion};
 use crate::state::InstanceState;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -117,8 +116,6 @@ pub struct InstanceInfo {
     /// 起動時刻。書式は [`crate::format_utc_timestamp`]。
     pub started_at: String,
     pub project: Option<InstanceProject>,
-    /// 現在シーンの参照。取得不能時は None。
-    pub scene: Option<SceneRef>,
 }
 
 /// `InstanceInfo` 内のプロジェクト情報。
@@ -216,10 +213,6 @@ mod tests {
                 revision: Some(42),
                 modified: Some(true),
             }),
-            scene: Some(SceneRef {
-                id: 0,
-                name: Some("Scene 1".to_string()),
-            }),
         }
     }
 
@@ -235,7 +228,7 @@ mod tests {
 
     #[test]
     fn instance_info_allows_unknown_optional_fields() {
-        let s = r#"{"instance_id":"8df98c04-e7c2-4f98-b3ce-fc1c39d76414","state":"ready","pid":1,"started_at":"x","project":{"display_name":"a","path":"b","epoch":"e","revision":1,"modified":false},"scene":{"id":0,"name":null},"future":1}"#;
+        let s = r#"{"instance_id":"8df98c04-e7c2-4f98-b3ce-fc1c39d76414","state":"ready","pid":1,"started_at":"x","project":{"display_name":"a","path":"b","epoch":"e","revision":1,"modified":false},"future":1}"#;
         let result: Result<InstanceInfo, _> = serde_json::from_str(s);
         assert!(result.is_ok());
     }
@@ -251,8 +244,6 @@ mod tests {
         assert_eq!(project.epoch, None);
         assert_eq!(project.revision, None);
         assert_eq!(project.modified, None);
-        // scene を持たない応答も受理する。
-        assert_eq!(info.scene, None);
     }
 
     #[test]
@@ -301,18 +292,6 @@ mod tests {
         assert_eq!(value["project"]["modified"], serde_json::json!(true));
         let restored: InstanceInfo = serde_json::from_value(value).unwrap();
         assert_eq!(restored, info);
-    }
-
-    #[test]
-    fn instance_info_scene_can_be_absent() {
-        let info = InstanceInfo {
-            scene: None,
-            ..sample_instance_info()
-        };
-        let value = serde_json::to_value(&info).unwrap();
-        assert_eq!(value["scene"], serde_json::Value::Null);
-        let restored: InstanceInfo = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.scene, None);
     }
 
     #[test]

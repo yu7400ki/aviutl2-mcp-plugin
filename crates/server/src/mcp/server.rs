@@ -5501,7 +5501,6 @@ mod tests {
                     revision: None,
                     modified: None,
                 }),
-                scene: None,
             })
             .collect();
         ListInstancesResponse {

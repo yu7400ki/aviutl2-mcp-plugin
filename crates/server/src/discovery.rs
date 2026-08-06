@@ -620,7 +620,6 @@ fn build_instance_info(descriptor: InstanceDescriptor, pong: PongResult) -> Inst
         pid: descriptor.pid,
         started_at: descriptor.started_at,
         project,
-        scene: None,
     }
 }
 
@@ -764,8 +763,6 @@ mod tests {
         assert_eq!(project.revision, Some(42));
         assert_eq!(project.modified, Some(true));
         assert_eq!(info.state, InstanceState::Ready);
-        // シーンは生存確認からは取得できない。
-        assert_eq!(info.scene, None);
     }
 
     #[test]

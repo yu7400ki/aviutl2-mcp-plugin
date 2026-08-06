@@ -70,13 +70,8 @@ fn instance_line(info: &InstanceInfo) -> String {
         .and_then(|p| p.modified)
         .map(|modified| format!("modified={modified}"))
         .unwrap_or_else(|| "modified=未取得".to_string());
-    let scene = info
-        .scene
-        .as_ref()
-        .map(|s| format!("scene_id={}", s.id))
-        .unwrap_or_else(|| "scene=未取得".to_string());
     format!(
-        "- {} state={} pid={} project={project} {modified} {scene}",
+        "- {} state={} pid={} project={project} {modified}",
         info.instance_id,
         info.state.as_snake_case(),
         info.pid,
@@ -802,7 +797,6 @@ mod tests {
                 pid: 1234,
                 started_at: "2026-01-01T00:00:00.0000000Z".to_string(),
                 project: None,
-                scene: None,
             }],
             total_count: 1,
             count: 1,
@@ -839,7 +833,6 @@ mod tests {
                         revision: None,
                         modified,
                     }),
-                    scene: None,
                 }],
                 total_count: 1,
                 count: 1,
@@ -867,7 +860,6 @@ mod tests {
                     revision: None,
                     modified: None,
                 }),
-                scene: None,
             })
             .collect();
         let response = ListInstancesResponse {

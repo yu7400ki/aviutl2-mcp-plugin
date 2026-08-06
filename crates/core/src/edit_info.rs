@@ -73,15 +73,6 @@ pub struct SceneInfo {
     pub sample_rate: u32,
 }
 
-/// シーンの参照。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SceneRef {
-    /// シーン ID。
-    pub id: i32,
-    /// シーン名。取得不能時は null。
-    pub name: Option<String>,
-}
-
 /// 編集カーソル位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
@@ -237,16 +228,6 @@ mod tests {
         let s = serde_json::to_string(&scene).unwrap();
         let restored: SceneInfo = serde_json::from_str(&s).unwrap();
         assert_eq!(restored, scene);
-    }
-
-    #[test]
-    fn scene_ref_roundtrip() {
-        for name in [Some("Scene 1".to_string()), None] {
-            let scene_ref = SceneRef { id: 3, name };
-            let s = serde_json::to_string(&scene_ref).unwrap();
-            let restored: SceneRef = serde_json::from_str(&s).unwrap();
-            assert_eq!(restored, scene_ref);
-        }
     }
 
     #[test]

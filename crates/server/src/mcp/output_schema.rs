@@ -379,7 +379,6 @@ fn instance_info() -> Value {
         ("pid", unsigned()),
         ("started_at", string()),
         ("project", nullable(instance_project())),
-        ("scene", nullable(scene_ref())),
     ])
 }
 
@@ -391,10 +390,6 @@ fn instance_project() -> Value {
         ("revision", nullable_unsigned()),
         ("modified", nullable_boolean()),
     ])
-}
-
-fn scene_ref() -> Value {
-    object(&[("id", integer()), ("name", nullable_string())])
 }
 
 fn scene_info() -> Value {
@@ -743,8 +738,8 @@ mod tests {
         ItemValue, LayerInfo, ListAvailableEffectsResult, ListFontsResult, ListLayersResult,
         ListModulesResult, ListObjectAliasesResult, ListObjectsResult, ListPalettesResult,
         ModuleEntry, ModuleType, ObjectAliasSummary, ObjectDetail, ObjectFingerprintInput,
-        ObjectSummary, ObservedSelection, PageMeta, PaletteEntry, Rgba, SceneInfo, SceneRef,
-        SectionRange, SelectionField, SelectionSnapshot, SelectionState, TrackGroup, TrackInfo,
+        ObjectSummary, ObservedSelection, PageMeta, PaletteEntry, Rgba, SceneInfo, SectionRange,
+        SelectionField, SelectionSnapshot, SelectionState, TrackGroup, TrackInfo,
     };
 
     /// 値が schema に適合するかを再帰的に検査する。
@@ -1029,10 +1024,6 @@ mod tests {
                     revision: Some(3),
                     modified: Some(false),
                 }),
-                scene: Some(SceneRef {
-                    id: 0,
-                    name: Some("Scene 1".to_string()),
-                }),
             }],
             total_count: 1,
             count: 1,
@@ -1061,10 +1052,9 @@ mod tests {
     }
 
     #[test]
-    fn list_instances_schema_accepts_absent_project_and_scene() {
+    fn list_instances_schema_accepts_an_absent_project() {
         let mut response = sample_instances_response();
         response.instances[0].project = None;
-        response.instances[0].scene = None;
         assert_conforms(list_instances(), &to_value(&response));
     }
 
