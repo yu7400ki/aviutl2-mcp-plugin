@@ -9,10 +9,16 @@
 //! ツリーの形、節の一覧、名指ししてよい識別子、未実測の項目、候補の写し——で
 //! ある。
 
+use crate::agent_plugin::skills::SKILL_FILES;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// skill ツリーの根。
+///
+/// **本文を読む検査はここを見ない。** 見るのは埋め込みの一覧
+/// （[`SKILL_FILES`]）であり、配られるのはそちらだからである。ディスクを要する
+/// のはツリーの形の検査だけで、そちらは埋め込みが漏らしたファイルも見える形で
+/// なければ意味を成さない。
 fn skills_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("data")
@@ -27,22 +33,30 @@ const SKILL_NAME: &str = "aviutl2-editing";
 
 /// `SKILL.md` の本文。
 fn skill_body() -> String {
-    let path = skills_dir().join(SKILL_NAME).join("SKILL.md");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("{} を読めません: {e}", path.display()))
+    let name = format!("{SKILL_NAME}/SKILL.md");
+    skill_files()
+        .into_iter()
+        .find_map(|(path, body)| (path == name).then_some(body))
+        .unwrap_or_else(|| panic!("{name} が埋め込まれていません"))
 }
 
-/// skill ツリーに含まれる全ての markdown を、根からの相対パスと本文の対で返す。
+/// 配られる skill ツリーを、根からの相対パスと本文の対で返す。
+///
+/// **ディスクではなく埋め込みを見る。** 利用者へ届くのは埋め込みのほうであり、
+/// data ディレクトリに在って埋め込まれていないファイルは、どれだけ良く書けて
+/// いても読まれない。
 fn skill_files() -> Vec<(String, String)> {
-    let mut files = Vec::new();
-    collect_markdown(&skills_dir(), &skills_dir(), &mut files);
+    let mut files: Vec<(String, String)> = SKILL_FILES
+        .iter()
+        .map(|(path, body)| ((*path).to_string(), (*body).to_string()))
+        .collect();
     files.sort();
     assert!(!files.is_empty(), "skill ツリーに markdown がありません");
     files
 }
 
 /// ディレクトリを辿って markdown を集める。
-fn collect_markdown(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
+fn collect_markdown(root: &Path, dir: &Path, out: &mut Vec<String>) {
     for entry in
         std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{} を辿れません: {e}", dir.display()))
     {
@@ -54,14 +68,12 @@ fn collect_markdown(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
         if path.extension().is_none_or(|ext| ext != "md") {
             continue;
         }
-        let relative = path
-            .strip_prefix(root)
-            .expect("根の外のファイルを拾いました")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let body = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("{} を読めません: {e}", path.display()));
-        out.push((relative, body));
+        out.push(
+            path.strip_prefix(root)
+                .expect("根の外のファイルを拾いました")
+                .to_string_lossy()
+                .replace('\\', "/"),
+        );
     }
 }
 
@@ -248,6 +260,24 @@ fn the_skill_tree_holds_only_directories_that_have_a_skill_md() {
         vec![SKILL_NAME.to_string()],
         "skill は 1 つに保つ。発火の条件が同じである以上、割っても両方が同時に読まれる"
     );
+}
+
+#[test]
+fn the_embedded_tree_matches_the_files_on_disk() {
+    // **`include_str!` はリテラルしか受け付けない。** 一覧は手書きであり、
+    // data ディレクトリへ足したファイルは黙って配布から漏れる。ここが
+    // その 1 経路を塞ぐ——漏れは「参照文書が開けない」として利用者側に出る。
+    let mut on_disk = Vec::new();
+    collect_markdown(&skills_dir(), &skills_dir(), &mut on_disk);
+    on_disk.sort();
+    let embedded: Vec<String> = skill_files().into_iter().map(|(path, _)| path).collect();
+    assert_eq!(embedded, on_disk, "埋め込みの一覧とツリーが食い違います");
+
+    for (path, body) in skill_files() {
+        let on_disk = std::fs::read_to_string(skills_dir().join(&path))
+            .unwrap_or_else(|e| panic!("{path} を読めません: {e}"));
+        assert_eq!(body, on_disk, "{path} の埋め込みが古くなっています");
+    }
 }
 
 #[test]

@@ -4,6 +4,8 @@
 //! MCP server からの要求を受け付ける。
 
 #[cfg(windows)]
+pub mod agent_plugin;
+#[cfg(windows)]
 pub mod alias;
 #[cfg(windows)]
 mod atomic_file;
@@ -41,7 +43,7 @@ pub mod settings;
 #[cfg(windows)]
 pub mod settings_ui;
 /// 同梱する skill の本文を、写しと未実測の両側から固定する検査。
-#[cfg(test)]
+#[cfg(all(windows, test))]
 mod skill_body;
 #[cfg(all(windows, test))]
 mod test_support;
@@ -304,6 +306,18 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
         self.lifecycle = Some(lifecycle);
         self.pipe_server = Some(pipe_server);
         self.render_adapter = Some(render_adapter);
+
+        // agent plugin の生成は登録の最後に置く。**AviUtl2 の編集機能にも
+        // instance の登録にも要らないものであり、要る側を先に済ませる。**
+        // 手前のいずれかが失敗して戻った場合はここへ到達しないが、それでよい
+        // ——registry writer が失敗していればルートを保護できておらず、pipe
+        // server が失敗していれば marketplace の指す先が動かない。**どちらも
+        // 「生成しない」が正しい。**
+        //
+        // 失敗は握り潰してログへ残す。panic まで捕らえるのは、記録の経路自体が
+        // panic 源であり得るためである（終了手順が段ごとに隔離しているのと同じ
+        // 理由）。ここは登録の最後であり、捕らえたところで飛ばされる後続は無い。
+        let _ = std::panic::catch_unwind(agent_plugin::sync);
     }
 
     fn plugin_info(&self) -> aviutl2::generic::GenericPluginTable {

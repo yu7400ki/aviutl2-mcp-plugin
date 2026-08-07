@@ -41,11 +41,8 @@
 use crate::alias::read_bounded;
 use crate::read::host::HostEffectHelp;
 use std::collections::HashMap;
-use std::ffi::OsString;
-use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 
 /// 説明を収めたファイルの名前。
 const HELP_FILE: &str = "Default.aul2";
@@ -66,15 +63,6 @@ const EFFECT_DESCRIPTION_KEY: &str = "effect.name";
 /// この経路の費用は要求の内容で決まらないため、予算では守れない。上限は
 /// 要求元が動かせない。
 pub const MAX_HELP_BYTES: u64 = 4 * 1024 * 1024;
-
-/// 実行ファイルのパスを受け取る最初の長さ。
-const INITIAL_PATH_LEN: usize = 260;
-
-/// 実行ファイルのパスを受け取る領域の上限。
-///
-/// Windows のパスの上限を収める長さであり、これでも収まらない応答は解決の
-/// 失敗として扱う。
-const MAX_PATH_LEN: usize = 32 * 1024;
 
 /// 解決した効果ごとの説明。
 static HELP: OnceLock<HashMap<String, HostEffectHelp>> = OnceLock::new();
@@ -123,35 +111,10 @@ fn help_table() -> &'static HashMap<String, HostEffectHelp> {
 
 /// ホストの実行ファイルが置かれたディレクトリを返す。解決できなければ `None`。
 fn host_directory() -> Option<PathBuf> {
-    module_file_name()
+    crate::identity::module_file_name(None)
         .as_deref()
         .and_then(Path::parent)
         .map(Path::to_path_buf)
-}
-
-/// 現在のプロセスの実行ファイルのパスを返す。
-///
-/// 受け取る領域は足りるまで広げる。**取得は書き込んだ長さしか返さない。**
-/// 領域と同じ長さが返った場合は切り詰められた可能性があり、その値をパスとして
-/// 扱うと別の場所を指す。
-fn module_file_name() -> Option<PathBuf> {
-    let mut buffer = vec![0u16; INITIAL_PATH_LEN];
-    loop {
-        // SAFETY: 第 1 引数の `None` は現在のプロセスの実行ファイルを指す。
-        // `buffer` は呼び出し中を通じて生存する書き込み可能な領域であり、
-        // 長さは呼び出し先へスライスとして渡る。
-        let written = unsafe { GetModuleFileNameW(None, &mut buffer) } as usize;
-        if written == 0 {
-            return None;
-        }
-        if written < buffer.len() {
-            return Some(PathBuf::from(OsString::from_wide(&buffer[..written])));
-        }
-        if buffer.len() >= MAX_PATH_LEN {
-            return None;
-        }
-        buffer.resize((buffer.len() * 2).min(MAX_PATH_LEN), 0);
-    }
 }
 
 /// ディレクトリ直下の説明ファイルを読んで表を組み立てる。
@@ -588,7 +551,9 @@ effect.name=文字を表示します\r\n";
             dir.display()
         );
         assert_eq!(
-            module_file_name().as_deref().and_then(Path::parent),
+            crate::identity::module_file_name(None)
+                .as_deref()
+                .and_then(Path::parent),
             Some(dir.as_path())
         );
     }
