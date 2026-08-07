@@ -1146,18 +1146,12 @@ impl AviUtl2McpServer {
 
     /// メディアファイル・object alias・エフェクト名・登録済みエイリアス名のいずれかから
     /// オブジェクトを作成する。
-    /// source の effect はエイリアスファイルの effect.name の値であり、
-    /// list_available_effects が返す名前をそのまま指定する。
-    /// カタログに在る名前でも作成元にできるとは限らず、その場合は
-    /// unsupported_operation（effect_not_creatable）となる。名前がカタログに無い場合は
-    /// unsupported_operation（effect_not_registered）となる。
-    /// source の alias_name には list_object_aliases が返した名前を指定する。
-    /// エイリアスファイルの中身を読む必要は無い。
-    /// 名前に `\ / : * ? " ' < > | % = , .` を含めることはできない。
-    /// これは AviUtl2 の UI が登録時に課す制約である。
-    /// alias_name は object_alias（生テキスト）より検証が厳しい。
-    /// パースできないエイリアスと effect を 1 つも含まないエイリアスは、
-    /// 作成前に invalid_argument（alias_not_parsable / alias_without_effect）で拒否される。
+    /// source が effect のとき、カタログに在る名前でも作成元にできるとは限らず、
+    /// その場合は unsupported_operation（effect_not_creatable）となる。
+    /// 名前がカタログに無い場合は unsupported_operation（effect_not_registered）となる。
+    /// source が alias_name のとき、パースできないエイリアスと effect を 1 つも
+    /// 含まないエイリアスは、作成前に
+    /// invalid_argument（alias_not_parsable / alias_without_effect）で拒否される。
     /// 複数オブジェクトを含む alias は全てが作成され、created に全件、object に
     /// その先頭が入る。応答の effect は常に null である。
     /// 長さと挿入位置はホストが自動調整し得るため、
@@ -1684,9 +1678,7 @@ impl AviUtl2McpServer {
 
     /// レイヤーの名前・表示・ロック状態を変更する。
     /// name と enabled と locked の 3 つ全てを省略した要求は受け付けない。
-    /// name に {"type": "reset"} を指定すると標準のレイヤー名へ戻す。
-    /// name に {"type": "set"} を指定する場合、空の名前は受け付けず
-    /// invalid_argument となる。標準名へ戻すには reset を指定する。
+    /// name に空の名前を指定すると invalid_argument となる。標準名へ戻すには reset を指定する。
     /// レイヤーには fingerprint が無いため、読み取った時点から状態が変わっていても
     /// 検出できない。応答が返す layer には変更後に読み直した実際の状態が入るので、
     /// 意図どおりかはその値で確認する。
@@ -1797,7 +1789,6 @@ impl AviUtl2McpServer {
     /// name と size と sample_rate の 3 つ全てを省略した要求は受け付けない。
     /// name に空の名前は指定できず invalid_argument（empty）となる。オブジェクト名や
     /// レイヤー名と違い、シーン名には「標準へ戻す」が無く、名前を消す手段も無い。
-    /// size は width と height を組で指定する。ホストは片方だけを変える手段を持たない。
     /// 解像度は render_frame が描ける大きさに収まる必要がある。width と height の積が
     /// 1 フレームの非圧縮 RGBA8 の上限（256 MiB）を超える要求は invalid_argument となる。
     /// フレームレートは変更できない。現在の値は get_current_scene が返す fps_rate と
@@ -3649,12 +3640,13 @@ mod tests {
     fn create_object_states_what_an_effect_name_is_and_when_it_cannot_be_used() {
         // 作成元が 4 種であること、effect が何の値であること、カタログに在っても
         // 元にできるとは限らないこと。どれも要求元が名前を用意する前に要る。
+        //
+        // **名前が何の値かは作成元の分岐が述べる。** 失敗の条件だけが tool の
+        // 説明に残る——値を用意する時点と、tool を選ぶ時点は別である。
         let description = description_of("create_object");
         for phrase in [
             "object alias",
             "エフェクト名",
-            "effect.name",
-            "list_available_effects",
             "effect_not_creatable",
             "effect_not_registered",
         ] {
@@ -3663,23 +3655,64 @@ mod tests {
                 "create_object の説明が {phrase} に触れていません"
             );
         }
+        let source = object_source_description("effect");
+        for phrase in ["effect.name", "list_available_effects"] {
+            assert!(
+                source.contains(phrase),
+                "作成元の effect が {phrase} に触れていません: {source}"
+            );
+        }
+    }
+
+    /// 作成元の種別ごとの分岐に付いた説明を取り出す。
+    fn object_source_description(kind: &str) -> String {
+        let variants =
+            tool_named("create_object").input_schema["$defs"]["ObjectSourceInput"]["oneOf"]
+                .as_array()
+                .expect("作成元が判別子つきの union として宣言されていません")
+                .clone();
+        let variant = variants
+            .iter()
+            .find(|variant| variant["properties"]["type"]["const"] == kind)
+            .unwrap_or_else(|| panic!("{kind} 種別の分岐がありません"))
+            .clone();
+        // 分岐そのものの説明と、値のフィールドの説明を併せて見る。名前の由来は
+        // どちらに書いても要求元へは 1 つの分岐として届く。
+        let own = variant["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let fields: String = variant["properties"]
+            .as_object()
+            .expect("分岐が properties を宣言していません")
+            .values()
+            .filter_map(|property| property["description"].as_str())
+            .collect();
+        own + &fields
     }
 
     #[test]
     fn create_object_says_where_an_alias_name_comes_from_and_how_it_is_checked() {
         // 名前の出どころ・使えない文字・生テキストより厳しい検証。どれも要求元が
         // 名前を用意する前に要る。とくに禁止文字は AviUtl2 の UI が課すもので
-        // あり、我々が決めた制約ではない。
-        let description = description_of("create_object");
+        // あり、我々が決めた制約ではない。**値を書く場所の隣が述べる。**
+        let source = object_source_description("alias_name");
         for phrase in [
             "list_object_aliases が返した名前",
             "中身を読む必要は無い",
             r#"\ / : * ? " ' < > | % = , ."#,
             "AviUtl2 の UI",
             "object_alias（生テキスト）より検証が厳しい",
-            "alias_not_parsable",
-            "alias_without_effect",
         ] {
+            assert!(
+                source.contains(phrase),
+                "作成元の alias_name が {phrase} に触れていません: {source}"
+            );
+        }
+        // 拒否される条件は tool の説明に残る。その呼び出しが失敗する条件そのもので
+        // あり、要求を組み立て終えた後に効く。
+        let description = description_of("create_object");
+        for phrase in ["alias_not_parsable", "alias_without_effect"] {
             assert!(
                 description.contains(phrase),
                 "create_object の説明が {phrase} に触れていません"
@@ -4849,6 +4882,13 @@ mod tests {
             vec!["width", "height"]
         );
 
+        // 組でしか綴れないことは、値を書く場所の隣が述べる。
+        assert!(
+            field_description("set_scene_settings", "size")
+                .contains("width と height は組で指定する"),
+            "size が組であることを述べていません"
+        );
+
         // 綴りの誤った軸が黙って無視されないこと。
         assert_eq!(
             tool.input_schema.get("additionalProperties"),
@@ -4911,7 +4951,6 @@ mod tests {
             "3 つ全てを省略した要求は受け付けない",
             "空の名前は指定できず",
             "「標準へ戻す」が無く",
-            "width と height を組で指定する",
             // 値域と、変更できない軸。
             "render_frame が描ける大きさ",
             "フレームレートは変更できない",

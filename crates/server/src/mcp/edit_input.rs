@@ -123,14 +123,16 @@ pub enum ObjectSourceInput {
     },
     /// エフェクト名から作成する。
     Effect {
-        /// エイリアスファイルの effect.name の値。list_available_effects が返す名前を指定する。
+        /// エイリアスファイルの effect.name の値。list_available_effects が返す名前をそのまま指定する。
         #[schemars(length(max = MAX_NAME_CHARS))]
         name: String,
     },
     /// 登録済みオブジェクトエイリアスの名前から作成する。
+    ///
+    /// object_alias（生テキスト）より検証が厳しい。
     AliasName {
-        /// list_object_aliases が返した名前。
-        /// `\ / : * ? " ' < > | % = , .` は含められない。
+        /// list_object_aliases が返した名前。エイリアスファイルの中身を読む必要は無い。
+        /// `\ / : * ? " ' < > | % = , .` は含められない。これは AviUtl2 の UI が登録時に課す制約である。
         #[schemars(length(min = 1, max = MAX_NAME_CHARS))]
         name: String,
     },
