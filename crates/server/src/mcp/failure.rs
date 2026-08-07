@@ -790,6 +790,186 @@ mod tests {
         assert!(!text.contains("details.failed_object="), "{text}");
         assert!(!text.contains("差し替えて"), "{text}");
     }
+
+    #[test]
+    fn a_detail_key_no_one_wrote_a_guidance_for_still_reaches_the_caller() {
+        // 値の供給をホワイトリストへ戻さないための表明である。実在の key で
+        // 書くと、たまたま案内が付いているだけでも通ってしまうため、案内を
+        // 持ち得ない架空の key で確かめる。
+        let error = ErrorObject::new(ErrorCode::SdkError, "失敗しました", false).with_details(
+            serde_json::json!({
+                "quokka_index": 7,
+                "wombat_names": ["ひとつ", "ふたつ"],
+            }),
+        );
+        let text = text(&error);
+        assert!(text.contains("details.quokka_index=7"), "{text}");
+        assert!(
+            text.contains(r#"details.wombat_names=["ひとつ","ふたつ"]"#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn known_movements_and_observed_value_reach_the_caller() {
+        // 補助情報へ載せたのに要求元へ届かなかった 2 件そのものを固定する。
+        // 検査するのは key の名前ではなく値の字面である。
+        let error = ErrorObject::new(
+            ErrorCode::UnsupportedOperation,
+            "移動方法の名前が既知の一覧にありません",
+            false,
+        )
+        .with_details(serde_json::json!({
+            "reason": "track_mode_unknown",
+            "known_movements": ["直線移動", "曲線移動", "瞬間移動"],
+            "observed_value": 4000,
+        }));
+        let text = text(&error);
+        assert!(
+            text.contains(r#"details.known_movements=["直線移動","曲線移動","瞬間移動"]"#),
+            "{text}"
+        );
+        assert!(text.contains("details.observed_value=4000"), "{text}");
+        assert!(
+            text.contains(r#"details.reason="track_mode_unknown""#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn detail_lines_are_reproducible_and_ordered_by_key() {
+        // 同じ失敗が呼ぶたびに違う並びで返ると、要求元は差分を取れず、
+        // 応答の比較でしか分からない退行を見逃す。
+        let error = ErrorObject::new(ErrorCode::SdkError, "失敗しました", false)
+            .with_details(serde_json::json!({ "zulu": 1, "alfa": 2, "mike": 3, "bravo": 4 }));
+        let first = text(&error);
+        assert_eq!(first, text(&error), "呼ぶたびに並びが変わっています");
+
+        let keys: Vec<&str> = first
+            .lines()
+            .filter_map(|line| line.strip_prefix("details."))
+            .filter_map(|line| line.split_once('='))
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(keys, ["alfa", "bravo", "mike", "zulu"], "{first}");
+    }
+
+    #[test]
+    fn sensitive_details_are_absent_from_the_text_content() {
+        // 選別は `structuredContent` の側だけの約束ではない。選別を経ない
+        // 補助情報が text へ出る経路を作らない。
+        let error = ErrorObject::new(ErrorCode::InternalError, "失敗しました", false).with_details(
+            serde_json::json!({
+                "auth_secret": "s3cret",
+                "pipe_name": r"\\.\pipe\aviutl2-mcp-1",
+                "project_path": r"C:\Users\me\project.aup2",
+                "retry_after_ms": 100,
+            }),
+        );
+        let text = text(&error);
+        for absent in [
+            "auth_secret",
+            "s3cret",
+            "pipe_name",
+            "aviutl2-mcp-1",
+            "project_path",
+            "project.aup2",
+        ] {
+            assert!(!text.contains(absent), "{absent} が残っています: {text}");
+        }
+        assert!(text.contains("details.retry_after_ms=100"), "{text}");
+    }
+
+    #[test]
+    fn details_beyond_the_budget_are_dropped_whole_and_the_loss_is_stated() {
+        // 途中で切った JSON は要求元が読めず、黙って切ると落とした key を
+        // 「無い」と読む。落とすのは行の単位であり、落としたことを述べる。
+        const KEYS: usize = 40;
+        let mut details = Map::new();
+        for index in 0..KEYS {
+            details.insert(
+                format!("filler_{index:02}"),
+                Value::String("あ".repeat(MAX_DETAIL_STRING_CHARS)),
+            );
+        }
+        let error = ErrorObject::new(ErrorCode::SdkError, "失敗しました", false)
+            .with_details(Value::Object(details));
+        let text = text(&error);
+
+        let kept: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("details."))
+            .collect();
+        assert!(!kept.is_empty(), "1 行も残っていません");
+        assert!(kept.len() < KEYS, "上限が効いていません");
+
+        let budget: usize = kept.iter().map(|line| line.chars().count()).sum();
+        assert!(budget <= MAX_DETAIL_TEXT_CHARS, "{budget} 文字残っています");
+
+        for line in &kept {
+            let (_, encoded) = line
+                .strip_prefix("details.")
+                .and_then(|line| line.split_once('='))
+                .expect("値の行は key=value の形である");
+            serde_json::from_str::<Value>(encoded)
+                .unwrap_or_else(|error| panic!("JSON が途中で切れています: {line} ({error})"));
+        }
+
+        let notice = text
+            .lines()
+            .find(|line| line.starts_with("details のうち"))
+            .expect("省略を述べる行がありません");
+        assert!(
+            notice.contains(&format!("{} 行", KEYS - kept.len())),
+            "{notice}"
+        );
+    }
+
+    #[test]
+    fn a_locked_layer_gets_both_the_values_and_the_next_step() {
+        // 値の行は「何が起きたか」を、案内の行は「次に何をするか」を答える。
+        // 前者を足したことで後者が消えると、要求元は別 operation を挟めば
+        // 解けることを知る手段を失う。
+        let error = ErrorObject::new(ErrorCode::PreconditionFailed, "レイヤーがロック", true)
+            .with_details(serde_json::json!({
+                "reason": "layer_locked",
+                "layer": 3,
+                "retry_requires": "none",
+            }));
+        let text = text(&error);
+        assert!(text.contains("details.layer=3"), "{text}");
+        assert!(text.contains(r#"details.reason="layer_locked""#), "{text}");
+        assert!(text.contains(LAYER_LOCKED_GUIDANCE), "{text}");
+    }
+
+    #[test]
+    fn details_that_are_not_an_object_produce_no_lines() {
+        // 補助情報は自由な形の値であり、object とは限らない。key を持たない
+        // 値へ `details.` の行を作らない。
+        let error = ErrorObject::new(ErrorCode::SdkError, "失敗しました", false)
+            .with_details(serde_json::json!("ただの文字列"));
+        let text = text(&error);
+        assert!(!text.contains("details."), "{text}");
+    }
+
+    #[test]
+    fn sanitizing_details_twice_changes_nothing() {
+        // 描画の直前にも選別を通すため、選別済みの値を再び通す経路が常に走る。
+        // 二度目が値を削るなら、text と `structuredContent` の字面がずれる。
+        let mut deep = serde_json::json!({ "leaf": 1 });
+        for _ in 0..MAX_DETAIL_DEPTH + 2 {
+            deep = serde_json::json!({ "nested": deep });
+        }
+        let details = serde_json::json!({
+            "auth_secret": "s3cret",
+            "note": "あ".repeat(MAX_DETAIL_STRING_CHARS * 2),
+            "items": (0..MAX_DETAIL_ARRAY_ITEMS * 3).collect::<Vec<_>>(),
+            "deep": deep,
+        });
+        let once = sanitize_details(&details, 0);
+        assert_eq!(sanitize_details(&once, 0), once);
+    }
+
     #[test]
     fn long_remote_message_is_clamped() {
         let remote = ErrorObject::new(ErrorCode::SdkError, "え".repeat(10_000), false);
