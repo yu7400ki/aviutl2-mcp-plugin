@@ -3378,10 +3378,10 @@ mod tests {
     /// **「落とした」と「消えた」を区別する唯一の表である。** 各行について、
     /// 句が tool の説明から消えていることと、行き先に在ることを確かめる。
     ///
-    /// **`to_skill` の側はまだ実体を持たない。** skill が存在しないため、いま
-    /// 確かめられるのは層 1 から消えたことと、書く内容が記録されていることだけ
-    /// である。**skill を書く作業がこの表を入力に取り、`to_skill` が本文に在る
-    /// ことを検査した時点で、層 3 側の検査が実体を持つ。**
+    /// **`to_skill` の側は [`the_conventions_handed_to_the_skill_are_in_its_body`]
+    /// が本文と突き合わせる。** 本表が層 3 側の検査の入力である——句がどこへ
+    /// 行ったかを記録しているのはここだけであり、skill の本文だけを読んでも
+    /// 「述べ足りない」ことは分からない。
     /// 併せて持ち越す検査は [`CHECKS_HANDED_TO_THE_SKILL`] にある。
     const RELOCATED_CONVENTIONS: &[Relocation] = &[
         Relocation {
@@ -3681,9 +3681,9 @@ mod tests {
                 );
             }
             if let Some(statement) = relocation.to_skill {
-                // skill はまだ無い。**行き先が決まっていることと、書く内容が
-                // 残っていることだけを固定する。** skill を書く作業がこの表を
-                // 読み、本文に対して同じ検査を掛けた時点で実体を持つ。
+                // 本文との突き合わせは
+                // [`the_conventions_handed_to_the_skill_are_in_its_body`] が行う。
+                // ここで見るのは、行き先の宣言が空でないことだけである。
                 assert!(!statement.is_empty(), "skill が受け取る内容が空です");
             }
         }
@@ -3716,6 +3716,149 @@ mod tests {
                 "持ち越す検査の記録が欠けています"
             );
         }
+    }
+
+    /// 同梱する skill の `SKILL.md` を読む。
+    ///
+    /// **本文は plugin crate が持つ**——skill は plugin のバイナリへ埋め込まれ、
+    /// plugin が書き出す。それでも突き合わせをこちら側で行うのは、**層 1 から
+    /// 何を落としたかの記録がこの crate にしか無い**ためである。本文の側だけを
+    /// 読んでも、述べ足りない句は見えない。
+    fn skill_body() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates ディレクトリを辿れません")
+            .join("plugin")
+            .join("data")
+            .join("skills")
+            .join("aviutl2-editing")
+            .join("SKILL.md");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} を読めません: {e}", path.display()))
+    }
+
+    /// 本文と句を、markdown の装飾と改行の差を無視して比べられる形へ均す。
+    ///
+    /// 表が持つ句は 1 続きの文であり、本文では折り返され、語の一部が
+    /// コードや強調として囲まれる。**均さずに比べると、体裁を整えただけで
+    /// 検査が落ちる。** 均すのは空白とバッククォートとアスタリスクだけで、
+    /// 下線は残す——`set_object_item` のような名前が別語に化ける。
+    fn without_markdown_noise(text: &str) -> String {
+        text.chars()
+            .filter(|ch| !ch.is_whitespace() && !matches!(ch, '`' | '*'))
+            .collect()
+    }
+
+    /// 均した本文の中に句が現れる回数。
+    fn occurrences(body: &str, phrase: &str) -> usize {
+        without_markdown_noise(body)
+            .matches(&without_markdown_noise(phrase))
+            .count()
+    }
+
+    #[test]
+    fn the_conventions_handed_to_the_skill_are_in_its_body() {
+        // **C-T1 の層 3 側である。** 層 1 から句が消えたことは
+        // [`the_phrases_dropped_from_the_tool_descriptions_live_in_another_layer`]
+        // が見ている。こちらが見るのは、その行き先に句が在ることである。
+        // 両方を持って初めて「落とした」と「消えた」が区別できる。
+        let body = skill_body();
+        let mut handed = 0usize;
+        for relocation in RELOCATED_CONVENTIONS {
+            let Some(statement) = relocation.to_skill else {
+                continue;
+            };
+            handed += 1;
+            assert!(
+                occurrences(&body, statement) >= 1,
+                "層 1 の {} tool が述べていた事実が skill の本文にありません: {statement}",
+                relocation.was_stated_by
+            );
+        }
+        assert!(handed > 0, "skill が受け取った句が 1 つもありません");
+    }
+
+    #[test]
+    fn the_checks_handed_to_the_skill_are_satisfied_by_its_body() {
+        // **削除ではなく移設であることを、移設先で確かめる。** 4 件はいずれも
+        // 「説明が嘘をつかないこと」を守っていた検査であり、層 1 から消した
+        // 時点で守り手が居なくなっている。
+        let body = skill_body();
+        assert_eq!(
+            CHECKS_HANDED_TO_THE_SKILL.len(),
+            4,
+            "持ち越す検査が増減しています。本文側の検査も併せて見直してください"
+        );
+
+        // 1. 要求が project_revision を運ばないこと。**1 度だけ述べる**——
+        //    層 1 で 16 tool へ並んでいた句を、層 3 でも並べては移した意味が無い。
+        assert_eq!(
+            occurrences(&body, "project_revision を運ばない"),
+            1,
+            "project_revision を運ばないことの記述が 1 度ではありません"
+        );
+
+        // 2. 取り消し単位。一般則を 1 度述べ、例外を名指しし、確かめていない
+        //    ものを確かめていないと述べる。**どれを名指しするかは層 1 の
+        //    [`undo_statement`] が持つ**——手書きの一覧にすると、tool を足した
+        //    ときに片方だけが古くなる。
+        assert_eq!(
+            occurrences(&body, "1 つの取り消し単位になる"),
+            1,
+            "取り消し単位の一般則が 1 度ではありません"
+        );
+        let mut unconfirmed = Vec::new();
+        for name in edit_like_tools() {
+            match undo_statement(name) {
+                UndoStatement::NoUnitAndJumpsBack => assert!(
+                    body.lines()
+                        .any(|line| line.contains(name) && line.contains("取り消し単位を作らない")),
+                    "{name} が単位を作らない例外として名指しされていません"
+                ),
+                UndoStatement::NotUndoableAndJumpsBack => assert!(
+                    body.lines()
+                        .any(|line| line.contains(name) && line.contains("取り消せない")),
+                    "{name} が取り消せない例外として名指しされていません"
+                ),
+                UndoStatement::Silent => unconfirmed.push(name),
+                UndoStatement::ItsWholePurpose | UndoStatement::FollowsTheGeneralRule => {}
+            }
+        }
+        assert!(
+            !unconfirmed.is_empty(),
+            "確かめていない tool が 1 つもありません"
+        );
+        let line = body
+            .lines()
+            .find(|line| line.contains("取り消し単位") && line.contains("確かめていない"))
+            .expect("取り消し単位を確かめていないことを述べる行がありません");
+        for name in &unconfirmed {
+            assert!(
+                line.contains(name),
+                "取り消し単位を確かめていない {name} が名指しされていません: {line}"
+            );
+        }
+
+        // 3. timeout を受けた後の手順。**値そのものは失敗の text content へ出る**
+        //    ため、本文が持つのは読み方だけでよい。
+        assert_eq!(
+            occurrences(&body, "details.change_applied"),
+            1,
+            "timeout の後の手順が 1 度ではありません"
+        );
+
+        // 4. 候補を引く経路。**候補の値そのものは写さない**——正本は
+        //    describe_effects が返す表である。写しが無いことは plugin crate の
+        //    検査が基底の表と突き合わせて見る。
+        assert_eq!(
+            occurrences(&body, "describe_effects を呼ぶ"),
+            1,
+            "候補を引く経路が 1 度ではありません"
+        );
+        assert!(
+            occurrences(&body, "正本は describe_effects が返す表") >= 1,
+            "候補の正本がどこに在るかを本文が述べていません"
+        );
     }
 
     /// effect の増減が兄弟 effect の selector も無効にすることを述べる tool。
