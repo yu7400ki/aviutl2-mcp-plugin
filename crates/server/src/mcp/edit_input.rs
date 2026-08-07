@@ -533,7 +533,7 @@ pub struct SetObjectItemInput {
     /// 対象インスタンスの ID。
     #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
     pub instance_id: String,
-    /// 設定項目を持つ effect のセレクター。
+    /// 設定項目を持つ effect のセレクター。設定項目はいずれかの effect に属するため、対象は effect の selector で指す。
     pub selector: EffectSelectorInput,
     /// 設定項目名。
     #[schemars(length(max = MAX_NAME_CHARS))]
@@ -687,6 +687,8 @@ pub struct DeleteObjectSectionInput {
     /// 対象オブジェクトのセレクター。
     pub selector: ObjectSelectorInput,
     /// 削除する中間点を開始位置に持つ区間の番号。1 以上。
+    /// 区間の番号と中間点の番号は 1 つずれる。sections[i] が区間番号 i であり、i が 1 以上のとき sections[i].start が i 番目の中間点のフレームである。
+    /// sections[0].start はオブジェクトの開始フレームであって中間点ではないため、区間 0 は指定できない。
     ///
     /// 宣言した下限は [`DeleteObjectSectionParams::validate`] が実際に確かめる。
     /// 宣言だけがあって検証されない制約は残さない。
@@ -716,6 +718,8 @@ pub struct MoveObjectSectionInput {
     /// 対象オブジェクトのセレクター。
     pub selector: ObjectSelectorInput,
     /// 移動する中間点を開始位置に持つ区間の番号。1 以上。
+    /// 区間の番号と中間点の番号は 1 つずれる。sections[i] が区間番号 i であり、i が 1 以上のとき sections[i].start が i 番目の中間点のフレームである。
+    /// sections[0].start はオブジェクトの開始フレームであって中間点ではないため、区間 0 は指定できない。
     ///
     /// 宣言した下限は [`MoveObjectSectionParams::validate`] が実際に確かめる。
     #[schemars(range(min = MIN_SECTION, max = MAX_POSITION))]

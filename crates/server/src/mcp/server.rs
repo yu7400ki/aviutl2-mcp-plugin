@@ -1282,7 +1282,6 @@ impl AviUtl2McpServer {
     }
 
     /// effect の設定項目またはトラックバーの値を変更する。
-    /// 設定項目はいずれかの effect に属するため、対象は effect の selector で指す。
     /// 書き込みを公開していない設定項目種別があり、その場合は unsupported_operation
     /// となる。種別は get_object の item_type で確認できる。
     /// 設定項目の種別が値の形を受け付けない場合は invalid_argument となり、
@@ -1291,14 +1290,13 @@ impl AviUtl2McpServer {
     /// 移動を持つトラックバーへ number や integer を書く要求は unsupported_operation
     /// となり details.reason は track_movement_present になる。書けば移動もその
     /// パラメータも消えるためであり、消したい場合は mode を null にした track を送る。
-    /// details.current_value にホストが現在保持している値が入り、書き込みは
-    /// 発行されない（details.mutation_issued は付かない）。
+    /// details.current_value にホストが現在保持している値が入り、書き込みは発行されない。
     /// 移動を持たないトラックバーへ track を書く要求は通り、新しく移動が付く。
     /// 書き込みは全ての種別で、書いた直後に読み直して要求した値が入ったかを照合する。
     /// 入っていなければ unsupported_operation となり details.reason は
     /// item_value_not_applied、details.observed_value に書き込んだ直後に読み直した値が入る。
-    /// この失敗では書き込みは既に発行済みであり details.mutation_issued は true になるが、
-    /// 設定項目は書き込み前の値へ戻す。戻せたかは details.restored が名乗り、
+    /// この失敗では書き込みは既に発行済みだが、設定項目は書き込み前の値へ戻す。
+    /// 戻せたかは details.restored が名乗り、
     /// 戻せなかった場合だけ details.consistency_unknown が true になる。
     /// 戻せていれば selector はそのまま使え、対象を読み直す必要は無い。
     /// observed_value は応答が返る時点の現在値ではなく、要求の代わりに送り直す値でもない。
@@ -1308,9 +1306,6 @@ impl AviUtl2McpServer {
     /// 数値が値域を外れてクランプされた場合と、小数が項目の桁数へ丸められた場合も
     /// 同じ失敗になる。ホストが値を調整したことと拒否したことは区別できないため、
     /// 要求した値を得られていない点で同じ扱いにする。
-    /// 選べる値と値域は describe_effects が返す。表に載っていない項目は null になるため、
-    /// その場合の有効な値は get_object が返す既存オブジェクトの値から得る。
-    /// 登録済みのフォント名は list_fonts が返す。色は 16 進 6 桁で指定する。
     #[tool(
         name = "set_object_item",
         annotations(
@@ -1573,18 +1568,14 @@ impl AviUtl2McpServer {
     }
 
     /// オブジェクトの中間点を 1 つ削除し、前後の区間を 1 つにまとめる。
-    /// section は削除する中間点を開始位置に持つ区間の番号であり、1 以上である。
-    /// 区間の番号と中間点の番号は 1 つずれる。sections[i] が区間番号 i であり、
-    /// i が 1 以上のとき sections[i].start が i 番目の中間点のフレームである。
-    /// sections[0].start はオブジェクトの開始フレームであって中間点ではないため、
-    /// 区間 0 は指定できず、指定すると invalid_argument（section_index_out_of_range）となる。
-    /// sections の末尾の end はオブジェクトの終了フレームである。
+    /// section に 0 を指定すると invalid_argument（section_index_out_of_range）となる。
     /// section が区間の数以上なら precondition_failed（section_index_out_of_range）となる。
     /// 同じ事実でも、常に誤りである 0 は invalid_argument、対象の現在の状態に
     /// よって決まる範囲外は precondition_failed になる。
     /// 削除した中間点の移動パラメータは失われ、create_object_section で同じ
     /// フレームへ中間点を戻しても元の値には戻らない。
     /// 応答の sections は変更後の区間の一覧であり、get_object が返すものと同じ形である。
+    /// sections の末尾の end はオブジェクトの終了フレームである。
     /// 対象のレイヤーがロックされている場合は precondition_failed（layer_locked）と
     /// なる。set_layer_state でロックを解除してから再実行する。
     #[tool(
@@ -1625,12 +1616,8 @@ impl AviUtl2McpServer {
     }
 
     /// オブジェクトの中間点を別のフレームへ移す。
-    /// section は移動する中間点を開始位置に持つ区間の番号であり、1 以上である。
     /// frame は移動先のシーンの絶対フレーム番号であり、オブジェクト内の相対位置ではない。
-    /// 区間の番号と中間点の番号は 1 つずれる。sections[i] が区間番号 i であり、
-    /// i が 1 以上のとき sections[i].start が i 番目の中間点のフレームである。
-    /// sections[0].start はオブジェクトの開始フレームであって中間点ではないため、
-    /// 区間 0 は指定できず、指定すると invalid_argument（section_index_out_of_range）となる。
+    /// section に 0 を指定すると invalid_argument（section_index_out_of_range）となる。
     /// sections の末尾の end はオブジェクトの終了フレームである。
     /// 中間点は隣の中間点を追い越せない。移動できるのは sections[section-1].start より後、
     /// sections[section+1].start より前（無ければオブジェクトの終了フレームまで）であり、
@@ -3347,29 +3334,43 @@ mod tests {
         }
     }
 
-    /// 層 1 から落とした反復句の行き先。
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Destination {
-        /// 入力 schema。共有の入力型か、値を書くフィールドの隣が持つ。
-        InputSchema,
-        /// skill。**まだ存在しない。**
-        Skill,
+    /// 入力 schema が受け取った分。
+    struct InputSchemaLanding {
+        /// 入力 schema で述べる句。
+        phrase: &'static str,
+        /// 句を運ぶ property の名前。
+        ///
+        /// **空なら schema のどこに在ってもよい**——共有の入力型そのものの説明が
+        /// 持つ場合である。名前を挙げた行では、その property の説明だけを見る。
+        /// 挙げないと、たまたま同じ語を含む無関係なフィールドが数に入り、
+        /// 本来の置き場所が空になっても閾値を満たしてしまう。
+        fields: &'static [&'static str],
+        /// 句が届く tool の最小数。
+        reaches: usize,
     }
 
     /// 層 1 から落とした反復句 1 件。
+    ///
+    /// **行き先は 1 つとは限らない。** 引数の隣に置ける部分と、組み立ての段階で
+    /// 効く部分の両方を持つ事実があり、単一の行き先しか記録できない形にすると
+    /// 片方が黙って落ちる。
     struct Relocation {
-        /// 層 1 が述べていた事実。**skill が受け取る行では、これが書く内容である。**
+        /// 層 1 が述べていた事実。
         statement: &'static str,
         /// 層 1 で同じことを述べていた tool の数。
         was_stated_by: usize,
+        /// その事実が実際に掛かる tool の数。
+        ///
+        /// **1 なら tool 固有であり、層 1 に残すべきものである。**
+        /// [`was_stated_by`] とは別に持つ——複数 tool へ掛かるキーを 1 tool の
+        /// 説明だけが解説している状態は、説明の数からは見えない。
+        applies_to: usize,
         /// 層 1 から消えたことを確かめる句。
         dropped: &'static [&'static str],
-        /// 行き先。
-        to: Destination,
-        /// 行き先で述べる句。
-        lands_as: &'static str,
-        /// 入力 schema へ移した句が届く tool の最小数。
-        reaches: usize,
+        /// 入力 schema が受け取る分。
+        to_input_schema: Option<InputSchemaLanding>,
+        /// skill が受け取る分。**skill が本文に書く内容である。**
+        to_skill: Option<&'static str>,
     }
 
     /// 層 1 から落とした反復句と、その行き先。
@@ -3377,103 +3378,205 @@ mod tests {
     /// **「落とした」と「消えた」を区別する唯一の表である。** 各行について、
     /// 句が tool の説明から消えていることと、行き先に在ることを確かめる。
     ///
-    /// [`Destination::Skill`] の行は skill が受け取る。**skill はまだ無いため、
-    /// いま確かめられるのは層 1 から消えたことだけである。** skill を書く作業は
-    /// この表を入力に取り、`statement` が本文に在ることを検査する。
+    /// **`to_skill` の側はまだ実体を持たない。** skill が存在しないため、いま
+    /// 確かめられるのは層 1 から消えたことと、書く内容が記録されていることだけ
+    /// である。**skill を書く作業がこの表を入力に取り、`to_skill` が本文に在る
+    /// ことを検査した時点で、層 3 側の検査が実体を持つ。**
     /// 併せて持ち越す検査は [`CHECKS_HANDED_TO_THE_SKILL`] にある。
     const RELOCATED_CONVENTIONS: &[Relocation] = &[
         Relocation {
             statement: "frame 番号と layer 番号はいずれも 0 始まりであり、UI の表示とは 1 ずれる",
             was_stated_by: 25,
+            applies_to: 23,
             dropped: &[
                 "番号はいずれも 0 始まり",
                 "layer 番号は 0 始まり",
                 "frame 番号は 0 始まり",
+                "UI の表示とは異なる",
             ],
-            to: Destination::InputSchema,
-            lands_as: "0 始まり",
-            reaches: 15,
+            to_input_schema: Some(InputSchemaLanding {
+                phrase: "0 始まり",
+                fields: &["layer", "frame", "frames", "layer_min", "layer_max"],
+                reaches: 18,
+            }),
+            // 起点そのものは値の隣で足りるが、**UI と 1 ずれることは引数の隣に
+            // 書いても遅い。** 画面で見た番号をそのまま送る判断は、要求を組み立てる
+            // 前に起きる。
+            to_skill: Some(
+                "AviUtl2 の UI はレイヤーとフレームを 1 始まりで表示する。\
+                 tool が受け渡すのは 0 始まりの番号であり、画面で見た番号より 1 小さい",
+            ),
         },
         Relocation {
             statement: "応答が返した selector は組み立て直さず、読み直さずにそのまま次の要求へ渡せる",
             was_stated_by: 12,
+            applies_to: 14,
             dropped: &["読み直さずにそのまま次の編集へ渡せる"],
-            to: Destination::InputSchema,
-            lands_as: "読み直さずにそのまま次の要求へ渡せる",
-            reaches: 14,
+            to_input_schema: Some(InputSchemaLanding {
+                phrase: "読み直さずにそのまま次の要求へ渡せる",
+                fields: &[],
+                reaches: 14,
+            }),
+            to_skill: Some(
+                "selector は自分で組み立てない。読み取りの応答が返した値をそのまま編集へ渡し、\
+                 編集の応答が返した値をそのまま次の編集へ渡す",
+            ),
         },
         Relocation {
             statement: "プロジェクトの世代は selector が運ぶ project_epoch で照合する",
             was_stated_by: 11,
+            applies_to: 14,
             dropped: &["selector が運ぶ project_epoch"],
-            to: Destination::InputSchema,
-            lands_as: "プロジェクトの世代はこの値で照合",
-            reaches: 14,
+            to_input_schema: Some(InputSchemaLanding {
+                phrase: "プロジェクトの世代はこの値で照合",
+                fields: &["project_epoch"],
+                reaches: 14,
+            }),
+            to_skill: Some(
+                "プロジェクト境界の照合材料は selector が運ぶ project_epoch である。\
+                 selector を持たない tool（create_object・set_layer_state・set_selection・\
+                 set_grid_bpm・set_scene_settings）だけが expected_project_epoch を要求し、\
+                 そちらは省略できない",
+            ),
         },
         Relocation {
             statement: "対象が変化していた precondition_failed は、対象の現在の姿を details へ添える。\
                         読み直さずにそのまま次の要求の selector にできる",
             was_stated_by: 11,
+            applies_to: 12,
             dropped: &["details.current_object"],
             // **キー名は層 2 に置けない。** 共有型は apply_batch の schema にも
             // 入るが、そちらは同じものを failed_object という別の名前で返す。
             // 層 2 が名乗れるのは「同じ形が添う」ことまでである。
-            to: Destination::InputSchema,
-            lands_as: "対象の現在の姿",
-            reaches: 14,
+            to_input_schema: Some(InputSchemaLanding {
+                phrase: "対象の現在の姿",
+                fields: &[],
+                reaches: 14,
+            }),
+            to_skill: Some(
+                "対象が変化していた precondition_failed では details.current_object に\
+                 対象の現在の姿が入り、そのまま次の要求の selector にできる。\
+                 apply_batch だけは何番目で落ちたかを併せて示すため details.failed_object という\
+                 別のキーで返す",
+            ),
         },
         Relocation {
             statement: "offset と limit（1〜200、既定 50）でページを指定し、\
                         2 ページ目以降は先頭ページが返した snapshot_revision を添える",
             was_stated_by: 11,
+            applies_to: 9,
             dropped: &["offset と limit（1〜200、既定 50）"],
-            to: Destination::InputSchema,
-            lands_as: "1 以上 200 以下",
-            reaches: 9,
+            to_input_schema: Some(InputSchemaLanding {
+                phrase: "1 以上 200 以下",
+                fields: &["limit"],
+                reaches: 9,
+            }),
+            to_skill: None,
         },
         Relocation {
             statement: "カタログ列挙の snapshot_revision は受理されるが照合には用いない",
             was_stated_by: 5,
+            applies_to: 5,
             dropped: &["snapshot_revision は受理するがページ間の照合には用いない"],
-            to: Destination::InputSchema,
-            lands_as: "受理するがページ間の照合に用いない",
-            reaches: 5,
+            to_input_schema: Some(InputSchemaLanding {
+                phrase: "受理するがページ間の照合に用いない",
+                fields: &["snapshot_revision"],
+                reaches: 5,
+            }),
+            to_skill: None,
         },
         Relocation {
             statement: "要求は project_revision を運ばない。\
                         読み取りから編集までに revision が進んでいても拒否されない",
             was_stated_by: 16,
+            applies_to: 16,
             dropped: &["project_revision を運ばない"],
-            to: Destination::Skill,
-            lands_as: "project_revision を運ばない",
-            reaches: 0,
+            // 引数に無いものの不在は、引数の隣に書けない。
+            to_input_schema: None,
+            to_skill: Some(
+                "要求は project_revision を運ばない。読み取りから編集までに revision が\
+                 進んでいても拒否されない。拒否を避けるために revision を取り直す必要は無い",
+            ),
         },
         Relocation {
             statement: "編集 tool の呼び出し 1 回が 1 つの取り消し単位になる。\
                         まとめて 1 単位にしたいときは apply_batch を選ぶ",
             was_stated_by: 12,
+            applies_to: 16,
             dropped: &["この呼び出し 1 回が 1 つの取り消し単位になる"],
-            to: Destination::Skill,
-            lands_as: "1 つの取り消し単位",
-            reaches: 0,
+            to_input_schema: None,
+            to_skill: Some(
+                "編集 tool の呼び出し 1 回が 1 つの取り消し単位になる。\
+                 まとめて 1 単位にしたいときは apply_batch を選ぶ",
+            ),
         },
         Relocation {
             statement: "timeout は変更が無かったことを意味しない。\
                         details.change_applied が \"no\" なら未適用のため再送してよく、\
                         \"unknown\" なら読み直して確認してから再送する",
             was_stated_by: 16,
+            applies_to: 16,
             dropped: &["details.change_applied"],
-            to: Destination::Skill,
-            lands_as: "details.change_applied",
-            reaches: 0,
+            to_input_schema: None,
+            to_skill: Some(
+                "timeout は変更が無かったことを意味しない。details.change_applied が \"no\" なら\
+                 未適用のため再送してよく、\"unknown\" なら読み直して確認してから再送する",
+            ),
+        },
+        Relocation {
+            // **層 1 で述べていたのは 1 tool だけだが、キーは汎用である。**
+            // 書き込みを発行した後に落ちた失敗すべてに付き、一括適用の
+            // sub-operation でも立つ。1 tool の説明が全編集経路のキーを解説して
+            // いる状態は、説明の数からは見えない。
+            statement: "details.mutation_issued は、その失敗の時点で書き込みが\
+                        発行済みだったかを示す",
+            was_stated_by: 1,
+            applies_to: 16,
+            dropped: &["details.mutation_issued"],
+            to_input_schema: None,
+            to_skill: Some(
+                "書き込みを発行した後に落ちた失敗には details.mutation_issued が true で付く。\
+                 付かない失敗は 1 バイトも書いていないため、対象を読み直さずに要求を直して\
+                 送り直せる",
+            ),
+        },
+        Relocation {
+            // 値の書式は値を書く場所の隣が正本である。層 1 にも置くと、
+            // 書式が変わったときに片方だけが古くなる。
+            statement: "色は 16 進 6 桁で指定する",
+            was_stated_by: 1,
+            applies_to: 2,
+            dropped: &["色は 16 進 6 桁で指定する"],
+            to_input_schema: Some(InputSchemaLanding {
+                phrase: "16 進 6 桁",
+                fields: &[],
+                reaches: 2,
+            }),
+            to_skill: None,
+        },
+        Relocation {
+            // 値の選び方そのものは、どの tool を呼ぶかを決める前に効く。
+            statement: "設定項目に書ける値は describe_effects の choices と range から、\
+                        フォント名は list_fonts から、表に無い項目は既存オブジェクトの値から得る",
+            was_stated_by: 1,
+            applies_to: 2,
+            dropped: &[
+                "選べる値と値域は describe_effects が返す",
+                "登録済みのフォント名は list_fonts が返す",
+            ],
+            to_input_schema: None,
+            to_skill: Some(
+                "設定項目に何を書けるか分からないときは describe_effects を呼ぶ。\
+                 choices が候補を、range が値域と小数桁を返す。どちらも null の項目は\
+                 表に載っていないだけであり、既存オブジェクトの値を get_object で読んで倣う。\
+                 フォント名は list_fonts が返す",
+            ),
         },
     ];
 
     /// 層 3 が受け取る検査 1 件。
     struct HandedCheck {
-        /// 層 1 を見ていた検査の名前。
-        was: &'static str,
-        /// その検査が確かめていたこと。
+        /// 層 1 に対して確かめていたこと。
         checked: &'static str,
         /// skill 側で何を確かめる形になるか。
         becomes: &'static str,
@@ -3485,12 +3588,10 @@ mod tests {
     /// あり、句を動かすなら検査も動かす。skill を書く作業はこの表を入力に取る。
     const CHECKS_HANDED_TO_THE_SKILL: &[HandedCheck] = &[
         HandedCheck {
-            was: "edit_tool_descriptions_admit_that_the_revision_is_not_part_of_the_request",
             checked: "編集 tool すべての説明が「要求は project_revision を運ばない」と述べること",
             becomes: "SKILL.md の本文が同じことを 1 度述べること",
         },
         HandedCheck {
-            was: "edit_tool_descriptions_state_the_undo_boundary の OneUnit の分岐",
             checked: "10 tool の説明が「この呼び出し 1 回が 1 つの取り消し単位になる」と述べること",
             becomes: "SKILL.md が一般則を 1 度述べ、例外（set_selection は単位を作らない、\
                       set_scene_settings は取り消せない）と、取り消し単位を作るか確かめて\
@@ -3498,11 +3599,15 @@ mod tests {
                       層 1 に残る表明は [`undo_statement`] が持つ",
         },
         HandedCheck {
-            was: "edit_tool_descriptions_state_what_costs_the_caller_if_assumed_wrong の \
-                  change_applied と unknown の分岐",
             checked: "編集 tool すべての説明が details.change_applied の 3 値の読み方を述べること",
             becomes: "SKILL.md が timeout を受けた後の手順を 1 度述べること。\
                       値そのものは失敗の text content へ出るため、書くのは読み方だけでよい",
+        },
+        HandedCheck {
+            checked: "set_object_item の説明が、書ける値の入手先（describe_effects・list_fonts・\
+                      get_object）を述べること",
+            becomes: "SKILL.md が候補を引く経路を 1 度述べること。**候補の値そのものは写さない**\
+                      ——正本は describe_effects が返す表である",
         },
     ];
 
@@ -3526,8 +3631,22 @@ mod tests {
 
         for relocation in RELOCATED_CONVENTIONS {
             assert!(
-                relocation.was_stated_by > 1,
-                "1 tool でしか述べていない事実は反復句ではありません: {}",
+                relocation.applies_to > 1,
+                "1 tool にしか掛からない事実は層 1 に残すものです: {}",
+                relocation.statement
+            );
+            // **表が記録するのは移設であって新設ではない。** 層 1 が 1 度も
+            // 述べていなかった事実をここへ足すと、落とした句の帳尻が合わなくなる。
+            assert!(
+                relocation.was_stated_by >= 1,
+                "層 1 が述べていなかった事実が表に在ります: {}",
+                relocation.statement
+            );
+            // 行き先が 1 つも無い行は、落としただけの行である。
+            assert!(
+                relocation.to_input_schema.is_some() || relocation.to_skill.is_some(),
+                "行き先の無い句が表に在ります（層 1 の {} tool が述べていました）: {}",
+                relocation.was_stated_by,
                 relocation.statement
             );
             for phrase in relocation.dropped {
@@ -3538,27 +3657,48 @@ mod tests {
                     );
                 }
             }
-            match relocation.to {
-                Destination::InputSchema => {
-                    let reached = schemas
-                        .iter()
-                        .filter(|(_, schema)| schema.contains(relocation.lands_as))
-                        .count();
+            if let Some(landing) = &relocation.to_input_schema {
+                let reached = tools()
+                    .into_iter()
+                    .filter(|tool| {
+                        let schema = Value::Object(tool.input_schema.as_ref().clone());
+                        if landing.fields.is_empty() {
+                            // 共有の入力型そのものの説明が持つ。
+                            return schema.to_string().contains(landing.phrase);
+                        }
+                        property_descriptions(&schema).iter().any(|(field, text)| {
+                            landing.fields.contains(&field.as_str())
+                                && text.contains(landing.phrase)
+                        })
+                    })
+                    .count();
+                assert!(
+                    reached >= landing.reaches,
+                    "{} が入力 schema で {} tool にしか届いていません（{} 以上を期待）",
+                    relocation.statement,
+                    reached,
+                    landing.reaches
+                );
+            }
+            if let Some(statement) = relocation.to_skill {
+                // skill はまだ無い。**行き先が決まっていることと、書く内容が
+                // 残っていることだけを固定する。** skill を書く作業がこの表を
+                // 読み、本文に対して同じ検査を掛けた時点で実体を持つ。
+                assert!(!statement.is_empty(), "skill が受け取る内容が空です");
+            }
+        }
+
+        // schemas は層 1 と層 2 の両方を 1 度に見るために組む。落とした句が
+        // schema 側へも現れていないかを、行き先の宣言と突き合わせる。
+        for relocation in RELOCATED_CONVENTIONS {
+            if relocation.to_input_schema.is_some() {
+                continue;
+            }
+            for phrase in relocation.dropped {
+                for (name, schema) in &schemas {
                     assert!(
-                        reached >= relocation.reaches,
-                        "{} が入力 schema で {} tool にしか届いていません（{} 以上を期待）",
-                        relocation.statement,
-                        reached,
-                        relocation.reaches
-                    );
-                }
-                Destination::Skill => {
-                    // skill はまだ無い。**行き先が決まっていることと、書く内容が
-                    // 残っていることだけを固定する。** skill を書く作業がこの表を
-                    // 読み、本文に対して同じ検査を掛ける。
-                    assert!(
-                        !relocation.statement.is_empty() && !relocation.lands_as.is_empty(),
-                        "skill が受け取る内容が空です"
+                        !schema.contains(*phrase),
+                        "{name} の入力 schema が、入力 schema へ移さないと決めた句を持っています: {phrase}"
                     );
                 }
             }
@@ -3567,12 +3707,12 @@ mod tests {
         assert!(
             RELOCATED_CONVENTIONS
                 .iter()
-                .any(|relocation| relocation.to == Destination::Skill),
+                .any(|relocation| relocation.to_skill.is_some()),
             "skill が受け取る行が 1 つもありません"
         );
         for check in CHECKS_HANDED_TO_THE_SKILL {
             assert!(
-                !check.was.is_empty() && !check.checked.is_empty() && !check.becomes.is_empty(),
+                !check.checked.is_empty() && !check.becomes.is_empty(),
                 "持ち越す検査の記録が欠けています"
             );
         }
@@ -4429,12 +4569,6 @@ mod tests {
                     // 読み直す。
                     "設定項目は書き込み前の値へ戻す",
                     "選択肢に無い値",
-                    // 候補と値域を返す経路が在ることを書かなければ、要求元は
-                    // 既存の値からの推測だけで値を選び続ける。
-                    "選べる値と値域は describe_effects が返す",
-                    "get_object が返す既存オブジェクトの値から得る",
-                    "登録済みのフォント名は list_fonts が返す",
-                    "色は 16 進 6 桁で指定する",
                     // クランプと丸めも失敗になることを予期できなければ、要求元は
                     // 成功するはずの要求が落ちたと読む。
                     "クランプ",
@@ -5025,22 +5159,45 @@ mod tests {
     fn section_tool_descriptions_explain_the_index_correspondence() {
         // 「区間の番号」と「中間点の番号」が 1 つずれることは、要求元が自力で
         // 気付ける情報ではない。
+        //
+        // **区間番号を引数に取る 2 tool では、値を書く場所の隣が述べる。**
+        // 追加は区間番号を取らないため、応答の sections の形を述べる側として
+        // 説明が持つ。
+        for name in ["delete_object_section", "move_object_section"] {
+            let field = field_description(name, "section");
+            for keyword in [
+                "sections[i] が区間番号 i",
+                "sections[0].start はオブジェクトの開始フレームであって中間点ではない",
+            ] {
+                assert!(
+                    field.contains(keyword),
+                    "{name} の section に {keyword} がありません: {field}"
+                );
+            }
+            assert!(
+                !description_of(name).contains("sections[i] が区間番号 i"),
+                "{name} の説明が入力 schema の写しを持っています"
+            );
+        }
+        for keyword in [
+            "sections[i] が区間番号 i",
+            "sections[0].start はオブジェクトの開始フレームであって中間点ではない",
+        ] {
+            assert!(
+                description_of("create_object_section").contains(keyword),
+                "create_object_section の説明に {keyword} がありません"
+            );
+        }
+        // 応答の sections の形は 3 つとも同じであり、いずれも説明が述べる。
         for name in [
             "create_object_section",
             "delete_object_section",
             "move_object_section",
         ] {
-            let description = description_of(name);
-            for keyword in [
-                "sections[i] が区間番号 i",
-                "sections[0].start はオブジェクトの開始フレームであって中間点ではない",
-                "sections の末尾の end はオブジェクトの終了フレーム",
-            ] {
-                assert!(
-                    description.contains(keyword),
-                    "{name} の説明に {keyword} がありません"
-                );
-            }
+            assert!(
+                description_of(name).contains("sections の末尾の end はオブジェクトの終了フレーム"),
+                "{name} の説明が応答の sections の形を述べていません"
+            );
         }
         // フレームの意味も要求元が自力では決められない。
         for name in ["create_object_section", "move_object_section"] {
