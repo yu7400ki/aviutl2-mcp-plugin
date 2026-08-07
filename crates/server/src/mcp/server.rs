@@ -1158,15 +1158,9 @@ impl AviUtl2McpServer {
     /// alias_name は object_alias（生テキスト）より検証が厳しい。
     /// パースできないエイリアスと effect を 1 つも含まないエイリアスは、
     /// 作成前に invalid_argument（alias_not_parsable / alias_without_effect）で拒否される。
-    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
-    /// project_epoch をそのまま指定する。省略はできない。作成は対象を指す selector を
-    /// 持たないため、これがプロジェクト境界を照合する唯一の材料である。
-    /// 要求は project_revision を運ばない。読み取りから作成までに revision が進んで
-    /// いても拒否されない。
-    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// 複数オブジェクトを含む alias は全てが作成され、created に全件、object に
-    /// その先頭が入る。長さと挿入位置はホストが自動調整し得るため、
+    /// その先頭が入る。応答の effect は常に null である。
+    /// 長さと挿入位置はホストが自動調整し得るため、
     /// 応答が返す位置は要求した宛先と異なり得る。
     /// 応答が返す selector が実際の配置であり、配置を確かめるには応答の値を見る。
     /// 同じ要求を再送すると重複して作成し得る。作成先に既存オブジェクトがあれば
@@ -1174,9 +1168,6 @@ impl AviUtl2McpServer {
     /// ホストが挿入位置を自動調整した場合はすり抜け得る。
     /// 配置先のレイヤーがロックされている場合は precondition_failed（layer_locked）と
     /// なる。set_layer_state でロックを解除してから再実行する。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
-    /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "create_object",
         annotations(
@@ -1215,24 +1206,12 @@ impl AviUtl2McpServer {
     }
 
     /// オブジェクトのレイヤーと開始フレームを変更する。
-    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
-    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
-    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
-    /// selector の project_epoch が拒否する。
-    /// selector には応答が返した値をそのまま指定する。応答が返した selector は
-    /// 読み直さずにそのまま次の編集へ渡せる。
     /// 配置はホストが調整し得るため、応答が返す位置は要求した宛先と異なり得る。
     /// 応答が返す selector が実際の配置であり、配置を確かめるには応答の値を見る。
-    /// 宛先に既存オブジェクトがある場合は precondition_failed となる。
+    /// 宛先に既存オブジェクトがある場合は precondition_failed（destination_occupied）となる。
     /// 移動元または移動先のレイヤーがロックされている場合は
     /// precondition_failed（layer_locked）となる。set_layer_state で
     /// ロックを解除してから再実行する。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
-    /// 対象が変化していた場合の precondition_failed では、details.current_object に
-    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
-    /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "move_object",
         annotations(
@@ -1271,18 +1250,6 @@ impl AviUtl2McpServer {
     }
 
     /// オブジェクト名を変更する。name を省略するか null にすると標準名へ戻す。
-    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
-    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
-    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
-    /// selector の project_epoch が拒否する。
-    /// selector には応答が返した値をそのまま指定する。応答が返した selector は
-    /// 読み直さずにそのまま次の編集へ渡せる。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
-    /// 対象が変化していた場合の precondition_failed では、details.current_object に
-    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
-    /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "set_object_name",
         annotations(
@@ -1322,15 +1289,6 @@ impl AviUtl2McpServer {
 
     /// effect の設定項目またはトラックバーの値を変更する。
     /// 設定項目はいずれかの effect に属するため、対象は effect の selector で指す。
-    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
-    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
-    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
-    /// selector の project_epoch が拒否する。
-    /// selector には get_object が返した effect の selector をそのまま指定する。
-    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
-    /// effect の設定を変えるとそのオブジェクトの fingerprint も変わるため、変更前の
-    /// selector で続けて編集すると precondition_failed となる。
     /// 書き込みを公開していない設定項目種別があり、その場合は unsupported_operation
     /// となる。種別は get_object の item_type で確認できる。
     /// 設定項目の種別が値の形を受け付けない場合は invalid_argument となり、
@@ -1356,14 +1314,9 @@ impl AviUtl2McpServer {
     /// 数値が値域を外れてクランプされた場合と、小数が項目の桁数へ丸められた場合も
     /// 同じ失敗になる。ホストが値を調整したことと拒否したことは区別できないため、
     /// 要求した値を得られていない点で同じ扱いにする。
-    /// 選択肢の一覧を返す手段が無いため、有効な値は
-    /// get_object が返す既存オブジェクトの値から得る。
+    /// 選べる値と値域は describe_effects が返す。表に載っていない項目は null になるため、
+    /// その場合の有効な値は get_object が返す既存オブジェクトの値から得る。
     /// 登録済みのフォント名は list_fonts が返す。色は 16 進 6 桁で指定する。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
-    /// 対象が変化していた場合の precondition_failed では、details.current_object に
-    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
-    /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "set_object_item",
         annotations(
@@ -1404,22 +1357,10 @@ impl AviUtl2McpServer {
     /// オブジェクトへ effect を付与する。
     /// effect_name には list_available_effects が返す名前を指定する。
     /// 登録されていない名前は unsupported_operation となる。
-    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
-    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
-    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
-    /// selector の project_epoch が拒否する。
-    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
-    /// effect を足すとそのオブジェクトの fingerprint も変わるため、変更前の
-    /// selector で続けて編集すると precondition_failed となる。
     /// 同じ要求を再送すると重複して付与し得る。付与によってオブジェクトの
     /// fingerprint が変わるため、同じ selector での再送は precondition_failed と
     /// なり防がれる。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
-    /// 対象が変化していた場合の precondition_failed では、details.current_object に
-    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
-    /// この呼び出し 1 回が 1 つの取り消し単位になる。
+    /// 応答が返すのは付与した effect の selector だけである。
     #[tool(
         name = "add_effect",
         annotations(
@@ -1459,20 +1400,7 @@ impl AviUtl2McpServer {
 
     /// effect の有効・無効を変更する。
     /// 出力 item の有効・無効は変更できず unsupported_operation となる。
-    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
-    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
-    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
-    /// selector の project_epoch が拒否する。
-    /// selector には get_object が返した effect の selector をそのまま指定する。
-    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
-    /// effect の状態を変えるとそのオブジェクトの fingerprint も変わるため、変更前の
-    /// selector で続けて編集すると precondition_failed となる。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
-    /// 対象が変化していた場合の precondition_failed では、details.current_object に
-    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
-    /// この呼び出し 1 回が 1 つの取り消し単位になる。
+    /// 応答の effect には変更後に読み直した effect が入る。
     #[tool(
         name = "set_effect_enabled",
         annotations(
@@ -1512,20 +1440,7 @@ impl AviUtl2McpServer {
 
     /// オブジェクトから effect を削除する。
     /// 対象が既に失われている場合は not_found となり、追加の変更は起きない。
-    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
-    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
-    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
-    /// selector の project_epoch が拒否する。
-    /// selector には get_object が返した effect の selector をそのまま指定する。
-    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
-    /// effect を削除するとそのオブジェクトの fingerprint も変わるため、変更前の
-    /// selector で続けて編集すると precondition_failed となる。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
-    /// 対象が変化していた場合の precondition_failed では、details.current_object に
-    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
-    /// この呼び出し 1 回が 1 つの取り消し単位になる。
+    /// 応答は effect を返さない（常に null）。
     #[tool(
         name = "delete_effect",
         annotations(
@@ -1565,21 +1480,10 @@ impl AviUtl2McpServer {
 
     /// オブジェクトを削除する。
     /// 対象が既に失われている場合は not_found となり、追加の変更は起きない。
-    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
-    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
-    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
-    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
-    /// selector の project_epoch が拒否する。
-    /// selector には応答が返した値をそのまま指定する。他の編集 tool では応答が
-    /// 返した selector をそのまま次の編集へ渡せるが、削除した対象の selector は
+    /// 他の編集 tool と異なり、応答は対象を返さない。削除した対象の selector は
     /// 以後どの編集にも使えない。
     /// 対象のレイヤーがロックされている場合は precondition_failed（layer_locked）と
     /// なる。set_layer_state でロックを解除してから再実行する。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
-    /// 対象が変化していた場合の precondition_failed では、details.current_object に
-    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
-    /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "delete_object",
         annotations(
@@ -1620,7 +1524,6 @@ impl AviUtl2McpServer {
     /// オブジェクトへ中間点を追加し、区間を 1 つ増やす。
     /// frame は中間点を置くシーンの絶対フレーム番号であり、オブジェクト内の相対位置
     /// ではない。get_object が返した sections の値をそのまま基準に使える。
-    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// 応答の sections は変更後の区間の一覧であり、get_object が返すものと同じ形である。
     /// 区間の番号と中間点の番号は 1 つずれる。sections[i] が区間番号 i であり、
     /// i が 1 以上のとき sections[i].start が i 番目の中間点のフレームである。
@@ -1631,18 +1534,8 @@ impl AviUtl2McpServer {
     /// 既に区間の開始フレームなら precondition_failed（section_boundary_exists）となる。
     /// 同じ要求を再送しても中間点は重複しない。2 回目は section_boundary_exists で
     /// 落ち、状態は 1 回目と同じである。
-    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
-    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
-    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
-    /// selector の project_epoch が拒否する。
-    /// selector には get_object や list_objects が返した値をそのまま指定する。
-    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
-    /// 対象が変化していた場合の precondition_failed では、details.current_object に
-    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// 対象のレイヤーがロックされている場合は precondition_failed（layer_locked）と
     /// なる。set_layer_state でロックを解除してから再実行する。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     #[tool(
         name = "create_object_section",
         annotations(
@@ -1690,22 +1583,11 @@ impl AviUtl2McpServer {
     /// section が区間の数以上なら precondition_failed（section_index_out_of_range）となる。
     /// 同じ事実でも、常に誤りである 0 は invalid_argument、対象の現在の状態に
     /// よって決まる範囲外は precondition_failed になる。
-    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// 削除した中間点の移動パラメータは失われ、create_object_section で同じ
     /// フレームへ中間点を戻しても元の値には戻らない。
     /// 応答の sections は変更後の区間の一覧であり、get_object が返すものと同じ形である。
-    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
-    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
-    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
-    /// selector の project_epoch が拒否する。
-    /// selector には get_object や list_objects が返した値をそのまま指定する。
-    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
-    /// 対象が変化していた場合の precondition_failed では、details.current_object に
-    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// 対象のレイヤーがロックされている場合は precondition_failed（layer_locked）と
     /// なる。set_layer_state でロックを解除してから再実行する。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     #[tool(
         name = "delete_object_section",
         annotations(
@@ -1745,8 +1627,7 @@ impl AviUtl2McpServer {
 
     /// オブジェクトの中間点を別のフレームへ移す。
     /// section は移動する中間点を開始位置に持つ区間の番号であり、1 以上である。
-    /// frame は移動先のシーンの絶対フレーム番号であり、オブジェクト内の相対位置
-    /// ではない。frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
+    /// frame は移動先のシーンの絶対フレーム番号であり、オブジェクト内の相対位置ではない。
     /// 区間の番号と中間点の番号は 1 つずれる。sections[i] が区間番号 i であり、
     /// i が 1 以上のとき sections[i].start が i 番目の中間点のフレームである。
     /// sections[0].start はオブジェクトの開始フレームであって中間点ではないため、
@@ -1757,18 +1638,8 @@ impl AviUtl2McpServer {
     /// 外れると precondition_failed（section_move_crosses_boundary）となる。
     /// section が区間の数以上なら precondition_failed（section_index_out_of_range）となる。
     /// 応答の sections は変更後の区間の一覧であり、get_object が返すものと同じ形である。
-    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
-    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
-    /// 拒否されない。対象が変化していれば fingerprint が、別のプロジェクトであれば
-    /// selector の project_epoch が拒否する。
-    /// selector には get_object や list_objects が返した値をそのまま指定する。
-    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
-    /// 対象が変化していた場合の precondition_failed では、details.current_object に
-    /// 対象の現在の値が入る。読み直さずにそのまま次の要求の selector として使える。
     /// 対象のレイヤーがロックされている場合は precondition_failed（layer_locked）と
     /// なる。set_layer_state でロックを解除してから再実行する。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     #[tool(
         name = "move_object_section",
         annotations(
@@ -1811,12 +1682,6 @@ impl AviUtl2McpServer {
     /// name に {"type": "reset"} を指定すると標準のレイヤー名へ戻す。
     /// name に {"type": "set"} を指定する場合、空の名前は受け付けず
     /// invalid_argument となる。標準名へ戻すには reset を指定する。
-    /// layer 番号は 0 始まりであり UI の表示とは異なる。
-    /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
-    /// project_epoch をそのまま指定する。省略はできない。レイヤーは selector も
-    /// fingerprint も持たないため、これがプロジェクト境界を照合する唯一の材料である。
-    /// 要求は project_revision を運ばない。読み取りから変更までに revision が進んで
-    /// いても拒否されない。
     /// レイヤーには fingerprint が無いため、読み取った時点から状態が変わっていても
     /// 検出できない。応答が返す layer には変更後に読み直した実際の状態が入るので、
     /// 意図どおりかはその値で確認する。
@@ -1826,9 +1691,6 @@ impl AviUtl2McpServer {
     /// move_object_section が precondition_failed（layer_locked）になる。
     /// 設定値の変更や effect の増減は止めない。
     /// この tool 自身はロックの影響を受けない。ロックされたレイヤーでもロックを外せる。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
-    /// この呼び出し 1 回が 1 つの取り消し単位になる。
     #[tool(
         name = "set_layer_state",
         annotations(
@@ -1872,8 +1734,6 @@ impl AviUtl2McpServer {
     /// 全件を送る。一覧全体が置き換わるため、置き換え前の一覧を保持していなければ
     /// 同じ状態へは戻せない。
     /// entries を空配列にするとグリッドが消える。指定できるのは 256 件までである。
-    /// tempo は 0 より大きい値、beat は 1 以上の整数を指定する。
-    /// start と offset は秒であり、フレーム番号ではない。start は 0 以上を指定する。
     /// start が一覧の中で重複する要求は invalid_argument（duplicate_target）となる。
     /// 値が範囲外の要求は invalid_argument（grid_bpm_out_of_range）となる。
     /// tempo は単精度へ丸めた結果も 0 より大きい必要があり、極端に小さい値は
@@ -1881,17 +1741,10 @@ impl AviUtl2McpServer {
     /// beat が 32bit 符号付き整数に収まらない要求は
     /// invalid_argument（argument_not_representable）となる。
     /// start の昇順は求めない。並べ替えはホストが行う。
-    /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
-    /// project_epoch をそのまま指定する。省略はできない。BPM グリッドは selector も
-    /// fingerprint も持たないため、これがプロジェクト境界を照合する唯一の材料である。
-    /// 要求は project_revision を運ばない。読み取りから変更までに revision が進んで
-    /// いても拒否されない。
     /// 応答の entries には置き換え後に読み直した一覧が入る。ホストは tempo と offset を
     /// 単精度で受け取り並べ替えもするため、要求した値や順序と一致するとは限らない。
     /// 確かめるのは件数だけであり、件数が食い違うと unsupported_operation
     /// （change_not_applied）となる。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     #[tool(
         name = "set_grid_bpm",
         annotations(
@@ -1944,11 +1797,6 @@ impl AviUtl2McpServer {
     /// 1 フレームの非圧縮 RGBA8 の上限（256 MiB）を超える要求は invalid_argument となる。
     /// フレームレートは変更できない。現在の値は get_current_scene が返す fps_rate と
     /// fps_scale で読める。
-    /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
-    /// project_epoch をそのまま指定する。省略はできない。シーンは selector も
-    /// fingerprint も持たないため、これがプロジェクト境界を照合する唯一の材料である。
-    /// 要求は project_revision を運ばない。読み取りから変更までに revision が進んで
-    /// いても拒否されない。
     /// シーンには fingerprint が無いため、読み取った時点から状態が変わっていても
     /// 検出できない。応答が返す scene には変更後に観測した実際の状態が入るので、
     /// 意図どおりかはその値で確認する。
@@ -1959,8 +1807,6 @@ impl AviUtl2McpServer {
     /// unsupported_operation（change_not_applied）となり、解像度とサンプリングレートは
     /// 1 つも変更されない。
     /// シーン設定には 0 始まりの軸が無く、応答の値は UI の表示と同じ単位である。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     #[tool(
         name = "set_scene_settings",
         annotations(
@@ -2001,7 +1847,6 @@ impl AviUtl2McpServer {
     /// どこを見て何を選んでいるかを変更する。cursor はカーソル位置、selected_range は
     /// フレーム範囲選択、focus はフォーカス対象、display はレイヤー編集の表示開始位置である。
     /// cursor と selected_range と focus と display の 4 つ全てを省略した要求は受け付けない。
-    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// cursor と display はどちらも設定できる範囲へ調整されるため、要求した値が
     /// そのまま入るとは限らない。応答の cursor と display には調整後の値が入る。
     /// ただし調整の扱いは 2 つで違う。cursor はクランプされても applied に入る。
@@ -2010,26 +1855,12 @@ impl AviUtl2McpServer {
     /// したがって display だけは applied を見れば要求どおりの位置か判別できる。
     /// display の反映可否は表示開始位置だけで判定する。応答が返す表示フレーム数と
     /// 表示レイヤー数は厳密な値ではなく、判定にも使えない。
-    /// expected_project_epoch には直前の読み取りまたは編集の応答が返した
-    /// project_epoch をそのまま指定する。省略はできない。focus を省略した要求は
-    /// selector を 1 つも持たないため、これがプロジェクト境界を照合する材料である。
-    /// 要求は project_revision を運ばない。読み取りから変更までに revision が進んで
-    /// いても拒否されない。
-    /// focus の selector には応答が返した値をそのまま指定する。指定した対象が
-    /// 変化していれば fingerprint が、別のプロジェクトであれば selector の
-    /// project_epoch が拒否する。応答が返した selector は読み直さずにそのまま
-    /// 次の編集へ渡せる。
-    /// focus の対象が変化していた場合の precondition_failed では、
-    /// details.current_object に対象の現在の値が入る。読み直さずにそのまま
-    /// 次の要求の selector として使える。
     /// この tool は他の編集 tool と異なり取り消し単位を作らない。実行後に取り消し
     /// 操作を行うと、カーソルや選択範囲ではなく、その前に行った編集が取り消される。
     /// 応答が返す反映値は編集と原子的に観測したものではなく、ホストが範囲外の値を
     /// クランプした結果である。実際に適用できた項目は applied が、要求したが
     /// 適用できなかった項目は not_applied が示す。一部だけが適用されても応答は
     /// 成功であり、not_applied が空でなければ残りは反映されていない。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     #[tool(
         name = "set_selection",
         annotations(
@@ -2070,15 +1901,10 @@ impl AviUtl2McpServer {
     /// 複数の編集を 1 つの取り消し単位としてまとめて適用する。
     /// operations へ入れられるのは move_object と set_object_item の 2 種だけであり、
     /// 他の編集は対応する単独 tool を使う。件数は 1 件以上 100 件以下である。
-    /// frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。
     /// この呼び出し 1 回の全体が 1 つの取り消し単位になる。
     /// 1 つの batch の中では、同じ読み取り時点の selector をそのまま並べてよい。
     /// 単独 tool を連続して呼ぶ場合と異なり、先行する変更で後続の selector が
     /// 無効にならない。全対象を変更前にまとめて照合するためである。
-    /// プロジェクトの世代は selector が運ぶ project_epoch で照合する。要求は
-    /// project_revision を運ばない。読み取りから編集までに revision が進んでいても
-    /// 拒否されない。
-    /// 応答が返した selector は読み直さずにそのまま次の編集へ渡せる。
     /// 配列順に適用し、宛先の空きは適用時点で確かめる。したがって先行する移動が
     /// 空けた場所を、後続の移動の宛先にできる。
     /// ただし 2 つのオブジェクトが互いの位置を交換する 2 件は通らない。1 件目を
@@ -2100,8 +1926,6 @@ impl AviUtl2McpServer {
     /// ロックされたレイヤーが妨げるのは move_object だけであり、
     /// precondition_failed（layer_locked）となる。設定値の変更はロックされた
     /// レイヤー上でも通る。解除は set_layer_state で行う。
-    /// timeout は変更が無かったことを意味しない。details.change_applied が "no" なら
-    /// 未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
     /// 大きなプロジェクトでは適用中に AviUtl2 の UI が数秒止まり得る。
     #[tool(
         name = "apply_batch",
@@ -3485,67 +3309,44 @@ mod tests {
     ];
 
     #[test]
-    fn edit_tool_descriptions_state_what_costs_the_caller_if_assumed_wrong() {
-        // いずれも誤った前提で操作すると損失が生じる事項であり、説明から
-        // 落とせない。
+    fn every_edit_tool_declares_where_the_project_boundary_is_matched() {
+        // プロジェクト境界の照合材料は、要求のどこかに必ず在る——selector の中か、
+        // 前提の epoch のどちらかである。**述べる場所は入力 schema である。**
+        // tool の説明へ写すと、同じ 5 行が編集 tool の数だけ並ぶ一方、値を書く
+        // 時点では読まれない。
         for name in edit_like_tools() {
-            let description = description_of(name);
-            for keyword in ["project_epoch", "selector", "change_applied", "unknown"] {
-                assert!(
-                    description.contains(keyword),
-                    "{name} の説明に {keyword} がありません"
-                );
-            }
-            // 番号の起点は、番号を扱う tool にだけ意味がある。扱わない tool へ
-            // 求めると、説明が持たない性質を述べることになる。
-            if !takes_zero_based_numbers(name) {
-                continue;
-            }
-            for keyword in ["0 始まり", "UI の表示とは異なる"] {
-                assert!(
-                    description.contains(keyword),
-                    "{name} の説明に {keyword} がありません"
-                );
-            }
+            let schema = Value::Object(tool_named(name).input_schema.as_ref().clone()).to_string();
+            assert!(
+                schema.contains("project_epoch"),
+                "{name} の入力 schema が境界の照合材料を持ちません"
+            );
+            assert!(
+                !description_of(name).contains("expected_project_epoch"),
+                "{name} の説明が入力 schema の写しを持っています"
+            );
         }
     }
 
     #[test]
     fn only_the_tools_without_a_selector_ask_for_an_expected_epoch() {
-        // 前提の epoch を運ぶのは selector を持たない 2 tool だけである。他の tool の
-        // 説明が求めると、呼び出し側は送れない値を探すことになる。どちらの側に
-        // 属するかを表で固定するので、tool を足したときに素通りしない。
+        // 前提の epoch を運ぶのは selector を持たない tool だけである。持つ tool へ
+        // 宣言すると、同じ意味の値が 1 要求の 2 か所へ並ぶ。どちらの側に属するかを
+        // 表で固定するので、tool を足したときに素通りしない。
         for name in edit_like_tools() {
-            let description = description_of(name);
+            let properties = tool_named(name).input_schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{name} に properties がありません"))
+                .clone();
             if TOOLS_CARRYING_AN_EXPECTED_EPOCH.contains(&name) {
-                for keyword in ["expected_project_epoch", "省略はできない"] {
-                    assert!(
-                        description.contains(keyword),
-                        "{name} の説明に {keyword} がありません"
-                    );
-                }
+                assert!(
+                    properties.contains_key("expected_project_epoch"),
+                    "{name} が前提の epoch を宣言していません"
+                );
                 continue;
             }
             assert!(
-                !description.contains("expected_project_epoch"),
-                "{name} の説明が運べない前提の epoch を求めています"
-            );
-            assert!(
-                description.contains("selector が運ぶ project_epoch"),
-                "{name} の説明が境界の照合材料を示していません"
-            );
-        }
-    }
-
-    #[test]
-    fn edit_tool_descriptions_admit_that_the_revision_is_not_part_of_the_request() {
-        // 要求は project_revision を運ばない。説明が黙っていると、呼び出し側は
-        // 拒否を避けるために revision を取り直し続ける。
-        for name in edit_like_tools() {
-            let description = description_of(name);
-            assert!(
-                description.contains("project_revision を運ばない"),
-                "{name} の説明が revision を要求しないことを述べていません"
+                !properties.contains_key("expected_project_epoch"),
+                "{name} が運べない前提の epoch を求めています"
             );
         }
     }
@@ -3966,9 +3767,21 @@ mod tests {
     /// tool の説明が取り消しについて述べる内容。
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum UndoStatement {
-        /// 1 回の呼び出しが 1 つの取り消し単位になると述べる。
-        OneUnit,
+        /// 呼び出し全体が 1 つの取り消し単位になると述べる。
+        ///
+        /// **一括適用にとってはそれが tool の目的そのものである。** 一般則の
+        /// 言い換えではないため層 1 に残る。
+        ItsWholePurpose,
+        /// 一般則（1 回の呼び出しが 1 つの取り消し単位になる）に従う。
+        ///
+        /// **層 1 では述べない。** 編集 tool すべてに掛かる規約であり、層 1 へ
+        /// 写すと同じ 1 行が tool の数だけ並ぶ。組み立ての段階で効く——
+        /// `apply_batch` を選ぶかの判断材料である。
+        FollowsTheGeneralRule,
         /// 取り消し単位を作らず、取り消しが 1 つ前の編集へ飛ぶと述べる。
+        ///
+        /// **一般則の例外である。** 例外は一般則を置いた層には書けない——
+        /// 一般則を読む全 tool へ伝わってしまう。
         NoUnitAndJumpsBack,
         /// 取り消せないことを説明の冒頭で述べ、取り消しが 1 つ前の編集へ飛ぶと
         /// 述べる。
@@ -3989,9 +3802,10 @@ mod tests {
     /// tool ごとに 1 か所へ置き、tool を足したときに素通りしないようにする。
     fn undo_statement(name: &str) -> UndoStatement {
         match name {
+            "apply_batch" => UndoStatement::ItsWholePurpose,
             "create_object" | "move_object" | "set_object_name" | "set_object_item"
             | "add_effect" | "set_effect_enabled" | "delete_effect" | "delete_object"
-            | "set_layer_state" | "apply_batch" => UndoStatement::OneUnit,
+            | "set_layer_state" => UndoStatement::FollowsTheGeneralRule,
             "set_selection" => UndoStatement::NoUnitAndJumpsBack,
             // SDK は 3 つの setter を Undo 非対応と明記している。取り消せない
             // ことは、要求を出す前に読まれる場所へ置く。
@@ -4011,10 +3825,22 @@ mod tests {
         for name in edit_like_tools() {
             let description = description_of(name);
             match undo_statement(name) {
-                UndoStatement::OneUnit => assert!(
+                UndoStatement::ItsWholePurpose => assert!(
                     description.contains("1 つの取り消し単位"),
                     "{name} の説明に取り消し単位がありません"
                 ),
+                // 一般則に従う tool と、確かめていない tool は、どちらも層 1 で
+                // 黙る。言い換えも塞ぐ——1 つの語だけを見ていると、別の
+                // 言い回しで同じ保証が入り込む。
+                UndoStatement::FollowsTheGeneralRule | UndoStatement::Silent => {
+                    for forbidden in ["取り消し単位", "取り消し", "元に戻", "Undo", "undo"]
+                    {
+                        assert!(
+                            !description.contains(forbidden),
+                            "{name} の説明が層 3 の一般則か未確認の挙動に触れています: {forbidden}"
+                        );
+                    }
+                }
                 UndoStatement::NoUnitAndJumpsBack => {
                     // 「戻る保証が無い」は「戻るかもしれない」と読める。実際は
                     // 戻らないうえに取り消しが 1 つ前の編集まで飛ぶため、失う
@@ -4047,17 +3873,6 @@ mod tests {
                         !description.contains("1 つの取り消し単位"),
                         "{name} の説明が取り消し単位を作ると読めます"
                     );
-                }
-                UndoStatement::Silent => {
-                    // 述べていないことを確かめるため、言い換えも塞ぐ。1 つの
-                    // 語だけを見ていると、別の言い回しで同じ保証が入り込む。
-                    for forbidden in ["取り消し単位", "取り消し", "元に戻", "Undo", "undo"]
-                    {
-                        assert!(
-                            !description.contains(forbidden),
-                            "{name} の説明が確かめていない取り消しの挙動に触れています: {forbidden}"
-                        );
-                    }
                 }
             }
         }
@@ -4247,7 +4062,6 @@ mod tests {
             (
                 "set_object_item",
                 &[
-                    "fingerprint",
                     "公開していない設定項目種別",
                     "item_type",
                     // 有効な値の一覧を返す手段が無いため、外した値の直し方を
@@ -4258,6 +4072,9 @@ mod tests {
                     // 読み直す。
                     "設定項目は書き込み前の値へ戻す",
                     "選択肢に無い値",
+                    // 候補と値域を返す経路が在ることを書かなければ、要求元は
+                    // 既存の値からの推測だけで値を選び続ける。
+                    "選べる値と値域は describe_effects が返す",
                     "get_object が返す既存オブジェクトの値から得る",
                     "登録済みのフォント名は list_fonts が返す",
                     "色は 16 進 6 桁で指定する",
@@ -4273,8 +4090,8 @@ mod tests {
                     "受け付けられる値を選び直す",
                 ],
             ),
-            ("set_effect_enabled", &["fingerprint", "出力 item"]),
-            ("delete_effect", &["fingerprint", "not_found"]),
+            ("set_effect_enabled", &["出力 item", "読み直した effect"]),
+            ("delete_effect", &["not_found"]),
             ("delete_object", &["not_found"]),
             (
                 "set_selection",
@@ -4291,6 +4108,8 @@ mod tests {
             (
                 "set_layer_state",
                 &[
+                    // レイヤーは fingerprint を持たない。読み取り時からの変化を
+                    // 検出できないことは、この tool でしか起きない。
                     "fingerprint",
                     "全てを省略した要求は受け付けない",
                     "この tool 自身はロックの影響を受けない",
@@ -4415,17 +4234,36 @@ mod tests {
     }
 
     #[test]
-    fn tools_that_return_the_current_object_say_so() {
-        // 失敗応答に載る値は tool schema に現れない。説明が触れなければ、
-        // 呼び出し側はその存在を知る手段が無く読み直しに戻る。
+    fn no_tool_description_repeats_how_to_read_the_current_object() {
+        // `details` の値は失敗の text content へキーごと出るようになった。
+        // **キーが在ることを説明する必要はもう無く、要るのは値の使い方である。**
+        // それは selector の使い方そのものであるため共有型の説明が持ち、
+        // 11 tool の説明から落ちる。
+        //
+        // 一覧そのものは [`returns_a_current_object`] が保ち続ける。落とすのは
+        // 説明であって事実ではない。
         for name in edit_like_tools() {
-            let description = description_of(name);
-            assert_eq!(
-                description.contains("details.current_object"),
-                returns_a_current_object(name),
-                "{name} の説明と現在の姿を返す tool の一覧が食い違います"
+            assert!(
+                !description_of(name).contains("details.current_object"),
+                "{name} の説明が共有型の写しを持っています"
             );
         }
+        assert!(
+            shared_type_description("get_object", "ObjectSelectorInput")
+                .contains("details.current_object"),
+            "selector の説明が現在の姿の使い方を述べていません"
+        );
+        // 表が古びないよう、編集 tool の集合と突き合わせる。どちらの側に属するかは
+        // tool ごとに決まる事実であり、説明を落としても失われない。
+        let returning: Vec<&str> = edit_like_tools()
+            .into_iter()
+            .filter(|name| returns_a_current_object(name))
+            .collect();
+        assert_eq!(
+            returning.len(),
+            11,
+            "現在の姿を返す tool の数が変わりました: {returning:?}"
+        );
     }
 
     #[test]
@@ -4630,7 +4468,6 @@ mod tests {
             "置き換え前の一覧を保持していなければ",
             "空配列",
             "256 件",
-            "秒であり、フレーム番号ではない",
             "昇順は求めない",
             "duplicate_target",
             "grid_bpm_out_of_range",
@@ -4640,6 +4477,20 @@ mod tests {
             assert!(
                 description.contains(keyword),
                 "set_grid_bpm の説明に {keyword} がありません"
+            );
+        }
+
+        // 位置の単位はフレーム番号ではない。取り違えると桁が変わるため、値を
+        // 書く場所の隣が述べる。
+        let entry =
+            tool_named("set_grid_bpm").input_schema["$defs"]["GridBpmInput"]["properties"].clone();
+        for field in ["start", "offset"] {
+            let field_description = entry[field]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{field} に説明がありません"));
+            assert!(
+                field_description.contains("秒であり、フレーム番号ではない"),
+                "{field} が単位を述べていません: {field_description}"
             );
         }
     }
