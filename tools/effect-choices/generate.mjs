@@ -1,4 +1,12 @@
-// 選択肢の候補表を、起動中の AviUtl2 への書き込み検証で起こす。
+// 設定項目の面——選択肢の候補と、数値の値域および小数桁——を、起動中の
+// AviUtl2 への書き込み検証で起こす。
+//
+// **SDK に供給源が無い。** 設定項目の列挙がコールバックへ渡すのは名前と種別だけ
+// であり、選択肢を返す関数も値域を返す関数もヘッダーに存在しない。どちらの面も
+// ホストは持っているが我々へ渡す口が無く、**同じ問題に 2 つ目の答えを作らない**
+// ——書き込みの成否と、ホストが倒した値そのものを判定に使う。
+//
+// # 候補
 //
 // 候補の在庫は言語ファイルの `[Effect]` 節から得る。ただし**どの設定項目の選択肢
 // なのかはファイルに書かれていない。** 効果名・項目名・選択肢ラベルが重複排除
@@ -7,7 +15,7 @@
 // 変えない**ため、受理された値だけが残り、スクラッチのオブジェクトを最後に
 // 消せば副作用は残らない。
 //
-// # 対象を select に限る理由
+// 対象を select に限る。
 //
 // - **combo は集合を確定できない。** リストと文字の複合であり、一覧に無い文字列も
 //   受理する（`図形 / 図形の種類` は svg ファイルのパスを受け取る）。受理された
@@ -15,6 +23,21 @@
 // - **mask と figure は環境に依る。** 候補はデータディレクトリの内容（`Figure`
 //   ディレクトリなど）に由来し、利用者ごとに変わる。配布物へ同梱する静的な表に
 //   入れる対象ではない。
+//
+// # 値域
+//
+// 書き戻し照合がそのまま測定器になる。極端に大きい値・小さい値・小数を多く持つ
+// 値を書くと、書き込みは `item_value_not_applied` で失敗し、**ホストが倒した値が
+// 応答の `observed_value` に載る。** それが上限・下限・小数桁である。
+//
+// **探りの値が値域の内側へ収まった側は測れない。** 受理されたことが言うのは
+// 「端が探りの外にある」ことだけであり、端が無いことの証明にはならない。
+// 測れなかった側は記録しない——**表に載せるのは測れた側だけとする。**
+//
+// **`item_value_not_applied` 以外の失敗は測定ではない。** 移動を持つ項目は
+// `track_movement_present` で失敗し、探りの値そのものをホストが解釈できなければ
+// また別の理由で失敗する。いずれもその項目を測らずに報告へ回す——黙って値域を
+// 持たない項目にはしない。
 //
 // # 2 段で埋める理由
 //
@@ -32,6 +55,7 @@
 
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Mcp, REPOSITORY } from "./mcp.mjs";
 
 /** 生成物の既定の書き出し先。 */
@@ -48,8 +72,21 @@ const LANGUAGE_DIRECTORIES = [
   join(process.env.ProgramData ?? "C:\\ProgramData", "aviutl2", "Language"),
 ];
 
-/** 書き込みの総回数の上限。暴走したときにここで止まる。 */
-const DEFAULT_MAX_WRITES = 50000;
+/**
+ * 書き込みの総回数の上限。暴走したときにここで止まる。
+ *
+ * 見積もりは 2 つの面の和である。
+ *
+ * - 候補: 1 項目あたり、境界拡張が最悪 `MAX_STEPS_PER_DIRECTION` × 2 方向、
+ *   2 段目が在庫の全件でおよそ 600 回。合わせて 1000 回。項目を 22 組と見て
+ *   **22,000 回**
+ * - 値域: 1 項目あたり上限・下限・小数桁で 3 回。数値の項目を 1000 組と見て
+ *   **3,000 回**
+ *
+ * **上限は見積もりの倍を超える位置に置く。** 予算は暴走を止める柵であり、
+ * 正常な走査が触れる値ではない。
+ */
+const DEFAULT_MAX_WRITES = 60000;
 
 /** 境界拡張で 1 方向へ進む最大の歩数。 */
 const MAX_STEPS_PER_DIRECTION = 200;
@@ -60,11 +97,57 @@ const DESCRIBE_BATCH = 10;
 /** 走査する効果の種別。 */
 const EFFECT_TYPES = ["input", "output", "control", "filter", "transition"];
 
-/** 対象とする設定項目の種別。 */
-const TARGET_ITEM_TYPE = "select";
+/** 候補を集める設定項目の種別。 */
+const CHOICE_ITEM_TYPES = ["select"];
+
+/** 値域を測る設定項目の種別。 */
+const RANGE_ITEM_TYPES = ["integer", "number"];
+
+/** 小数桁を測る設定項目の種別。**整数の項目へは小数を持つ値を書く形が無い。** */
+const DECIMALS_ITEM_TYPES = ["number"];
+
+/** 設定項目の種別から、その項目について測る面を引く。 */
+const FACET_OF_ITEM_TYPE = new Map([
+  ...CHOICE_ITEM_TYPES.map((type) => [type, "choices"]),
+  ...RANGE_ITEM_TYPES.map((type) => [type, "range"]),
+]);
+
+/**
+ * 値域を測る探りの値。
+ *
+ * **`integer` と `number` で別に決めた上で、同じ大きさに落ち着いている。**
+ * `integer` はホスト側の整数の幅に縛られる——SDK のヘッダーは幅を述べておらず、
+ * `i64` の両端を書くと収まらない可能性がある。10 億は 32 ビット整数の上限の
+ * 半分以下であり、設定項目が取り得る大きさ（`サイズ` の上限が 4000、座標が
+ * 数万）より 5 桁大きい。`number` は倍精度であるためこの縛りを受けないが、
+ * **極端な値をホストが解釈できるかは測っていない。まず収まる範囲で試す。**
+ */
+const RANGE_PROBE = { max: 1_000_000_000, min: -1_000_000_000 };
+
+/**
+ * 小数桁を測る探りの値。
+ *
+ * **値域の内側に在る必要が無い。** 値域を外れれば端へ倒され、内側なら項目の桁へ
+ * 丸められるが、どちらの場合もホストが返す表記はその項目の小数桁で書かれている。
+ * 測れないのは受理されたときだけであり、そのとき分かるのは 9 桁がそのまま残った
+ * ことだけである。
+ */
+const DECIMALS_PROBE = 0.123456789;
 
 /** 書き込みが受理されなかったことを表す応答の理由。 */
 const NOT_APPLIED = "item_value_not_applied";
+
+/** 書き込み 1 回の結末。 */
+const WRITE = {
+  /** ホストが要求どおりの値を持った。 */
+  accepted: "accepted",
+  /** ホストが値を倒したか捨てた。読み直した値が `observed` に入る。 */
+  notApplied: "not_applied",
+  /** 予算を使い切り、書き込みを行わなかった。 */
+  exhausted: "exhausted",
+  /** 上記以外の失敗。ホストが名乗った理由が `reason` に入る。 */
+  failed: "failed",
+};
 
 /** 引数を解釈する。 */
 function parseArguments(argv) {
@@ -341,33 +424,51 @@ class Target {
   }
 
   /**
-   * 候補を 1 つ書き込み、受理されたかどうかを返す。
+   * 値を 1 つ書き込み、結末を返す。
    *
-   * **拒否は状態を変えない**ため、selector はそのまま次の試行に使える。受理された
-   * ときだけ応答が返す新しい selector へ差し替える。
+   * **拒否は状態を変えず、倒しは書き込み前の値へ巻き戻される**ため、selector は
+   * そのまま次の試行に使える。受理されたときだけ応答が返す新しい selector へ
+   * 差し替える。
    */
-  async write(value, budget) {
-    if (!budget.take()) return null;
+  async write(payload, budget) {
+    if (!budget.take()) return { outcome: WRITE.exhausted };
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const response = await this.survey.call("set_object_item", {
         selector: this.effectSelector,
         item: this.itemName,
-        value: { type: "choice", value },
+        value: payload,
       });
       if (!response.isError) {
         this.effectSelector = response.data.effect.selector;
         this.objectSelector = response.data.effect.selector.object;
-        this.currentValue = value;
-        return true;
+        this.currentValue = payload.value;
+        return { outcome: WRITE.accepted };
       }
       const details = response.data?.details ?? {};
-      if (details.reason === NOT_APPLIED) return false;
+      if (details.reason === NOT_APPLIED) {
+        return { outcome: WRITE.notApplied, observed: details.observed_value ?? null };
+      }
       if (response.data?.code !== "precondition_failed") {
-        throw new Error(`${this.effectName} / ${this.itemName} への書き込みが失敗しました: ${response.text}`);
+        return { outcome: WRITE.failed, reason: details.reason ?? response.data?.code ?? response.text };
       }
       await this.refresh();
     }
     throw new Error(`${this.effectName} / ${this.itemName} の selector に追従できません`);
+  }
+
+  /**
+   * 候補を 1 つ書き込む。
+   *
+   * **想定しない失敗はここで止める。** 選択肢の書き込みが受理と拒否以外で落ちる
+   * のは我々の想定が外れたときであり、続ければ候補の集合が静かに欠ける。値域の
+   * 探りとは扱いが違う——あちらは失敗そのものが「測れなかった」という観測である。
+   */
+  async writeChoice(value, budget) {
+    const result = await this.write({ type: "choice", value }, budget);
+    if (result.outcome === WRITE.failed) {
+      throw new Error(`${this.effectName} / ${this.itemName} への書き込みが失敗しました: ${result.reason}`);
+    }
+    return result;
   }
 }
 
@@ -387,14 +488,77 @@ async function expandFromCurrent(target, inventory, positionOf, budget) {
     for (let distance = 1; distance <= MAX_STEPS_PER_DIRECTION; distance += 1) {
       const candidate = inventory[start + step * distance];
       if (candidate === undefined) break;
-      const accepted = await target.write(candidate, budget);
-      if (accepted === null) return { found, writes, halted: true };
+      const result = await target.writeChoice(candidate, budget);
+      if (result.outcome === WRITE.exhausted) return { found, writes, halted: true };
       writes += 1;
-      if (!accepted) break;
+      if (result.outcome !== WRITE.accepted) break;
       found.add(candidate);
     }
   }
   return { found, writes, halted: false };
+}
+
+/**
+ * 値域と小数桁を測る。
+ *
+ * 上限・下限・小数桁のいずれも、**ホストが倒した値が失敗の応答に載ること**で
+ * 分かる。受理された探りは何も教えない——その側の端が探りの外にあるだけであり、
+ * 端が無いことの証明にはならない。
+ *
+ * 受理と拒否以外の失敗が返ったら、そこで測るのをやめて理由を持ち帰る。移動を
+ * 持つ項目（`track_movement_present`）と、探りの値そのものをホストが解釈できない
+ * 場合がここへ来る。**黙って値域を持たない項目にはしない。**
+ */
+async function measureRange(target, itemType, budget) {
+  const probes = [
+    ["max", RANGE_PROBE.max],
+    ["min", RANGE_PROBE.min],
+  ];
+  if (DECIMALS_ITEM_TYPES.includes(itemType)) probes.push(["decimals", DECIMALS_PROBE]);
+
+  const range = { min: null, max: null, decimals: null };
+  let writes = 0;
+  for (const [part, value] of probes) {
+    const result = await target.write({ type: itemType, value }, budget);
+    if (result.outcome === WRITE.exhausted) return { range, writes, halted: true, failure: null };
+    if (result.outcome === WRITE.failed) return { range, writes, halted: false, failure: result.reason };
+    writes += 1;
+    if (result.outcome === WRITE.accepted) continue;
+    if (part === "decimals") range.decimals = fractionDigits(result.observed);
+    else range[part] = observedNumber(result.observed);
+  }
+  return { range, writes, halted: false, failure: null };
+}
+
+/**
+ * ホストが返した表記から小数桁を数える。
+ *
+ * 数えるのは表記そのものである。ホストは値をその項目の桁で書き出すため、
+ * `4000.00` は 2 桁の項目であり `4000` は 0 桁の項目である。数として読めない
+ * 表記は測定にならないため `null` を返す。
+ */
+export function fractionDigits(text) {
+  const match = /^-?\d+(?:\.(\d+))?$/.exec(String(text ?? "").trim());
+  if (!match) return null;
+  return match[1]?.length ?? 0;
+}
+
+/** ホストが返した表記を数として読む。読めなければ `null` を返す。 */
+export function observedNumber(text) {
+  const trimmed = String(text ?? "").trim();
+  if (!/^-?\d+(?:\.\d+)?$/.test(trimmed)) return null;
+  return Number.parseFloat(trimmed);
+}
+
+/**
+ * 測れた欄だけを持つ値域を組み立てる。1 つも測れていなければ `null` を返す。
+ *
+ * **測れなかった欄は書かない。** 書けば「測れなかった」と「そちら側に端が無い」
+ * が同じ表記になる。
+ */
+export function rangeFacet(range) {
+  const measured = Object.entries(range).filter(([, value]) => value !== null);
+  return measured.length > 0 ? Object.fromEntries(measured) : null;
 }
 
 /**
@@ -403,13 +567,18 @@ async function expandFromCurrent(target, inventory, positionOf, budget) {
  * 在庫に位置を持たない値は先頭へ置く。位置を持たないのは走査を始めた時点の
  * 現在値だけであり、他に順を決める材料が無い。
  */
-function inInventoryOrder(values, positionOf) {
+export function inInventoryOrder(values, positionOf) {
   const position = (value) => positionOf.get(value) ?? -1;
   return [...values].sort((left, right) => position(left) - position(right));
 }
 
-/** 効果名・項目名の昇順で並べた表を組み立てる。 */
-function buildDocument(entries) {
+/**
+ * 効果名・項目名の昇順で並べた表を組み立てる。
+ *
+ * 葉は面の組である。**軸（効果名・項目名）と内容（`choices` / `range`）で階層を
+ * 分ける**ため、面が増えてもトップレベルのキーは増えない。
+ */
+export function buildDocument(entries) {
   const byName = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
   const effects = {};
   const effectNames = [...new Set(entries.map((entry) => entry.effect))].sort(byName);
@@ -417,7 +586,7 @@ function buildDocument(entries) {
     const items = {};
     const own = entries.filter((entry) => entry.effect === effectName);
     for (const itemName of own.map((entry) => entry.item).sort(byName)) {
-      items[itemName] = own.find((entry) => entry.item === itemName).values;
+      items[itemName] = own.find((entry) => entry.item === itemName).facets;
     }
     effects[effectName] = items;
   }
@@ -450,10 +619,17 @@ async function main() {
 
     const pairs = effects.flatMap((effect) =>
       effect.items
-        .filter((item) => item.itemType === TARGET_ITEM_TYPE)
-        .map((item) => ({ effect: effect.name, item: item.name })),
+        .filter((item) => FACET_OF_ITEM_TYPE.has(item.itemType))
+        .map((item) => ({
+          effect: effect.name,
+          item: item.name,
+          itemType: item.itemType,
+          facet: FACET_OF_ITEM_TYPE.get(item.itemType),
+        })),
     );
-    console.log(`${TARGET_ITEM_TYPE} の (効果, 項目): ${pairs.length} 組`);
+    const byItemType = {};
+    for (const pair of pairs) byItemType[pair.itemType] = (byItemType[pair.itemType] ?? 0) + 1;
+    console.log(`測る (効果, 項目): ${pairs.length} 組 ${JSON.stringify(byItemType)}`);
 
     const targetEffectNames = [...new Set(pairs.map((pair) => pair.effect))];
     const hosts = await resolveHosts(survey, targetEffectNames, effects, layerOf);
@@ -481,11 +657,22 @@ async function main() {
       }
       const target = new Target(survey, selector, pair.effect, pair.item);
       await target.refresh();
-      targets.push({ ...pair, target, initialValue: target.currentValue, found: new Set(), writes: 0, surveyed: false });
+      targets.push({
+        ...pair,
+        target,
+        initialValue: target.currentValue,
+        found: new Set(),
+        range: null,
+        failure: null,
+        writes: 0,
+        surveyed: false,
+      });
     }
+    const choiceTargets = targets.filter((entry) => entry.facet === "choices");
+    const rangeTargets = targets.filter((entry) => entry.facet === "range");
 
     // 1 段目: 境界拡張。
-    for (const entry of targets) {
+    for (const entry of choiceTargets) {
       const result = await expandFromCurrent(entry.target, inventory, positionOf, budget);
       entry.found = result.found;
       entry.writes += result.writes;
@@ -494,18 +681,18 @@ async function main() {
     }
 
     // 2 段目: 1 段目が拾えなかったラベルを項目ごとに残らず試す。
-    for (const entry of targets) {
+    for (const entry of choiceTargets) {
       let recovered = 0;
       let halted = false;
       for (const label of inventory) {
         if (entry.found.has(label)) continue;
-        const accepted = await entry.target.write(label, budget);
-        if (accepted === null) {
+        const result = await entry.target.writeChoice(label, budget);
+        if (result.outcome === WRITE.exhausted) {
           halted = true;
           break;
         }
         entry.writes += 1;
-        if (!accepted) continue;
+        if (result.outcome !== WRITE.accepted) continue;
         entry.found.add(label);
         recovered += 1;
       }
@@ -514,27 +701,41 @@ async function main() {
       if (recovered > 0) console.log(`回収 ${entry.effect} / ${entry.item}: ${recovered} 件`);
     }
 
+    // 値域: 1 項目あたり上限・下限・小数桁の 3 回。
+    for (const entry of rangeTargets) {
+      const result = await measureRange(entry.target, entry.itemType, budget);
+      entry.range = result.range;
+      entry.failure = result.failure;
+      entry.writes += result.writes;
+      if (result.halted) break;
+      entry.surveyed = true;
+      const measured = rangeFacet(result.range);
+      if (measured) console.log(`値域 ${entry.effect} / ${entry.item}: ${JSON.stringify(measured)}`);
+    }
+
     const complete = [];
     for (const entry of targets) {
       const pair = { effect: entry.effect, item: entry.item };
       if (!entry.surveyed) {
         unreached.push({ ...pair, reason: `書き込みの上限 ${budget.limit} 回に達した` });
-      } else if (entry.found.size <= 1) {
-        // 現在値しか残らなかった項目は、在庫がその選択肢を 1 つも覆っていない。
-        // 表へ入れても get_object が既に返す値をなぞるだけで、選べる先を示さない。
-        unreached.push({ ...pair, reason: `在庫が覆っておらず、${entry.initialValue} 以外を確認できない` });
+      } else if (entry.facet === "choices") {
+        if (entry.found.size <= 1) {
+          // 現在値しか残らなかった項目は、在庫がその選択肢を 1 つも覆っていない。
+          // 表へ入れても get_object が既に返す値をなぞるだけで、選べる先を示さない。
+          unreached.push({ ...pair, reason: `在庫が覆っておらず、${entry.initialValue} 以外を確認できない` });
+        } else {
+          complete.push({ ...pair, facets: { choices: inInventoryOrder(entry.found, positionOf) } });
+        }
+      } else if (entry.failure) {
+        unreached.push({ ...pair, reason: `探りが ${entry.failure} で失敗し、値域を測れない` });
       } else {
-        complete.push(entry);
+        const range = rangeFacet(entry.range);
+        if (range) complete.push({ ...pair, facets: { range } });
+        else unreached.push({ ...pair, reason: "探りの値が値域の内側に収まり、上限も下限も小数桁も測れない" });
       }
     }
 
-    const table = buildDocument(
-      complete.map((entry) => ({
-        effect: entry.effect,
-        item: entry.item,
-        values: inInventoryOrder(entry.found, positionOf),
-      })),
-    );
+    const table = buildDocument(complete);
     writeFileSync(options.output, `${JSON.stringify(table, null, 2)}\n`, "utf8");
 
     console.log(`\n${options.output} へ ${complete.length} 組を書き出しました（書き込み ${budget.used} 回）`);
@@ -551,4 +752,8 @@ async function main() {
   }
 }
 
-await main();
+// 直接実行されたときだけ走査を始める。**表を組み立てる関数は実機を要さない**
+// ため、読み込むだけで小さな入力から出力の形を確かめられるようにする。
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main();
+}
