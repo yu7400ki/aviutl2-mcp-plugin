@@ -56,6 +56,19 @@ const MAX_DETAIL_DEPTH: usize = 8;
 /// エラーメッセージに許す最大文字数。
 const MAX_MESSAGE_CHARS: usize = 400;
 
+/// text content へ出す `details` の行の合計に許す最大文字数。
+///
+/// `sanitize_details` は要素ごとの上限（文字列・配列の長さ、深さ）を持つが、
+/// key の数に上限が無いため合計が決まらない。ここで合計を止める。
+///
+/// [`MAX_MESSAGE_CHARS`] と同じく要求元が動かせない。要求の内容で応答の費用が
+/// 変わらないようにするためである。
+///
+/// 値は [`MAX_DETAIL_STRING_CHARS`] の 3 倍を超える幅を取ってある。上限まで
+/// 伸びた文字列値を持つ key が複数あっても落ちず、それでいて text content 全体の
+/// 上限（[`crate::mcp::summary::MAX_TEXT_CHARS`]）の一部に収まる。
+const MAX_DETAIL_TEXT_CHARS: usize = 4_000;
+
 /// 入力検証の失敗を表すエラーを作る。
 pub fn invalid_argument(message: impl Into<String>) -> ErrorObject {
     from_code(ErrorCode::InvalidArgument, message)
@@ -144,10 +157,17 @@ const LAYER_LOCKED_GUIDANCE: &str =
     "対象のレイヤーがロックされています。set_layer_state でロックを解除してから再実行してください";
 
 /// 対象の現在の姿を返した失敗へ添える案内。
-const CURRENT_OBJECT_GUIDANCE: &str = "details.current_object に対象の現在の値が入っています。読み直さずにそのまま次の要求の selector として使えます";
+///
+/// 値そのものは `details` の行が運ぶ。ここが述べるのは、その値を読み直さずに
+/// 次の要求へ渡せるという手順だけである。
+const CURRENT_OBJECT_GUIDANCE: &str =
+    "添えた対象の現在の姿は、読み直さずにそのまま次の要求の selector として使えます";
 
 /// 一括適用で落ちた sub-operation の対象を返した失敗へ添える案内。
-const FAILED_OBJECT_GUIDANCE: &str = "details.failed_object に落ちた sub-operation の対象の現在の値が入っています。その 1 件だけを差し替えて再要求できます";
+///
+/// 同上。100 件を読み直さずに 1 件だけを差し替えられることを述べる。
+const FAILED_OBJECT_GUIDANCE: &str =
+    "添えた対象の現在の姿を使って、落ちた sub-operation の 1 件だけを差し替えて再要求できます";
 
 /// 巻き戻しに失敗した一括適用へ添える案内。
 ///
@@ -156,8 +176,14 @@ const CONSISTENCY_UNKNOWN_GUIDANCE: &str = "巻き戻しに失敗しており、
 
 /// エラーの text content を組み立てる。
 ///
-/// 補助情報だけでは次に何をすればよいか分からない失敗には、取るべき操作を
-/// 添える。
+/// 行の並びは `code` → `correlation_id` → `details` の値 → 案内である。
+///
+/// **値を先に、案内を後に置く。** 値の行は `details` の key の数だけ並ぶ可変長で
+/// あり、案内の行は「次に何をするか」を述べる手順である。手順を末尾へ固定すれば、
+/// 読み手は行数を数えずに末尾を見れば次の一手が分かる。逆に案内を先へ置くと、
+/// 可変長の値の行に押し流されて位置が定まらない。
+///
+/// 値の行と案内の行は別々の予算を持つ。値が上限で落ちても案内は落ちない。
 pub fn text(error: &ErrorObject) -> String {
     let retry = if error.retryable {
         "リトライ可能"
@@ -170,14 +196,65 @@ pub fn text(error: &ErrorObject) -> String {
         error.code.as_snake_case(),
         clamp_chars(&error.message, MAX_MESSAGE_CHARS),
     );
-    for line in guidance(error) {
+    for line in detail_lines(&error.details)
+        .into_iter()
+        .chain(guidance(error))
+    {
         text.push('\n');
         text.push_str(&line);
     }
     text
 }
 
+/// `details` を 1 行 1 key として描画する。
+///
+/// **key を名指しした分岐を持たない。** `details` へ値を足せば、この関数を
+/// 変えずに要求元へ届く。key ごとに案内文を対応させる形は、値を足す側と text を
+/// 組む側が別 crate にあるために片方だけが取り残される。
+///
+/// 描画するのは [`sanitize_details`] を通した後の値である。`details` の出所は
+/// 接続先の応答と server 自身の組み立ての 2 つあり、前者しか選別を通っていない。
+/// 描画の直前に通すことで、選別を経ない値が text へ出る経路を作らない。二度
+/// 通しても結果は変わらない（切り詰め済みの値は再び切り詰められない）。
+///
+/// key の順は昇順に定まる。`serde_json` を `preserve_order` 無しで使っており
+/// [`Map`] が `BTreeMap` であるため、走査がそのまま昇順になる。並び替えは持たない。
+///
+/// 値は compact JSON で書く。`structuredContent` に載る字面と一致させ、両方を
+/// 読む要求元が同じものだと分かるようにするためである。
+fn detail_lines(details: &Value) -> Vec<String> {
+    let sanitized = sanitize_details(details, 0);
+    let Some(map) = sanitized.as_object() else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    let mut used = 0;
+    let mut dropped = 0;
+    for (key, value) in map {
+        let line = format!("details.{key}={value}");
+        let chars = line.chars().count();
+        // 予算を超えた行より後は、収まる大きさでも落とす。飛ばして拾うと
+        // 「末尾から落とした」ではなくなり、どこまで届いたかが読めない。
+        if dropped > 0 || used + chars > MAX_DETAIL_TEXT_CHARS {
+            dropped += 1;
+            continue;
+        }
+        used += chars;
+        lines.push(line);
+    }
+    if dropped > 0 {
+        // 黙って切ると、要求元は落とした key を「無い」と読む。
+        lines.push(format!(
+            "details のうち {dropped} 行を上限のため省略しました。全件は structuredContent を参照してください"
+        ));
+    }
+    lines
+}
+
 /// 補助情報から、次に取るべき操作の案内を引く。
+///
+/// ここが答えるのは「次に何をするか」だけである。「何が起きたか」は
+/// [`detail_lines`] が `details` から機械的に描画する。
 fn guidance(error: &ErrorObject) -> Vec<String> {
     let details = &error.details;
     let mut lines = Vec::new();
@@ -609,7 +686,9 @@ mod tests {
 
     #[test]
     fn a_content_mismatch_is_told_that_it_can_reuse_the_current_object() {
-        // 現在の姿は応答に載っているが、tool schema からはその存在を知れない。
+        // 現在の姿そのものが text に並び、かつ「読み直さずに次の要求へ渡せる」
+        // という手順が添う。値だけでは次に何をするかが決まらず、手順だけでは
+        // 材料が無い。両方が要る。
         let error = ErrorObject::new(ErrorCode::PreconditionFailed, "対象が変化しました", true)
             .with_details(serde_json::json!({
                 "mismatch": "fingerprint",
@@ -617,14 +696,23 @@ mod tests {
                 "retry_requires": "refetch",
             }));
         let text = text(&error);
-        assert!(text.contains("details.current_object"), "{text}");
+        assert!(
+            text.contains(r#"details.current_object={"layer":2}"#),
+            "{text}"
+        );
+        assert!(
+            text.contains("次の要求の selector として使えます"),
+            "{text}"
+        );
     }
 
     #[test]
     fn failures_without_a_next_step_are_not_given_one() {
+        // 補助情報を持たない失敗には、値の行も案内の行も足さない。
         let text = text(&invalid_argument("limit が範囲外です"));
+        assert!(!text.contains("details."), "{text}");
         assert!(!text.contains("set_layer_state"), "{text}");
-        assert!(!text.contains("details.current_object"), "{text}");
+        assert!(!text.contains("selector として使えます"), "{text}");
         assert!(!text.contains("operations["), "{text}");
         assert!(!text.contains("巻き戻し"), "{text}");
     }
@@ -665,8 +753,8 @@ mod tests {
 
     #[test]
     fn a_batch_object_mismatch_is_told_that_it_can_replace_a_single_operation() {
-        // 100 件を読み直させないための値であり、その存在は tool schema からは
-        // 知れない。
+        // 100 件を読み直させないための値である。値そのものが text に並び、
+        // かつ 1 件だけを差し替えられるという手順が添う。
         let error = ErrorObject::new(ErrorCode::PreconditionFailed, "対象が変化しました", true)
             .with_details(serde_json::json!({
                 "mismatch": "fingerprint",
@@ -675,14 +763,18 @@ mod tests {
                 "retry_requires": "refetch",
             }));
         let text = text(&error);
-        assert!(text.contains("details.failed_object"), "{text}");
+        assert!(
+            text.contains(r#"details.failed_object={"layer":2}"#),
+            "{text}"
+        );
         assert!(text.contains("1 件だけを差し替えて"), "{text}");
     }
 
     #[test]
     fn a_batch_effect_mismatch_only_names_the_position() {
         // effect 側の不一致では差し替えの材料が付かない。付くものとして案内すると、
-        // 要求元は存在しない値を探す。
+        // 要求元は存在しない値を探す。何が起きたかを述べる値の行は出るが、
+        // 材料の在ることを前提にした案内は出ない。
         let error = ErrorObject::new(ErrorCode::PreconditionFailed, "対象が変化しました", true)
             .with_details(serde_json::json!({
                 "mismatch": "effect_fingerprint",
@@ -691,9 +783,13 @@ mod tests {
             }));
         let text = text(&error);
         assert!(text.contains("operations[7]"), "{text}");
-        assert!(!text.contains("failed_object"), "{text}");
+        assert!(
+            text.contains(r#"details.mismatch="effect_fingerprint""#),
+            "{text}"
+        );
+        assert!(!text.contains("details.failed_object="), "{text}");
+        assert!(!text.contains("差し替えて"), "{text}");
     }
-
     #[test]
     fn long_remote_message_is_clamped() {
         let remote = ErrorObject::new(ErrorCode::SdkError, "え".repeat(10_000), false);
