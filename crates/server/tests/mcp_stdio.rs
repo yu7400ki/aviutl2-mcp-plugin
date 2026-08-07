@@ -424,15 +424,15 @@ fn effect_catalog_paging_is_not_declared_as_revision_checked() {
     // effect カタログはプロジェクトの revision に連動しないため照合されない。
     // 照合されるかのように案内すると、返らない precondition_failed をもって
     // 「ページ間の一貫性が検証された」と読まれてしまう。
+    //
+    // **述べる場所は入力 schema である。** tool の説明はページ指定に触れない
+    // ——同じ 3 行がページを取る tool の数だけ並ぶためであり、判断が要るのは
+    // 値を送るかどうかを決める時点である。
     let effects = listed_tool(&listed, "list_available_effects");
     let description = effects["description"].as_str().expect("説明がある");
     assert!(
-        !description.contains("先頭ページが返した snapshot_revision を添える"),
-        "照合されない値を添えるよう促しています: {description}"
-    );
-    assert!(
-        description.contains("照合には用いない"),
-        "照合しないことが説明されていません: {description}"
+        !description.contains("snapshot_revision"),
+        "照合されない値を tool の説明が案内しています: {description}"
     );
 
     let field = &effects["inputSchema"]["properties"]["snapshot_revision"];
@@ -453,11 +453,6 @@ fn effect_catalog_paging_is_not_declared_as_revision_checked() {
     // 照合する列挙 tool の宣言はそのまま残す。
     for name in ["list_layers", "list_objects"] {
         let tool = listed_tool(&listed, name);
-        let description = tool["description"].as_str().expect("説明がある");
-        assert!(
-            description.contains("先頭ページが返した snapshot_revision"),
-            "{name}: {description}"
-        );
         let field_description =
             tool["inputSchema"]["properties"]["snapshot_revision"]["description"]
                 .as_str()

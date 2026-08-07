@@ -548,8 +548,6 @@ impl AviUtl2McpServer {
 impl AviUtl2McpServer {
     /// 生存確認済みの AviUtl2 インスタンスを列挙する。
     /// 返る instance_id は他のすべての tool で必須の引数となる。
-    /// 本サーバーが扱う frame 番号と layer 番号はいずれも 0 始まりである。
-    /// offset と limit（1〜200、既定 50）でページを指定する。
     /// 他の一覧 tool と異なり結果は page オブジェクトを持たず、
     /// 件数と続きは instances と同じ階層に並ぶ。snapshot_revision の概念も無い。
     /// 生存確認は実行中の要求と競合し得るため、稼働中のインスタンスが
@@ -584,7 +582,6 @@ impl AviUtl2McpServer {
     }
 
     /// 現在の編集情報（シーン・カーソル・表示範囲・選択範囲・revision）を取得する。
-    /// frame 番号と layer 番号はいずれも 0 始まりである。
     #[tool(
         name = "get_edit_info",
         annotations(
@@ -622,7 +619,6 @@ impl AviUtl2McpServer {
     }
 
     /// 現在シーンの情報と取得時点の project_revision を取得する。
-    /// frame 番号と layer 番号はいずれも 0 始まりである。
     #[tool(
         name = "get_current_scene",
         annotations(
@@ -660,9 +656,6 @@ impl AviUtl2McpServer {
     }
 
     /// 現在シーンのレイヤーを列挙する。
-    /// layer 番号は 0 始まりであり、frame 番号も 0 始まりである。
-    /// offset と limit（1〜200、既定 50）でページを指定し、
-    /// 2 ページ目以降は先頭ページが返した snapshot_revision を添える。
     #[tool(
         name = "list_layers",
         annotations(
@@ -701,10 +694,6 @@ impl AviUtl2McpServer {
     }
 
     /// 現在シーンのオブジェクトを列挙する。
-    /// frame 番号と layer 番号はいずれも 0 始まりである。
-    /// 各要素の selector は get_object へそのまま渡せる。
-    /// offset と limit（1〜200、既定 50）でページを指定し、
-    /// 2 ページ目以降は先頭ページが返した snapshot_revision を添える。
     #[tool(
         name = "list_objects",
         annotations(
@@ -743,8 +732,6 @@ impl AviUtl2McpServer {
     }
 
     /// オブジェクトの詳細（alias・中間点区間・effect・revision）を取得する。
-    /// frame 番号と layer 番号はいずれも 0 始まりである。
-    /// selector には list_objects が返した値をそのまま指定する。
     /// effect の locked は出力項目（標準描画等）については実態を反映せず、
     /// 常に false になる。ロックは入力項目と出力項目をまとめた単位で掛かる。
     #[tool(
@@ -791,10 +778,6 @@ impl AviUtl2McpServer {
     /// focus_section は focus の区間番号であり、区間番号 i は
     /// get_object が返す sections[i] を指す。focus が null のとき focus_section も null である。
     /// selected は layer 番号・frame_start の昇順で並び、list_objects と同じ並びである。
-    /// frame 番号と layer 番号はいずれも 0 始まりである。
-    /// focus と selected の各要素の selector は get_object や編集 tool へそのまま渡せる。
-    /// offset と limit（1〜200、既定 50）でページを指定し、
-    /// 2 ページ目以降は先頭ページが返した snapshot_revision を添える。
     /// ページ指定が掛かるのは selected だけであり、focus には掛からない。
     /// 編集カーソルとフレーム範囲選択は返さない。どちらも get_edit_info が返す。
     #[tool(
@@ -838,10 +821,6 @@ impl AviUtl2McpServer {
     /// 1 件につき名前・種別・対応フラグ・設定項目の数・説明を返す。
     /// description はホストが同梱する説明であり、持たない effect は null になる。空欄を推測で補わない。
     /// 設定項目の名前は返さない。対象へ付与したあと get_object を呼べば、項目名が現在値付きで得られる。
-    /// effect_type を指定すると種別で絞り込める。
-    /// offset と limit（1〜200、既定 50）でページを指定する。
-    /// snapshot_revision は受理するがページ間の照合には用いない。
-    /// effect カタログは登録済みプラグインの集合であり、プロジェクトの revision に連動しないためである。
     #[tool(
         name = "list_available_effects",
         annotations(
@@ -881,27 +860,24 @@ impl AviUtl2McpServer {
 
     /// 名前で指定した effect の中身を取得する。
     /// effect_names には list_available_effects が返す名前を 1〜10 件指定する。
-    /// 同じ名前を 2 度指定すると invalid_argument となる。
     /// 1 件につき name・description・items（name / item_type / description / choices / range）を返す。
     /// 設定項目の一覧はホストの列挙から得るため、必ず実際の effect と一致する。
-    /// description はホストが同梱する説明であり、持たない effect と持たない項目は
-    /// null になる。空欄を推測で補わない。
-    /// choices は選択肢の候補であり、values と source（builtin_table / sidecar）を持つ。
-    /// 候補を持たない項目は null になる。値を選べない項目という意味ではない。
-    /// choices はヒントであってゲートではない。候補に無い値でも書き込みは通り、
-    /// 候補に在る値が必ず通るとも限らない。可否を決めるのはホストである。
-    /// range は値域と小数桁であり、min・max・decimals と source を持つ。
-    /// 3 つの値は個別に null になる。測れた側だけが載るためである。
-    /// range もヒントであってゲートではない。値域を外れる値でも書き込みは通る。
+    /// description はホストが同梱する説明であり、持たない effect と持たない項目は null になる。
     /// 説明を持たない effect は多く、とくにフィルタ効果はほとんどが null である。
-    /// 名前が似ている effect の使い分けは、説明ではなく items の顔ぶれで判断する。
-    /// そのために複数の名前をまとめて指定して並べて比べられる。
+    /// 空欄を推測で補わない。名前が似ている effect の使い分けは、説明ではなく
+    /// items の顔ぶれで判断する。
+    /// choices は選択肢の候補（values と source: builtin_table / sidecar）、range は値域と
+    /// 小数桁（min・max・decimals と source）である。持たない項目は null になり、
+    /// range の 3 つの値は測れた側だけが載るため個別に null になる。
+    /// どちらもヒントであってゲートではない。候補に無い値でも書き込みは通り、
+    /// 値域を外れる値でも書き込みは通る。候補に在る値が必ず通るとも限らない。
+    /// 可否を決めるのはホストである。
     /// 登録されていない名前は not_found に並び、その名前だけが落ちる。
     /// 要求全体は失敗しないため、effects に無い名前は not_found を必ず確認すること。
     /// not_found に出た名前は綴りが違うだけであり、設定項目を持たない effect ではない。
     /// 設定項目の現在値は返さない。対象へ付与したあと get_object を呼べば現在値が得られる。
-    /// ページ指定を持たない。offset / limit / snapshot_revision は受け付けない。
-    /// 返すのは指定した名前の分だけであり、続きのページという概念が無いためである。
+    /// ページ指定を持たない。返すのは指定した名前の分だけであり、続きのページという
+    /// 概念が無いためである。
     #[tool(
         name = "describe_effects",
         annotations(
@@ -941,10 +917,7 @@ impl AviUtl2McpServer {
 
     /// インスタンスが利用できるフォント名の一覧を取得する。
     /// いずれも font 種別の設定項目へそのまま指定できる名前である。
-    /// 名前による絞り込みは持たない。offset と limit（1〜200、既定 50）で
-    /// ページを指定し、total_count で全体の件数が分かる。
-    /// snapshot_revision は受理するがページ間の照合には用いない。
-    /// フォントは登録済みの集合であり、プロジェクトの revision に連動しないためである。
+    /// 名前による絞り込みは持たない。total_count で全体の件数が分かる。
     #[tool(
         name = "list_fonts",
         annotations(
@@ -992,9 +965,6 @@ impl AviUtl2McpServer {
     /// 落ちたページとそうでないページで値が違い得る。全体の件数として扱わないこと。
     /// ページ内のすべてが落ちると items が空のまま has_more が true になり得る。
     /// 反復は items が空になったことではなく has_more と next_offset で終端すること。
-    /// offset と limit（1〜200、既定 50）でページを指定する。
-    /// snapshot_revision は受理するがページ間の照合には用いない。
-    /// パレットは登録済みの集合であり、プロジェクトの revision に連動しないためである。
     #[tool(
         name = "list_palettes",
         annotations(
@@ -1033,13 +1003,9 @@ impl AviUtl2McpServer {
     }
 
     /// インスタンスへ登録されているスクリプトとプラグインの一覧を取得する。
-    /// module_type を指定すると種別で絞り込める。
     /// information はホストが利用者へ表示する説明文である。
     /// 一覧には既知の 9 種別だけが現れる。
     /// 種別を解釈できないモジュールは一覧から欠落し得る。
-    /// offset と limit（1〜200、既定 50）でページを指定する。
-    /// snapshot_revision は受理するがページ間の照合には用いない。
-    /// モジュールは登録済みの集合であり、プロジェクトの revision に連動しないためである。
     #[tool(
         name = "list_modules",
         annotations(
@@ -1084,16 +1050,11 @@ impl AviUtl2McpServer {
     /// label は AviUtl2 の UI 状態ファイル由来であり、欠けることがあり、
     /// 実行中の表示と一致しないことがある。
     /// label は識別子ではなく、複数のエイリアスが同じ label を共有し得る。
-    /// label を指定すると、その label を持つエントリだけに絞り込める。
     /// 読み取れなかったエイリアスは一覧から除かれる。
     /// total_count から引かれるのは本ページで落とした分だけであり、
     /// 落ちたページとそうでないページで値が違い得る。全体の件数として扱わないこと。
     /// ページ内のすべてが落ちると items が空のまま has_more が true になり得る。
     /// 反復は items が空になったことではなく has_more と next_offset で終端すること。
-    /// offset と limit（1〜200、既定 50）でページを指定する。
-    /// snapshot_revision は受理するがページ間の照合には用いない。
-    /// 前のページが返した値をそのまま送り返しても拒否されない。
-    /// エイリアスは登録済みの集合であり、プロジェクトの revision に連動しないためである。
     /// エイリアスの登録・削除・編集は AviUtl2 の UI で行う。この server は読み取りだけを提供する。
     /// AviUtl2 のデータディレクトリを解決できない環境では unsupported_operation となる。
     #[tool(
@@ -1134,8 +1095,7 @@ impl AviUtl2McpServer {
     }
 
     /// effect の設定項目を、指定したフレームで評価した値を取得する。
-    /// frames はシーンの絶対フレーム番号であり 0 始まりである。
-    /// get_object が返した frame_start / frame_end と同じ座標であり、
+    /// frames は get_object が返した frame_start / frame_end と同じ座標であり、
     /// オブジェクトの範囲外を指定すると precondition_failed（frame_out_of_range）となる。
     /// frames に小数を指定するとフレーム間の位置を指し、中間点・加減速・時間制御を
     /// 含む補間後の値が返る。トラックバー項目は小数部をそのまま使い、
@@ -2181,7 +2141,6 @@ impl AviUtl2McpServer {
     }
 
     /// 現在シーンの 1 フレームを描画し、成果物を resource として返す。
-    /// frame 番号は 0 始まりであり UI の表示とは異なる。
     /// 描画できるのは現在シーンだけである。expected_scene_id には
     /// get_edit_info などが返した scene_id をそのまま指定する。
     /// 結果は画像そのものではなく resource URI で返る。内容は resources/read で
@@ -3383,24 +3342,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_descriptions_state_zero_based_numbering() {
-        for tool in tools() {
-            let description = tool
-                .description
-                .as_ref()
-                .unwrap_or_else(|| panic!("{} に説明がありません", tool.name));
-            if !takes_zero_based_numbers(&tool.name) {
-                continue;
-            }
-            assert!(
-                description.contains("0 始まり"),
-                "{} の説明に 0 始まりの明記がありません",
-                tool.name
-            );
-        }
-    }
-
-    #[test]
     fn the_effect_catalog_description_names_where_item_names_come_from() {
         // 一覧は設定項目の名前を返さない。どこで得られるかを書かなければ、
         // 名前を推測で組み立てるか、そもそも項目を触らないかのどちらかになる。
@@ -3488,6 +3429,7 @@ mod tests {
             "必ず通るとも限らない",
             "range",
             "値域を外れる値でも書き込みは通る",
+            "可否を決めるのはホストである",
         ] {
             assert!(
                 description.contains(phrase),
@@ -3728,11 +3670,24 @@ mod tests {
     fn the_catalog_tools_say_that_the_revision_is_not_matched() {
         // 受理するが照合しない値である。黙っていると、要求元は 2 ページ目が
         // 落ちない理由も、添えても取りこぼしが防げない理由も分からない。
+        //
+        // **述べる場所はフィールドの隣である。** 値を送るかどうかを決める時点で
+        // 読まれ、共有の入力型に 1 度書けば該当する tool すべてへ届く。
         for name in catalog_page_tools() {
-            let description = description_of(&name);
+            let description = field_description(&name, "snapshot_revision");
+            for phrase in [
+                "受理するがページ間の照合に用いない",
+                "revision に連動しない",
+                "前のページが返した値をそのまま送り返しても拒否されない",
+            ] {
+                assert!(
+                    description.contains(phrase),
+                    "{name} の snapshot_revision が {phrase} に触れていません: {description}"
+                );
+            }
             assert!(
-                description.contains("snapshot_revision は受理するがページ間の照合には用いない"),
-                "{name} の説明が照合しないことを述べていません"
+                !description_of(&name).contains("snapshot_revision"),
+                "{name} の説明がページ指定を写しています"
             );
         }
     }
@@ -3904,7 +3859,6 @@ mod tests {
             "total_count から引かれるのは本ページで落とした分だけ",
             "全体の件数として扱わないこと",
             "has_more と next_offset で終端すること",
-            "前のページが返した値をそのまま送り返しても拒否されない",
             "AviUtl2 の UI で行う",
             "読み取りだけを提供する",
             "unsupported_operation",
@@ -4518,7 +4472,6 @@ mod tests {
     fn the_render_description_states_what_costs_the_caller_if_assumed_wrong() {
         let description = description_of(RENDER_FRAME);
         for keyword in [
-            "0 始まり",
             // 描けるのは現在シーンだけである。
             "現在シーンだけ",
             "expected_scene_id",
@@ -4552,42 +4505,6 @@ mod tests {
                 "{RENDER_FRAME} の説明に {keyword} がありません"
             );
         }
-    }
-
-    #[test]
-    fn paginated_tool_descriptions_explain_page_arguments() {
-        let mut checked = 0;
-        for tool in tools() {
-            let properties = tool
-                .input_schema
-                .get("properties")
-                .and_then(|v| v.as_object())
-                .unwrap_or_else(|| panic!("{} に properties がありません", tool.name));
-            let description = tool
-                .description
-                .as_ref()
-                .unwrap_or_else(|| panic!("{} に説明がありません", tool.name));
-
-            // ページ指定を受け取る tool は、その使い方を説明にも書く。
-            if properties.contains_key("limit") {
-                checked += 1;
-                for keyword in ["offset", "limit"] {
-                    assert!(
-                        description.contains(keyword),
-                        "{} の説明に {keyword} がありません",
-                        tool.name
-                    );
-                }
-            }
-            if properties.contains_key("snapshot_revision") {
-                assert!(
-                    description.contains("snapshot_revision"),
-                    "{} の説明に snapshot_revision がありません",
-                    tool.name
-                );
-            }
-        }
-        assert!(checked >= 4, "ページ指定を持つ tool を検査していません");
     }
 
     #[test]
