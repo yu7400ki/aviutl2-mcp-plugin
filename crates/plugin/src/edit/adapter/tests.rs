@@ -15,15 +15,15 @@ use crate::edit::fake::{
     SCENE_NAME, SECTION_RANGES, SHAPE, STATIC_ITEM, TRACK_MODES, coordinate,
     coordinate_catalog_entry, raw_item_value, shape, shape_catalog_entry,
 };
-use crate::item_choices::ItemFacets;
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::{default_page_request, default_page_window, with_silent_panic_hook};
 use aviutl2_mcp_core::{
     ApplyBatchParams, BatchOperation, CreateObjectSectionParams, CursorPosition,
     DeleteObjectSectionParams, Destination, EditOperation, EffectFlags, EffectItem, EffectItemType,
-    EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemChoices, ItemRange,
-    ItemValue, LayerNameChange, MAX_GRID_BPM_ENTRIES, MoveObjectSectionParams,
-    ObjectSectionsOutcome, ObjectSelector, Placement, SceneSize, TableSource,
+    EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemChoices,
+    ItemFacets, ItemRange, ItemValue, LayerNameChange, MAX_GRID_BPM_ENTRIES,
+    MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSelector, Placement, SceneSize,
+    TableSource,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -3243,6 +3243,10 @@ fn the_choices_table_never_decides_whether_a_write_goes_through() {
     // 移動方法の一覧とは性質が違う。あちらは一覧に無い名前を書くとホストの
     // プロセスが落ちるため通す選択肢が無いが、候補を外した書き込みは最悪でも
     // ホストが値を無視するだけである。
+    //
+    // **覆う範囲は [`the_range_table_never_decides_whether_a_write_goes_through`]
+    // と同じである。** 表はフェイクのカタログ側にあり、捕まえられるのは
+    // [`crate::read::host::ReadHost::effect_facets`] を経由するゲートだけである。
     for value in HINTED_VALUES {
         assert!(
             !CHOICE_VALUES.contains(&value),
@@ -3324,6 +3328,19 @@ fn the_range_table_never_decides_whether_a_write_goes_through() {
     // **値域は候補より外れやすい。** 候補の陳腐化は足りなくなるだけだが、値域の
     // 陳腐化は狭くなる——版が上がって上限が広がったとき、事前検証を掛けて
     // いれば通るはずの値をこちら側が拒む。
+    //
+    // # この検査が覆う範囲
+    //
+    // 表はフェイクのカタログ側にあり、読み取り経路が面を引く先と同じ場所で
+    // ある。**捕まえられるのは
+    // [`crate::read::host::ReadHost::effect_facets`] を経由して面を読むゲート
+    // だけである。** [`crate::item_facets::table`] を直に読むゲートはここを
+    // 素通りする——あちらは実行ファイルへ埋め込んだ基底とデータディレクトリの
+    // サイドカーだけを見ており、フェイクのカタログを見ないためである。
+    //
+    // **その隙間を塞ぐ手が現状は無い。** 表は要求ごとに解決するものではなく
+    // 起動から 1 度きりであり、差し替える口が製品側に無い。検査のために口を
+    // 開ければ、塞ごうとしている性質そのものを検査のために曲げることになる。
     let inside = (MAX_ITEM_VALUE / 2) as f64;
     let outside = (MAX_ITEM_VALUE + 400) as f64;
 

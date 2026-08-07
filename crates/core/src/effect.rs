@@ -218,6 +218,23 @@ pub struct ItemRange {
     pub source: TableSource,
 }
 
+/// 設定項目 1 件について表が述べたことの組。
+///
+/// **面ごとに独立して欠ける。** 候補だけを持つ項目も、値域だけを持つ項目も、
+/// どちらも持たない項目もある。持たないことは「その項目に候補や値域が無い」
+/// ことではなく、表がそれを述べていないことだけを意味する。
+///
+/// **応答には現れない。** 表を引く経路が (効果, 項目) から 1 件を取り出すために
+/// 使う組であり、[`EffectItemDescription`] は面をそのままフィールドへ展開する。
+/// 直列化を持たないのはそのためである。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ItemFacets {
+    /// 選択肢の候補。表が述べていなければ `None`。
+    pub choices: Option<ItemChoices>,
+    /// 値域と小数桁。表が述べていなければ `None`。
+    pub range: Option<ItemRange>,
+}
+
 /// 表が述べたことの由来。
 ///
 /// **候補にも値域にも同じ由来が付く。** 面ごとに別の enum を持つ理由が無い——

@@ -144,7 +144,7 @@
 //!   注記も、算出に全 effect × 全項目の列挙を要する陳腐化の印も持たない。
 
 use crate::alias::{data_directory, read_bounded};
-use aviutl2_mcp_core::{FiniteF64, ItemChoices, ItemRange, TableSource};
+use aviutl2_mcp_core::{FiniteF64, ItemChoices, ItemFacets, ItemRange, TableSource};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
@@ -153,7 +153,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// 埋め込む基底の表。
-const BUILTIN_TABLE: &str = include_str!("../data/effect_item_choices.json");
+const BUILTIN_TABLE: &str = include_str!("../data/effect_item_facets.json");
 
 /// サイドカーを探すディレクトリの名前。
 const PLUGIN_DIRECTORY: &str = "Plugin";
@@ -190,6 +190,19 @@ type Facet<T> = Option<Option<T>>;
 ///
 /// **形は基底もサイドカーも同じであり、違うのは知らない面の扱いだけである。**
 /// そこだけを `STRICT` で分ける。
+///
+/// # なぜ [`Deserialize`] を手で書くのか
+///
+/// **厳しさが型引数だからである。** 未知の欄を拒むかどうかは
+/// `#[serde(deny_unknown_fields)]` という属性で決まり、属性は型ごとに固定される。
+/// 派生に任せると、厳しい版と寛容な版を別の型として書くほかなく、面を持つ階層と
+/// 値域の階層の 2 つがあるため近似した struct が 4 つ並ぶ。**面を 1 つ足すたびに
+/// 4 か所を直すことになり、直し忘れは沈黙する**——寛容な版で欄を書き忘れても、
+/// 未知の欄として黙って落ちるだけである。
+///
+/// **3 状態（書いていない / `null` / 値）そのものは派生でも表せる。**
+/// `Option<Option<T>>` へ `#[serde(default, deserialize_with = ...)]` を付ければ
+/// よく、`deny_unknown_fields` とも併用できる。手で書く理由はここには無い。
 #[derive(Debug, Default)]
 struct FacetsDocument<const STRICT: bool> {
     /// 選択肢の候補。
@@ -349,19 +362,6 @@ impl fmt::Display for SidecarRejection {
     }
 }
 
-/// 設定項目 1 件について表が述べたこと。
-///
-/// **面ごとに独立して欠ける。** 候補だけを持つ項目も、値域だけを持つ項目も、
-/// どちらも持たない項目もある。持たないことは「その項目に候補や値域が無い」
-/// ことではなく、表がそれを述べていないことだけを意味する。
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ItemFacets {
-    /// 選択肢の候補。表が述べていなければ `None`。
-    pub choices: Option<ItemChoices>,
-    /// 値域と小数桁。表が述べていなければ `None`。
-    pub range: Option<ItemRange>,
-}
-
 /// 面の呼び名。
 ///
 /// ログへ「何を置き換えたのか」を残すために持つ。置き換えの粒度が面である以上、
@@ -385,7 +385,11 @@ impl fmt::Display for FacetKind {
 /// 表を 1 つ重ねた結果。
 #[derive(Debug, Default, PartialEq, Eq)]
 struct OverlayReport {
-    /// 表へ入れた面の数。
+    /// 書き手が述べた面の数。
+    ///
+    /// **`null` と書いて面を消したものも数える。** 数えるのは「表がその面に
+    /// ついて主張した」ことであり、主張の中身ではない。消す主張だけを落とすと、
+    /// ログの数がファイルの中身と合わなくなる。
     applied: usize,
     /// 既にあった面を置き換えた (効果, 項目, 面) の並び。
     replaced: Vec<(String, String, FacetKind)>,
@@ -669,7 +673,7 @@ mod tests {
     impl TempDir {
         fn new() -> Self {
             let dir = std::env::temp_dir()
-                .join(format!("aviutl2-mcp-item-choices-{}", uuid::Uuid::new_v4()));
+                .join(format!("aviutl2-mcp-item-facets-{}", uuid::Uuid::new_v4()));
             fs::create_dir_all(dir.join(PLUGIN_DIRECTORY)).expect("作れる");
             Self(dir)
         }

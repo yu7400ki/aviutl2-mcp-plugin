@@ -103,7 +103,7 @@ impl ReadHost for SdkReadHost {
     fn effect_facets(&self, effect_name: &str) -> HostEffectFacets {
         // 編集ハンドルを通らない。供給源は埋め込んだ基底とサイドカーだけである。
         HostEffectFacets {
-            items: crate::item_choices::table()
+            items: crate::item_facets::table()
                 .effect(effect_name)
                 .cloned()
                 .unwrap_or_default(),
@@ -892,7 +892,7 @@ mod tests {
         for name in ["テキスト", "図形", "存在しない効果"] {
             assert_eq!(
                 SdkReadHost.effect_facets(name).items,
-                crate::item_choices::table()
+                crate::item_facets::table()
                     .effect(name)
                     .cloned()
                     .unwrap_or_default(),

@@ -808,7 +808,6 @@ fn selected_range(info: &HostEditInfo) -> Option<FrameRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::item_choices::ItemFacets;
     use crate::read::host::{
         HostEffect, HostEffectFacets, HostEffectHelp, HostLayer, HostObject, HostObjectPlacement,
         SceneReader,
@@ -819,8 +818,8 @@ mod tests {
     };
     use aviutl2_mcp_core::{
         AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
-        FiniteF64, GridBpm, ItemChoices, ItemRange, ItemValue, PALETTE_COLOR_COUNT, Rgba,
-        SectionRange, TableSource, TrackInfo, TrackValue,
+        FiniteF64, GridBpm, ItemChoices, ItemFacets, ItemRange, ItemValue, PALETTE_COLOR_COUNT,
+        Rgba, SectionRange, TableSource, TrackInfo, TrackValue,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -35,7 +35,7 @@ import { join } from "node:path";
 import { Mcp, REPOSITORY } from "./mcp.mjs";
 
 /** 生成物の既定の書き出し先。 */
-const DEFAULT_OUTPUT = join(REPOSITORY, "crates", "plugin", "data", "effect_item_choices.json");
+const DEFAULT_OUTPUT = join(REPOSITORY, "crates", "plugin", "data", "effect_item_facets.json");
 
 /**
  * 言語ファイルを探す場所。先に見つかった方を使う。

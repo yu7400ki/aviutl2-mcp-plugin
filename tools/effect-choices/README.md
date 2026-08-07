@@ -1,6 +1,6 @@
 # 選択肢の候補表の生成器
 
-`crates/plugin/data/effect_item_choices.json` を、起動中の AviUtl2 への書き込み
+`crates/plugin/data/effect_item_facets.json` を、起動中の AviUtl2 への書き込み
 検証で起こす。plugin はこの JSON を `include_str!` でバイナリへ取り込む。
 
 生成器はワークスペースの外にある。`Cargo.toml` の `members` は `crates/*` だけを
@@ -30,7 +30,7 @@ node tools/effect-choices/generate.mjs
 | 引数 | 既定 | 内容 |
 |---|---|---|
 | `--language <path>` | 開発用ディレクトリ → `%ProgramData%` の走査 | 在庫を読む言語ファイル |
-| `--out <path>` | `crates/plugin/data/effect_item_choices.json` | 書き出し先 |
+| `--out <path>` | `crates/plugin/data/effect_item_facets.json` | 書き出し先 |
 | `--server <path>` | `target/release` → `target/debug` | MCP サーバーの実行ファイル |
 | `--max-writes <n>` | 50000 | 書き込みの総回数の上限 |
 

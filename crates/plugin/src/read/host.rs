@@ -5,11 +5,10 @@
 //! opaque handle はどの境界にも現れず、対象は「レイヤー番号と開始フレーム」で
 //! 指し示す。参照区間の内側でハンドルを再解決するのは実装側の責務である。
 
-use crate::item_choices::ItemFacets;
 use crate::read::error::ReadError;
 use aviutl2_mcp_core::{
-    AvailableEffectItem, EffectFlags, EffectItem, EffectType, FiniteF64, GridBpm, ModuleEntry,
-    Rgba, SectionRange,
+    AvailableEffectItem, EffectFlags, EffectItem, EffectType, FiniteF64, GridBpm, ItemFacets,
+    ModuleEntry, Rgba, SectionRange,
 };
 use std::collections::HashMap;
 use std::fmt;
