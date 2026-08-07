@@ -778,16 +778,16 @@ mod tests {
     use super::*;
     use crate::api::ListInstancesResponse;
     use aviutl2_mcp_core::{
-        AvailableEffect, ChoicesSource, Cursor, DescribeEffectsResult, DisplayRange, EditInfo,
-        EditOutcome, EffectDescription, EffectFingerprintInput, EffectFlags, EffectInfo,
-        EffectItem, EffectItemDescription, EffectItemType, EffectItemValues, EffectType,
-        EvaluatedItem, Extent, FiniteF64, FrameRange, GetCurrentSceneResult, GridBpm, InstanceId,
-        InstanceInfo, InstanceProject, InstanceState, ItemChoices, ItemValue, LayerInfo,
+        AvailableEffect, Cursor, DescribeEffectsResult, DisplayRange, EditInfo, EditOutcome,
+        EffectDescription, EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem,
+        EffectItemDescription, EffectItemType, EffectItemValues, EffectType, EvaluatedItem, Extent,
+        FiniteF64, FrameRange, GetCurrentSceneResult, GridBpm, InstanceId, InstanceInfo,
+        InstanceProject, InstanceState, ItemChoices, ItemValue, LayerInfo,
         ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
         ListObjectAliasesResult, ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType,
         ObjectAliasSummary, ObjectDetail, ObjectFingerprintInput, ObjectSummary, ObservedSelection,
         PageMeta, PaletteEntry, Rgba, SceneInfo, SectionRange, SelectionField, SelectionSnapshot,
-        SelectionState, TrackGroup, TrackInfo, TrackValue,
+        SelectionState, TableSource, TrackGroup, TrackInfo, TrackValue,
     };
 
     /// 値が schema に適合するかを再帰的に検査する。
@@ -1220,7 +1220,7 @@ mod tests {
                             description: Some("図形の種類を選択します".to_string()),
                             choices: Some(ItemChoices {
                                 values: vec!["円".to_string(), "四角形".to_string()],
-                                source: ChoicesSource::BuiltinTable,
+                                source: TableSource::BuiltinTable,
                             }),
                         },
                         EffectItemDescription {
@@ -1229,7 +1229,7 @@ mod tests {
                             description: None,
                             choices: Some(ItemChoices {
                                 values: vec!["通常".to_string(), "加算".to_string()],
-                                source: ChoicesSource::Sidecar,
+                                source: TableSource::Sidecar,
                             }),
                         },
                         EffectItemDescription {

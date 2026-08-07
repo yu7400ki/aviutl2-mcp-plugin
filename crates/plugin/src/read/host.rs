@@ -5,10 +5,11 @@
 //! opaque handle はどの境界にも現れず、対象は「レイヤー番号と開始フレーム」で
 //! 指し示す。参照区間の内側でハンドルを再解決するのは実装側の責務である。
 
+use crate::item_choices::ItemFacets;
 use crate::read::error::ReadError;
 use aviutl2_mcp_core::{
-    AvailableEffectItem, EffectFlags, EffectItem, EffectType, FiniteF64, GridBpm, ItemChoices,
-    ModuleEntry, Rgba, SectionRange,
+    AvailableEffectItem, EffectFlags, EffectItem, EffectType, FiniteF64, GridBpm, ModuleEntry,
+    Rgba, SectionRange,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -378,18 +379,18 @@ pub struct HostEffectHelp {
     pub items: HashMap<String, String>,
 }
 
-/// 選択肢の候補のうち、effect 1 件に当たる分。
+/// 設定項目について表が述べたことのうち、effect 1 件に当たる分。
 ///
 /// **設定項目の名前を確定させるものではない。** [`HostEffectHelp`] と同じく、
-/// 項目の一覧はホストの列挙から得るのが正しく、ここに現れるのは候補が書かれて
+/// 項目の一覧はホストの列挙から得るのが正しく、ここに現れるのは面が書かれて
 /// いる項目名だけである。列挙に無い名前がここに在ることも、その逆もある。
 ///
-/// **受け付ける値を宣言するものでもない。** 候補はヒントであり、書き込みの
+/// **受け付ける値を宣言するものでもない。** 候補も値域もヒントであり、書き込みの
 /// 可否はホストが決める。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HostEffectChoices {
-    /// 設定項目名から候補を引く表。
-    pub items: HashMap<String, ItemChoices>,
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HostEffectFacets {
+    /// 設定項目名から面の組を引く表。
+    pub items: HashMap<String, ItemFacets>,
 }
 
 /// 登録済み effect 1 件の見出し。
@@ -467,25 +468,26 @@ pub trait ReadHost: Send + Sync {
     /// 取れる手が無い。
     fn effect_help(&self, effect_name: &str) -> HostEffectHelp;
 
-    /// effect 1 件の設定項目が取り得る値の候補を返す。参照区間を必要としない。
+    /// effect 1 件の設定項目について表が述べたことを返す。参照区間を必要と
+    /// しない。
     ///
-    /// **SDK には候補を引く手段が無い。** 設定項目の列挙が渡すのは名前と種別
-    /// だけであり、選択肢を返す関数が存在しない。供給源は plugin へ埋め込んだ
-    /// 表と、走査で見つけたサイドカーだけである。ホスト環境から引く値である
-    /// ことは他のメソッドと同じであり、この境界に置くことで、候補を持つ環境と
-    /// 持たない環境の双方を差し替えて確かめられる。
+    /// **SDK には候補も値域も引く手段が無い。** 設定項目の列挙が渡すのは名前と
+    /// 種別だけであり、選択肢を返す関数も値域を返す関数も存在しない。供給源は
+    /// plugin へ埋め込んだ表と、走査で見つけたサイドカーだけである。ホスト環境
+    /// から引く値であることは他のメソッドと同じであり、この境界に置くことで、
+    /// 表を持つ環境と持たない環境の双方を差し替えて確かめられる。
     ///
-    /// **候補は書き込みのゲートではない。** ここに無い値も書き込みは通り、ここに
+    /// **面は書き込みのゲートではない。** ここに無い値も書き込みは通り、ここに
     /// ある値が必ず通るとも限らない。可否はホストが決め、書き込みの経路は書いた
     /// 値を読み直して照合する。移動方法の一覧
     /// （[`crate::movement::movements`]）とは性質が違う——あちらは一覧に無い
-    /// 名前を書くとホストのプロセスが落ちるため通す選択肢が無いが、候補は
+    /// 名前を書くとホストのプロセスが落ちるため通す選択肢が無いが、面は
     /// 外しても最悪でホストが値を無視するだけである。
     ///
-    /// 候補を持たない effect は空の [`HostEffectChoices`] になる。**失敗を型で
-    /// 運ばない。** 候補の有無は応答の可用性を左右せず、読めなかったことを
+    /// 表に無い effect は空の [`HostEffectFacets`] になる。**失敗を型で
+    /// 運ばない。** 面の有無は応答の可用性を左右せず、読めなかったことを
     /// 要求元へ伝えても取れる手が無い。
-    fn effect_choices(&self, effect_name: &str) -> HostEffectChoices;
+    fn effect_facets(&self, effect_name: &str) -> HostEffectFacets;
 
     /// 登録済みフォント名を全件返す。参照区間を必要としない。
     ///

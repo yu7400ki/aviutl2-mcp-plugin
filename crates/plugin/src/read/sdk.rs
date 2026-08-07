@@ -9,7 +9,7 @@
 use crate::EDIT_HANDLE;
 use crate::read::error::ReadError;
 use crate::read::host::{
-    EditState, HostEditInfo, HostEffect, HostEffectChoices, HostEffectHelp, HostEffectSummary,
+    EditState, HostEditInfo, HostEffect, HostEffectFacets, HostEffectHelp, HostEffectSummary,
     HostLayer, HostObject, HostObjectDetail, HostObjectPlacement, ReadHost, SceneReader,
     SceneValueReader,
 };
@@ -100,9 +100,9 @@ impl ReadHost for SdkReadHost {
             .unwrap_or_default()
     }
 
-    fn effect_choices(&self, effect_name: &str) -> HostEffectChoices {
+    fn effect_facets(&self, effect_name: &str) -> HostEffectFacets {
         // 編集ハンドルを通らない。供給源は埋め込んだ基底とサイドカーだけである。
-        HostEffectChoices {
+        HostEffectFacets {
             items: crate::item_choices::table()
                 .effect(effect_name)
                 .cloned()
@@ -886,17 +886,17 @@ mod tests {
     }
 
     #[test]
-    fn the_effect_choices_come_from_the_merged_table() {
-        // 候補も編集ハンドルからは得られない。この境界は埋め込みの基底へ
+    fn the_effect_facets_come_from_the_merged_table() {
+        // 候補も値域も編集ハンドルからは得られない。この境界は埋め込みの基底へ
         // サイドカーを重ねた表を引き写すだけである。
         for name in ["テキスト", "図形", "存在しない効果"] {
             assert_eq!(
-                SdkReadHost.effect_choices(name).items,
+                SdkReadHost.effect_facets(name).items,
                 crate::item_choices::table()
                     .effect(name)
                     .cloned()
                     .unwrap_or_default(),
-                "{name} の候補が表と別のところから来ています"
+                "{name} の面が表と別のところから来ています"
             );
         }
     }

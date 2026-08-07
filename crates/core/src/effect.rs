@@ -180,15 +180,44 @@ pub struct ItemChoices {
     /// 候補の値。表に書かれた順で並ぶ。
     pub values: Vec<String>,
     /// 候補の由来。
-    pub source: ChoicesSource,
+    pub source: TableSource,
 }
 
-/// 選択肢の候補の由来。
+/// 設定項目が取り得る値の範囲と小数桁。
+///
+/// **測れた側だけを持つ。** 供給源は候補と同じ表であり、値は極端な値を書いて
+/// ホストが倒した先を読むことで起こす。探りの値が範囲の内側へ収まってしまった
+/// 項目については、その側を記録しない。**表にこの項目が無いこと（`range` 自体が
+/// null）と、上限を測れなかったこと（`max` だけが null）は別の事実である。**
+///
+/// **候補と同じくヒントであってゲートではない。** ここが述べる範囲を外れる値でも
+/// 書き込みは通す。**値域は候補より外れやすい**——候補の陳腐化は「足りなくなる」
+/// だが、値域の陳腐化は「狭くなる」であり、版が上がって上限が広がれば、表は
+/// 正しい値を範囲外だと言う。事前検証を掛けていれば、そこで通るはずの値を
+/// こちら側が拒む。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ItemRange {
+    /// 下限。測れていなければ null。
+    pub min: Option<FiniteF64>,
+    /// 上限。測れていなければ null。
+    pub max: Option<FiniteF64>,
+    /// 小数点以下の桁数。測れていなければ null。
+    pub decimals: Option<u32>,
+    /// 値域の由来。
+    pub source: TableSource,
+}
+
+/// 表が述べたことの由来。
+///
+/// **候補にも値域にも同じ由来が付く。** 面ごとに別の enum を持つ理由が無い——
+/// 「実行ファイルへ埋め込んだ表から来た」「走査で見つけたファイルから来た」の
+/// 2 値は、面が何であるかに依らず同じ意味を持つ。面の名前を型名へ入れると、
+/// 3 つ目の面を足すたびに同じ 2 値の enum が 1 つ増える。
 ///
 /// **由来そのもので決まる。** ファイル名や中身から見分けるものではない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ChoicesSource {
+pub enum TableSource {
     /// 実行ファイルへ埋め込まれた基底の表。
     BuiltinTable,
     /// 走査で見つけたサイドカーファイル。
@@ -976,7 +1005,7 @@ mod tests {
                     ),
                     choices: Some(ItemChoices {
                         values: vec!["円".to_string(), "四角形".to_string()],
-                        source: ChoicesSource::BuiltinTable,
+                        source: TableSource::BuiltinTable,
                     }),
                 },
                 EffectItemDescription {
@@ -1038,12 +1067,12 @@ mod tests {
     #[test]
     fn the_choices_source_names_where_the_values_came_from() {
         for (source, name) in [
-            (ChoicesSource::BuiltinTable, "\"builtin_table\""),
-            (ChoicesSource::Sidecar, "\"sidecar\""),
+            (TableSource::BuiltinTable, "\"builtin_table\""),
+            (TableSource::Sidecar, "\"sidecar\""),
         ] {
             let s = serde_json::to_string(&source).unwrap();
             assert_eq!(s, name);
-            let restored: ChoicesSource = serde_json::from_str(&s).unwrap();
+            let restored: TableSource = serde_json::from_str(&s).unwrap();
             assert_eq!(restored, source);
         }
     }

@@ -13,19 +13,20 @@ use crate::edit::host::{
 };
 use crate::edit::precondition::MutationTicket;
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject};
+use crate::item_choices::ItemFacets;
 use crate::project::ProjectState;
 use crate::read::ReadError;
 use crate::read::host::{
-    EditState, HostEditInfo, HostEffect, HostEffectChoices, HostEffectHelp, HostEffectSummary,
+    EditState, HostEditInfo, HostEffect, HostEffectFacets, HostEffectHelp, HostEffectSummary,
     HostLayer, HostObject, HostObjectDetail, HostObjectPlacement, ReadHost, SceneReader,
     SceneValueReader,
 };
 use crate::test_support::alias_with_effects;
 use aviutl2_mcp_core::{
     AvailableEffectItem, Cursor, DisplayRange, EffectFlags, EffectItem, EffectItemType, EffectType,
-    EvaluatedItemKind, FiniteF64, FrameRange, GridBpm, ItemChoices, ItemValue, ModuleEntry,
-    ModuleType, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, TrackInfo, TrackValue,
-    decode_host_text, decode_track_value, encode_host_text,
+    EvaluatedItemKind, FiniteF64, FrameRange, GridBpm, ItemValue, ModuleEntry, ModuleType,
+    PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, TrackInfo, TrackValue, decode_host_text,
+    decode_track_value, encode_host_text,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -894,14 +895,14 @@ impl ReadHost for FakeReadHost {
         HostEffectHelp::default()
     }
 
-    fn effect_choices(&self, effect_name: &str) -> HostEffectChoices {
-        HostEffectChoices {
+    fn effect_facets(&self, effect_name: &str) -> HostEffectFacets {
+        HostEffectFacets {
             items: self
                 .0
                 .catalog
                 .iter()
                 .find(|entry| entry.name == effect_name)
-                .map(|entry| entry.choices.clone())
+                .map(|entry| entry.facets.clone())
                 .unwrap_or_default(),
         }
     }
@@ -2455,7 +2456,7 @@ pub(crate) fn shape_catalog_entry() -> FakeCatalogEntry {
         effect_type: EffectType::Filter,
         flags: EffectFlags::from_raw(1),
         items: item_definitions(shape(0).items),
-        choices: HashMap::new(),
+        facets: HashMap::new(),
     }
 }
 
@@ -2516,7 +2517,7 @@ pub(crate) fn coordinate_catalog_entry() -> FakeCatalogEntry {
         effect_type: EffectType::Filter,
         flags: EffectFlags::from_raw(1),
         items: item_definitions(coordinate(0, &[0.0, 1.0]).items),
-        choices: HashMap::new(),
+        facets: HashMap::new(),
     }
 }
 
@@ -2642,13 +2643,13 @@ pub(crate) struct FakeCatalogEntry {
     pub(crate) effect_type: EffectType,
     pub(crate) flags: EffectFlags,
     pub(crate) items: Vec<AvailableEffectItem>,
-    /// 設定項目名から引く選択肢の候補。
+    /// 設定項目名から引く面の組。
     ///
-    /// **ホストが受け付ける値とは別物である。** 候補は読み取り経路へ出すヒント
-    /// であり、書き込みの可否を決めるのは [`host_write`] が写すホストの挙動の
-    /// 側である。**既定は空である**——候補を持たない環境がそのまま既定であり、
-    /// 候補が得られることを前提にした経路を作らない。
-    pub(crate) choices: HashMap<String, ItemChoices>,
+    /// **ホストが受け付ける値とは別物である。** 候補も値域も読み取り経路へ出す
+    /// ヒントであり、書き込みの可否を決めるのは [`host_write`] が写すホストの
+    /// 挙動の側である。**既定は空である**——表を持たない環境がそのまま既定で
+    /// あり、面が得られることを前提にした経路を作らない。
+    pub(crate) facets: HashMap<String, ItemFacets>,
 }
 
 impl FakeCatalogEntry {
@@ -2684,14 +2685,14 @@ pub(crate) fn fake_catalog() -> Vec<FakeCatalogEntry> {
                 name: "範囲".to_string(),
                 item_type: EffectItemType::Integer,
             }],
-            choices: HashMap::new(),
+            facets: HashMap::new(),
         },
         FakeCatalogEntry {
             name: "動画ファイル".to_string(),
             effect_type: EffectType::Input,
             flags: EffectFlags::from_raw(3),
             items: Vec::new(),
-            choices: HashMap::new(),
+            facets: HashMap::new(),
         },
         FakeCatalogEntry {
             name: "音声フェード".to_string(),
@@ -2699,14 +2700,14 @@ pub(crate) fn fake_catalog() -> Vec<FakeCatalogEntry> {
             // 音声だけを扱う。画像のフラグは立たない。
             flags: EffectFlags::from_raw(2),
             items: Vec::new(),
-            choices: HashMap::new(),
+            facets: HashMap::new(),
         },
         FakeCatalogEntry {
             name: "標準描画".to_string(),
             effect_type: EffectType::Output,
             flags: EffectFlags::from_raw(1),
             items: Vec::new(),
-            choices: HashMap::new(),
+            facets: HashMap::new(),
         },
     ]
 }

@@ -6,15 +6,15 @@ use aviutl2_mcp_core::AuthSecret;
 use aviutl2_mcp_core::ScaledBudgets;
 use aviutl2_mcp_core::settings::{Settings, SettingsDocument};
 use aviutl2_mcp_core::{
-    AvailableEffect, ChoicesSource, Cursor, DescribeEffectsResult, DisplayRange, EditInfo,
-    EffectDescription, EffectFlags, EffectItemDescription, EffectItemType, EffectItemValues,
-    EffectType, ErrorCode, ErrorObject, EvaluatedItem, Extent, FiniteF64, FrameRange,
-    GetCurrentSceneResult, GridBpm, InstanceId, InstanceState, ItemChoices, LayerInfo,
-    ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
-    ListObjectAliasesResult, ListObjectsResult, ListPalettesResult, MAX_DESCRIBED_EFFECTS,
-    ModuleEntry, ModuleType, ObjectAliasSummary, ObjectDetail, ObjectFingerprintInput,
-    ObjectSummary, PALETTE_COLOR_COUNT, PageMeta, PaletteEntry, RequestEnvelope, Rgba, SceneInfo,
-    SectionRange, SelectionSnapshot, TrackGroup,
+    AvailableEffect, Cursor, DescribeEffectsResult, DisplayRange, EditInfo, EffectDescription,
+    EffectFlags, EffectItemDescription, EffectItemType, EffectItemValues, EffectType, ErrorCode,
+    ErrorObject, EvaluatedItem, Extent, FiniteF64, FrameRange, GetCurrentSceneResult, GridBpm,
+    InstanceId, InstanceState, ItemChoices, LayerInfo, ListAvailableEffectsResult, ListFontsResult,
+    ListLayersResult, ListModulesResult, ListObjectAliasesResult, ListObjectsResult,
+    ListPalettesResult, MAX_DESCRIBED_EFFECTS, ModuleEntry, ModuleType, ObjectAliasSummary,
+    ObjectDetail, ObjectFingerprintInput, ObjectSummary, PALETTE_COLOR_COUNT, PageMeta,
+    PaletteEntry, RequestEnvelope, Rgba, SceneInfo, SectionRange, SelectionSnapshot, TableSource,
+    TrackGroup,
 };
 
 use aviutl2_mcp_server::mcp::input::{
@@ -581,7 +581,7 @@ fn sample_effect_descriptions() -> DescribeEffectsResult {
                     ),
                     choices: Some(ItemChoices {
                         values: vec!["円".to_string(), "四角形".to_string()],
-                        source: ChoicesSource::BuiltinTable,
+                        source: TableSource::BuiltinTable,
                     }),
                 }],
             },

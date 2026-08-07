@@ -15,14 +15,15 @@ use crate::edit::fake::{
     SCENE_NAME, SECTION_RANGES, SHAPE, STATIC_ITEM, TRACK_MODES, coordinate,
     coordinate_catalog_entry, raw_item_value, shape, shape_catalog_entry,
 };
+use crate::item_choices::ItemFacets;
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::{default_page_request, default_page_window, with_silent_panic_hook};
 use aviutl2_mcp_core::{
-    ApplyBatchParams, BatchOperation, ChoicesSource, CreateObjectSectionParams, CursorPosition,
+    ApplyBatchParams, BatchOperation, CreateObjectSectionParams, CursorPosition,
     DeleteObjectSectionParams, Destination, EditOperation, EffectFlags, EffectItem, EffectItemType,
     EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemChoices, ItemValue,
     LayerNameChange, MAX_GRID_BPM_ENTRIES, MoveObjectSectionParams, ObjectSectionsOutcome,
-    ObjectSelector, Placement, SceneSize,
+    ObjectSelector, Placement, SceneSize, TableSource,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -856,7 +857,7 @@ fn an_effect_source_does_not_go_through_the_media_path_check() {
             effect_type: EffectType::Filter,
             flags: EffectFlags::from_raw(1),
             items: Vec::new(),
-            choices: HashMap::new(),
+            facets: HashMap::new(),
         });
     });
     harness.host.clear_calls();
@@ -3186,21 +3187,24 @@ const HINTED_VALUES: [&str; 2] = ["表だけにある形", "表だけにある�
 /// 表はカタログの側に持つ。読み取り経路が候補を引く先と同じ場所であり、
 /// 書き込みの経路がそこを見るようになれば、この表を変えた結果が成否に現れる。
 fn shape_catalog_entry_with_choices(values: &[&str]) -> FakeCatalogEntry {
-    let choices = shape_catalog_entry()
+    shape_catalog_entry_with_facets(ItemFacets {
+        choices: Some(ItemChoices {
+            values: values.iter().map(|value| (*value).to_string()).collect(),
+            source: TableSource::Sidecar,
+        }),
+        range: None,
+    })
+}
+
+/// 面の組を全項目へ持たせた [`shape_catalog_entry`]。
+fn shape_catalog_entry_with_facets(facets: ItemFacets) -> FakeCatalogEntry {
+    let facets = shape_catalog_entry()
         .items
         .into_iter()
-        .map(|item| {
-            (
-                item.name,
-                ItemChoices {
-                    values: values.iter().map(|value| (*value).to_string()).collect(),
-                    source: ChoicesSource::Sidecar,
-                },
-            )
-        })
+        .map(|item| (item.name, facets.clone()))
         .collect();
     FakeCatalogEntry {
-        choices,
+        facets,
         ..shape_catalog_entry()
     }
 }

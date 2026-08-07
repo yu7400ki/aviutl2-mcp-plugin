@@ -401,19 +401,22 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
             }
             let items = guard(|| self.host.effect_items(name))?;
             let help = catch(|| self.host.effect_help(name))?;
-            let choices = catch(|| self.host.effect_choices(name))?;
+            let facets = catch(|| self.host.effect_facets(name))?;
             effects.push(EffectDescription {
                 name: name.clone(),
                 description: help.description,
                 items: items
                     .into_iter()
-                    .map(|item| EffectItemDescription {
-                        // 説明も候補も項目名で引く。ホストの列挙に無い項目は
+                    .map(|item| {
+                        // 説明も面も項目名で引く。ホストの列挙に無い項目は
                         // 現れず、持たない項目は null になる。
-                        description: help.items.get(&item.name).cloned(),
-                        choices: choices.items.get(&item.name).cloned(),
-                        name: item.name,
-                        item_type: item.item_type,
+                        let facets = facets.items.get(&item.name);
+                        EffectItemDescription {
+                            description: help.items.get(&item.name).cloned(),
+                            choices: facets.and_then(|facets| facets.choices.clone()),
+                            name: item.name,
+                            item_type: item.item_type,
+                        }
                     })
                     .collect(),
             });
@@ -804,8 +807,9 @@ fn selected_range(info: &HostEditInfo) -> Option<FrameRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::item_choices::ItemFacets;
     use crate::read::host::{
-        HostEffect, HostEffectChoices, HostEffectHelp, HostLayer, HostObject, HostObjectPlacement,
+        HostEffect, HostEffectFacets, HostEffectHelp, HostLayer, HostObject, HostObjectPlacement,
         SceneReader,
     };
     use crate::test_support::{
@@ -813,9 +817,9 @@ mod tests {
         with_silent_panic_hook,
     };
     use aviutl2_mcp_core::{
-        AvailableEffectItem, ChoicesSource, EffectFlags, EffectItem, EffectItemType, ErrorCode,
-        Fingerprint, FiniteF64, GridBpm, ItemChoices, ItemValue, PALETTE_COLOR_COUNT, Rgba,
-        SectionRange, TrackInfo, TrackValue,
+        AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
+        FiniteF64, GridBpm, ItemChoices, ItemValue, PALETTE_COLOR_COUNT, Rgba, SectionRange,
+        TableSource, TrackInfo, TrackValue,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -892,11 +896,11 @@ mod tests {
         /// **既定は空である。** 供給源を読めない環境がそのまま既定であり、説明が
         /// 得られることを前提にした経路を作らない。
         help: Vec<(String, HostEffectHelp)>,
-        /// 表が持つ effect ごとの候補。
+        /// 表が持つ effect ごとの面。
         ///
         /// **既定は空である。** 中身を持たない基底だけの環境がそのまま既定で
-        /// あり、候補が得られることを前提にした経路を作らない。
-        choices: Vec<(String, HostEffectChoices)>,
+        /// あり、面が得られることを前提にした経路を作らない。
+        facets: Vec<(String, HostEffectFacets)>,
         /// 設定項目の数を問い合わせた effect 名を、問い合わせた順に覚える。
         ///
         /// 窓の外の effect について問い合わせていないことを、件数でも名前でも
@@ -1010,7 +1014,7 @@ mod tests {
                 layers: fake_layers(),
                 catalog: fake_catalog(),
                 help: Vec::new(),
-                choices: Vec::new(),
+                facets: Vec::new(),
                 item_count_queries: Mutex::new(Vec::new()),
                 panic_at: None,
                 object_read_fails_at: None,
@@ -1144,13 +1148,13 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        fn effect_choices(&self, effect_name: &str) -> HostEffectChoices {
-            self.assert_ready("effect_choices");
-            self.record("effect_choices");
-            self.choices
+        fn effect_facets(&self, effect_name: &str) -> HostEffectFacets {
+            self.assert_ready("effect_facets");
+            self.record("effect_facets");
+            self.facets
                 .iter()
                 .find(|(name, _)| name == effect_name)
-                .map(|(_, choices)| choices.clone())
+                .map(|(_, facets)| facets.clone())
                 .unwrap_or_default()
         }
 
@@ -1686,24 +1690,27 @@ mod tests {
         }
     }
 
-    /// effect 1 件分の候補を組み立てる。
+    /// effect 1 件分の面を組み立てる。
+    fn effect_facets(items: &[(&str, ItemFacets)]) -> HostEffectFacets {
+        HostEffectFacets {
+            items: items
+                .iter()
+                .map(|(name, facets)| ((*name).to_string(), facets.clone()))
+                .collect(),
+        }
+    }
+
+    /// 候補だけを持つ面の組。
     ///
     /// 由来を項目ごとに指定する。同じ effect の中に基底の候補とサイドカーの
     /// 候補が混ざる形は、表を重ねれば普通に起こる。
-    fn effect_choices(items: &[(&str, &[&str], ChoicesSource)]) -> HostEffectChoices {
-        HostEffectChoices {
-            items: items
-                .iter()
-                .map(|(name, values, source)| {
-                    (
-                        (*name).to_string(),
-                        ItemChoices {
-                            values: values.iter().map(|value| (*value).to_string()).collect(),
-                            source: *source,
-                        },
-                    )
-                })
-                .collect(),
+    fn choices_facet(values: &[&str], source: TableSource) -> ItemFacets {
+        ItemFacets {
+            choices: Some(ItemChoices {
+                values: values.iter().map(|value| (*value).to_string()).collect(),
+                source,
+            }),
+            range: None,
         }
     }
 
@@ -3837,15 +3844,17 @@ mod tests {
         // 候補を知らないことが損失の原因である。読み取り経路へ出さなければ、
         // 要求元は候補の存在そのものに気付けない。
         let adapter = adapter_with(|_| FakeHost {
-            choices: vec![(
+            facets: vec![(
                 "グロー".to_string(),
-                effect_choices(&[
+                effect_facets(&[
                     (
                         "グローの項目1",
-                        &["通常", "加算"],
-                        ChoicesSource::BuiltinTable,
+                        choices_facet(&["通常", "加算"], TableSource::BuiltinTable),
                     ),
-                    ("グローの項目0", &["円", "四角形"], ChoicesSource::Sidecar),
+                    (
+                        "グローの項目0",
+                        choices_facet(&["円", "四角形"], TableSource::Sidecar),
+                    ),
                 ]),
             )],
             ..FakeHost::new()
@@ -3866,14 +3875,14 @@ mod tests {
                     "グローの項目1",
                     Some(&ItemChoices {
                         values: vec!["通常".to_string(), "加算".to_string()],
-                        source: ChoicesSource::BuiltinTable,
+                        source: TableSource::BuiltinTable,
                     })
                 ),
                 (
                     "グローの項目0",
                     Some(&ItemChoices {
                         values: vec!["円".to_string(), "四角形".to_string()],
-                        source: ChoicesSource::Sidecar,
+                        source: TableSource::Sidecar,
                     })
                 ),
                 // 表に無い項目は null である。空の配列で代えると、「候補が
@@ -3899,11 +3908,17 @@ mod tests {
         // しない項目は、表に在っても応答には現れない。落とさずに失敗へ倒すと、
         // 環境をまたぐ配布物が tool を壊す。
         let adapter = adapter_with(|_| FakeHost {
-            choices: vec![(
+            facets: vec![(
                 "ぼかし".to_string(),
-                effect_choices(&[
-                    ("ぼかしの項目0", &["通常"], ChoicesSource::Sidecar),
-                    ("この環境に無い項目", &["値"], ChoicesSource::Sidecar),
+                effect_facets(&[
+                    (
+                        "ぼかしの項目0",
+                        choices_facet(&["通常"], TableSource::Sidecar),
+                    ),
+                    (
+                        "この環境に無い項目",
+                        choices_facet(&["値"], TableSource::Sidecar),
+                    ),
                 ]),
             )],
             ..FakeHost::new()
@@ -3922,8 +3937,8 @@ mod tests {
     }
 
     #[test]
-    fn describe_effects_asks_for_the_choices_once_per_effect() {
-        // 候補も効果ごとに 1 度で引く。項目ごとに引くと、同じ表を項目の数だけ
+    fn describe_effects_asks_for_the_facets_once_per_effect() {
+        // 面も効果ごとに 1 度で引く。項目ごとに引くと、同じ表を項目の数だけ
         // 引き直す。
         let adapter = adapter();
         adapter
@@ -3934,9 +3949,9 @@ mod tests {
             .host
             .calls()
             .iter()
-            .filter(|call| **call == "effect_choices")
+            .filter(|call| **call == "effect_facets")
             .count();
-        assert_eq!(asked, 2, "効果の数と候補を引いた回数が食い違っています");
+        assert_eq!(asked, 2, "効果の数と面を引いた回数が食い違っています");
     }
 
     #[test]

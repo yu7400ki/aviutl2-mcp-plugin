@@ -14,7 +14,7 @@ pub mod effect_help;
 #[cfg(windows)]
 pub mod identity;
 #[cfg(windows)]
-pub(crate) mod item_choices;
+pub mod item_choices;
 #[cfg(windows)]
 pub mod lifecycle;
 #[cfg(windows)]
