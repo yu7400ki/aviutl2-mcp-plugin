@@ -237,8 +237,8 @@ pub struct GetObjectInput {
 /// 読み直さずにそのまま次の要求へ渡せる。
 /// 対象を変更すると fingerprint が変わる。変更前の selector で続けて編集すると
 /// precondition_failed となるため、応答が返した新しい selector へ持ち替える。
-/// その precondition_failed の details.current_object には対象の現在の姿が同じ形で
-/// 入り、これもそのまま次の要求の selector にできる。
+/// その precondition_failed が details に対象の現在の姿を添えるときも同じ形であり、
+/// これもそのまま次の要求の selector にできる。
 // 型の説明は入力 schema へそのまま載る。実装の判断はここへ書かない。
 //
 // 双方向の値であるため未知フィールドを拒否しない。server はこの値を解釈せず

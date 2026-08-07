@@ -3411,13 +3411,16 @@ mod tests {
             reaches: 14,
         },
         Relocation {
-            statement: "対象が変化していた precondition_failed の details.current_object は、\
+            statement: "対象が変化していた precondition_failed は、対象の現在の姿を details へ添える。\
                         読み直さずにそのまま次の要求の selector にできる",
             was_stated_by: 11,
             dropped: &["details.current_object"],
+            // **キー名は層 2 に置けない。** 共有型は apply_batch の schema にも
+            // 入るが、そちらは同じものを failed_object という別の名前で返す。
+            // 層 2 が名乗れるのは「同じ形が添う」ことまでである。
             to: Destination::InputSchema,
-            lands_as: "details.current_object",
-            reaches: 11,
+            lands_as: "対象の現在の姿",
+            reaches: 14,
         },
         Relocation {
             statement: "offset と limit（1〜200、既定 50）でページを指定し、\
@@ -4314,40 +4317,50 @@ mod tests {
     }
 
     #[test]
-    fn the_integer_item_description_names_the_only_item_type_that_takes_it() {
-        // `accepts` が通すのは (Integer, Integer) だけである。number の項目へ
-        // 書けると読める説明は、通らない要求を組み立てさせる——しかも失敗するのは
-        // invalid_argument であり、値を選び直しても直らない。
-        let description = item_value_description("integer");
-        assert!(
-            description.contains("item_type: integer"),
-            "書ける種別を名指ししていません: {description}"
-        );
-        assert!(
-            description.contains("item_type: number") && description.contains("invalid_argument"),
-            "number の項目で落ちることを述べていません: {description}"
-        );
-        assert!(
-            !description.contains("number と同じ"),
-            "number と同じ扱いだと読めます: {description}"
-        );
-
-        // 説明を実装から確かめる。integer の値は integer の項目にだけ通り、
-        // number の項目には通らない。
-        for (item_type, accepted) in [
-            (EffectItemType::Integer, true),
-            (EffectItemType::Number, false),
-        ] {
-            let items = vec![AvailableEffectItem {
-                name: "項目".to_string(),
-                item_type,
-            }];
-            let value = ItemValue::Integer { value: 1 };
-            assert_eq!(
-                prepare_item_write(&items, "項目", &value, no_track_target()).is_ok(),
-                accepted,
-                "integer の値が受け付けられる種別と説明が食い違います"
+    fn the_numeric_item_descriptions_name_the_only_item_type_that_takes_them() {
+        // `accepts` が通すのは (Integer, Integer) と (Number, Number) だけである。
+        // 片方をもう片方の項目へ書けると読める説明は、通らない要求を組み立て
+        // させる——しかも失敗するのは invalid_argument であり、値を選び直しても
+        // 直らない。**2 つは対称であり、片方だけを名指しすると残りが黙って古くなる。**
+        for (kind, other) in [("integer", "number"), ("number", "integer")] {
+            let description = item_value_description(kind);
+            assert!(
+                description.contains(&format!("item_type: {kind}")),
+                "{kind} が書ける種別を名指ししていません: {description}"
             );
+            assert!(
+                description.contains(&format!("item_type: {other}"))
+                    && description.contains("invalid_argument"),
+                "{kind} が {other} の項目で落ちることを述べていません: {description}"
+            );
+            assert!(
+                !description.contains(&format!("{other} と同じ")),
+                "{kind} が {other} と同じ扱いだと読めます: {description}"
+            );
+        }
+
+        // 説明を実装から確かめる。値の形と種別は 1 対 1 で対応する。
+        for (value, accepting) in [
+            (ItemValue::Integer { value: 1 }, EffectItemType::Integer),
+            (
+                ItemValue::Number {
+                    value: aviutl2_mcp_core::FiniteF64::try_new(1.0).expect("有限である"),
+                },
+                EffectItemType::Number,
+            ),
+        ] {
+            for item_type in [EffectItemType::Integer, EffectItemType::Number] {
+                let accepted = item_type == accepting;
+                let items = vec![AvailableEffectItem {
+                    name: "項目".to_string(),
+                    item_type,
+                }];
+                assert_eq!(
+                    prepare_item_write(&items, "項目", &value, no_track_target()).is_ok(),
+                    accepted,
+                    "数値の値が受け付けられる種別と説明が食い違います"
+                );
+            }
         }
     }
 
@@ -4593,9 +4606,14 @@ mod tests {
             );
         }
         assert!(
-            shared_type_description("get_object", "ObjectSelectorInput")
-                .contains("details.current_object"),
+            shared_type_description("get_object", "ObjectSelectorInput").contains("対象の現在の姿"),
             "selector の説明が現在の姿の使い方を述べていません"
+        );
+        // **キー名を述べる tool は apply_batch だけである。** そちらは 100 件の
+        // うちどれが落ちたかを併せて示す必要があるため、別のキーで返す。
+        assert!(
+            description_of(APPLY_BATCH).contains("details.failed_object"),
+            "一括適用の説明が自分のキーを述べていません"
         );
         // 表が古びないよう、編集 tool の集合と突き合わせる。どちらの側に属するかは
         // tool ごとに決まる事実であり、説明を落としても失われない。
@@ -5139,13 +5157,20 @@ mod tests {
             "読み直さずにそのまま次の要求へ渡せる",
             "fingerprint が変わる",
             "precondition_failed",
-            "details.current_object",
+            "対象の現在の姿",
         ] {
             assert!(
                 object.contains(phrase),
                 "オブジェクトの selector の説明が {phrase} に触れていません: {object}"
             );
         }
+        // **キー名は名乗らない。** 同じ型が apply_batch の schema にも入るが、
+        // そちらは同じものを details.failed_object という別の名前で返す。
+        // 共有型が片方の名前を名乗ると、もう片方の tool に対して嘘になる。
+        assert!(
+            !object.contains("details."),
+            "共有型が失敗応答のキーを名乗っています: {object}"
+        );
 
         let effect = shared_type_description("set_object_item", "EffectSelectorInput");
         for phrase in [

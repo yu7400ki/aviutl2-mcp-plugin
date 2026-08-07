@@ -252,7 +252,9 @@ impl FocusChangeInput {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ItemValueInput {
-    /// 実数。有限値のみ。トラックバーへ書くと全区間へ同じ値が入る。
+    /// 実数。有限値のみ。item_type: number の項目にだけ書ける。
+    /// item_type: integer の項目へ書くと invalid_argument となる。
+    /// トラックバーへ書くと全区間へ同じ値が入る。
     /// 移動を持つ項目へは指定できず、unsupported_operation となる。
     /// 移動を消したい場合は mode を null にした track を送る。
     Number {
