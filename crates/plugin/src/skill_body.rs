@@ -116,12 +116,51 @@ const ALLOWED_SECTIONS: &[(&str, Purpose)] = &[
     ("selector と世代", Purpose::CrossToolConvention),
     ("取り消しの単位", Purpose::CrossToolConvention),
     ("失敗したときにすること", Purpose::CrossToolConvention),
-    ("書ける値を引く", Purpose::ValueLookupRoute),
+    ("使える効果と書ける値を引く", Purpose::ValueLookupRoute),
     ("参照文書", Purpose::ReferenceIndex),
 ];
 
+/// 参照文書が持ってよい節。
+///
+/// **`SKILL.md` だけを固定しても足りない。** 節を丸ごと足す経路は
+/// `references/` の側にも同じだけ開いており、そちらは量が増えるぶん
+/// 気付かれにくい。ファイルごとに一覧を持つ。
+const ALLOWED_REFERENCE_SECTIONS: &[(&str, &[&str])] = &[
+    (
+        "references/layers.md",
+        &[
+            "番号が大きいレイヤーが手前に描かれる",
+            "この規則は応答に現れない",
+            "組むときの向き",
+        ],
+    ),
+    (
+        "references/object-alias.md",
+        &[
+            "なぜ使うか",
+            "構造",
+            "frame 行が区間を決める",
+            "トラックバーの値と移動",
+            "黙って捨てられる書き方がある",
+            "トラックバーグループ",
+            "未確認",
+        ],
+    ),
+    (
+        "references/workflows.md",
+        &[
+            "見る → 組み立てる → 作る → 描いて確かめる",
+            "空のプロジェクトから始めるとき",
+            "失敗を踏んだとき",
+        ],
+    ),
+];
+
 /// 節が受け持つ役割。**`SKILL.md` が持ってよいのはこの 3 つだけである。**
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// 一覧へ節を足すとき、3 つのどれに当たるかを言えないなら、それは
+/// `SKILL.md` に属さない節である。
+#[derive(Debug, Clone, Copy)]
 enum Purpose {
     /// 複数の tool にまたがる規約。
     CrossToolConvention,
@@ -162,7 +201,8 @@ const IDENTIFIERS_THE_SKILL_MAY_NAME: &[&str] = &[
     "failed_object",
     "mutation_issued",
     "change_applied",
-    // 書ける値を引く経路。
+    // 何が在るかと、書ける値を引く経路。
+    "list_available_effects",
     "describe_effects",
     "get_object",
     "list_fonts",
@@ -174,14 +214,10 @@ const IDENTIFIERS_THE_SKILL_MAY_NAME: &[&str] = &[
 ///
 /// **skill は実測記録の要約であって、推測の置き場ではない。** 座標系・単位は
 /// 実機で確かめていないため、断定も推測も本文に置かない。
-const UNMEASURED_TERMS: &[&str] = &[
-    "座標系",
-    "原点",
-    "回転の向き",
-    "拡大率の基準",
-    "等倍",
-    "画面中央",
-];
+///
+/// **語は連結せずに単独で挙げる。** `拡大率の基準` のような連結語だけを置くと、
+/// `拡大率は 100 が原寸である` のような断定が素通りする。
+const UNMEASURED_TERMS: &[&str] = &["座標系", "原点", "回転の向き", "拡大率", "等倍", "画面中央"];
 
 /// 実測していないことを名乗る句。
 const UNMEASURED_DISCLAIMER: &str = "実測していない";
@@ -236,9 +272,15 @@ fn the_skill_body_declares_up_front_that_it_carries_no_copy() {
 }
 
 #[test]
-fn the_skill_body_has_only_the_sections_it_is_allowed_to_have() {
+fn the_skill_has_only_the_sections_it_is_allowed_to_have() {
     // C-T2。**節の一覧を検査の側に置く。** 本文の側だけを見ても、増えた節が
     // 写しなのか新しい規約なのかは機械では分からない。
+    //
+    // **限界を承知で使う形である。** ここが緑であることは、不変条件 1 を
+    // 満たしたことを意味しない——既にある節の中へ、識別子を 1 つも使わずに
+    // tool の動作を説明する段落を書けば素通りする。C-T2 が「機械的に見るのは
+    // 難しい」と述べているのはこの穴のことであり、塞ぐ手は無い。
+    // **節を足す経路だけを塞いでいる。**
     let found = sections(&skill_body());
     let allowed: Vec<String> = ALLOWED_SECTIONS
         .iter()
@@ -248,14 +290,30 @@ fn the_skill_body_has_only_the_sections_it_is_allowed_to_have() {
         found, allowed,
         "SKILL.md の節が、持ってよい一覧と一致しません"
     );
-    for purpose in [
-        Purpose::CrossToolConvention,
-        Purpose::ReferenceIndex,
-        Purpose::ValueLookupRoute,
-    ] {
+
+    for (path, titles) in ALLOWED_REFERENCE_SECTIONS {
+        let body = skill_files()
+            .into_iter()
+            .find_map(|(name, body)| (name == format!("{SKILL_NAME}/{path}")).then_some(body))
+            .unwrap_or_else(|| panic!("{path} がありません"));
+        let expected: Vec<String> = titles.iter().map(|title| (*title).to_string()).collect();
+        assert_eq!(
+            sections(&body),
+            expected,
+            "{path} の節が、持ってよい一覧と一致しません"
+        );
+    }
+    // 一覧を持たない参照文書があると、そのファイルだけ節を足し放題になる。
+    for (name, _) in skill_files() {
+        let Some(path) = name.strip_prefix(&format!("{SKILL_NAME}/")) else {
+            continue;
+        };
         assert!(
-            ALLOWED_SECTIONS.iter().any(|(_, p)| *p == purpose),
-            "{purpose:?} を受け持つ節がありません"
+            path == "SKILL.md"
+                || ALLOWED_REFERENCE_SECTIONS
+                    .iter()
+                    .any(|(known, _)| *known == path),
+            "{path} の節の一覧が検査側にありません"
         );
     }
 }
@@ -304,11 +362,12 @@ struct Convention {
     phrases: &'static [&'static str],
 }
 
-/// `SKILL.md` が持つべき規約。
+/// `SKILL.md` が持つべき規約と経路。
 ///
 /// **層 1 から落とした句の行き先は server crate の表が持つ。** ここに在るのは、
-/// 落とした句には含まれないが skill が述べると決まっているもの——対象の決め方と、
-/// 失敗の受け止め方——を含めた、話題の側からの網羅である。
+/// 落とした句には含まれないが skill が述べると決まっているもの——対象の決め方、
+/// 失敗の受け止め方、何が在るかを引く経路——を含めた、話題の側からの網羅で
+/// ある。
 const CONVENTIONS_THE_SKILL_MUST_STATE: &[Convention] = &[
     Convention {
         topic: "instance_id の取り方",
@@ -337,6 +396,16 @@ const CONVENTIONS_THE_SKILL_MUST_STATE: &[Convention] = &[
     Convention {
         topic: "失敗したらリトライではなく読み直すこと",
         phrases: &["同じ要求をそのまま送り直さない", "組み立て直す"],
+    },
+    // **候補を引く経路は、設定項目の値だけではない。** 実測で失われたのは
+    // 「当てられなかった」ではなく「在ることを知らなかった」であり、効果
+    // そのものを引く経路が無ければ、知らないものは思い付けないままになる。
+    Convention {
+        topic: "どんな効果が在るかを引く経路",
+        phrases: &[
+            "list_available_effects が返す",
+            "1 つも候補に上がらなかった",
+        ],
     },
 ];
 
@@ -445,6 +514,12 @@ fn the_skill_writes_nothing_about_what_was_never_measured() {
 fn the_skill_copies_no_choice_from_the_builtin_table() {
     // 候補の正本は読み取り経路が返す表である。手書きの markdown へ写せば
     // 正本が 2 つになり、**陳腐化が「足りなくなる」から「間違う」へ落ちる。**
+    //
+    // **判定は (効果, 項目) ごとに 3 語であり、その下は通る。** 1 つの項目から
+    // 2 語だけ挙げる書き方も、効果をまたいで 1 語ずつ並べる書き方も素通り
+    // する。閾値を下げれば、候補と無関係に同じ語を使っただけで落ちるように
+    // なる——`通常` や `回転` は候補の値であると同時にただの日本語である。
+    // **緑であることは、写しが 1 語も無いことを意味しない。**
     let table: serde_json::Value =
         serde_json::from_str(include_str!("../data/effect_item_facets.json"))
             .expect("基底の表を解釈できません");
