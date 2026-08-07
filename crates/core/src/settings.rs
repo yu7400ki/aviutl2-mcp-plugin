@@ -63,11 +63,16 @@ const FIELD_ARTIFACT: &str = "artifact";
 const FIELD_HANDOFF: &str = "handoff";
 const FIELD_RENDER: &str = "render";
 const FIELD_SESSION: &str = "session";
+const FIELD_AGENT_PLUGIN: &str = "agent_plugin";
 const FIELD_TTL_SECONDS: &str = "ttl_seconds";
 const FIELD_MAX_COUNT: &str = "max_count";
 const FIELD_MAX_TOTAL_BYTES: &str = "max_total_bytes";
 const FIELD_DRAIN_TIMEOUT_MS: &str = "drain_timeout_ms";
 const FIELD_STALE_AFTER_SECONDS: &str = "stale_after_seconds";
+const FIELD_GENERATE: &str = "generate";
+const FIELD_CLAUDE: &str = "claude";
+const FIELD_AGENT_PLUGINS: &str = "agent_plugins";
+const FIELD_SKILL: &str = "skill";
 
 /// 既定のログレベル。`RUST_LOG` と同じ書式で解釈する。
 ///
@@ -139,6 +144,18 @@ pub const DEFAULT_SESSION_STALE_AFTER_SECONDS: u64 = 3600;
 pub const MIN_SESSION_STALE_AFTER_SECONDS: u64 = 600;
 /// 同上限（秒）。
 pub const MAX_SESSION_STALE_AFTER_SECONDS: u64 = 86400;
+
+/// agent plugin を生成するかどうかの既定値。
+///
+/// **既定は生成しない。** 生成物は AviUtl2 の外側——別のアプリが読む設定——に
+/// 効くため、同意の無い書き込みを行わない。
+pub const DEFAULT_AGENT_PLUGIN_GENERATE: bool = false;
+/// Claude Code 方言を生成するかどうかの既定値。
+pub const DEFAULT_AGENT_PLUGIN_CLAUDE: bool = true;
+/// agent-plugins.org 方言を生成するかどうかの既定値。
+pub const DEFAULT_AGENT_PLUGIN_AGENT_PLUGINS: bool = true;
+/// skill を同梱するかどうかの既定値。
+pub const DEFAULT_AGENT_PLUGIN_SKILL: bool = true;
 
 /// 終了手順が投入済みタスクの完了を待つ上限の既定値（ミリ秒）。
 pub const DEFAULT_RENDER_DRAIN_TIMEOUT_MS: u64 = 3000;
@@ -238,11 +255,51 @@ impl std::fmt::Display for SettingsIssue {
     }
 }
 
+/// agent plugin の生成に関する切り替え。
+///
+/// **`generate` だけが同意である。** 内訳の 3 つを既定で立てておくのは、
+/// `generate` を 1 か所立てれば動く一式がそのまま揃うようにするためであり、
+/// `generate` が偽の間も内訳の値は保たれる——同意を戻したときに前の選択が残る。
+///
+/// **有効な方言が 0 なら何も生成しない。** `skill` だけを立てても生成しない。
+/// skill は plugin root の中にあって初めて発見されるため、manifest の無い
+/// `skills/` を置いても見つける client が居ない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentPluginSettings {
+    /// 生成するかどうか。**同意そのものである。**
+    pub generate: bool,
+    /// Claude Code 方言を生成する。
+    pub claude: bool,
+    /// agent-plugins.org 方言を生成する。
+    pub agent_plugins: bool,
+    /// skill を生成する。
+    pub skill: bool,
+}
+
+impl Default for AgentPluginSettings {
+    fn default() -> Self {
+        Self {
+            generate: DEFAULT_AGENT_PLUGIN_GENERATE,
+            claude: DEFAULT_AGENT_PLUGIN_CLAUDE,
+            agent_plugins: DEFAULT_AGENT_PLUGIN_AGENT_PLUGINS,
+            skill: DEFAULT_AGENT_PLUGIN_SKILL,
+        }
+    }
+}
+
 /// 解決済みの設定。
 ///
-/// 全ての値が範囲内へ丸められており、そのまま使える。**全項目が全プロセスに
-/// 効く。** 予算の不等式は「ある plugin とある server の組」についての性質で
-/// あり、プロセスごとに違う値を持たせると静的にも動的にも保てない。
+/// 全ての値が範囲内へ丸められており、そのまま使える。予算の不等式は「ある
+/// plugin とある server の組」についての性質であり、プロセスごとに違う値を
+/// 持たせると静的にも動的にも保てない。
+///
+/// # 片側だけが読む項目がある
+///
+/// **[`Settings::agent_plugin`] だけは plugin しか読まない。** 他の項目は全て
+/// 全プロセスに効くが、agent plugin の生成は plugin の仕事であり、server は
+/// この項目を素通りする。取り出し口をここに置いてあるのは、設定ファイルの
+/// 解決手続きを 2 つに割らないためである——読む側が 1 つしか居ないことは、
+/// 解決の場所を分ける理由にならない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     log_level: Option<String>,
@@ -254,6 +311,7 @@ pub struct Settings {
     handoff_ttl: Duration,
     render_drain_timeout: Duration,
     session_stale_after: Duration,
+    agent_plugin: AgentPluginSettings,
 }
 
 impl Default for Settings {
@@ -268,6 +326,7 @@ impl Default for Settings {
             handoff_ttl: Duration::from_secs(DEFAULT_HANDOFF_TTL_SECONDS),
             render_drain_timeout: Duration::from_millis(DEFAULT_RENDER_DRAIN_TIMEOUT_MS),
             session_stale_after: Duration::from_secs(DEFAULT_SESSION_STALE_AFTER_SECONDS),
+            agent_plugin: AgentPluginSettings::default(),
         }
     }
 }
@@ -335,6 +394,13 @@ impl Settings {
     pub fn session_stale_after(&self) -> Duration {
         self.session_stale_after
     }
+
+    /// agent plugin の生成に関する切り替え。
+    ///
+    /// **読むのは plugin だけである。** server はこの項目を素通りする。
+    pub fn agent_plugin(&self) -> AgentPluginSettings {
+        self.agent_plugin
+    }
 }
 
 /// 設定画面が保持する変更点。
@@ -362,6 +428,14 @@ pub struct SettingsChange {
     pub render_drain_timeout_ms: Option<u64>,
     /// 放置された session ディレクトリとみなす古さ（秒）。
     pub session_stale_after_seconds: Option<u64>,
+    /// agent plugin を生成するかどうか。
+    pub agent_plugin_generate: Option<bool>,
+    /// Claude Code 方言を生成するかどうか。
+    pub agent_plugin_claude: Option<bool>,
+    /// agent-plugins.org 方言を生成するかどうか。
+    pub agent_plugin_agent_plugins: Option<bool>,
+    /// skill を生成するかどうか。
+    pub agent_plugin_skill: Option<bool>,
 }
 
 impl SettingsChange {
@@ -472,6 +546,18 @@ impl SettingsDocument {
             FIELD_STALE_AFTER_SECONDS,
             change.session_stale_after_seconds,
         );
+        self.set_group_flag(
+            FIELD_AGENT_PLUGIN,
+            FIELD_GENERATE,
+            change.agent_plugin_generate,
+        );
+        self.set_group_flag(FIELD_AGENT_PLUGIN, FIELD_CLAUDE, change.agent_plugin_claude);
+        self.set_group_flag(
+            FIELD_AGENT_PLUGIN,
+            FIELD_AGENT_PLUGINS,
+            change.agent_plugin_agent_plugins,
+        );
+        self.set_group_flag(FIELD_AGENT_PLUGIN, FIELD_SKILL, change.agent_plugin_skill);
     }
 
     /// 直前の設定を土台に、書かれている内容を解決する。
@@ -574,11 +660,28 @@ impl SettingsDocument {
             handoff_ttl: Duration::from_secs(handoff_ttl),
             render_drain_timeout: Duration::from_millis(render_drain_timeout_ms),
             session_stale_after: Duration::from_secs(session_stale_after),
+            agent_plugin: self.agent_plugin(&mut issues),
         };
         (settings, issues)
     }
 
+    /// 群 object の数値の項目を書く。
     fn set_group_field(&mut self, group: &str, field: &str, value: Option<u64>) {
+        self.set_group_value(group, field, value.map(Value::from));
+    }
+
+    /// 群 object の真偽値の項目を書く。
+    ///
+    /// **数値と別の口にしてあるのは、変更点の型をそのまま持ち込ませないため
+    /// である。** 群へ書ける値の種類は書き手の側で決まっており、`Value` を直に
+    /// 受ける口を公開すると、解決側が読める形かどうかを呼び出し元が判断する
+    /// ことになる。
+    fn set_group_flag(&mut self, group: &str, field: &str, value: Option<bool>) {
+        self.set_group_value(group, field, value.map(Value::from));
+    }
+
+    /// 群 object の項目を書く。群が無い、または群が object でなければ作り直す。
+    fn set_group_value(&mut self, group: &str, field: &str, value: Option<Value>) {
         let Some(value) = value else {
             return;
         };
@@ -590,7 +693,7 @@ impl SettingsDocument {
             *entry = Value::Object(Map::new());
         }
         if let Some(object) = entry.as_object_mut() {
-            object.insert(field.to_string(), Value::from(value));
+            object.insert(field.to_string(), value);
         }
     }
 
@@ -680,21 +783,10 @@ impl SettingsDocument {
             None => field.to_string(),
         };
         let value = match group {
-            Some(group) => match self.fields.get(group) {
-                None | Some(Value::Null) => None,
-                Some(Value::Object(object)) => object.get(field),
-                Some(_) => {
-                    // 群の型違いは群につき 1 回だけ記録する。**同じ群の項目を
-                    // 引くたびに積むと、同じ 1 行が項目の数だけ WARN に並ぶ。**
-                    let issue = SettingsIssue {
-                        field: group.to_string(),
-                        reason: SettingsIssueReason::TypeMismatch,
-                    };
-                    if !issues.contains(&issue) {
-                        issues.push(issue);
-                    }
-                    return default;
-                }
+            Some(group) => match self.group(group, issues) {
+                GroupLookup::Object(object) => object.get(field),
+                GroupLookup::Absent => None,
+                GroupLookup::NotAnObject => return default,
             },
             None => self.fields.get(field),
         };
@@ -720,6 +812,87 @@ impl SettingsDocument {
         }
         applied
     }
+
+    /// 群 object を引く。
+    ///
+    /// 群の型違いは群につき 1 回だけ記録する。**同じ群の項目を引くたびに積むと、
+    /// 同じ 1 行が項目の数だけ WARN に並ぶ。**
+    fn group(&self, group: &str, issues: &mut Vec<SettingsIssue>) -> GroupLookup<'_> {
+        match self.fields.get(group) {
+            None | Some(Value::Null) => GroupLookup::Absent,
+            Some(Value::Object(object)) => GroupLookup::Object(object),
+            Some(_) => {
+                let issue = SettingsIssue {
+                    field: group.to_string(),
+                    reason: SettingsIssueReason::TypeMismatch,
+                };
+                if !issues.contains(&issue) {
+                    issues.push(issue);
+                }
+                GroupLookup::NotAnObject
+            }
+        }
+    }
+
+    /// 群 object の真偽値の項目を、型を見て取り出す。
+    ///
+    /// 未記載なら既定値、型が違えば既定値と [`SettingsIssueReason::TypeMismatch`]。
+    /// **丸めが無いのが数値との違いである**——真偽値に境界は無く、範囲外の値も
+    /// 存在しない。
+    fn flag(
+        &self,
+        group: &str,
+        field: &str,
+        default: bool,
+        issues: &mut Vec<SettingsIssue>,
+    ) -> bool {
+        let value = match self.group(group, issues) {
+            GroupLookup::Object(object) => object.get(field),
+            GroupLookup::Absent | GroupLookup::NotAnObject => return default,
+        };
+        match value {
+            None | Some(Value::Null) => default,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => {
+                issues.push(SettingsIssue {
+                    field: format!("{group}.{field}"),
+                    reason: SettingsIssueReason::TypeMismatch,
+                });
+                default
+            }
+        }
+    }
+
+    /// agent plugin の切り替えを取り出す。
+    fn agent_plugin(&self, issues: &mut Vec<SettingsIssue>) -> AgentPluginSettings {
+        let defaults = AgentPluginSettings::default();
+        AgentPluginSettings {
+            generate: self.flag(
+                FIELD_AGENT_PLUGIN,
+                FIELD_GENERATE,
+                defaults.generate,
+                issues,
+            ),
+            claude: self.flag(FIELD_AGENT_PLUGIN, FIELD_CLAUDE, defaults.claude, issues),
+            agent_plugins: self.flag(
+                FIELD_AGENT_PLUGIN,
+                FIELD_AGENT_PLUGINS,
+                defaults.agent_plugins,
+                issues,
+            ),
+            skill: self.flag(FIELD_AGENT_PLUGIN, FIELD_SKILL, defaults.skill, issues),
+        }
+    }
+}
+
+/// 群 object を引いた結果。
+enum GroupLookup<'a> {
+    /// 群が object として在る。
+    Object(&'a Map<String, Value>),
+    /// 群が書かれていない。
+    Absent,
+    /// 群が object ではない。**記録は済んでいる。**
+    NotAnObject,
 }
 
 /// 設定ファイルの内容から作る印。

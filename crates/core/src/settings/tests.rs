@@ -637,6 +637,118 @@ fn the_settings_path_follows_the_environment_override_or_the_base_dir() {
 }
 
 #[test]
+fn the_agent_plugin_group_defaults_to_consent_off_and_the_rest_on() {
+    // off なのは同意だけである。内訳を全て真にしておくのは、`generate` を
+    // 1 か所立てれば動く一式がそのまま揃うようにするためである。
+    let (settings, issues) = resolve("{}");
+    assert!(issues.is_empty(), "{issues:?}");
+    assert_eq!(
+        settings.agent_plugin(),
+        AgentPluginSettings {
+            generate: false,
+            claude: true,
+            agent_plugins: true,
+            skill: true,
+        }
+    );
+}
+
+#[test]
+fn the_agent_plugin_flags_round_trip_through_the_document() {
+    let text = r#"{
+        "schema_version": 1,
+        "agent_plugin": {
+            "generate": true,
+            "claude": false,
+            "agent_plugins": true,
+            "skill": false
+        }
+    }"#;
+    let parsed = document(text);
+    let reparsed = SettingsDocument::parse(&parsed.to_json()).unwrap();
+    assert_eq!(parsed, reparsed);
+
+    let (settings, issues) = reparsed.resolve(&Settings::default());
+    assert!(issues.is_empty(), "{issues:?}");
+    assert_eq!(
+        settings.agent_plugin(),
+        AgentPluginSettings {
+            generate: true,
+            claude: false,
+            agent_plugins: true,
+            skill: false,
+        }
+    );
+}
+
+#[test]
+fn dropping_the_consent_keeps_the_breakdown_in_the_file() {
+    // **同意を戻したときに前の選択が残る。** `generate` を倒すたびに内訳が
+    // 既定へ戻ると、opt-in の撤回が設定の作り直しになる。
+    let mut parsed = document(r#"{"schema_version":1}"#);
+    parsed.apply(&SettingsChange {
+        agent_plugin_generate: Some(true),
+        agent_plugin_claude: Some(false),
+        agent_plugin_skill: Some(false),
+        ..SettingsChange::default()
+    });
+    parsed.apply(&SettingsChange {
+        agent_plugin_generate: Some(false),
+        ..SettingsChange::default()
+    });
+
+    let written = parsed.to_json();
+    let (settings, issues) = SettingsDocument::parse(&written)
+        .unwrap()
+        .resolve(&Settings::default());
+    assert!(issues.is_empty(), "{issues:?}");
+    assert_eq!(
+        settings.agent_plugin(),
+        AgentPluginSettings {
+            generate: false,
+            claude: false,
+            agent_plugins: true,
+            skill: false,
+        },
+        "同意を倒したときに内訳の値が失われました: {written}"
+    );
+}
+
+#[test]
+fn an_agent_plugin_flag_with_the_wrong_type_falls_back_alone() {
+    let (settings, issues) = resolve(r#"{"agent_plugin":{"generate":"yes","skill":false}}"#);
+
+    assert_eq!(
+        issues,
+        vec![SettingsIssue {
+            field: "agent_plugin.generate".to_string(),
+            reason: SettingsIssueReason::TypeMismatch,
+        }]
+    );
+    assert!(!settings.agent_plugin().generate);
+    assert!(
+        !settings.agent_plugin().skill,
+        "同じ群の他の項目が消えました"
+    );
+    assert!(settings.agent_plugin().claude);
+}
+
+#[test]
+fn an_agent_plugin_group_with_the_wrong_type_is_reported_once() {
+    let (settings, issues) = resolve(r#"{"agent_plugin":42}"#);
+
+    assert_eq!(
+        issues,
+        vec![SettingsIssue {
+            field: "agent_plugin".to_string(),
+            reason: SettingsIssueReason::TypeMismatch,
+        }],
+        "群の型違いが項目の数だけ積まれました"
+    );
+    assert_eq!(settings.agent_plugin(), AgentPluginSettings::default());
+}
+
+#[test]
 fn the_schema_version_stays_at_one() {
     // 版を上げるのは既存フィールドの意味が変わるときだけである。
     assert_eq!(SETTINGS_SCHEMA_VERSION, 1);
