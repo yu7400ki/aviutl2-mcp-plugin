@@ -3351,6 +3351,234 @@ mod tests {
         }
     }
 
+    /// 層 1 から落とした反復句の行き先。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Destination {
+        /// 入力 schema。共有の入力型か、値を書くフィールドの隣が持つ。
+        InputSchema,
+        /// skill。**まだ存在しない。**
+        Skill,
+    }
+
+    /// 層 1 から落とした反復句 1 件。
+    struct Relocation {
+        /// 層 1 が述べていた事実。**skill が受け取る行では、これが書く内容である。**
+        statement: &'static str,
+        /// 層 1 で同じことを述べていた tool の数。
+        was_stated_by: usize,
+        /// 層 1 から消えたことを確かめる句。
+        dropped: &'static [&'static str],
+        /// 行き先。
+        to: Destination,
+        /// 行き先で述べる句。
+        lands_as: &'static str,
+        /// 入力 schema へ移した句が届く tool の最小数。
+        reaches: usize,
+    }
+
+    /// 層 1 から落とした反復句と、その行き先。
+    ///
+    /// **「落とした」と「消えた」を区別する唯一の表である。** 各行について、
+    /// 句が tool の説明から消えていることと、行き先に在ることを確かめる。
+    ///
+    /// [`Destination::Skill`] の行は skill が受け取る。**skill はまだ無いため、
+    /// いま確かめられるのは層 1 から消えたことだけである。** skill を書く作業は
+    /// この表を入力に取り、`statement` が本文に在ることを検査する。
+    /// 併せて持ち越す検査は [`CHECKS_HANDED_TO_THE_SKILL`] にある。
+    const RELOCATED_CONVENTIONS: &[Relocation] = &[
+        Relocation {
+            statement: "frame 番号と layer 番号はいずれも 0 始まりであり、UI の表示とは 1 ずれる",
+            was_stated_by: 25,
+            dropped: &[
+                "番号はいずれも 0 始まり",
+                "layer 番号は 0 始まり",
+                "frame 番号は 0 始まり",
+            ],
+            to: Destination::InputSchema,
+            lands_as: "0 始まり",
+            reaches: 15,
+        },
+        Relocation {
+            statement: "応答が返した selector は組み立て直さず、読み直さずにそのまま次の要求へ渡せる",
+            was_stated_by: 12,
+            dropped: &["読み直さずにそのまま次の編集へ渡せる"],
+            to: Destination::InputSchema,
+            lands_as: "読み直さずにそのまま次の要求へ渡せる",
+            reaches: 14,
+        },
+        Relocation {
+            statement: "プロジェクトの世代は selector が運ぶ project_epoch で照合する",
+            was_stated_by: 11,
+            dropped: &["selector が運ぶ project_epoch"],
+            to: Destination::InputSchema,
+            lands_as: "プロジェクトの世代はこの値で照合",
+            reaches: 14,
+        },
+        Relocation {
+            statement: "対象が変化していた precondition_failed の details.current_object は、\
+                        読み直さずにそのまま次の要求の selector にできる",
+            was_stated_by: 11,
+            dropped: &["details.current_object"],
+            to: Destination::InputSchema,
+            lands_as: "details.current_object",
+            reaches: 11,
+        },
+        Relocation {
+            statement: "offset と limit（1〜200、既定 50）でページを指定し、\
+                        2 ページ目以降は先頭ページが返した snapshot_revision を添える",
+            was_stated_by: 11,
+            dropped: &["offset と limit（1〜200、既定 50）"],
+            to: Destination::InputSchema,
+            lands_as: "1 以上 200 以下",
+            reaches: 9,
+        },
+        Relocation {
+            statement: "カタログ列挙の snapshot_revision は受理されるが照合には用いない",
+            was_stated_by: 5,
+            dropped: &["snapshot_revision は受理するがページ間の照合には用いない"],
+            to: Destination::InputSchema,
+            lands_as: "受理するがページ間の照合に用いない",
+            reaches: 5,
+        },
+        Relocation {
+            statement: "要求は project_revision を運ばない。\
+                        読み取りから編集までに revision が進んでいても拒否されない",
+            was_stated_by: 16,
+            dropped: &["project_revision を運ばない"],
+            to: Destination::Skill,
+            lands_as: "project_revision を運ばない",
+            reaches: 0,
+        },
+        Relocation {
+            statement: "編集 tool の呼び出し 1 回が 1 つの取り消し単位になる。\
+                        まとめて 1 単位にしたいときは apply_batch を選ぶ",
+            was_stated_by: 12,
+            dropped: &["この呼び出し 1 回が 1 つの取り消し単位になる"],
+            to: Destination::Skill,
+            lands_as: "1 つの取り消し単位",
+            reaches: 0,
+        },
+        Relocation {
+            statement: "timeout は変更が無かったことを意味しない。\
+                        details.change_applied が \"no\" なら未適用のため再送してよく、\
+                        \"unknown\" なら読み直して確認してから再送する",
+            was_stated_by: 16,
+            dropped: &["details.change_applied"],
+            to: Destination::Skill,
+            lands_as: "details.change_applied",
+            reaches: 0,
+        },
+    ];
+
+    /// 層 3 が受け取る検査 1 件。
+    struct HandedCheck {
+        /// 層 1 を見ていた検査の名前。
+        was: &'static str,
+        /// その検査が確かめていたこと。
+        checked: &'static str,
+        /// skill 側で何を確かめる形になるか。
+        becomes: &'static str,
+    }
+
+    /// 層 3 へ持ち越す検査。
+    ///
+    /// **削除ではない。** いずれも「説明が嘘をつかないこと」を守っていた検査で
+    /// あり、句を動かすなら検査も動かす。skill を書く作業はこの表を入力に取る。
+    const CHECKS_HANDED_TO_THE_SKILL: &[HandedCheck] = &[
+        HandedCheck {
+            was: "edit_tool_descriptions_admit_that_the_revision_is_not_part_of_the_request",
+            checked: "編集 tool すべての説明が「要求は project_revision を運ばない」と述べること",
+            becomes: "SKILL.md の本文が同じことを 1 度述べること",
+        },
+        HandedCheck {
+            was: "edit_tool_descriptions_state_the_undo_boundary の OneUnit の分岐",
+            checked: "10 tool の説明が「この呼び出し 1 回が 1 つの取り消し単位になる」と述べること",
+            becomes: "SKILL.md が一般則を 1 度述べ、例外（set_selection は単位を作らない、\
+                      set_scene_settings は取り消せない）と、取り消し単位を作るか確かめて\
+                      いない 4 tool（中間点の 3 つと set_grid_bpm）を併せて名指しすること。\
+                      層 1 に残る表明は [`undo_statement`] が持つ",
+        },
+        HandedCheck {
+            was: "edit_tool_descriptions_state_what_costs_the_caller_if_assumed_wrong の \
+                  change_applied と unknown の分岐",
+            checked: "編集 tool すべての説明が details.change_applied の 3 値の読み方を述べること",
+            becomes: "SKILL.md が timeout を受けた後の手順を 1 度述べること。\
+                      値そのものは失敗の text content へ出るため、書くのは読み方だけでよい",
+        },
+    ];
+
+    #[test]
+    fn the_phrases_dropped_from_the_tool_descriptions_live_in_another_layer() {
+        // **「落とした」と「消えた」を区別する唯一の検査である。**
+        // 層 1 から句が消えたことだけを見ると、どこにも無い状態が通ってしまう。
+        let descriptions: Vec<(String, String)> = tools()
+            .into_iter()
+            .map(|tool| (tool.name.to_string(), description_of(&tool.name)))
+            .collect();
+        let schemas: Vec<(String, String)> = tools()
+            .into_iter()
+            .map(|tool| {
+                (
+                    tool.name.to_string(),
+                    Value::Object(tool.input_schema.as_ref().clone()).to_string(),
+                )
+            })
+            .collect();
+
+        for relocation in RELOCATED_CONVENTIONS {
+            assert!(
+                relocation.was_stated_by > 1,
+                "1 tool でしか述べていない事実は反復句ではありません: {}",
+                relocation.statement
+            );
+            for phrase in relocation.dropped {
+                for (name, description) in &descriptions {
+                    assert!(
+                        !description.contains(phrase),
+                        "{name} の説明が層 1 から落とした句を残しています: {phrase}"
+                    );
+                }
+            }
+            match relocation.to {
+                Destination::InputSchema => {
+                    let reached = schemas
+                        .iter()
+                        .filter(|(_, schema)| schema.contains(relocation.lands_as))
+                        .count();
+                    assert!(
+                        reached >= relocation.reaches,
+                        "{} が入力 schema で {} tool にしか届いていません（{} 以上を期待）",
+                        relocation.statement,
+                        reached,
+                        relocation.reaches
+                    );
+                }
+                Destination::Skill => {
+                    // skill はまだ無い。**行き先が決まっていることと、書く内容が
+                    // 残っていることだけを固定する。** skill を書く作業がこの表を
+                    // 読み、本文に対して同じ検査を掛ける。
+                    assert!(
+                        !relocation.statement.is_empty() && !relocation.lands_as.is_empty(),
+                        "skill が受け取る内容が空です"
+                    );
+                }
+            }
+        }
+
+        assert!(
+            RELOCATED_CONVENTIONS
+                .iter()
+                .any(|relocation| relocation.to == Destination::Skill),
+            "skill が受け取る行が 1 つもありません"
+        );
+        for check in CHECKS_HANDED_TO_THE_SKILL {
+            assert!(
+                !check.was.is_empty() && !check.checked.is_empty() && !check.becomes.is_empty(),
+                "持ち越す検査の記録が欠けています"
+            );
+        }
+    }
+
     #[test]
     fn creation_tools_name_the_guard_that_actually_stops_a_resend() {
         // revision を照合しない以上、再送を止めるのは宛先の重複確認と対象の
