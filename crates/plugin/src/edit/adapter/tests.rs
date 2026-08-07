@@ -2047,11 +2047,12 @@ fn a_successful_write_reads_the_value_back_exactly_once() {
 }
 
 #[test]
-fn only_a_scalar_written_to_a_trackbar_is_read_before_the_write() {
-    // 移動の有無は設定値の生文字列にしか現れないため、移動を持ち得る種別へ
-    // 数値を書くときだけ、書き込みの前に 1 回読む。**移動を書く要求では読ま
-    // ない**——現在値によらず通るためであり、アニメーションを作る経路に追加の
-    // 呼び出しは無い。移動を持ち得ない種別でも読まない。
+fn a_verified_write_reads_the_value_once_before_the_write() {
+    // **書き込みの前に読むのは巻き戻しの材料である。** 照合が落ちたときに
+    // 書き戻す生文字列は、発行してしまえば失われる。したがって組み合わせに
+    // よらず 1 回読む——移動の事前確認が要らない要求（移動を書く要求、移動を
+    // 持ち得ない種別）でも読む。移動の有無の判定は同じ文字列を使うため、
+    // 読み取りが 2 回になることはない。
     let cases: [(&str, ItemValue, usize); 3] = [
         (
             STATIC_ITEM,
@@ -2060,14 +2061,14 @@ fn only_a_scalar_written_to_a_trackbar_is_read_before_the_write() {
             },
             1,
         ),
-        (STATIC_ITEM, movement(&[0.0, 50.0, 100.0], "直線移動"), 0),
+        (STATIC_ITEM, movement(&[0.0, 50.0, 100.0], "直線移動"), 1),
         (
             // 移動を持ち得ない種別の代表。選択肢の effect が持つ。
             "メモ",
             ItemValue::Text {
                 value: "覚書".to_string(),
             },
-            0,
+            1,
         ),
     ];
     for (item, value, expected) in cases {
@@ -2858,16 +2859,12 @@ fn a_choice_value_the_host_accepts_succeeds() {
             },
             "{item}"
         );
+        let calls = harness.host.calls();
+        let first = first_mutation(&calls).expect("変更 API が呼ばれていません");
         assert_eq!(
-            harness
-                .host
-                .calls()
-                .iter()
-                .filter(|call| **call == ITEM_VALUE)
-                .count(),
+            count(&calls[first..], ITEM_VALUE),
             1,
-            "{item} の照合の読み直しは 1 回だけです: {:?}",
-            harness.host.calls()
+            "{item} の照合の読み直しは 1 回だけです: {calls:?}"
         );
     }
 }

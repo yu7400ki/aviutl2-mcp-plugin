@@ -27,7 +27,7 @@ use aviutl2_mcp_core::{
     ModuleType, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, TrackInfo, TrackValue,
     decode_host_text, decode_track_value, encode_host_text,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -94,6 +94,14 @@ pub(crate) enum Fault {
     ///
     /// 逆操作の材料が揃わない状況を作る。
     ItemValueUnreadable,
+    /// 設定項目への 2 回目以降の書き込みを無言で無視する。
+    ///
+    /// **戻す書き込みだけが効かない状況を作る。** 単独の書き込みは、前向きの
+    /// 書き込みが 1 回目、巻き戻しが 2 回目である。ホストが失敗を返さないまま
+    /// 元へ戻らない経路は、書き込み API の戻り値では観測できない。
+    ///
+    /// 数えるのは編集区間ごとであり、要求をまたいで積み上がらない。
+    IgnoreItemRestore,
     /// 中間点の変更 API が理由を伝えずに拒否する。
     ///
     /// 事前確認を通ったのに `false` が返る状況を作る。
@@ -780,6 +788,7 @@ impl EditHost for FakeEditHost {
             host: self,
             objects: RefCell::new(Vec::new()),
             effects: RefCell::new(Vec::new()),
+            item_writes: Cell::new(0),
         };
         // クロージャから漏れた巻き戻しを記録してから伝え直す。実際の SDK では
         // ここが C の関数ポインタ境界であり、漏れた時点でプロセスが落ちる。
@@ -906,6 +915,7 @@ impl ReadHost for FakeReadHost {
             host: &self.0,
             objects: RefCell::new(Vec::new()),
             effects: RefCell::new(Vec::new()),
+            item_writes: Cell::new(0),
         };
         Ok(f(&editor))
     }
@@ -919,6 +929,11 @@ struct FakeSceneEditor<'a> {
     host: &'a FakeEditHost,
     objects: RefCell<Vec<usize>>,
     effects: RefCell<Vec<(usize, usize)>>,
+    /// この区間で設定項目へ書き込んだ回数。
+    ///
+    /// [`Fault::IgnoreItemRestore`] が「戻す書き込み」を見分ける唯一の手掛かり
+    /// である。区間ごとに数えるため、要求をまたいで積み上がらない。
+    item_writes: Cell<usize>,
 }
 
 impl FakeSceneEditor<'_> {
@@ -1697,6 +1712,14 @@ impl SceneEditor for FakeSceneEditor<'_> {
             .lock()
             .unwrap()
             .push(value.to_string());
+        let writes = self.item_writes.get();
+        self.item_writes.set(writes + 1);
+        // 2 回目以降の書き込みだけが効かない。発行そのものは成功として返す——
+        // ホストは書き込みの成否を返さないため、効かなかったことは読み直して
+        // からでないと分からない。
+        if writes > 0 && self.host.knobs().fault == Some(Fault::IgnoreItemRestore) {
+            return Ok(());
+        }
         let item = item.to_string();
         let value = value.to_string();
         // フォント名の妥当性は登録済みの一覧で決まる。種別だけでは書き換えの

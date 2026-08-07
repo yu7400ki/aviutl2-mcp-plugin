@@ -15,7 +15,9 @@
 use crate::alias::AdmittedAlias;
 use crate::edit::EditAdapter;
 use crate::edit::batch;
-use crate::edit::error::{EditError, OccupiedRange, SectionPreconditionReason, UnsupportedReason};
+use crate::edit::error::{
+    EditError, ItemRestore, OccupiedRange, SectionPreconditionReason, UnsupportedReason,
+};
 use crate::edit::host::{EditHost, HostSelection, SceneEditor};
 use crate::edit::precondition::{
     Boundary, EditKind, ExpectedEpoch, MutationPermit, MutationTicket, verify_boundary,
@@ -36,8 +38,8 @@ use aviutl2_mcp_core::{
     ObjectSelector, ObjectSource, ObjectSummary, ObservedSelection, RangeChange, ReadBackCheck,
     SceneSettingsOutcome, SectionRange, SelectionField, SelectionState, SetEffectEnabledParams,
     SetGridBpmParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSceneSettingsParams, SetSelectionParams, TrackWriteTarget,
-    movement_check_reads_current_value, prepare_item_write, write_drops_existing_movement,
+    SetSceneSettingsParams, SetSelectionParams, TrackWriteTarget, prepare_item_write,
+    write_drops_existing_movement,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -477,7 +479,15 @@ pub(crate) fn verify_written_item(
     if write.read_back_matches(&observed) == Some(true) {
         return Ok(());
     }
-    Err(permit.attribute(boundary, EditError::ItemValueNotApplied { observed }))
+    // 巻き戻しはこの関数の外で行う。一括適用も同じ判定を通るが、あちらは要求
+    // 全体の巻き戻し計画を別に持つ。
+    Err(permit.attribute(
+        boundary,
+        EditError::ItemValueNotApplied {
+            observed,
+            restore: ItemRestore::NotAttempted,
+        },
+    ))
 }
 
 /// 変更後の対象から、指定位置の effect 情報を読み直す。
@@ -648,37 +658,104 @@ pub(crate) fn ensure_movement_write(
     }
 }
 
-/// 対象の現在値を読み直したうえで [`ensure_movement_write`] を掛ける。
+/// 書き込みを発行する前に、対象がいま持つ生文字列を 1 回だけ読む。
 ///
-/// **現在値は項目名で 1 つだけ読む**（[`SceneEditor::effect_item_value`]）。
-/// 移動の有無は設定値の生文字列にしか現れないため、対象を読まずに判定する手段が
-/// 無い。設定項目の一覧へ移動の有無を載せる形も採れるが、そちらは effect が
-/// 公開する項目の数だけ問い合わせることになる——1 件を書くために全項目の現状を
-/// 読むのは、要る情報の量と釣り合わない。
+/// **読むのは照合する種別だけである**（[`ReadBackCheck::Compare`]）。この値の
+/// 用途は 2 つあり、どちらも照合する種別でしか要らない。
 ///
-/// **読むのは、移動を持ち得る種別へ移動を含まない値を書くときだけである**
-/// （[`movement_check_reads_current_value`]）。移動を書く要求は現在値によらず
-/// 通るため読まない——**アニメーションを作る経路に追加の呼び出しは無い。**
+/// - **巻き戻しの材料。** 書き込み検証が落ちたときに書き戻す文字列である。
+///   照合しない種別は検証が落ちる契機を持たないため、戻す場面が生じない
+/// - **移動の事前確認**（[`ensure_movement_write`]）。移動を持ち得る種別は
+///   いずれも照合する側にある
 ///
-/// **一括適用はこの関数を通らない。** 逆操作の材料として同じ値を既に読んで
-/// いるため、読み直さずに [`ensure_movement_write`] だけを呼ぶ。sub-operation
-/// あたりの費用は 1 件も増えない。
-fn ensure_movement_write_now(
+/// [`verify_written_item`] は「費用は照合の有無と一致する」と宣言している。
+/// 書き込みの前の読み取りも同じ規則へ揃える。**現に到達し得る書き込みは
+/// すべて照合する**——書き込みを公開していない種別は書き込む文字列の組み立てが
+/// 先に拒み、[`ReadBackCheck::Declared`] を持つ [`ItemWrite`] は生まれない。
+/// 狭めても実際に読まなくなる書き込みは無く、宣言だけが保たれる。
+///
+/// **移動の事前確認と巻き戻しの材料は同じ値である。** 対象がいまどの移動を
+/// 持つかも、書き戻す文字列も、ホストが返すこの 1 つの文字列にしか現れない。
+/// 2 度読まない。
+///
+/// **符号化を挟まない。** [`ItemValue`] へ解釈してから書き戻す形にすると、
+/// 解釈できない値を戻せなくなる。ホスト自身が直前に返した文字列である以上、
+/// 書式も移動方法の名前も必ず妥当であり、不正な移動方法名でホストを落とす
+/// 経路へも入らない。
+fn read_before_write(
     editor: &dyn SceneEditor,
     effect: &ResolvedEffect<'_>,
-    items: &[AvailableEffectItem],
     item: &str,
-    value: &ItemValue,
-) -> Result<(), EditError> {
-    let reads = items
-        .iter()
-        .find(|entry| entry.name == item)
-        .is_some_and(|entry| movement_check_reads_current_value(&entry.item_type, value));
-    if !reads {
-        return Ok(());
+    write: &ItemWrite,
+) -> Result<Option<String>, EditError> {
+    let ReadBackCheck::Compare(_) = write.read_back() else {
+        return Ok(None);
+    };
+    editor.effect_item_value(effect, item).map(Some)
+}
+
+/// 書き込み検証が落ちたとき、対象を書き込み前の値へ戻してから失敗を返す。
+///
+/// **[`verify_written_item`] の内側へは入れない。** 一括適用も同じ関数を通るが、
+/// あちらは要求全体の巻き戻し計画を別に持ち、逆操作の材料も戻す順序もそちらが
+/// 握っている。sub-operation ごとにここで戻せば、同じ書き込みを 2 度戻すことに
+/// なる。
+///
+/// 戻す書き込みを発行するかは、**書き込み前の値と読み直した値の比較**で決まる。
+/// 同じならホストは何も変えておらず（選択肢に無い値・未登録のフォント名・書式の
+/// 合わない色がこれにあたる）、戻すものが無い。**階級に名前は与えない**——
+/// 要求元が取る行動はどちらでも変わり、変わるのは我々が発行する書き込みの数
+/// だけである。
+fn restore_after_failed_verification(
+    editor: &dyn SceneEditor,
+    permit: &MutationPermit<'_>,
+    boundary: &Boundary,
+    effect: &ResolvedEffect<'_>,
+    item: &str,
+    origin: Option<&str>,
+    error: EditError,
+) -> EditError {
+    let observed = error.observed_item_value().map(str::to_string);
+    // 書き込み検証以外の失敗と、照合しない種別はここへ来ない。後者は検証が
+    // 落ちる契機を持たず、書き込みの前の読み取りも行っていない。
+    let (Some(observed), Some(origin)) = (observed, origin) else {
+        return error;
+    };
+    let restore = match observed == origin {
+        true => ItemRestore::Restored,
+        false => restore_item_value(editor, permit, boundary, effect, item, origin),
+    };
+    error.with_item_restore(restore)
+}
+
+/// 書き込み前の生文字列を書き戻し、戻せたことを読み直して確かめる。
+///
+/// **発行は同じ [`MutationPermit`] で行う。** 最初の発行で確定した revision が
+/// そのまま応答へ載るため、巻き戻しを挟んでも 1 要求が進める revision は高々 1
+/// である。
+///
+/// **「書き込み API が真を返した」を成功と読まない。** ホストは書き込みの成否を
+/// 返さず、返った真は要求した値が入ったことを示さない。読み直して元の文字列と
+/// 一致することだけが、戻せたことの根拠である。
+fn restore_item_value(
+    editor: &dyn SceneEditor,
+    permit: &MutationPermit<'_>,
+    boundary: &Boundary,
+    effect: &ResolvedEffect<'_>,
+    item: &str,
+    origin: &str,
+) -> ItemRestore {
+    let restored = permit
+        .issue(boundary, |ticket| {
+            editor.set_effect_item(ticket, effect, item, origin)
+        })
+        .and_then(|()| editor.effect_item_value(effect, item))
+        .is_ok_and(|current| current == origin);
+    if restored {
+        return ItemRestore::Restored;
     }
-    let current = editor.effect_item_value(effect, item)?;
-    ensure_movement_write(items, item, value, &current)
+    tracing::warn!(item, "書き込み検証に落ちた設定値を元へ戻せませんでした");
+    ItemRestore::Failed
 }
 
 /// 列挙に現れない設定項目名を、値が読めるかどうかで分ける。
@@ -1020,15 +1097,33 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 }
                 Err(error) => return Err(EditError::ItemWrite(error)),
             };
+            // 巻き戻しの材料を、書き込みを発行する前に読む。
+            let origin_value = read_before_write(editor, &effect, &params.item, &write)?;
             // 書き込みを発行する前に確かめる。発行してしまえば、消えた移動を
-            // 復元する手段がこちら側に無い。
-            ensure_movement_write_now(editor, &effect, &items, &params.item, &params.value)?;
+            // 復元する手段がこちら側に無い。**事前に断れる失敗を事後の巻き戻し
+            // へ落とさない**——巻き戻しは失敗し得るが、発行しないことは失敗
+            // しない。
+            if let Some(current) = &origin_value {
+                ensure_movement_write(&items, &params.item, &params.value, current)?;
+            }
 
             let permit = boundary.issue_permit(project)?;
             permit.issue(&boundary, |ticket| {
                 editor.set_effect_item(ticket, &effect, &params.item, write.value())
             })?;
-            verify_written_item(editor, &permit, &boundary, &effect, &params.item, &write)?;
+            if let Err(error) =
+                verify_written_item(editor, &permit, &boundary, &effect, &params.item, &write)
+            {
+                return Err(restore_after_failed_verification(
+                    editor,
+                    &permit,
+                    &boundary,
+                    &effect,
+                    &params.item,
+                    origin_value.as_deref(),
+                    error,
+                ));
+            }
 
             // 照合を通った値を、種別に応じた形へ解釈し直して応答へ載せる。表記は
             // ホストが整えたものであり、要求した値そのものである。
