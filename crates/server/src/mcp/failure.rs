@@ -943,6 +943,71 @@ mod tests {
     }
 
     #[test]
+    fn the_next_step_is_placed_after_every_value_line_and_outlives_their_budget() {
+        // 案内は「次に何をするか」を述べる手順であり、値の行は key の数だけ並ぶ
+        // 可変長である。手順を末尾へ固定しないと、読み手は行数を数えないと
+        // 次の一手を見つけられない。
+        let error = ErrorObject::new(ErrorCode::PreconditionFailed, "レイヤーがロック", true)
+            .with_details(serde_json::json!({
+                "reason": "layer_locked",
+                "layer": 3,
+                "zulu": "昇順で最後に並ぶ値",
+            }));
+        let ordered = text(&error);
+        let last_value = ordered.rfind("\ndetails.").expect("値の行が出ていません");
+        let next_step = ordered
+            .find(LAYER_LOCKED_GUIDANCE)
+            .expect("案内の行が出ていません");
+        assert!(
+            next_step > last_value,
+            "案内が値より前にあります: {ordered}"
+        );
+
+        // 値の行と案内の行は別々の予算を持つ。値が上限で落ちても手順は落ちない
+        // ——手順を失うと、要求元には失敗したという事実しか残らない。
+        //
+        // 値の行で予算をちょうど使い切る。余りを残すと、案内を値と同じ予算から
+        // 支払う実装でもその余りに収まってしまい、別々であることを見られない。
+        const LINE_CHARS: usize = 50;
+        const VALUE_CHARS: usize = LINE_CHARS - "details.filler_00=\"\"".len();
+        let kept = MAX_DETAIL_TEXT_CHARS / LINE_CHARS;
+        assert_eq!(
+            MAX_DETAIL_TEXT_CHARS % LINE_CHARS,
+            0,
+            "予算を割り切る行長でないと余りが残る"
+        );
+
+        let mut details = Map::new();
+        for index in 0..kept + 20 {
+            details.insert(
+                format!("filler_{index:02}"),
+                Value::String("x".repeat(VALUE_CHARS)),
+            );
+        }
+        details.insert("reason".to_string(), serde_json::json!("layer_locked"));
+        let crowded = text(
+            &ErrorObject::new(ErrorCode::PreconditionFailed, "レイヤーがロック", true)
+                .with_details(Value::Object(details)),
+        );
+        assert!(
+            crowded.contains("details のうち"),
+            "省略が起きていません: {crowded}"
+        );
+        let used: usize = crowded
+            .lines()
+            .filter(|line| line.starts_with("details."))
+            .map(|line| line.chars().count())
+            .sum();
+        assert_eq!(used, MAX_DETAIL_TEXT_CHARS, "予算に余りが残っています");
+        // 引き金になった値の行そのものが落ちてもなお案内は残る。
+        assert!(
+            !crowded.contains(r#"details.reason="layer_locked""#),
+            "{crowded}"
+        );
+        assert!(crowded.contains(LAYER_LOCKED_GUIDANCE), "{crowded}");
+    }
+
+    #[test]
     fn details_that_are_not_an_object_produce_no_lines() {
         // 補助情報は自由な形の値であり、object とは限らない。key を持たない
         // 値へ `details.` の行を作らない。
