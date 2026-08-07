@@ -2,6 +2,8 @@ use super::*;
 use aviutl2_mcp_core::settings::{SettingsDocument, SettingsIssue};
 use aviutl2_mcp_core::tool::{ALWAYS_ENABLED_TOOL, all_tool_names};
 use std::collections::BTreeSet;
+use win32_ui::widget::Widget;
+use windows::Win32::UI::WindowsAndMessaging::BN_CLICKED;
 
 /// JSON から設定を解決する。丸めが起きた場合は試験の前提が崩れているため落とす。
 fn settings_from(json: &str) -> Settings {
@@ -489,4 +491,157 @@ fn the_labels_carry_the_unit_and_the_range() {
         assert!(label.contains(&min.to_string()), "{label}");
         assert!(label.contains(&max.to_string()), "{label}");
     }
+}
+
+/// 「エージェントプラグイン」ページの切り替えを引く。
+fn agent_plugin(form: &SettingsForm, toggle: AgentPluginToggle) -> &AgentPluginInput {
+    form.agent_plugin()
+        .iter()
+        .find(|input| input.toggle() == toggle)
+        .expect("切り替えが画面にありません")
+}
+
+/// 既定では同意だけが off で、内訳は立っていること。
+///
+/// **off なのは同意だけである。** 内訳まで倒しておくと、`generate` を立てても
+/// 何も生成されず、opt-in が「設定を作らせる」作業になる。
+#[test]
+fn the_agent_plugin_page_starts_with_the_consent_off_and_the_rest_on() {
+    let form = SettingsForm::new(&Settings::default());
+
+    assert!(
+        !agent_plugin(&form, AgentPluginToggle::Generate)
+            .control()
+            .is_checked()
+    );
+    for toggle in [
+        AgentPluginToggle::Claude,
+        AgentPluginToggle::AgentPlugins,
+        AgentPluginToggle::Skill,
+    ] {
+        assert!(
+            agent_plugin(&form, toggle).control().is_checked(),
+            "{toggle:?} が既定で倒れています"
+        );
+    }
+    assert!(form.collect().unwrap().is_empty());
+}
+
+/// 同意が off の間、内訳は無効表示であること。**値は保つ。**
+#[test]
+fn the_breakdown_is_disabled_while_the_consent_is_off() {
+    let form = SettingsForm::new(&Settings::default());
+
+    assert!(
+        agent_plugin(&form, AgentPluginToggle::Generate)
+            .control()
+            .is_enabled(),
+        "同意そのものが無効表示になっています"
+    );
+    for toggle in [
+        AgentPluginToggle::Claude,
+        AgentPluginToggle::AgentPlugins,
+        AgentPluginToggle::Skill,
+    ] {
+        let control = agent_plugin(&form, toggle).control();
+        assert!(!control.is_enabled(), "{toggle:?} が有効表示のままです");
+        assert!(control.is_checked(), "{toggle:?} の値が失われています");
+    }
+}
+
+/// 同意が on で開いたら、内訳は最初から触れること。
+#[test]
+fn the_breakdown_is_enabled_when_the_consent_is_already_given() {
+    let settings = settings_from(r#"{"agent_plugin":{"generate":true}}"#);
+    let form = SettingsForm::new(&settings);
+
+    for input in form.agent_plugin() {
+        assert!(
+            input.control().is_enabled(),
+            "{:?} が無効表示です",
+            input.toggle()
+        );
+    }
+}
+
+/// 同意を立てた直後に内訳へ手が届くこと。
+///
+/// **1 度閉じ直させると opt-in が 2 手になる。**
+#[test]
+fn giving_the_consent_enables_the_breakdown_without_changing_its_values() {
+    let form = SettingsForm::new(&Settings::default());
+    let consent = agent_plugin(&form, AgentPluginToggle::Generate).control();
+
+    consent.set_checked(true);
+    // 画面上のクリックはウィンドウプロシージャから通知として届く。
+    consent.on_command(BN_CLICKED as u16);
+
+    for toggle in [
+        AgentPluginToggle::Claude,
+        AgentPluginToggle::AgentPlugins,
+        AgentPluginToggle::Skill,
+    ] {
+        let control = agent_plugin(&form, toggle).control();
+        assert!(control.is_enabled(), "{toggle:?} が無効表示のままです");
+        assert!(control.is_checked(), "{toggle:?} の値が変わりました");
+    }
+}
+
+/// 触った切り替えだけが変更点に載ること。
+#[test]
+fn only_the_touched_agent_plugin_toggles_appear_in_the_change() {
+    let form = SettingsForm::new(&Settings::default());
+    agent_plugin(&form, AgentPluginToggle::Generate)
+        .control()
+        .set_checked(true);
+
+    let change = form.collect().unwrap();
+
+    assert_eq!(change.agent_plugin_generate, Some(true));
+    assert_eq!(change.agent_plugin_claude, None);
+    assert_eq!(change.agent_plugin_agent_plugins, None);
+    assert_eq!(change.agent_plugin_skill, None);
+}
+
+/// 全ての切り替えが変更点を通って設定へ戻ること。
+#[test]
+fn every_agent_plugin_toggle_round_trips_through_the_change() {
+    let form = SettingsForm::new(&Settings::default());
+    for input in form.agent_plugin() {
+        let control = input.control();
+        control.set_checked(!control.is_checked());
+    }
+
+    let change = form.collect().unwrap();
+    let (settings, _) = applied("{}", &change);
+
+    assert_eq!(
+        settings.agent_plugin(),
+        AgentPluginSettings {
+            generate: true,
+            claude: false,
+            agent_plugins: false,
+            skill: false,
+        }
+    );
+
+    // 戻した設定で開き直すと、同じ画面が同じ値を映す。
+    let reopened = SettingsForm::new(&settings);
+    assert!(reopened.collect().unwrap().is_empty());
+}
+
+/// 全 variant に見出しが付いていること。
+#[test]
+fn every_agent_plugin_toggle_has_a_label() {
+    for toggle in AgentPluginToggle::ALL {
+        assert!(!toggle.label().is_empty(), "{toggle:?}");
+    }
+    assert_eq!(
+        AgentPluginToggle::ALL
+            .into_iter()
+            .filter(|toggle| toggle.is_consent())
+            .count(),
+        1,
+        "同意そのものは 1 つでなければならない"
+    );
 }

@@ -16,13 +16,15 @@
 //! 数値の範囲は `aviutl2_mcp_core::settings` の下限・上限の定数から導く。
 //! **書き写さないため、tool や範囲が変わったときに画面だけが古くなる経路が無い。**
 
+use super::toggle::Toggle;
 use aviutl2_mcp_core::budget::{RequestBudgetKind, ScaledBudgets};
 use aviutl2_mcp_core::settings::{
-    MAX_ARTIFACT_MAX_COUNT, MAX_ARTIFACT_MAX_TOTAL_BYTES, MAX_ARTIFACT_TTL_SECONDS,
-    MAX_BUDGET_SCALE_PERCENT, MAX_HANDOFF_TTL_SECONDS, MAX_RENDER_DRAIN_TIMEOUT_MS,
-    MAX_SESSION_STALE_AFTER_SECONDS, MIN_ARTIFACT_MAX_COUNT, MIN_ARTIFACT_MAX_TOTAL_BYTES,
-    MIN_ARTIFACT_TTL_SECONDS, MIN_BUDGET_SCALE_PERCENT, MIN_HANDOFF_TTL_SECONDS,
-    MIN_RENDER_DRAIN_TIMEOUT_MS, MIN_SESSION_STALE_AFTER_SECONDS, Settings, SettingsChange,
+    AgentPluginSettings, MAX_ARTIFACT_MAX_COUNT, MAX_ARTIFACT_MAX_TOTAL_BYTES,
+    MAX_ARTIFACT_TTL_SECONDS, MAX_BUDGET_SCALE_PERCENT, MAX_HANDOFF_TTL_SECONDS,
+    MAX_RENDER_DRAIN_TIMEOUT_MS, MAX_SESSION_STALE_AFTER_SECONDS, MIN_ARTIFACT_MAX_COUNT,
+    MIN_ARTIFACT_MAX_TOTAL_BYTES, MIN_ARTIFACT_TTL_SECONDS, MIN_BUDGET_SCALE_PERCENT,
+    MIN_HANDOFF_TTL_SECONDS, MIN_RENDER_DRAIN_TIMEOUT_MS, MIN_SESSION_STALE_AFTER_SECONDS,
+    Settings, SettingsChange,
 };
 use aviutl2_mcp_core::tool::{ToolFamily, togglable_tool_names};
 use win32_ui::widget::{CheckBox, ComboBox, Number, NumberRangeError};
@@ -234,6 +236,86 @@ fn clamp_to_i32(value: u64) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
+/// 「エージェントプラグイン」ページの切り替え。
+///
+/// **`generate` だけが同意である。** 他の 3 つは内訳であり、同意が無い間は
+/// 無効表示になる（値は保つ）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPluginToggle {
+    /// 生成するかどうか。**同意そのものである。**
+    Generate,
+    /// Claude Code 方言を生成する。
+    Claude,
+    /// agent-plugins.org 方言を生成する。
+    AgentPlugins,
+    /// skill を同梱する。
+    Skill,
+}
+
+impl AgentPluginToggle {
+    /// 全 variant。並べる順でもある。
+    pub const ALL: [AgentPluginToggle; 4] = [
+        AgentPluginToggle::Generate,
+        AgentPluginToggle::Claude,
+        AgentPluginToggle::AgentPlugins,
+        AgentPluginToggle::Skill,
+    ];
+
+    /// 同意そのものか。
+    pub fn is_consent(self) -> bool {
+        self == AgentPluginToggle::Generate
+    }
+
+    /// 見出しの文字列。
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentPluginToggle::Generate => "agent plugin を生成する",
+            AgentPluginToggle::Claude => "Claude Code 方言を生成する",
+            AgentPluginToggle::AgentPlugins => "agent-plugins.org 方言を生成する",
+            AgentPluginToggle::Skill => "skill を同梱する",
+        }
+    }
+
+    /// 現在の設定が持つ値。
+    fn current(self, settings: &AgentPluginSettings) -> bool {
+        match self {
+            AgentPluginToggle::Generate => settings.generate,
+            AgentPluginToggle::Claude => settings.claude,
+            AgentPluginToggle::AgentPlugins => settings.agent_plugins,
+            AgentPluginToggle::Skill => settings.skill,
+        }
+    }
+
+    /// 変更点へ値を載せる。
+    fn apply(self, value: bool, change: &mut SettingsChange) {
+        match self {
+            AgentPluginToggle::Generate => change.agent_plugin_generate = Some(value),
+            AgentPluginToggle::Claude => change.agent_plugin_claude = Some(value),
+            AgentPluginToggle::AgentPlugins => change.agent_plugin_agent_plugins = Some(value),
+            AgentPluginToggle::Skill => change.agent_plugin_skill = Some(value),
+        }
+    }
+}
+
+/// 「エージェントプラグイン」ページの切り替え 1 つ。
+pub struct AgentPluginInput {
+    toggle: AgentPluginToggle,
+    control: Toggle,
+    initial: bool,
+}
+
+impl AgentPluginInput {
+    /// どの切り替えか。
+    pub fn toggle(&self) -> AgentPluginToggle {
+        self.toggle
+    }
+
+    /// 画面に置くチェックボックス。
+    pub fn control(&self) -> Toggle {
+        self.control.clone()
+    }
+}
+
 /// tool 1 つの切替。
 pub struct ToolToggle {
     name: String,
@@ -351,6 +433,7 @@ pub struct SettingsForm {
     tools: Vec<ToolToggle>,
     log_level: LogLevelChoice,
     numbers: Vec<NumericInput>,
+    agent_plugin: Vec<AgentPluginInput>,
     /// 開いた時点の予算一式。倍率の入力が使えないときの退避先である。
     budgets: ScaledBudgets,
 }
@@ -389,6 +472,7 @@ impl SettingsForm {
             tools,
             log_level: log_level_choice(settings),
             numbers,
+            agent_plugin: agent_plugin_toggles(settings.agent_plugin()),
             budgets,
         }
     }
@@ -413,6 +497,11 @@ impl SettingsForm {
         self.numbers
             .iter()
             .filter(move |input| input.setting.group() == group)
+    }
+
+    /// 「エージェントプラグイン」ページの切り替え。
+    pub fn agent_plugin(&self) -> &[AgentPluginInput] {
+        &self.agent_plugin
     }
 
     /// 入力を検証し、開いた時点から変わった項目だけを取り出す。
@@ -477,6 +566,13 @@ impl SettingsForm {
         }
         change.log_level = self.log_level.change();
 
+        for input in &self.agent_plugin {
+            let checked = input.control.is_checked();
+            if checked != input.initial {
+                input.toggle.apply(checked, &mut change);
+            }
+        }
+
         Ok(change)
     }
 
@@ -502,6 +598,41 @@ fn family_of(name: &str) -> ToolFamily {
         .into_iter()
         .find(|family| family.tool_names().any(|candidate| candidate == name))
         .expect("切替の対象はいずれかの族に属する")
+}
+
+/// 「エージェントプラグイン」ページの切り替えを組み立てる。
+///
+/// **同意が off の間、内訳は無効表示になる。** 同意の切り替えに応じて内訳の
+/// 有効・無効を追随させるのは、同意を立てた直後に内訳へ手が届くようにする
+/// ためである——1 度閉じ直させると、opt-in が 2 手になる。
+fn agent_plugin_toggles(settings: AgentPluginSettings) -> Vec<AgentPluginInput> {
+    let inputs: Vec<AgentPluginInput> = AgentPluginToggle::ALL
+        .into_iter()
+        .map(|toggle| {
+            let initial = toggle.current(&settings);
+            AgentPluginInput {
+                toggle,
+                control: Toggle::new(toggle.label())
+                    .checked(initial)
+                    .enabled(toggle.is_consent() || settings.generate),
+                initial,
+            }
+        })
+        .collect();
+
+    let breakdown: Vec<Toggle> = inputs
+        .iter()
+        .filter(|input| !input.toggle.is_consent())
+        .map(|input| input.control.clone())
+        .collect();
+    if let Some(consent) = inputs.iter().find(|input| input.toggle.is_consent()) {
+        consent.control.clone().on_change(move |checked| {
+            for toggle in &breakdown {
+                toggle.set_enabled(checked);
+            }
+        });
+    }
+    inputs
 }
 
 /// ログレベルの選択肢と初期値を組み立てる。

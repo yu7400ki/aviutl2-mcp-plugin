@@ -28,6 +28,7 @@
 //! AviUtl2 の UI であり、MCP は止まらない。
 
 pub mod form;
+pub mod toggle;
 
 use crate::settings;
 use aviutl2_mcp_core::settings::SettingsChange;
@@ -60,6 +61,9 @@ const FIELD_WIDTH: f32 = 220.0;
 
 /// 「動作」ページの 1 行に並べる入力欄の数。
 const FIELDS_PER_ROW: usize = 2;
+
+/// 「エージェントプラグイン」ページの切り替え 1 つ分の幅（論理 px）。
+const AGENT_PLUGIN_TOGGLE_WIDTH: f32 = 320.0;
 
 /// ボタンの幅（論理 px）。
 const BUTTON_WIDTH: f32 = 90.0;
@@ -105,6 +109,7 @@ fn open(parent: HWND) {
             Tabs::new()
                 .with_page("公開する tool", tool_page(&form))
                 .with_page("動作", behavior_page(&form))
+                .with_page("エージェントプラグイン", agent_plugin_page(&form))
                 .with_selected(0),
         )
         .with_layout(button_row(&form, &handle));
@@ -172,6 +177,43 @@ fn behavior_page(form: &SettingsForm) -> FlexLayout {
     page
 }
 
+/// 「エージェントプラグイン」ページ。
+///
+/// **生成先を 1 行で示す。** 利用者は client へ marketplace を登録するときに
+/// その場所を要する。示さなければ、この画面と client 側の作業が繋がらない。
+fn agent_plugin_page(form: &SettingsForm) -> FlexLayout {
+    let mut toggles = FlexLayout::column().with_gap(ITEM_GAP);
+    for input in form.agent_plugin() {
+        toggles = toggles.with_widget(
+            input
+                .control()
+                .with_width(SizeValue::Points(AGENT_PLUGIN_TOGGLE_WIDTH)),
+        );
+    }
+    FlexLayout::column()
+        .with_gap(GROUP_GAP)
+        .with_padding(PAGE_PADDING)
+        .with_widget(Label::new("生成するもの"))
+        .with_layout(toggles)
+        .with_widget(Label::new("生成先"))
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(ITEM_GAP)
+                .with_widget(Label::new(&destination_line())),
+        )
+}
+
+/// 生成先を 1 行で示す。
+///
+/// 解決できない場合も置き場所の**書き方**は示す。空欄にすると、利用者は
+/// どこを探せばよいか分からないまま画面を閉じる。
+fn destination_line() -> String {
+    match crate::registry::discovery_root() {
+        Ok(root) => root.display().to_string(),
+        Err(_) => r"%LOCALAPPDATA%\AviUtl2Mcp".to_string(),
+    }
+}
+
 /// レイアウトを `per_row` 個ずつ行へ折り返し、縦に積む。
 fn wrap(items: Vec<FlexLayout>, per_row: usize) -> FlexLayout {
     let new_row = || FlexLayout::row().with_gap(ITEM_GAP);
@@ -217,8 +259,19 @@ fn button_row(form: &Rc<SettingsForm>, handle: &DialogHandle) -> FlexLayout {
 }
 
 /// OK を押したときの処理。
+///
+/// **適用した時点で生成物へ反映する。** 有効にした直後に何も現れないのは、
+/// 利用者から見て失敗と区別が付かない。起動時にも同じ関数を通り、そちらは
+/// 差分の是正であって別の判断を持たない。
+///
+/// これは設定画面の規律を破らない——生成に要るのは設定と自 DLL のパスだけで
+/// あり、plugin の singleton にも編集ハンドルにも触れない。
 fn on_accept(form: &SettingsForm, handle: &DialogHandle) {
-    guarded_accept(form, handle, settings::save);
+    guarded_accept(form, handle, |change| {
+        settings::save(change)?;
+        crate::agent_plugin::sync();
+        Ok(())
+    });
 }
 
 /// 保存の口を差し替えられる形の OK。
@@ -317,6 +370,36 @@ mod tests {
             let count = form.numbers_in(group).count() + usize::from(group == BehaviorGroup::Log);
             assert!(count > 0, "{group:?} に入力欄がありません");
         }
+    }
+
+    /// 「エージェントプラグイン」ページの群が中身を持つこと。
+    ///
+    /// **見出しだけの群を作らない。** 画面の高さは最も高いページに揃うため、
+    /// 中身の無い見出しはそのまま余白になる。
+    #[test]
+    fn the_agent_plugin_page_carries_both_of_its_groups() {
+        let form = SettingsForm::new(&Settings::default());
+
+        assert_eq!(
+            form.agent_plugin().len(),
+            form::AgentPluginToggle::ALL.len(),
+            "切り替えを載せ忘れています"
+        );
+        assert!(!destination_line().is_empty(), "生成先の行が空です");
+    }
+
+    /// 生成先が 1 行で示されること。
+    ///
+    /// 利用者は client へ marketplace を登録するときにこの場所を要する。
+    #[test]
+    fn the_agent_plugin_page_names_where_the_tree_is_generated() {
+        let line = destination_line();
+
+        assert_eq!(line.lines().count(), 1, "生成先が 1 行に収まっていません");
+        assert!(
+            line.contains("AviUtl2Mcp"),
+            "生成先が示されていません: {line}"
+        );
     }
 
     /// 保存の呼び出しを記録する差し替え口。

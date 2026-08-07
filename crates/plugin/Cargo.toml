@@ -30,6 +30,14 @@ proptest = "1.6.0"
 [target.'cfg(windows)'.dependencies]
 aviutl2 = "0.41.0"
 aviutl2-mcp-win = { workspace = true }
+# 設定画面のウィジェットを 1 つ包むために、win32-ui と同じレイアウトエンジンを
+# 直接参照する。**版を揃えることが型の同一性である**——食い違えば
+# `Widget` の実装がコンパイルできなくなり、静かにずれる経路は無い。
+taffy = { version = "0.8.3", default-features = false, features = [
+    "taffy_tree",
+    "flexbox",
+    "std",
+] }
 win32-ui = { git = "https://github.com/yu7400ki/win32-ui.git", rev = "5822f65d03a1aeca7871e4960176402aa27b45c7" }
 windows = { workspace = true, features = [
     "Win32_Foundation",
@@ -39,6 +47,7 @@ windows = { workspace = true, features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
     "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 # 保護 DACL の表明はテストからのみ使う。
