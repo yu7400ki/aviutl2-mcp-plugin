@@ -2746,6 +2746,265 @@ fn the_failure_carries_the_host_value_and_not_the_requested_one() {
     );
 }
 
+/// 対象がいま持っている設定値を読み取り経路から得る。
+///
+/// 応答が返す値ではなく、プロジェクトの状態そのものを見る。応答だけを見ると、
+/// 巻き戻したと名乗るだけで戻していない実装を区別できない。
+fn stored_shape_item(harness: &Harness, item: &str) -> ItemValue {
+    let selector = harness.selector(1, 300);
+    harness
+        .read
+        .get_object(&selector)
+        .expect("対象の詳細")
+        .effects
+        .into_iter()
+        .find(|effect| effect.name == SHAPE)
+        .expect("effect がありません")
+        .items
+        .into_iter()
+        .find(|entry| entry.name == item)
+        .unwrap_or_else(|| panic!("設定項目 {item} がありません"))
+        .value
+}
+
+/// 書き込み検証が落ちる要求と、対象を戻す書き込みが要るか。
+///
+/// **2 つの階級を並べる。** 拒否ではホストが値を動かさず、戻すものが無い。
+/// 倒しでは値が動くため書き戻す。要求元へ返す失敗はどちらも同じであり、違うのは
+/// 我々が発行する書き込みの数だけである。
+fn failed_verification_cases() -> Vec<(&'static str, ItemValue, bool)> {
+    vec![
+        // 拒否。選択肢に無い値は黙殺され、値も fingerprint も動かない。
+        (
+            "図形の種類",
+            ItemValue::Choice {
+                value: "存在しない形".to_string(),
+            },
+            false,
+        ),
+        // 拒否。書式の合わない色は既定値の白へ落ちるが、変更前の値が既に白で
+        // ある。**ホストが書き込んだかどうかではなく、値が動いたかで分ける。**
+        (
+            "色",
+            ItemValue::Color {
+                value: "#ff0000".to_string(),
+            },
+            false,
+        ),
+        // 拒否。未登録のフォント名は黙殺される。
+        (
+            "フォント",
+            ItemValue::Font {
+                name: "NoSuchFont12345".to_string(),
+            },
+            false,
+        ),
+        // 倒し。値域を外れた数値は境界へ切り詰められ、変更前の値が失われる。
+        (
+            "サイズ",
+            ItemValue::Number {
+                value: FiniteF64::try_new((MAX_ITEM_VALUE + 400) as f64).expect("有限値"),
+            },
+            true,
+        ),
+        // 倒し。桁の多い小数は項目の桁へ丸められる。
+        (
+            "サイズ",
+            ItemValue::Number {
+                value: FiniteF64::try_new(1.2345).expect("有限値"),
+            },
+            true,
+        ),
+    ]
+}
+
+#[test]
+fn the_failed_verification_cases_cover_both_classes() {
+    // 片方の階級しか無い一覧では、「常に戻す」実装も「一度も戻さない」実装も
+    // 検査を通り抜ける。**費用の検査は 2 つの階級の差でしか成立しない。**
+    let classes: Vec<bool> = failed_verification_cases()
+        .into_iter()
+        .map(|(_, _, restoring)| restoring)
+        .collect();
+    assert!(classes.contains(&true), "倒しの階級の標本がありません");
+    assert!(classes.contains(&false), "拒否の階級の標本がありません");
+
+    // ホストが値を書き換える標本は、階級を割り当てないまま取り残さない。
+    for (item, requested, _) in rewritten_item_cases() {
+        assert!(
+            failed_verification_cases()
+                .iter()
+                .any(|(name, value, _)| *name == item && *value == requested),
+            "{item} へ {} を書く標本が階級を持ちません",
+            requested.kind()
+        );
+    }
+}
+
+#[test]
+fn a_failed_verification_leaves_the_item_at_its_value_before_the_write() {
+    // **失敗が状態を残さない。** ホストが値を倒した場合も、要求元から見た対象は
+    // 書き込みの前と同じ値を持つ。
+    for (item, requested, _) in failed_verification_cases() {
+        let harness = harness_with_choice_effect();
+        let before = stored_shape_item(&harness, item);
+        let error = harness
+            .edit
+            .set_object_item(&SetObjectItemParams {
+                selector: harness.effect_selector(1, 300, SHAPE, 0),
+                item: item.to_string(),
+                value: requested,
+            })
+            .err()
+            .unwrap_or_else(|| panic!("{item} の書き込み検証が落ちませんでした"));
+
+        assert_eq!(
+            error.details()["reason"],
+            json!("item_value_not_applied"),
+            "{item}"
+        );
+        assert_eq!(
+            stored_shape_item(&harness, item),
+            before,
+            "{item} が書き込み前の値へ戻っていません"
+        );
+    }
+}
+
+#[test]
+fn a_value_the_host_refuses_costs_no_restoring_write() {
+    // **費用の検査である。** 値が正しいことだけを見ると、戻すものが無い階級で
+    // 無駄な書き込みを発行しても通る。発行の回数そのものを数える。
+    for (item, requested, restoring) in failed_verification_cases() {
+        let harness = harness_with_choice_effect();
+        let selector = harness.effect_selector(1, 300, SHAPE, 0);
+        let origin = raw_item_value(&stored_shape_item(&harness, item));
+        harness
+            .edit
+            .set_object_item(&SetObjectItemParams {
+                selector,
+                item: item.to_string(),
+                value: requested,
+            })
+            .err()
+            .unwrap_or_else(|| panic!("{item} の書き込み検証が落ちませんでした"));
+
+        let writes = harness.host.item_value_arguments();
+        assert_eq!(
+            writes.len(),
+            1 + usize::from(restoring),
+            "{item} へ発行した書き込みの回数が想定と違います: {writes:?}"
+        );
+        if restoring {
+            // 書き戻すのはホストが直前に返した生文字列そのものである。読み取り
+            // 経路が解釈した値を組み立て直していれば、ここで食い違う。
+            assert_eq!(writes[1], origin, "{item} の巻き戻しが別の値を書きました");
+        }
+    }
+}
+
+#[test]
+fn a_selector_survives_a_failed_verification() {
+    // **A2 の本体である。** 戻せば fingerprint も戻る——内容ハッシュであり、
+    // 同じ内容へ戻せば同じ値が返る。要求元は失敗の後も同じ selector で続けられ、
+    // 復旧に get_object を要さない。
+    //
+    // 倒しの階級で見る。拒否の階級は巻き戻しが無くても selector が生き残るため、
+    // 復元したことを確かめられない。
+    let harness = harness_with_choice_effect();
+    let selector = harness.effect_selector(1, 300, SHAPE, 0);
+    let error = harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector: selector.clone(),
+            item: "サイズ".to_string(),
+            value: ItemValue::Number {
+                value: FiniteF64::try_new((MAX_ITEM_VALUE + 400) as f64).expect("有限値"),
+            },
+        })
+        .expect_err("切り詰められた値が成功として返りました");
+    assert_eq!(error.details()["reason"], json!("item_value_not_applied"));
+
+    // 失敗の前に得たオブジェクトの selector で読み直せる。
+    harness
+        .read
+        .get_object(&selector.object)
+        .expect("失敗の後にオブジェクトの selector が死にました");
+    // 同じ effect の selector で次の書き込みも通る。effect の fingerprint も
+    // 戻っている。
+    harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector,
+            item: "サイズ".to_string(),
+            value: ItemValue::Number {
+                value: FiniteF64::try_new(2.0).expect("有限値"),
+            },
+        })
+        .expect("失敗の後の書き込みが古い selector で拒否されました");
+}
+
+#[test]
+fn a_restore_that_does_not_take_effect_names_the_state_as_unknown() {
+    // 巻き戻しの書き込みも失敗し得る。**「書き込み API が真を返した」を成功と
+    // 読まない**——読み直して元の文字列と一致することだけが根拠である。
+    let harness = harness_with_choice_effect();
+    let selector = harness.effect_selector(1, 300, SHAPE, 0);
+    let before = stored_shape_item(&harness, "サイズ");
+    harness
+        .host
+        .arm(|knobs| knobs.fault = Some(Fault::IgnoreItemRestore));
+
+    let error = harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector,
+            item: "サイズ".to_string(),
+            value: ItemValue::Number {
+                value: FiniteF64::try_new((MAX_ITEM_VALUE + 400) as f64).expect("有限値"),
+            },
+        })
+        .expect_err("切り詰められた値が成功として返りました");
+
+    assert_eq!(error.details()["reason"], json!("item_value_not_applied"));
+    assert_eq!(error.details()["consistency_unknown"], json!(true));
+    // 巻き戻しは発行したが効かなかった。効かなかったことは対象の値に現れる。
+    assert_eq!(harness.host.item_value_arguments().len(), 2);
+    assert_ne!(
+        stored_shape_item(&harness, "サイズ"),
+        before,
+        "戻せていないのに戻ったと名乗っています"
+    );
+}
+
+#[test]
+fn a_restored_write_advances_the_revision_at_most_once() {
+    // 巻き戻しは同じ許可で発行する。許可は最初の発行で確定した revision を
+    // 保つため、書き込みが 2 回でも revision は 1 つしか進まない。
+    let harness = harness_with_choice_effect();
+    let error = harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector: harness.effect_selector(1, 300, SHAPE, 0),
+            item: "サイズ".to_string(),
+            value: ItemValue::Number {
+                value: FiniteF64::try_new((MAX_ITEM_VALUE + 400) as f64).expect("有限値"),
+            },
+        })
+        .expect_err("切り詰められた値が成功として返りました");
+
+    // 巻き戻しが実際に発行されていなければ、revision が 1 に留まることは何も
+    // 言っていない。
+    assert_eq!(
+        harness.host.item_value_arguments().len(),
+        2,
+        "巻き戻しの書き込みが発行されていません"
+    );
+    assert_eq!(harness.project.revision(), 1, "revision が 2 つ進みました");
+    assert_eq!(error.details()["mutation_issued"], json!(true));
+    assert_eq!(error.details()["current_project_revision"], json!(1));
+}
+
 /// 候補の表だけが主張する値。**ホストが受け付ける値とは重ならない。**
 const HINTED_VALUES: [&str; 2] = ["表だけにある形", "表だけにあるもう 1 つの形"];
 

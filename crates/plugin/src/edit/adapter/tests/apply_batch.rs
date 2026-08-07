@@ -935,6 +935,40 @@ fn set_shape_item_op(harness: &Harness, item: &str, value: ItemValue) -> BatchOp
 }
 
 #[test]
+fn a_failed_sub_operation_is_restored_only_once() {
+    // **単独の書き込みが持つ巻き戻しを、sub-operation ごとに走らせない。**
+    // 一括適用は要求全体の巻き戻し計画を別に持ち、落ちた sub-operation 自身も
+    // その対象に含める。両方が走れば、同じ設定項目へ逆操作が 2 度発行される。
+    let harness = harness_with_choice_effect();
+    let origin = raw_item_value(&ItemValue::Number {
+        value: FiniteF64::try_new(1.0).expect("有限値"),
+    });
+    let params = batch(vec![set_shape_item_op(
+        &harness,
+        "サイズ",
+        ItemValue::Number {
+            value: FiniteF64::try_new((MAX_ITEM_VALUE + 400) as f64).expect("有限値"),
+        },
+    )]);
+    let error = harness
+        .edit
+        .apply_batch(&params)
+        .expect_err("切り詰められた値が一括適用で受理されました");
+
+    assert_eq!(error.details()["reason"], json!("item_value_not_applied"));
+    assert_eq!(error.details()["rolled_back"], json!(true));
+    assert_eq!(error.details()["rolled_back_count"], json!(1));
+
+    let writes = harness.host.item_value_arguments();
+    assert_eq!(
+        writes.len(),
+        2,
+        "同じ設定項目へ逆操作が二重に発行されました: {writes:?}"
+    );
+    assert_eq!(writes[1], origin);
+}
+
+#[test]
 fn the_same_item_value_fails_the_same_way_alone_and_in_a_batch() {
     // 受理する集合が単独編集と一括適用で違ってはならない。同じ入力に対して
     // 同じ code と同じ名前と同じ実値を返すことで固定する。**照合を広げた種別
