@@ -1360,7 +1360,9 @@ impl AviUtl2McpServer {
     /// 同じ要求を再送すると重複して付与し得る。付与によってオブジェクトの
     /// fingerprint が変わるため、同じ selector での再送は precondition_failed と
     /// なり防がれる。
-    /// 応答が返すのは付与した effect の selector だけである。
+    /// effect の増減は、同じオブジェクトが持つ他の effect の selector も無効にする。
+    /// 応答が返すのは付与した effect の selector だけであるため、
+    /// 兄弟 effect を続けて編集するには get_object を引き直す。
     #[tool(
         name = "add_effect",
         annotations(
@@ -1441,6 +1443,9 @@ impl AviUtl2McpServer {
     /// オブジェクトから effect を削除する。
     /// 対象が既に失われている場合は not_found となり、追加の変更は起きない。
     /// 応答は effect を返さない（常に null）。
+    /// effect の増減は、同じオブジェクトが持つ他の effect の selector も無効にする。
+    /// 消した effect だけでなく兄弟 effect も指し直せなくなるため、
+    /// 続けて編集するには get_object を引き直す。
     #[tool(
         name = "delete_effect",
         annotations(
@@ -3579,6 +3584,46 @@ mod tests {
         }
     }
 
+    /// effect の増減が兄弟 effect の selector も無効にすることを述べる tool。
+    ///
+    /// **述べる場所は層 1 である。** 起こすのはこの 2 tool だけであり、
+    /// 反復句にならない。加えて、応答が返すのは足した／消した effect の selector
+    /// だけであるため、共有の selector 型が述べる「応答が返した新しい selector へ
+    /// 持ち替える」では兄弟を回復できない——回復の手段（get_object を引き直す）を
+    /// 名指しできるのは、増減を起こす tool の説明だけである。
+    const TOOLS_THAT_INVALIDATE_SIBLING_EFFECTS: &[&str] = &["add_effect", "delete_effect"];
+
+    #[test]
+    fn the_tools_that_add_or_remove_an_effect_say_the_siblings_go_stale() {
+        // 実測では、effect を足して消すとオブジェクトと兄弟 effect の fingerprint が
+        // いずれも足す前の値へ完全に戻った。fingerprint は純粋な内容ハッシュで
+        // あり、増減は兄弟まで巻き込む。述べなければ、要求元は手元の兄弟 selector を
+        // 使い続けて precondition_failed を踏み、対象を読み直すことになる。
+        for name in TOOLS_THAT_INVALIDATE_SIBLING_EFFECTS {
+            let description = description_of(name);
+            for phrase in [
+                "effect の増減は、同じオブジェクトが持つ他の effect の selector も無効にする",
+                "兄弟 effect",
+                "get_object を引き直す",
+            ] {
+                assert!(
+                    description.contains(phrase),
+                    "{name} の説明が {phrase} に触れていません: {description}"
+                );
+            }
+        }
+        // 起こさない tool が述べると、掛からない制約として読まれる。
+        for name in edit_like_tools() {
+            if TOOLS_THAT_INVALIDATE_SIBLING_EFFECTS.contains(&name) {
+                continue;
+            }
+            assert!(
+                !description_of(name).contains("兄弟 effect"),
+                "{name} の説明が起こさない無効化を述べています"
+            );
+        }
+    }
+
     #[test]
     fn creation_tools_name_the_guard_that_actually_stops_a_resend() {
         // revision を照合しない以上、再送を止めるのは宛先の重複確認と対象の
@@ -4319,7 +4364,7 @@ mod tests {
                 ],
             ),
             ("set_effect_enabled", &["出力 item", "読み直した effect"]),
-            ("delete_effect", &["not_found"]),
+            ("delete_effect", &["not_found", "兄弟 effect"]),
             ("delete_object", &["not_found"]),
             (
                 "set_selection",
