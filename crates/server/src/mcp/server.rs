@@ -4928,6 +4928,186 @@ mod tests {
         );
     }
 
+    /// 入力 schema に現れる property を、名前と説明の対で集める。
+    ///
+    /// `$defs` の中も辿る。共有の入力型はそこへ展開されるため、辿らなければ
+    /// selector も設定値も 1 つも見えない。
+    fn property_descriptions(schema: &Value) -> Vec<(String, String)> {
+        let mut found = Vec::new();
+        collect_property_descriptions(schema, &mut found);
+        found
+    }
+
+    fn collect_property_descriptions(value: &Value, found: &mut Vec<(String, String)>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(Value::Object(properties)) = map.get("properties") {
+                    for (name, property) in properties {
+                        if let Some(description) =
+                            property.get("description").and_then(Value::as_str)
+                        {
+                            found.push((name.clone(), description.to_string()));
+                        }
+                    }
+                }
+                for child in map.values() {
+                    collect_property_descriptions(child, found);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect_property_descriptions(item, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 共有の入力型に付いた説明を取り出す。
+    fn shared_type_description(tool: &str, definition: &str) -> String {
+        tool_named(tool).input_schema["$defs"][definition]["description"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{definition} に説明がありません"))
+            .to_string()
+    }
+
+    /// tool の入力 schema の直下にある property の説明を取り出す。
+    fn field_description(tool: &str, field: &str) -> String {
+        tool_named(tool).input_schema["properties"][field]["description"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{tool} の {field} に説明がありません"))
+            .to_string()
+    }
+
+    #[test]
+    fn the_fields_that_take_a_number_state_where_it_starts() {
+        // 起点を取り違えると別の場所へ書く。**値を書く場所そのものが述べる。**
+        // tool の説明へ写す形は、番号を扱う tool の数だけ同じ文を増やす一方、
+        // 引数を埋める時点では読まれない。
+        let mut checked = 0;
+        for tool in tools() {
+            let schema = Value::Object(tool.input_schema.as_ref().clone());
+            for (field, description) in property_descriptions(&schema) {
+                if !description.contains("レイヤー番号") && !description.contains("フレーム番号")
+                {
+                    continue;
+                }
+                // 番号ではないことを述べる説明は対象外である。BPM グリッドの
+                // 位置は秒であり、起点を持たない。
+                if description.contains("フレーム番号ではない") {
+                    continue;
+                }
+                checked += 1;
+                assert!(
+                    description.contains("0 始まり"),
+                    "{} の {field} が番号の起点を述べていません: {description}",
+                    tool.name
+                );
+            }
+        }
+        assert!(
+            checked >= 20,
+            "番号を取るフィールドを検査できていません: {checked} 件"
+        );
+    }
+
+    #[test]
+    fn the_selector_types_state_that_they_travel_back_unchanged() {
+        // selector を組み立て直さずに往復させることは、selector を受け取る全 tool に
+        // 掛かる規約である。共有型に 1 度書けば schemars が各 tool の schema へ配る。
+        let object = shared_type_description("get_object", "ObjectSelectorInput");
+        for phrase in [
+            "そのまま送り返す",
+            "読み直さずにそのまま次の要求へ渡せる",
+            "fingerprint が変わる",
+            "precondition_failed",
+            "details.current_object",
+        ] {
+            assert!(
+                object.contains(phrase),
+                "オブジェクトの selector の説明が {phrase} に触れていません: {object}"
+            );
+        }
+
+        let effect = shared_type_description("set_object_item", "EffectSelectorInput");
+        for phrase in [
+            "そのまま送り返す",
+            "読み直さずにそのまま次の要求へ渡せる",
+            "fingerprint が変わる",
+        ] {
+            assert!(
+                effect.contains(phrase),
+                "effect の selector の説明が {phrase} に触れていません: {effect}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_selector_types_state_which_epoch_matches_the_project() {
+        // プロジェクトの世代を照合する材料は selector の中に在る。値の隣で
+        // 述べなければ、要求元は selector を組み立て直す口を探すことになる。
+        let epoch = tool_named("get_object").input_schema["$defs"]["ObjectSelectorInput"]
+            ["properties"]["project_epoch"]["description"]
+            .as_str()
+            .expect("project_epoch に説明がある")
+            .to_string();
+        for phrase in ["プロジェクトの世代はこの値で照合", "別のプロジェクト"]
+        {
+            assert!(
+                epoch.contains(phrase),
+                "selector の project_epoch が {phrase} に触れていません: {epoch}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_page_fields_explain_how_to_page() {
+        // ページ指定は共有の入力型が配る。tool の説明へ写すと、同じ 3 行が
+        // ページを取る tool の数だけ並ぶ。
+        let mut checked = 0;
+        for tool in tools() {
+            let properties = tool.input_schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{} に properties がありません", tool.name));
+            if !properties.contains_key("limit") {
+                continue;
+            }
+            checked += 1;
+            let offset = field_description(&tool.name, "offset");
+            for phrase in ["0 始まりの位置", "has_more と next_offset で終端"] {
+                assert!(
+                    offset.contains(phrase),
+                    "{} の offset が {phrase} に触れていません: {offset}",
+                    tool.name
+                );
+            }
+            let limit = field_description(&tool.name, "limit");
+            for phrase in ["1 以上 200 以下", "省略すると 50"] {
+                assert!(
+                    limit.contains(phrase),
+                    "{} の limit が {phrase} に触れていません: {limit}",
+                    tool.name
+                );
+            }
+        }
+        assert!(checked >= 4, "ページ指定を持つ tool を検査していません");
+    }
+
+    #[test]
+    fn the_expected_epoch_fields_say_why_they_cannot_be_omitted() {
+        // 省略できない理由——対象を指す selector が無いこと——は、値を書く場所の
+        // 隣に在る。
+        for name in TOOLS_CARRYING_AN_EXPECTED_EPOCH {
+            let description = field_description(name, "expected_project_epoch");
+            for phrase in ["省略はできない", "プロジェクト境界を照合する"] {
+                assert!(
+                    description.contains(phrase),
+                    "{name} の expected_project_epoch が {phrase} に触れていません: {description}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn input_schemas_reject_unknown_fields() {
         for tool in tools() {

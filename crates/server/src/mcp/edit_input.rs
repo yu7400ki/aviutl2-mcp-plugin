@@ -426,7 +426,7 @@ pub struct CreateObjectInput {
     pub source: ObjectSourceInput,
     /// 配置先。
     pub placement: PlacementInput,
-    /// 直前の読み取りまたは編集の応答が返した project_epoch。作成は対象を指す selector を持たないため、これがプロジェクト境界を照合する唯一の材料である。
+    /// 直前の読み取りまたは編集の応答が返した project_epoch。省略はできない。作成は対象を指す selector を持たないため、これがプロジェクト境界を照合する唯一の材料である。
     #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
     pub expected_project_epoch: String,
 }
@@ -751,7 +751,7 @@ pub struct SetLayerStateInput {
     /// ロックの有無。省略時は変更しない。
     #[serde(default)]
     pub locked: Option<bool>,
-    /// 直前の読み取りまたは編集の応答が返した project_epoch。レイヤーは selector を持たないため、これがプロジェクト境界を照合する唯一の材料である。
+    /// 直前の読み取りまたは編集の応答が返した project_epoch。省略はできない。レイヤーは selector を持たないため、これがプロジェクト境界を照合する唯一の材料である。
     #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
     pub expected_project_epoch: String,
 }
@@ -793,7 +793,7 @@ pub struct SetSelectionInput {
     /// レイヤー編集の表示開始位置。省略時は変更しない。設定できる範囲へ調整される。
     #[serde(default)]
     pub display: Option<DisplayStartInput>,
-    /// 直前の読み取りまたは編集の応答が返した project_epoch。focus を省略した要求は selector を 1 つも持たないため、これがプロジェクト境界を照合する材料である。
+    /// 直前の読み取りまたは編集の応答が返した project_epoch。省略はできない。focus を省略した要求は selector を 1 つも持たないため、これがプロジェクト境界を照合する材料である。
     #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
     pub expected_project_epoch: String,
 }
@@ -886,7 +886,7 @@ pub struct SetGridBpmInput {
     /// 宣言した件数は [`SetGridBpmParams::validate`] が実際に確かめる。
     #[schemars(length(max = MAX_GRID_BPM_COUNT))]
     pub entries: Vec<GridBpmInput>,
-    /// 直前の読み取りまたは編集の応答が返した project_epoch。BPM グリッドは selector を持たないため、これがプロジェクト境界を照合する唯一の材料である。
+    /// 直前の読み取りまたは編集の応答が返した project_epoch。省略はできない。BPM グリッドは selector を持たないため、これがプロジェクト境界を照合する唯一の材料である。
     #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
     pub expected_project_epoch: String,
 }
@@ -963,7 +963,7 @@ pub struct SetSceneSettingsInput {
     #[serde(default)]
     #[schemars(range(min = MIN_SCENE_VALUE, max = MAX_POSITION))]
     pub sample_rate: Option<u32>,
-    /// 直前の読み取りまたは編集の応答が返した project_epoch。シーンは selector を持たないため、これがプロジェクト境界を照合する唯一の材料である。
+    /// 直前の読み取りまたは編集の応答が返した project_epoch。省略はできない。シーンは selector を持たないため、これがプロジェクト境界を照合する唯一の材料である。
     #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
     pub expected_project_epoch: String,
 }

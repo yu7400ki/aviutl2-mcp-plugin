@@ -65,10 +65,10 @@ fn default_limit() -> u32 {
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListInstancesInput {
-    /// 取得を開始する 0 始まりの位置。
+    /// 取得を開始する 0 始まりの位置。反復は応答の has_more と next_offset で終端する。items が空になったことでは終端しない。
     #[serde(default)]
     pub offset: u32,
-    /// 取得件数。
+    /// 取得件数。1 以上 200 以下であり、省略すると 50 になる。
     #[serde(default = "default_limit")]
     #[schemars(range(min = 1, max = 200))]
     pub limit: u32,
@@ -87,14 +87,14 @@ pub struct InstanceInput {
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PageInput {
-    /// 取得を開始する 0 始まりの位置。
+    /// 取得を開始する 0 始まりの位置。反復は応答の has_more と next_offset で終端する。items が空になったことでは終端しない。
     #[serde(default)]
     pub offset: u32,
-    /// 取得件数。
+    /// 取得件数。1 以上 200 以下であり、省略すると 50 になる。
     #[serde(default = "default_limit")]
     #[schemars(range(min = 1, max = 200))]
     pub limit: u32,
-    /// 先頭ページが返した snapshot_revision。指定すると一致しない場合に precondition_failed となる。
+    /// 先頭ページが返した snapshot_revision。2 ページ目以降へ添えると、一致しない場合に precondition_failed となる。前のページが返した値をそのまま送り返す。
     #[serde(default)]
     pub snapshot_revision: Option<u64>,
 }
@@ -124,14 +124,14 @@ impl PageInput {
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogPageInput {
-    /// 取得を開始する 0 始まりの位置。
+    /// 取得を開始する 0 始まりの位置。反復は応答の has_more と next_offset で終端する。items が空になったことでは終端しない。
     #[serde(default)]
     pub offset: u32,
-    /// 取得件数。
+    /// 取得件数。1 以上 200 以下であり、省略すると 50 になる。
     #[serde(default = "default_limit")]
     #[schemars(range(min = 1, max = 200))]
     pub limit: u32,
-    /// 先頭ページが返した snapshot_revision。この tool では照合に用いない。一覧の対象はプロジェクトの内容ではなく、プロジェクトの revision に連動しないためである。
+    /// 先頭ページが返した snapshot_revision。受理するがページ間の照合に用いない。一覧の対象はプロジェクトの内容ではなく、プロジェクトの revision に連動しないためである。前のページが返した値をそのまま送り返しても拒否されない。
     #[serde(default)]
     pub snapshot_revision: Option<u64>,
 }
@@ -233,13 +233,21 @@ pub struct GetObjectInput {
 
 /// オブジェクトを再指定するセレクター。
 ///
-/// 応答が返した値をそのまま送り返す双方向の値であり、未知フィールドを拒否しない。
-/// server はこの値を解釈せず接続先へ転送するだけなので、ここで弾いても得るものが
-/// 無い一方、フィールドが増えた応答をそのまま渡すクライアントを入口で
-/// `invalid_argument` にしてしまう。既知フィールドの検証は従来どおり行う。
+/// 読み取りと編集の応答が返した値を、そのまま送り返す。組み立て直さず、
+/// 読み直さずにそのまま次の要求へ渡せる。
+/// 対象を変更すると fingerprint が変わる。変更前の selector で続けて編集すると
+/// precondition_failed となるため、応答が返した新しい selector へ持ち替える。
+/// その precondition_failed の details.current_object には対象の現在の姿が同じ形で
+/// 入り、これもそのまま次の要求の selector にできる。
+// 型の説明は入力 schema へそのまま載る。実装の判断はここへ書かない。
+//
+// 双方向の値であるため未知フィールドを拒否しない。server はこの値を解釈せず
+// 接続先へ転送するだけなので、ここで弾いても得るものが無い一方、フィールドが
+// 増えた応答をそのまま渡すクライアントを入口で `invalid_argument` にしてしまう。
+// 既知フィールドの検証は従来どおり行う。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ObjectSelectorInput {
-    /// 応答が返したプロジェクトの epoch。
+    /// 応答が返したプロジェクトの epoch。プロジェクトの世代はこの値で照合し、別のプロジェクトを指していればここで拒否される。
     #[schemars(length(min = 1, max = MAX_EPOCH_CHARS))]
     pub project_epoch: String,
     /// 読み取り時と同じシーンかを確認するためのシーン ID。
@@ -375,10 +383,12 @@ pub struct ListObjectAliasesInput {
 }
 
 /// オブジェクト内の effect を再指定するセレクター。
-///
-/// [`ObjectSelectorInput`] と同じく往復型であり、未知フィールドを拒否しない。
-/// 内側の `object` も同じ扱いになる。fingerprint の算出方式は `object` だけが
-/// 持ち、ここには置かない。
+/// get_object や編集の応答が返した値を、そのまま送り返す。組み立て直さず、
+/// 読み直さずにそのまま次の要求へ渡せる。effect の設定や状態を変えると
+/// fingerprint が変わるため、応答が返した新しい selector へ持ち替える。
+// [`ObjectSelectorInput`] と同じく往復型であり、未知フィールドを拒否しない。
+// 内側の `object` も同じ扱いになる。fingerprint の算出方式は `object` だけが
+// 持ち、ここには置かない。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct EffectSelectorInput {
     /// effect が属するオブジェクト。
