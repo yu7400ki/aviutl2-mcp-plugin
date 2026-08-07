@@ -1891,7 +1891,8 @@ fn edits_that_target_an_effect_read_them() {
 fn an_item_value_the_host_clamps_is_reported_as_a_failure() {
     // クライアントは要求した値を得ていない。成功として返すと、逸脱に気付く
     // 手段が要求元にも利用者にも無い。**読み直した実値を添えることで、要求元は
-    // それをそのまま送り直せる。**
+    // 要求した値がホストの手でどうなったかを知る**——切り詰めであれば、その値が
+    // 値域の境界そのものである。
     let harness = Harness::new();
     let error = harness
         .edit
@@ -1907,9 +1908,11 @@ fn an_item_value_the_host_clamps_is_reported_as_a_failure() {
     assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
     assert_eq!(error.details()["reason"], json!("item_value_not_applied"));
     assert_eq!(
-        error.details()["current_value"],
+        error.details()["observed_value"],
         json!(MAX_ITEM_VALUE.to_string())
     );
+    // 巻き戻したため、読み直した値は応答が返る時点の現在値ではない。
+    assert_eq!(error.details()["restored"], json!(true));
 }
 
 #[test]
@@ -2637,9 +2640,10 @@ fn a_choice_value_the_host_ignores_is_reported_as_a_failure() {
             json!("item_value_not_applied"),
             "{item}"
         );
-        // 読み直した実値が載る。要求元はそのまま送り直せる。
+        // 書き込んだ直後に読み直した値が載る。この階級では変更前の値そのもの
+        // であり、ホストは何も倒していない。
         assert_eq!(
-            error.details()["current_value"],
+            error.details()["observed_value"],
             json!(CHOICE_VALUES[0]),
             "{item}"
         );
@@ -2714,7 +2718,7 @@ fn a_value_the_host_rewrites_is_reported_as_a_failure() {
             json!("item_value_not_applied"),
             "{item}"
         );
-        assert_eq!(error.details()["current_value"], json!(current), "{item}");
+        assert_eq!(error.details()["observed_value"], json!(current), "{item}");
     }
 }
 
@@ -2975,6 +2979,100 @@ fn a_restore_that_does_not_take_effect_names_the_state_as_unknown() {
         before,
         "戻せていないのに戻ったと名乗っています"
     );
+}
+
+#[test]
+fn the_observed_value_and_the_current_value_are_not_interchanged() {
+    // **2 つのキーは別の時点を指す。** `observed_value` は書き込んだ直後に
+    // 読み直した値であり、応答が返る時点の現在値ではない——巻き戻しが済んで
+    // いる。`current_value` は書き込みを発行する前に落ちた失敗が運ぶ値であり、
+    // 文字どおり現在値である。取り違えれば、要求元は戻したはずの状態を自分で
+    // 再現する要求を組み立てる。
+    let harness = harness_with_choice_effect();
+    let not_applied = harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector: harness.effect_selector(1, 300, SHAPE, 0),
+            item: "サイズ".to_string(),
+            value: ItemValue::Number {
+                value: FiniteF64::try_new((MAX_ITEM_VALUE + 400) as f64).expect("有限値"),
+            },
+        })
+        .expect_err("切り詰められた値が成功として返りました");
+    let details = not_applied.details();
+    assert_eq!(details["reason"], json!("item_value_not_applied"));
+    assert_eq!(
+        details["observed_value"],
+        json!(format!("{MAX_ITEM_VALUE}.00"))
+    );
+    assert!(
+        details.get("current_value").is_none(),
+        "巻き戻した後の値を現在値として名乗っています: {details}"
+    );
+
+    let track = harness_with_track_effect();
+    let would_be_lost = track
+        .edit
+        .set_object_item(&set_movement(
+            &track,
+            ItemValue::Number {
+                value: FiniteF64::try_new(0.0).expect("有限値"),
+            },
+        ))
+        .expect_err("移動を消す書き込みが成功として返りました");
+    let details = would_be_lost.details();
+    assert_eq!(details["reason"], json!("track_movement_present"));
+    assert!(details["current_value"].is_string());
+    assert!(
+        details.get("observed_value").is_none(),
+        "書き込みを発行していない失敗が読み直した値を名乗っています: {details}"
+    );
+}
+
+#[test]
+fn the_restore_outcome_is_named_for_both_classes() {
+    // **拒否の階級でも `restored` は真である。** 戻す書き込みが要らなかった
+    // だけで、対象は書き込み前の値を持つ。要求元が取る行動は倒しの階級と
+    // 変わらない。
+    for (item, requested, _) in failed_verification_cases() {
+        let harness = harness_with_choice_effect();
+        let error = harness
+            .edit
+            .set_object_item(&SetObjectItemParams {
+                selector: harness.effect_selector(1, 300, SHAPE, 0),
+                item: item.to_string(),
+                value: requested,
+            })
+            .err()
+            .unwrap_or_else(|| panic!("{item} の書き込み検証が落ちませんでした"));
+
+        let details = error.details();
+        assert_eq!(details["restored"], json!(true), "{item}");
+        assert!(
+            details.get("consistency_unknown").is_none(),
+            "{item} は戻せているのに中途半端な状態を名乗りました: {details}"
+        );
+    }
+
+    // 戻せなかったときだけ偽になり、`consistency_unknown` が対で立つ。
+    let harness = harness_with_choice_effect();
+    let selector = harness.effect_selector(1, 300, SHAPE, 0);
+    harness
+        .host
+        .arm(|knobs| knobs.fault = Some(Fault::IgnoreItemRestore));
+    let details = harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector,
+            item: "サイズ".to_string(),
+            value: ItemValue::Number {
+                value: FiniteF64::try_new((MAX_ITEM_VALUE + 400) as f64).expect("有限値"),
+            },
+        })
+        .expect_err("切り詰められた値が成功として返りました")
+        .details();
+    assert_eq!(details["restored"], json!(false));
+    assert_eq!(details["consistency_unknown"], json!(true));
 }
 
 #[test]

@@ -731,15 +731,36 @@ impl EditError {
             // 載せるのはホストが返した実値だけである。**要求された値は反響させ
             // ない。** 読み直した値はホストの現在の状態であって要求元の内容では
             // なく、同じ値は成功した書き込みの応答にも載る。
+            //
+            // **`current_value` とは名乗らない。** 巻き戻しが済んだ時点で、この
+            // 値は現在値ではない。現在値と名乗れば要求元はそのまま送り返し、
+            // 巻き戻したはずの状態を自分で再現することになる。
+            //
+            // **`coerced_value` とも名乗らない。** ホストが値を動かさずに書き
+            // 込みを捨てた場合、この値は変更前の値そのものである。「倒した値」と
+            // 名乗れば、その応答が「ホストがあなたの値を元の値へ倒した」と読める。
+            // `observed_value` は測定そのものを名乗るため 2 つの階級のどちらでも
+            // 正しい。
             EditError::ItemValueNotApplied { observed, restore } => {
                 details.insert("reason".to_string(), json!("item_value_not_applied"));
-                details.insert("current_value".to_string(), json!(truncate(observed)));
-                // 巻き戻せなかったときだけ名乗る。語彙は一括適用と同じものを
-                // 使う——要求元に求める行動（次の編集の前に読み直す）が同じで
-                // ある以上、名前を分ける理由が無い。
+                details.insert("observed_value".to_string(), json!(truncate(observed)));
+                // **階級は名乗り分けない。** ホストが値を動かさなかった場合も
+                // `restored` は真である——戻す書き込みが要らなかっただけで、
+                // 対象は書き込み前の値を持つ。要求元が取る行動（受け付けられる
+                // 値を選び直す）は動いた場合と変わらず、分ければ分岐だけが増える。
+                //
+                // 巻き戻せなかったときの語彙は一括適用と同じものを使う。要求元に
+                // 求める行動（次の編集の前に読み直す）が同じである以上、名前を
+                // 分ける理由が無い。
                 match restore {
-                    ItemRestore::NotAttempted | ItemRestore::Restored => {}
+                    // 一括適用の sub-operation。結末は要求全体の巻き戻しが
+                    // `rolled_back` として名乗る。
+                    ItemRestore::NotAttempted => {}
+                    ItemRestore::Restored => {
+                        details.insert("restored".to_string(), json!(true));
+                    }
                     ItemRestore::Failed => {
+                        details.insert("restored".to_string(), json!(false));
                         details.insert("consistency_unknown".to_string(), json!(true));
                     }
                 }
@@ -1658,9 +1679,14 @@ pub(crate) mod tests {
             // 読み直した対象の概要と、それが内包するセレクター。概要は要約で
             // あり alias も設定値もパスも持たない。
             "current_object",
-            // 書き込みの照合で読み直した、ホストが現在保持している設定値。
-            // 要求元が与えた値ではなく、成功した書き込みが返すものと同じである。
+            // 対象がいま持つ移動。書き込みを発行する前に落ちるため、文字どおり
+            // 現在値である。要求元が与えた値ではない。
             "current_value",
+            // 書き込んだ直後に読み直した設定値と、書き込み前の値へ戻せたか。
+            // 前者は要求元が与えた値ではなく、成功した書き込みが返すものと同じ
+            // である。後者は真偽値だけであり、値も元値も漏らさない。
+            "observed_value",
+            "restored",
             "name",
             "selector",
             "fingerprint",
@@ -1825,10 +1851,13 @@ pub(crate) mod tests {
             // 守るのは「要求元が与えた内容を反響させない」ことであり、ホストの
             // 現在の状態はその対象ではない。** パス種別の設定項目では、ここに
             // 利用者のファイルパスが現れるのが正しい姿である。
-            let host_value = details
-                .as_object_mut()
-                .expect("補助情報はオブジェクトです")
-                .remove("current_value");
+            //
+            // 欄は 2 つある。発行前に落ちた失敗が運ぶ現在値と、発行した直後に
+            // 読み直した値である。1 つの失敗が両方を持つことはない。
+            let object = details.as_object_mut().expect("補助情報はオブジェクトです");
+            let host_value = object
+                .remove("current_value")
+                .or_else(|| object.remove("observed_value"));
             let text = format!("{} {}", error, details);
             assert!(!text.contains("0x"), "{text}");
             assert!(!text.to_lowercase().contains("handle"), "{text}");
@@ -1847,7 +1876,7 @@ pub(crate) mod tests {
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 expected,
-                "current_value がホストから読み直した値以外を運んでいます: {error}"
+                "ホストから読み直した値の欄が別の内容を運んでいます: {error}"
             );
         }
     }

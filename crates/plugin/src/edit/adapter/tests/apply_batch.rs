@@ -729,7 +729,10 @@ fn a_choice_value_the_host_ignores_fails_the_batch_and_rolls_it_back() {
 
     assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
     assert_eq!(error.details()["reason"], json!("item_value_not_applied"));
-    assert_eq!(error.details()["current_value"], json!(CHOICE_VALUES[0]));
+    assert_eq!(error.details()["observed_value"], json!(CHOICE_VALUES[0]));
+    // 巻き戻しの結末は要求全体が名乗る。sub-operation が別に名乗ると、同じ
+    // 応答に 2 つの結末が並ぶ。
+    assert!(error.details().get("restored").is_none());
     assert_eq!(error.details()["failed_index"], json!(1));
     assert_eq!(error.details()["rolled_back"], json!(true));
     assert_eq!(error.details()["rolled_back_count"], json!(2));
@@ -846,6 +849,11 @@ fn the_same_movement_write_is_judged_the_same_way_alone_and_in_a_batch() {
                 assert_eq!(
                     single.details()["current_value"],
                     batched.details()["current_value"],
+                    "{item}"
+                );
+                assert_eq!(
+                    single.details().get("observed_value"),
+                    batched.details().get("observed_value"),
                     "{item}"
                 );
                 // 値の形の情報（個数・移動方法の一覧）も単独と一括で同じで
@@ -1014,9 +1022,14 @@ fn the_same_item_value_fails_the_same_way_alone_and_in_a_batch() {
             "{item}"
         );
         assert_eq!(
-            single.details()["current_value"],
-            batched.details()["current_value"],
+            single.details()["observed_value"],
+            batched.details()["observed_value"],
             "{item}"
+        );
+        // 欠けている値同士の比較で通り抜けない。読み直した値は両方に必ず載る。
+        assert!(
+            single.details()["observed_value"].is_string(),
+            "{item} の読み直した値が載っていません"
         );
         assert_eq!(batched.details()["failed_index"], json!(0), "{item}");
     }
