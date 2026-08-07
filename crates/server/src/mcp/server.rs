@@ -2034,8 +2034,19 @@ impl ServerHandler for AviUtl2McpServer {
                 .build(),
         );
         info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        // 層 0 が答えるのは「この server は何か」だけである。**複数 tool に
+        // またがる規約をここへ書かない**——それらは値を書く場所の隣（入力
+        // schema）と、作業を組み立てる時点で読まれる場所（skill）に正本を
+        // 持っており、層 0 へ写せば 3 つ目の正本ができる。入力 schema は
+        // 全てのクライアントが tools/list で受け取るため、写しを落としても
+        // 届かなくなるものは無い。
+        //
+        // 残すのは宛先の在り方である。**要求が誰に向かうのかは、どの tool を
+        // 呼ぶかを決める前に効く**——server が 1 つのアプリの窓口ではなく、
+        // 同時に走る複数のインスタンスの窓口であることは、tool 1 個の説明にも
+        // 引数 1 個の説明にも属さない。
         info.instructions = Some(
-            "AviUtl2 の編集内容を読み取り、変更する。list_instances 以外の tool は instance_id が必須である。frame 番号と layer 番号はいずれも 0 始まりであり UI の表示とは異なる。変更する tool は対象を selector で指し、応答が返した値をそのまま送り返す。selector を持たない create_object と set_selection では、応答が返した project_epoch を expected_project_epoch に必ず指定する。"
+            "AviUtl2 の編集内容を読み取り、変更する。同時に起動している複数の AviUtl2 を扱い、要求ごとにどのインスタンスへ宛てるかを instance_id で指す。"
                 .to_string(),
         );
         info
@@ -3716,6 +3727,40 @@ mod tests {
                 "持ち越す検査の記録が欠けています"
             );
         }
+    }
+
+    #[test]
+    fn the_server_instructions_carry_no_convention_that_lives_in_another_layer() {
+        // 層 0 が答えるのは「この server は何か」であり、接続時に 1 度だけ
+        // 読まれる。**層 1 から落とした句をここへ寄せると、正本が 3 つになる。**
+        // 移設の表を入力に取り、行き先が層 2 と層 3 に決まった句が層 0 にも
+        // 現れていないことを見る。
+        let instructions = ServerHandler::get_info(&server())
+            .instructions
+            .expect("層 0 の説明がありません");
+        for relocation in RELOCATED_CONVENTIONS {
+            for phrase in relocation.dropped {
+                assert!(
+                    !instructions.contains(phrase),
+                    "層 0 が層 1 から落とした句を抱えています: {phrase}"
+                );
+            }
+        }
+        // **tool を名指ししない。** 名指しは必ず「その tool がどういうものか」を
+        // 伴い、しかも数え漏らしても誰も気付けない——ここに在った
+        // 「selector を持たない create_object と set_selection」は、実際には
+        // 5 tool を数え落としていた。
+        for tool in tools() {
+            assert!(
+                !instructions.contains(tool.name.as_ref()),
+                "層 0 が {} を名指ししています",
+                tool.name
+            );
+        }
+        assert!(
+            !instructions.contains("expected_project_epoch"),
+            "層 0 が入力 schema の写しを持っています"
+        );
     }
 
     /// 同梱する skill の `SKILL.md` を読む。
