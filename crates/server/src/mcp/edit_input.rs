@@ -257,7 +257,11 @@ pub enum ItemValueInput {
         /// 値。
         value: f64,
     },
-    /// 整数。トラックバーでの扱いは number と同じである。
+    /// 整数。item_type: integer の項目にだけ書ける。
+    /// item_type: number の項目へ書くと invalid_argument となる。
+    /// トラックバーへ書くと全区間へ同じ値が入る。
+    /// 移動を持つ項目へは指定できず、unsupported_operation となる。
+    /// 移動を消したい場合は mode を null にした track を送る。
     Integer {
         /// 値。
         value: i64,

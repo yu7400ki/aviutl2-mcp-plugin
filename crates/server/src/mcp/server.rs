@@ -4281,6 +4281,44 @@ mod tests {
     }
 
     #[test]
+    fn the_integer_item_description_names_the_only_item_type_that_takes_it() {
+        // `accepts` が通すのは (Integer, Integer) だけである。number の項目へ
+        // 書けると読める説明は、通らない要求を組み立てさせる——しかも失敗するのは
+        // invalid_argument であり、値を選び直しても直らない。
+        let description = item_value_description("integer");
+        assert!(
+            description.contains("item_type: integer"),
+            "書ける種別を名指ししていません: {description}"
+        );
+        assert!(
+            description.contains("item_type: number") && description.contains("invalid_argument"),
+            "number の項目で落ちることを述べていません: {description}"
+        );
+        assert!(
+            !description.contains("number と同じ"),
+            "number と同じ扱いだと読めます: {description}"
+        );
+
+        // 説明を実装から確かめる。integer の値は integer の項目にだけ通り、
+        // number の項目には通らない。
+        for (item_type, accepted) in [
+            (EffectItemType::Integer, true),
+            (EffectItemType::Number, false),
+        ] {
+            let items = vec![AvailableEffectItem {
+                name: "項目".to_string(),
+                item_type,
+            }];
+            let value = ItemValue::Integer { value: 1 };
+            assert_eq!(
+                prepare_item_write(&items, "項目", &value, no_track_target()).is_ok(),
+                accepted,
+                "integer の値が受け付けられる種別と説明が食い違います"
+            );
+        }
+    }
+
+    #[test]
     fn the_color_item_description_states_which_notation_the_host_accepts() {
         // 説明は保証である。受理される書式を挙動から導く材料が要求元の側に
         // 無い——外れた書式は失敗するが、何が正解かは失敗からは分からない。
