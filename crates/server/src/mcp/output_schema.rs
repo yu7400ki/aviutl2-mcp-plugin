@@ -567,6 +567,7 @@ fn effect_item_description() -> Value {
         ("item_type", effect_item_type()),
         ("description", nullable_string()),
         ("choices", nullable(item_choices())),
+        ("range", nullable(item_range())),
     ])
 }
 
@@ -575,13 +576,25 @@ fn effect_item_description() -> Value {
 /// 受け付ける値を宣言するものではない。候補に無い値も書き込みは通り、候補に
 /// ある値が必ず通るとも限らない。
 fn item_choices() -> Value {
+    object(&[("values", array(string())), ("source", table_source())])
+}
+
+/// 設定項目の値域と小数桁。
+///
+/// 受け付ける値を宣言するものではない。この範囲を外れる値も書き込みは通る。
+/// **3 つの値は個別に null を取る**——測れた側だけが載るためである。
+fn item_range() -> Value {
     object(&[
-        ("values", array(string())),
-        (
-            "source",
-            json!({ "type": "string", "enum": ["builtin_table", "sidecar"] }),
-        ),
+        ("min", nullable_number()),
+        ("max", nullable_number()),
+        ("decimals", nullable_unsigned()),
+        ("source", table_source()),
     ])
+}
+
+/// 表が述べたことの由来。候補にも値域にも同じ 2 値が付く。
+fn table_source() -> Value {
+    json!({ "type": "string", "enum": ["builtin_table", "sidecar"] })
 }
 
 fn effect_flags() -> Value {
@@ -782,7 +795,7 @@ mod tests {
         EffectDescription, EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem,
         EffectItemDescription, EffectItemType, EffectItemValues, EffectType, EvaluatedItem, Extent,
         FiniteF64, FrameRange, GetCurrentSceneResult, GridBpm, InstanceId, InstanceInfo,
-        InstanceProject, InstanceState, ItemChoices, ItemValue, LayerInfo,
+        InstanceProject, InstanceState, ItemChoices, ItemRange, ItemValue, LayerInfo,
         ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
         ListObjectAliasesResult, ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType,
         ObjectAliasSummary, ObjectDetail, ObjectFingerprintInput, ObjectSummary, ObservedSelection,
@@ -1204,8 +1217,8 @@ mod tests {
     #[test]
     fn describe_effects_schema_matches_dto() {
         // 説明を持つ effect と持たない effect、説明を持つ項目と持たない項目、
-        // 候補を持つ項目と持たない項目、由来の 2 値、未知の種別、そして
-        // 見つからなかった名前を 1 度に通す。
+        // 候補を持つ項目と持たない項目、値域の 3 つの値が個別に欠けた項目、
+        // 由来の 2 値、未知の種別、そして見つからなかった名前を 1 度に通す。
         let result = DescribeEffectsResult {
             effects: vec![
                 EffectDescription {
@@ -1222,6 +1235,7 @@ mod tests {
                                 values: vec!["円".to_string(), "四角形".to_string()],
                                 source: TableSource::BuiltinTable,
                             }),
+                            range: None,
                         },
                         EffectItemDescription {
                             name: "合成モード".to_string(),
@@ -1231,12 +1245,38 @@ mod tests {
                                 values: vec!["通常".to_string(), "加算".to_string()],
                                 source: TableSource::Sidecar,
                             }),
+                            range: None,
+                        },
+                        EffectItemDescription {
+                            name: "サイズ".to_string(),
+                            item_type: EffectItemType::Integer,
+                            description: None,
+                            choices: None,
+                            range: Some(ItemRange {
+                                min: FiniteF64::try_new(1.0),
+                                max: FiniteF64::try_new(4000.0),
+                                decimals: Some(0),
+                                source: TableSource::BuiltinTable,
+                            }),
+                        },
+                        EffectItemDescription {
+                            name: "上限だけ測れた".to_string(),
+                            item_type: EffectItemType::Number,
+                            description: None,
+                            choices: None,
+                            range: Some(ItemRange {
+                                min: None,
+                                max: FiniteF64::try_new(100.0),
+                                decimals: None,
+                                source: TableSource::Sidecar,
+                            }),
                         },
                         EffectItemDescription {
                             name: "未知".to_string(),
                             item_type: EffectItemType::Unknown(42),
                             description: None,
                             choices: None,
+                            range: None,
                         },
                     ],
                 },

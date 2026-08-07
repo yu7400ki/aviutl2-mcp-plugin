@@ -414,6 +414,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
                         EffectItemDescription {
                             description: help.items.get(&item.name).cloned(),
                             choices: facets.and_then(|facets| facets.choices.clone()),
+                            range: facets.and_then(|facets| facets.range),
                             name: item.name,
                             item_type: item.item_type,
                         }
@@ -818,8 +819,8 @@ mod tests {
     };
     use aviutl2_mcp_core::{
         AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
-        FiniteF64, GridBpm, ItemChoices, ItemValue, PALETTE_COLOR_COUNT, Rgba, SectionRange,
-        TableSource, TrackInfo, TrackValue,
+        FiniteF64, GridBpm, ItemChoices, ItemRange, ItemValue, PALETTE_COLOR_COUNT, Rgba,
+        SectionRange, TableSource, TrackInfo, TrackValue,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1711,6 +1712,24 @@ mod tests {
                 source,
             }),
             range: None,
+        }
+    }
+
+    /// 値域だけを持つ面の組。
+    fn range_facet(
+        min: Option<f64>,
+        max: Option<f64>,
+        decimals: Option<u32>,
+        source: TableSource,
+    ) -> ItemFacets {
+        ItemFacets {
+            choices: None,
+            range: Some(ItemRange {
+                min: min.and_then(FiniteF64::try_new),
+                max: max.and_then(FiniteF64::try_new),
+                decimals,
+                source,
+            }),
         }
     }
 
@@ -3899,6 +3918,127 @@ mod tests {
                 .iter()
                 .all(|item| item.choices.is_none()),
             "表に無い effect へ候補が付きました"
+        );
+    }
+
+    #[test]
+    fn describe_effects_carries_the_range_of_each_item_with_its_source() {
+        // 値域を知らないことは、値域外の指定と値域内の取り違えの両方を招く。
+        // 後者は書き戻し照合も通るため、書く前に読めることだけが手段になる。
+        let adapter = adapter_with(|_| FakeHost {
+            facets: vec![(
+                "グロー".to_string(),
+                effect_facets(&[
+                    (
+                        "グローの項目1",
+                        range_facet(Some(1.0), Some(4000.0), Some(0), TableSource::BuiltinTable),
+                    ),
+                    // **測れた側だけを載せる。** 3 つの値は個別に欠ける。
+                    (
+                        "グローの項目0",
+                        range_facet(None, Some(100.0), None, TableSource::Sidecar),
+                    ),
+                ]),
+            )],
+            ..FakeHost::new()
+        });
+        let result = adapter
+            .describe_effects(&describe_params(&["グロー", "ぼかし"]))
+            .unwrap();
+
+        let described: Vec<(&str, Option<ItemRange>)> = result.effects[0]
+            .items
+            .iter()
+            .map(|item| (item.name.as_str(), item.range))
+            .collect();
+        assert_eq!(
+            described,
+            vec![
+                (
+                    "グローの項目1",
+                    Some(ItemRange {
+                        min: FiniteF64::try_new(1.0),
+                        max: FiniteF64::try_new(4000.0),
+                        decimals: Some(0),
+                        source: TableSource::BuiltinTable,
+                    })
+                ),
+                (
+                    "グローの項目0",
+                    Some(ItemRange {
+                        min: None,
+                        max: FiniteF64::try_new(100.0),
+                        decimals: None,
+                        source: TableSource::Sidecar,
+                    })
+                ),
+                // 表に無い項目は null である。**値域そのものが null であることと、
+                // 上限だけが null であることは別の事実である。**
+                ("グローの項目3", None),
+                ("グローの項目2", None),
+            ],
+            "値域が別の項目へ付いているか、測れていない側が埋められています"
+        );
+        assert!(
+            result.effects[1]
+                .items
+                .iter()
+                .all(|item| item.range.is_none()),
+            "表に無い effect へ値域が付きました"
+        );
+    }
+
+    #[test]
+    fn describe_effects_does_not_filter_the_facets_by_item_type() {
+        // **種別で絞らない。** 表に載っていれば text の項目にも候補と値域が付く。
+        // 絞ると、表が書いた記述を我々の判断で黙って落とすことになり、落とした
+        // 側に「面が無い」と「面を出さないことにした」の区別は届かない。
+        //
+        // **数値や選択肢の項目で確かめても意味が無い**——種別で絞る実装でも
+        // 通ってしまう。値域を持ちそうにない種別で見る。
+        let adapter = adapter_with(|_| FakeHost {
+            catalog: vec![FakeCatalogEntry {
+                summary: HostEffectSummary {
+                    name: "字幕".to_string(),
+                    effect_type: EffectType::Filter,
+                    flags: EffectFlags::from_raw(1),
+                },
+                items: vec![AvailableEffectItem {
+                    name: "本文".to_string(),
+                    item_type: EffectItemType::Text,
+                }],
+            }],
+            facets: vec![(
+                "字幕".to_string(),
+                effect_facets(&[(
+                    "本文",
+                    ItemFacets {
+                        choices: Some(ItemChoices {
+                            values: vec!["既定".to_string()],
+                            source: TableSource::Sidecar,
+                        }),
+                        range: Some(ItemRange {
+                            min: None,
+                            max: FiniteF64::try_new(1024.0),
+                            decimals: None,
+                            source: TableSource::Sidecar,
+                        }),
+                    },
+                )]),
+            )],
+            ..FakeHost::new()
+        });
+        let result = adapter
+            .describe_effects(&describe_params(&["字幕"]))
+            .unwrap();
+
+        let item = &result.effects[0].items[0];
+        assert_eq!(item.item_type, EffectItemType::Text);
+        assert!(item.choices.is_some(), "text の項目から候補が落ちました");
+        assert_eq!(
+            item.range.and_then(|range| range.max),
+            FiniteF64::try_new(1024.0),
+            "text の項目から値域が落ちました"
         );
     }
 

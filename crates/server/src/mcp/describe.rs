@@ -1118,12 +1118,14 @@ mod tests {
                                     .to_string(),
                             ),
                             choices: None,
+                            range: None,
                         },
                         EffectItemDescription {
                             name: "ライン幅".to_string(),
                             item_type: EffectItemType::Integer,
                             description: None,
                             choices: None,
+                            range: None,
                         },
                     ],
                 },
@@ -1195,6 +1197,7 @@ mod tests {
                         item_type: EffectItemType::Integer,
                         description: Some(long_name()),
                         choices: None,
+                        range: None,
                     })
                     .collect(),
             })

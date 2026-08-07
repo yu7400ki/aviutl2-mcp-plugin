@@ -166,6 +166,17 @@ pub struct EffectItemDescription {
     /// 落とすことになる。落とした側に「候補が無い」と「候補を出さないことにした」
     /// の区別は届かない。
     pub choices: Option<ItemChoices>,
+    /// 値域と小数桁。表に項目が無ければ null。
+    ///
+    /// 値域が null であることは「値の範囲が無い項目である」ことを意味しない。
+    /// 表に無いだけであり、書き込みは従来どおり通る。**`range` が null であること
+    /// と `range.max` が null であることは別の事実である**——前者は表がその項目の
+    /// 値域を述べていないことを、後者は上限を測れなかったことを言う。
+    ///
+    /// **種別では絞らない。** [`Self::choices`] と揃える——表に載っていれば `text`
+    /// の項目でも値域が付く。種別で絞ると、表が書いた記述を我々の判断で黙って
+    /// 落とすことになる。
+    pub range: Option<ItemRange>,
 }
 
 /// 設定項目が取り得る値の候補。
@@ -1007,12 +1018,19 @@ mod tests {
                         values: vec!["円".to_string(), "四角形".to_string()],
                         source: TableSource::BuiltinTable,
                     }),
+                    range: None,
                 },
                 EffectItemDescription {
                     name: "ライン幅".to_string(),
                     item_type: EffectItemType::Integer,
                     description: None,
                     choices: None,
+                    range: Some(ItemRange {
+                        min: FiniteF64::try_new(1.0),
+                        max: FiniteF64::try_new(4000.0),
+                        decimals: Some(0),
+                        source: TableSource::BuiltinTable,
+                    }),
                 },
             ],
         }
@@ -1065,7 +1083,52 @@ mod tests {
     }
 
     #[test]
-    fn the_choices_source_names_where_the_values_came_from() {
+    fn an_item_carries_its_range_with_the_source_it_came_from() {
+        // 値域も候補と同じ形で運ぶ。由来を落とすと、受け取った側は表の誤りを
+        // どこへ報告すればよいかを判断できない。
+        let value = serde_json::to_value(sample_effect_description()).unwrap();
+        assert_eq!(value["items"][1]["range"]["max"], 4000.0);
+        assert_eq!(value["items"][1]["range"]["source"], "builtin_table");
+        // 表に無い項目は null である。
+        assert!(value["items"][0]["range"].is_null(), "{value}");
+    }
+
+    #[test]
+    fn the_parts_of_a_range_are_null_one_by_one() {
+        // **測れた側だけを載せる。** 探りの値が範囲の内側へ収まった項目では、
+        // その側を記録できない。**値域そのものが null であることと、上限だけが
+        // null であることは、要求元にとって別の情報である**——前者は表が値域を
+        // 述べていないことを、後者は上限を測れなかったことを言う。
+        let item = EffectItemDescription {
+            name: "縦横比".to_string(),
+            item_type: EffectItemType::Number,
+            description: None,
+            choices: None,
+            range: Some(ItemRange {
+                min: None,
+                max: FiniteF64::try_new(100.0),
+                decimals: None,
+                source: TableSource::Sidecar,
+            }),
+        };
+        // 測れなかった側は欄ごと消さずに null で名乗る。欄が消えると、要求元は
+        // 「上限を測れなかった」と「上限という概念が無い」を見分けられない。
+        let value = serde_json::to_value(&item).unwrap();
+        let range = value["range"].as_object().expect("値域がある");
+        assert_eq!(range.get("min"), Some(&serde_json::Value::Null), "{value}");
+        assert_eq!(range["max"], 100.0);
+        assert_eq!(
+            range.get("decimals"),
+            Some(&serde_json::Value::Null),
+            "{value}"
+        );
+
+        let restored: EffectItemDescription = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, item);
+    }
+
+    #[test]
+    fn the_table_source_names_where_the_values_came_from() {
         for (source, name) in [
             (TableSource::BuiltinTable, "\"builtin_table\""),
             (TableSource::Sidecar, "\"sidecar\""),

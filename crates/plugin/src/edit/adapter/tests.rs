@@ -21,9 +21,9 @@ use crate::test_support::{default_page_request, default_page_window, with_silent
 use aviutl2_mcp_core::{
     ApplyBatchParams, BatchOperation, CreateObjectSectionParams, CursorPosition,
     DeleteObjectSectionParams, Destination, EditOperation, EffectFlags, EffectItem, EffectItemType,
-    EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemChoices, ItemValue,
-    LayerNameChange, MAX_GRID_BPM_ENTRIES, MoveObjectSectionParams, ObjectSectionsOutcome,
-    ObjectSelector, Placement, SceneSize, TableSource,
+    EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemChoices, ItemRange,
+    ItemValue, LayerNameChange, MAX_GRID_BPM_ENTRIES, MoveObjectSectionParams,
+    ObjectSectionsOutcome, ObjectSelector, Placement, SceneSize, TableSource,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -3275,6 +3275,81 @@ fn the_choices_table_never_decides_whether_a_write_goes_through() {
     // 表では、表が効いていないことを確かめられない。
     assert!(write_choice_with_table(None, CHOICE_ITEMS[0], CHOICE_VALUES[1]).is_ok());
     assert!(write_choice_with_table(None, CHOICE_ITEMS[0], HINTED_VALUES[0]).is_err());
+}
+
+/// 数値の項目。ホストは [`MIN_ITEM_VALUE`]〜[`MAX_ITEM_VALUE`] へ倒す。
+const NUMBER_ITEM: &str = "サイズ";
+
+/// 値域の表を差し替えたうえで、数値の項目へ 1 件書き込む。
+///
+/// 表の中身を変えても結果が変わらないことを比べられるよう、成否と失敗の種別を
+/// 1 つの値へ畳んで返す。
+fn write_number_with_range(range: Option<(f64, f64)>, value: f64) -> Result<String, String> {
+    let harness = Harness::with(|host| {
+        host.catalog.push(match range {
+            Some((min, max)) => shape_catalog_entry_with_facets(ItemFacets {
+                choices: None,
+                range: Some(ItemRange {
+                    min: FiniteF64::try_new(min),
+                    max: FiniteF64::try_new(max),
+                    decimals: Some(0),
+                    source: TableSource::Sidecar,
+                }),
+            }),
+            None => shape_catalog_entry(),
+        });
+        host.scene.get_mut().unwrap().layers[1].objects[1]
+            .effects
+            .push(shape(0));
+    });
+    harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector: harness.effect_selector(1, 300, SHAPE, 0),
+            item: NUMBER_ITEM.to_string(),
+            value: ItemValue::Number {
+                value: FiniteF64::try_new(value).expect("有限値"),
+            },
+        })
+        .map(|outcome| raw_item_value(&changed_item(&outcome, NUMBER_ITEM)))
+        .map_err(|error| format!("{:?} {}", error.error_code(), error.details()["reason"]))
+}
+
+#[test]
+fn the_range_table_never_decides_whether_a_write_goes_through() {
+    // **値域もヒントであってゲートではない。** 表の値域を外れる値でも書き込みは
+    // 通し、表の値域に収まる値が必ず通るとも約束しない。可否を決めるのはホスト
+    // であり、書き込みの経路は書いた値を読み直して照合する。
+    //
+    // **値域は候補より外れやすい。** 候補の陳腐化は足りなくなるだけだが、値域の
+    // 陳腐化は狭くなる——版が上がって上限が広がったとき、事前検証を掛けて
+    // いれば通るはずの値をこちら側が拒む。
+    let inside = (MAX_ITEM_VALUE / 2) as f64;
+    let outside = (MAX_ITEM_VALUE + 400) as f64;
+
+    for value in [inside, outside] {
+        // 表を持たない環境での結果を基準に取る。
+        let baseline = write_number_with_range(None, value);
+        for range in [
+            // 表が書こうとしている値より狭い範囲を主張する。
+            (0.0, 1.0),
+            // 表がホストより広い範囲を主張する。**版が上がった後の状態である。**
+            (0.0, f64::from(u16::MAX)),
+            // 表が書こうとしている値を含む。
+            (value - 1.0, value + 1.0),
+        ] {
+            assert_eq!(
+                write_number_with_range(Some(range), value),
+                baseline,
+                "{value} を書く成否が表の値域で変わりました"
+            );
+        }
+    }
+
+    // 基準そのものはホストの倒しで決まっている。両方が同じ結果になる値では、
+    // 表が効いていないことを確かめられない。
+    assert!(write_number_with_range(None, inside).is_ok());
+    assert!(write_number_with_range(None, outside).is_err());
 }
 
 #[test]

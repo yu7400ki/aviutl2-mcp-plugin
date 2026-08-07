@@ -2035,6 +2035,7 @@ mod tests {
                     item_type: EffectItemType::Integer,
                     description: described.then(|| format!("{}の項目{index} の説明", effect.name)),
                     choices: None,
+                    range: None,
                 })
                 .collect(),
         }

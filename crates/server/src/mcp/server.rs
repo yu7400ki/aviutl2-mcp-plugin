@@ -882,7 +882,7 @@ impl AviUtl2McpServer {
     /// 名前で指定した effect の中身を取得する。
     /// effect_names には list_available_effects が返す名前を 1〜10 件指定する。
     /// 同じ名前を 2 度指定すると invalid_argument となる。
-    /// 1 件につき name・description・items（name / item_type / description / choices）を返す。
+    /// 1 件につき name・description・items（name / item_type / description / choices / range）を返す。
     /// 設定項目の一覧はホストの列挙から得るため、必ず実際の effect と一致する。
     /// description はホストが同梱する説明であり、持たない effect と持たない項目は
     /// null になる。空欄を推測で補わない。
@@ -890,6 +890,9 @@ impl AviUtl2McpServer {
     /// 候補を持たない項目は null になる。値を選べない項目という意味ではない。
     /// choices はヒントであってゲートではない。候補に無い値でも書き込みは通り、
     /// 候補に在る値が必ず通るとも限らない。可否を決めるのはホストである。
+    /// range は値域と小数桁であり、min・max・decimals と source を持つ。
+    /// 3 つの値は個別に null になる。測れた側だけが載るためである。
+    /// range もヒントであってゲートではない。値域を外れる値でも書き込みは通る。
     /// 説明を持たない effect は多く、とくにフィルタ効果はほとんどが null である。
     /// 名前が似ている effect の使い分けは、説明ではなく items の顔ぶれで判断する。
     /// そのために複数の名前をまとめて指定して並べて比べられる。
@@ -3472,9 +3475,10 @@ mod tests {
     }
 
     #[test]
-    fn describe_effects_states_that_the_choices_are_a_hint_and_not_a_gate() {
-        // 候補をゲートとして読まれると、載っていない値を書けるのに書かない。
-        // 候補を出す目的そのものが失われる。
+    fn describe_effects_states_that_the_facets_are_a_hint_and_not_a_gate() {
+        // 面をゲートとして読まれると、載っていない値を書けるのに書かない。
+        // 面を出す目的そのものが失われる。値域は候補より外れやすく、版が上がって
+        // 上限が広がったときに、表が正しい値を範囲外だと言う。
         let description = description_of("describe_effects");
         for phrase in [
             "choices",
@@ -3482,6 +3486,8 @@ mod tests {
             "sidecar",
             "候補に無い値でも書き込みは通り",
             "必ず通るとも限らない",
+            "range",
+            "値域を外れる値でも書き込みは通る",
         ] {
             assert!(
                 description.contains(phrase),
