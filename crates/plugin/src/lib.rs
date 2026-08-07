@@ -40,6 +40,9 @@ pub mod session;
 pub mod settings;
 #[cfg(windows)]
 pub mod settings_ui;
+/// 同梱する skill の本文を、写しと未実測の両側から固定する検査。
+#[cfg(test)]
+mod skill_body;
 #[cfg(all(windows, test))]
 mod test_support;
 #[cfg(windows)]
