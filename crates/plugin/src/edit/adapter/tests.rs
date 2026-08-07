@@ -2434,6 +2434,44 @@ fn a_write_stops_when_the_current_value_cannot_be_read() {
     harness.assert_untouched();
 }
 
+#[test]
+fn a_movement_check_without_its_material_is_refused() {
+    // 材料を読む条件と、移動の判定が要る条件は別の述語である。今日は前者が
+    // 後者を含むが、片方だけを変えれば包含は破れる。そのとき「読んでいないから
+    // 判定しない」と倒すと、移動を黙って消す書き込みが素通りする。**到達不能で
+    // あることを根拠に分岐を消さず、到達したら落ちる形にする。**
+    let items = vec![AvailableEffectItem {
+        name: MOVING_ITEM.to_string(),
+        item_type: EffectItemType::Number,
+    }];
+    let scalar = ItemValue::Number {
+        value: FiniteF64::try_new(0.0).expect("有限値"),
+    };
+    let error = ensure_movement_write_with_origin(&items, MOVING_ITEM, &scalar, None)
+        .expect_err("材料が無いまま移動の判定が素通りしました");
+    assert_eq!(error.details()["reason"], json!("inverse_unavailable"));
+
+    // 判定が要らない組み合わせは、材料が無くても通る。判定の対象そのものが無い。
+    ensure_movement_write_with_origin(
+        &items,
+        MOVING_ITEM,
+        &movement(&[0.0, 100.0], "直線移動"),
+        None,
+    )
+    .expect("移動を書く要求まで拒否されました");
+
+    // 材料があれば普段どおり判定する。拒否の向きは現在値が決める。
+    ensure_movement_write_with_origin(
+        &items,
+        MOVING_ITEM,
+        &scalar,
+        Some("0.00,100.00,直線移動,0|"),
+    )
+    .expect_err("移動を消す書き込みが通りました");
+    ensure_movement_write_with_origin(&items, MOVING_ITEM, &scalar, Some("50.00"))
+        .expect("移動を持たない項目への数値が拒否されました");
+}
+
 /// 編集手順が実際に返した「移動が消える」失敗を集める。
 ///
 /// 名前を生む経路が製品に在ることの裏付けとして用いる。一覧から値を組み立てる
@@ -2979,6 +3017,43 @@ fn a_restore_that_does_not_take_effect_names_the_state_as_unknown() {
         before,
         "戻せていないのに戻ったと名乗っています"
     );
+}
+
+#[test]
+fn a_read_back_that_fails_restores_and_names_the_state_as_unknown() {
+    // 書き込んだ後の読み直しそのものが落ちると、適用されたかを確かめられない。
+    // **材料は手元にあるため戻しに行く。** 戻せたことも確かめられないため、
+    // 「戻せた」とは名乗らない。**確かめずに戻せたと名乗る形が Phase 4.5 の
+    // 出発点である。**
+    let harness = harness_with_choice_effect();
+    let selector = harness.effect_selector(1, 300, SHAPE, 0);
+    harness
+        .host
+        .arm(|knobs| knobs.fault = Some(Fault::ItemValueUnreadableAfterMutation));
+
+    let error = harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector,
+            item: "サイズ".to_string(),
+            value: ItemValue::Number {
+                value: FiniteF64::try_new(2.0).expect("有限値"),
+            },
+        })
+        .expect_err("読み直せないまま成功として返りました");
+
+    assert_eq!(error.error_code(), ErrorCode::SdkError);
+    let details = error.details();
+    assert_eq!(details["sdk_operation"], json!("get_effect_item_value"));
+    assert_eq!(details["mutation_issued"], json!(true));
+    // 巻き戻しを試みている。書き込みは前向きと戻しの 2 回発行された。
+    assert_eq!(
+        harness.host.item_value_arguments().len(),
+        2,
+        "巻き戻しを試みていません"
+    );
+    assert_eq!(details["restored"], json!(false));
+    assert_eq!(details["consistency_unknown"], json!(true));
 }
 
 #[test]

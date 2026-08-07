@@ -38,8 +38,8 @@ use aviutl2_mcp_core::{
     ObjectSelector, ObjectSource, ObjectSummary, ObservedSelection, RangeChange, ReadBackCheck,
     SceneSettingsOutcome, SectionRange, SelectionField, SelectionState, SetEffectEnabledParams,
     SetGridBpmParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSceneSettingsParams, SetSelectionParams, TrackWriteTarget, prepare_item_write,
-    write_drops_existing_movement,
+    SetSceneSettingsParams, SetSelectionParams, TrackWriteTarget,
+    movement_check_reads_current_value, prepare_item_write, write_drops_existing_movement,
 };
 use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -481,13 +481,7 @@ pub(crate) fn verify_written_item(
     }
     // 巻き戻しはこの関数の外で行う。一括適用も同じ判定を通るが、あちらは要求
     // 全体の巻き戻し計画を別に持つ。
-    Err(permit.attribute(
-        boundary,
-        EditError::ItemValueNotApplied {
-            observed,
-            restore: ItemRestore::NotAttempted,
-        },
-    ))
+    Err(permit.attribute(boundary, EditError::ItemValueNotApplied { observed }))
 }
 
 /// 変更後の対象から、指定位置の effect 情報を読み直す。
@@ -658,6 +652,37 @@ pub(crate) fn ensure_movement_write(
     }
 }
 
+/// 書き込みの前に読んだ生文字列で [`ensure_movement_write`] を掛ける。
+///
+/// **材料が手元に無いのに判定が要る組み合わせは失敗させる。** 読む条件
+/// （[`ReadBackCheck::Compare`]）と判定が要る条件
+/// （[`movement_check_reads_current_value`]）は別の述語である。今日は前者が
+/// 後者を含むが、片方だけを変えれば包含は破れる。そのとき「読んでいないから
+/// 判定しない」と倒すと、移動を黙って消す書き込みが素通りする。**到達不能で
+/// あることを根拠に分岐を消さず、到達したら落ちる形にする。**
+///
+/// 材料が無く判定も要らない組み合わせは通す。判定の対象そのものが無い。
+fn ensure_movement_write_with_origin(
+    items: &[AvailableEffectItem],
+    item: &str,
+    value: &ItemValue,
+    origin: Option<&str>,
+) -> Result<(), EditError> {
+    if let Some(current) = origin {
+        return ensure_movement_write(items, item, value, current);
+    }
+    let required = items
+        .iter()
+        .find(|entry| entry.name == item)
+        .is_some_and(|entry| movement_check_reads_current_value(&entry.item_type, value));
+    match required {
+        true => Err(EditError::UnsupportedTarget {
+            reason: UnsupportedReason::InverseUnavailable,
+        }),
+        false => Ok(()),
+    }
+}
+
 /// 書き込みを発行する前に、対象がいま持つ生文字列を 1 回だけ読む。
 ///
 /// **読むのは照合する種別だけである**（[`ReadBackCheck::Compare`]）。この値の
@@ -706,6 +731,11 @@ fn read_before_write(
 /// 合わない色がこれにあたる）、戻すものが無い。**階級に名前は与えない**——
 /// 要求元が取る行動はどちらでも変わらず、変わるのは我々が発行する書き込みの数
 /// だけである。
+///
+/// **読み直しそのものが落ちた場合も戻しに行く。** 比較する材料は無いが、書き
+/// 戻す材料は手元にある。適用されたかが分からない以上、戻さずに残す理由が無い。
+/// 戻せたことを確かめられなければ [`ItemRestore::Failed`] であり、確かめられ
+/// ないまま「戻せた」と名乗らない。
 fn restore_after_failed_verification(
     editor: &dyn SceneEditor,
     permit: &MutationPermit<'_>,
@@ -715,15 +745,15 @@ fn restore_after_failed_verification(
     origin: Option<&str>,
     error: EditError,
 ) -> EditError {
-    let observed = error.observed_item_value().map(str::to_string);
-    // 書き込み検証以外の失敗と、照合しない種別はここへ来ない。後者は検証が
-    // 落ちる契機を持たず、書き込みの前の読み取りも行っていない。
-    let (Some(observed), Some(origin)) = (observed, origin) else {
+    // 照合しない種別はここへ来ない。検証が落ちる契機を持たず、書き込みの前の
+    // 読み取りも行っていない。
+    let Some(origin) = origin else {
         return error;
     };
-    let restore = match observed == origin {
-        true => ItemRestore::Restored,
-        false => restore_item_value(editor, permit, boundary, effect, item, origin),
+    let restore = match error.observed_item_value() {
+        // ホストは値を動かしていない。戻すものが無い。
+        Some(observed) if observed == origin => ItemRestore::Restored,
+        _ => restore_item_value(editor, permit, boundary, effect, item, origin),
     };
     error.with_item_restore(restore)
 }
@@ -745,16 +775,27 @@ fn restore_item_value(
     item: &str,
     origin: &str,
 ) -> ItemRestore {
-    let restored = permit
+    let outcome = permit
         .issue(boundary, |ticket| {
             editor.set_effect_item(ticket, effect, item, origin)
         })
         .and_then(|()| editor.effect_item_value(effect, item))
-        .is_ok_and(|current| current == origin);
-    if restored {
+        .and_then(|current| match current == origin {
+            true => Ok(()),
+            // 書き込みも読み直しも通ったのに値が戻っていない。ホストが黙って
+            // 捨てた場合がこれである。
+            false => Err(EditError::UnsupportedTarget {
+                reason: UnsupportedReason::ChangeNotApplied,
+            }),
+        });
+    let Err(error) = outcome else {
         return ItemRestore::Restored;
-    }
-    tracing::warn!(item, "書き込み検証に落ちた設定値を元へ戻せませんでした");
+    };
+    tracing::warn!(
+        item,
+        code = %error.error_code().as_snake_case(),
+        "書き込み検証に落ちた設定値を元へ戻せませんでした"
+    );
     ItemRestore::Failed
 }
 
@@ -1103,9 +1144,12 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             // 復元する手段がこちら側に無い。**事前に断れる失敗を事後の巻き戻し
             // へ落とさない**——巻き戻しは失敗し得るが、発行しないことは失敗
             // しない。
-            if let Some(current) = &origin_value {
-                ensure_movement_write(&items, &params.item, &params.value, current)?;
-            }
+            ensure_movement_write_with_origin(
+                &items,
+                &params.item,
+                &params.value,
+                origin_value.as_deref(),
+            )?;
 
             let permit = boundary.issue_permit(project)?;
             permit.issue(&boundary, |ticket| {

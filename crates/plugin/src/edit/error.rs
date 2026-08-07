@@ -63,10 +63,14 @@ pub enum UnsupportedReason {
     ///
     /// ホストが無言で拒否した場合にここへ来る。成功として返してはならない。
     ChangeNotApplied,
-    /// 逆操作の材料を変更前に読み取れない。
+    /// 逆操作の材料が変更前に手元へ揃わない。
     ///
     /// 逆操作を組み立てられない変更は発行しない。実行してから組み立てられないと
     /// 分かる経路を作らないための拒否である。
+    ///
+    /// 読み取りが落ちた場合だけでなく、**材料を要する判定に材料が渡らなかった
+    /// 場合**も含む。どちらも「変更前の生文字列が無い」ことに変わりはなく、
+    /// 発行してよい理由にならない。
     InverseUnavailable,
 }
 
@@ -253,7 +257,7 @@ pub enum RollbackOutcome {
     Impossible,
 }
 
-/// 書き込み検証が落ちたあと、対象を書き込み前の値へ戻せたか。
+/// 変更を発行した後に落ちたとき、対象を発行前の値へ戻せたか。
 ///
 /// [`RollbackOutcome`] とは別に置く。あちらは複数の sub-operation を件数で
 /// 数えるものであり、単独の書き込みで戻す対象は常に 1 つの設定項目である。
@@ -412,7 +416,8 @@ pub enum EditError {
     /// なかったものとして値を選び直す。
     ///
     /// **書き込みは既に発行済みである。** 単独の書き込みはその後に対象を
-    /// 書き込み前の値へ戻す。戻せたかは `restore` が名乗る。
+    /// 書き込み前の値へ戻す。戻せたかは包みの [`EditError::AfterMutation`] が
+    /// 名乗る。
     #[error("書き込んだ設定値が読み直した値と一致しません")]
     ItemValueNotApplied {
         /// 書き込んだ直後に読み直した値。
@@ -423,8 +428,6 @@ pub enum EditError {
         /// **応答が返る時点の現在値ではない。** 巻き戻しが成功していれば、
         /// 対象は書き込み前の値を持つ。
         observed: String,
-        /// 対象を書き込み前の値へ戻せたか。
-        restore: ItemRestore,
     },
     /// 書き込むと、対象がいま持つ移動が消える。
     ///
@@ -501,6 +504,12 @@ pub enum EditError {
     ///
     /// エラーコードは失敗の理由を表すものを保ち、書き換えない。変更が入った
     /// という情報は補助情報の `mutation_issued` が担う。
+    ///
+    /// **発行した変更を元へ戻したかも、この包みが名乗る。** [`EditError::Batch`]
+    /// が要求全体の巻き戻しを名乗るのと同じ形である。**戻せたかという問いは
+    /// 失敗の種類に依らない**——読み直した値が要求と違った場合も、読み直し
+    /// そのものが落ちた場合も、対象が書き込み前の値を持つかは同じ語彙で答え
+    /// られる。葉の失敗へ持たせると、後者が名乗る場所を失う。
     #[error("{source}")]
     AfterMutation {
         /// 発行後に生じた失敗そのもの。
@@ -508,6 +517,8 @@ pub enum EditError {
         source: Box<EditError>,
         /// 加算後の revision。
         project_revision: u64,
+        /// 発行した変更を元へ戻せたか。
+        restore: ItemRestore,
     },
     /// 一括適用の失敗。
     ///
@@ -557,6 +568,7 @@ impl EditError {
             source => EditError::AfterMutation {
                 source: Box::new(source),
                 project_revision,
+                restore: ItemRestore::NotAttempted,
             },
         }
     }
@@ -568,28 +580,27 @@ impl EditError {
     /// 判定のためだけに対象をもう一度読まないための口である。**
     pub(crate) fn observed_item_value(&self) -> Option<&str> {
         match self {
-            EditError::ItemValueNotApplied { observed, .. } => Some(observed),
+            EditError::ItemValueNotApplied { observed } => Some(observed),
             EditError::AfterMutation { source, .. } => source.observed_item_value(),
             _ => None,
         }
     }
 
-    /// 書き込み検証の失敗へ、巻き戻しの結末を書き入れる。
+    /// 発行した変更を元へ戻した結末を書き入れる。
     ///
-    /// 巻き戻しは照合が落ちたことを知って初めて始まるため、結末は失敗を
-    /// 組み立てた後にしか決まらない。**他の失敗はそのまま素通りする**——
-    /// 巻き戻しは書き込み検証の失敗に対してだけ意味を持つ。
+    /// 巻き戻しは失敗を知って初めて始まるため、結末は失敗を組み立てた後にしか
+    /// 決まらない。**変更を発行していない失敗はそのまま素通りする**——戻す
+    /// 対象そのものが無い。
     pub(crate) fn with_item_restore(self, restore: ItemRestore) -> Self {
         match self {
-            EditError::ItemValueNotApplied { observed, .. } => {
-                EditError::ItemValueNotApplied { observed, restore }
-            }
             EditError::AfterMutation {
                 source,
                 project_revision,
+                ..
             } => EditError::AfterMutation {
-                source: Box::new(source.with_item_restore(restore)),
+                source,
                 project_revision,
+                restore,
             },
             other => other,
         }
@@ -741,29 +752,9 @@ impl EditError {
             // 名乗れば、その応答が「ホストがあなたの値を元の値へ倒した」と読める。
             // `observed_value` は測定そのものを名乗るため 2 つの階級のどちらでも
             // 正しい。
-            EditError::ItemValueNotApplied { observed, restore } => {
+            EditError::ItemValueNotApplied { observed } => {
                 details.insert("reason".to_string(), json!("item_value_not_applied"));
                 details.insert("observed_value".to_string(), json!(truncate(observed)));
-                // **階級は名乗り分けない。** ホストが値を動かさなかった場合も
-                // `restored` は真である——戻す書き込みが要らなかっただけで、
-                // 対象は書き込み前の値を持つ。要求元が取る行動（受け付けられる
-                // 値を選び直す）は動いた場合と変わらず、分ければ分岐だけが増える。
-                //
-                // 巻き戻せなかったときの語彙は一括適用と同じものを使う。要求元に
-                // 求める行動（次の編集の前に読み直す）が同じである以上、名前を
-                // 分ける理由が無い。
-                match restore {
-                    // 一括適用の sub-operation。結末は要求全体の巻き戻しが
-                    // `rolled_back` として名乗る。
-                    ItemRestore::NotAttempted => {}
-                    ItemRestore::Restored => {
-                        details.insert("restored".to_string(), json!(true));
-                    }
-                    ItemRestore::Failed => {
-                        details.insert("restored".to_string(), json!(false));
-                        details.insert("consistency_unknown".to_string(), json!(true));
-                    }
-                }
             }
             // 載せるのは対象がいま持つ移動である。要求元はこれを読んで、
             // 書き戻すか消すかを決める。要求された値は反響させない。
@@ -794,6 +785,7 @@ impl EditError {
             EditError::AfterMutation {
                 source,
                 project_revision,
+                restore,
             } => {
                 source.fill_details(details);
                 details.insert("mutation_issued".to_string(), json!(true));
@@ -801,6 +793,26 @@ impl EditError {
                     "current_project_revision".to_string(),
                     json!(project_revision),
                 );
+                // **階級は名乗り分けない。** ホストが値を動かさなかった場合も
+                // `restored` は真である——戻す書き込みが要らなかっただけで、
+                // 対象は書き込み前の値を持つ。要求元が取る行動（受け付けられる
+                // 値を選び直す）は動いた場合と変わらず、分ければ分岐だけが増える。
+                //
+                // 巻き戻せなかったときの語彙は一括適用と同じものを使う。要求元に
+                // 求める行動（次の編集の前に読み直す）が同じである以上、名前を
+                // 分ける理由が無い。
+                match restore {
+                    // 巻き戻しを試みていない。一括適用の sub-operation では、
+                    // 結末を要求全体の巻き戻しが `rolled_back` として名乗る。
+                    ItemRestore::NotAttempted => {}
+                    ItemRestore::Restored => {
+                        details.insert("restored".to_string(), json!(true));
+                    }
+                    ItemRestore::Failed => {
+                        details.insert("restored".to_string(), json!(false));
+                        details.insert("consistency_unknown".to_string(), json!(true));
+                    }
+                }
             }
             EditError::Batch {
                 source,
@@ -1004,19 +1016,11 @@ pub(crate) mod tests {
             // 読み直したホストの値を運ぶ。**パスを運ぶ標本も置く。** 種別に
             // よってはホストが保持する値が利用者のファイルパスであり、色だけを
             // 置くと補助情報の検査がその形を素通りする。
-            // 巻き戻しの結末は 3 通りあり、補助情報のキーがそれぞれ違う。
-            // 1 つだけ置くと、残りが載せるキーを検査が素通りする。
             EditError::ItemValueNotApplied {
                 observed: "ffffff".to_string(),
-                restore: ItemRestore::Restored,
             },
             EditError::ItemValueNotApplied {
                 observed: r"C:\assets\bgm.wav".to_string(),
-                restore: ItemRestore::Failed,
-            },
-            EditError::ItemValueNotApplied {
-                observed: "ffffff".to_string(),
-                restore: ItemRestore::NotAttempted,
             },
             // 対象がいま持つ移動を運ぶ。
             EditError::MovementWouldBeLost {
@@ -1046,6 +1050,18 @@ pub(crate) mod tests {
                 operation: "create_effect",
             }
             .after_mutation(44),
+            // 巻き戻しの結末は 3 通りあり、補助情報のキーがそれぞれ違う。
+            // 1 つだけ置くと、残りが載せるキーを検査が素通りする。
+            EditError::ItemValueNotApplied {
+                observed: "ffffff".to_string(),
+            }
+            .after_mutation(44)
+            .with_item_restore(ItemRestore::Restored),
+            EditError::ItemValueNotApplied {
+                observed: "ffffff".to_string(),
+            }
+            .after_mutation(44)
+            .with_item_restore(ItemRestore::Failed),
             // 事前解決相で落ちた一括適用。変更は 1 つも発行されていない。
             EditError::Batch {
                 source: Box::new(EditError::Read(ReadError::FingerprintMismatch {
@@ -1264,9 +1280,7 @@ pub(crate) mod tests {
                 // 逆操作の材料を読めなかった。
                 ErrorCode::UnsupportedOperation,
                 // 書き込んだ値が要求どおりに入らなかった。読み直しても有効に
-                // ならない。巻き戻しの結末が違う 3 つの標本であり、結末は
-                // コードを変えない——戻せたかは応答の補助情報が名乗る。
-                ErrorCode::UnsupportedOperation,
+                // ならない。色を運ぶ標本とパスを運ぶ標本の 2 つ。
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 // 書き込むと対象の移動が消える。値の形を変えるほかない。
@@ -1288,6 +1302,9 @@ pub(crate) mod tests {
                 // 前提の作り方の誤りであり、要求を作り直しても解消しない。
                 ErrorCode::InternalError,
                 ErrorCode::SdkError,
+                // 巻き戻しの結末はコードを変えない。戻せたかは補助情報が名乗る。
+                ErrorCode::UnsupportedOperation,
+                ErrorCode::UnsupportedOperation,
                 // 一括適用は失敗の理由をそのまま保つ。
                 ErrorCode::PreconditionFailed,
                 ErrorCode::PreconditionFailed,
@@ -1865,11 +1882,16 @@ pub(crate) mod tests {
             assert!(!text.contains(r"C:\"), "{text}");
             // 取り除く口が別の内容の抜け道にならないことを、失敗そのものが持つ
             // 値と突き合わせて確かめる。
-            let expected = match &error {
-                EditError::ItemValueNotApplied { observed, .. } => Some(observed.clone()),
-                EditError::MovementWouldBeLost { current_value } => Some(current_value.clone()),
-                _ => None,
-            };
+            let expected =
+                error
+                    .observed_item_value()
+                    .map(str::to_string)
+                    .or_else(|| match &error {
+                        EditError::MovementWouldBeLost { current_value } => {
+                            Some(current_value.clone())
+                        }
+                        _ => None,
+                    });
             assert_eq!(
                 host_value
                     .as_ref()

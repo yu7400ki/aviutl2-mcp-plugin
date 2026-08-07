@@ -94,6 +94,15 @@ pub(crate) enum Fault {
     ///
     /// 逆操作の材料が揃わない状況を作る。
     ItemValueUnreadable,
+    /// 設定項目の値を、変更を発行した後にだけ読めない。
+    ///
+    /// 書き込みの前の読み取りは通り、書き込んだ後の照合だけが落ちる。**巻き
+    /// 戻しの材料は手元にあるのに、書き込みが適用されたかを確かめられない状況**
+    /// であり、[`Fault::ItemValueUnreadable`] では作れない——あちらは書き込みの
+    /// 前の読み取りごと落とすため、変更が発行される前に要求が終わる。
+    ///
+    /// 差し込む条件は [`Fault::ReadBack`] と同じである。
+    ItemValueUnreadableAfterMutation,
     /// 設定項目への 2 回目以降の書き込みを無言で無視する。
     ///
     /// **戻す書き込みだけが効かない状況を作る。** 単独の書き込みは、前向きの
@@ -1400,7 +1409,14 @@ impl SceneEditor for FakeSceneEditor<'_> {
         item: &str,
     ) -> Result<String, EditError> {
         self.host.record(ITEM_VALUE);
-        if self.host.knobs().fault == Some(Fault::ItemValueUnreadable) {
+        let unreadable = match self.host.knobs().fault {
+            Some(Fault::ItemValueUnreadable) => true,
+            // 変更を発行した後にだけ落とす。書き込みの前の読み取りは通るため、
+            // 巻き戻しの材料は手元に残る。
+            Some(Fault::ItemValueUnreadableAfterMutation) => self.host.mutated(),
+            _ => false,
+        };
+        if unreadable {
             return Err(EditError::Sdk {
                 operation: "get_effect_item_value",
             });
