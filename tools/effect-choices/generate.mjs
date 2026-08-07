@@ -15,23 +15,29 @@
 // 変えない**ため、受理された値だけが残り、スクラッチのオブジェクトを最後に
 // 消せば副作用は残らない。
 //
-// 対象は、書き戻し照合が値を完全一致で比べる 4 種——`select` `combo` `mask`
-// `figure`——である。**どれも解決できない値を拒む。** `combo` はリストと文字の
-// 複合だが任意の文字列を受け取るわけではなく、`図形 / 図形の種類` へ実在しない
-// 図形を書けば失敗し、`四角形` は受理される。拒否は識別的であり、**受理された
-// ことが所属の証明になる。**
+// 対象は、**書き込みが選択肢の形（`choice`）を受け取る 4 種**——`select`
+// `combo` `mask` `figure`——である。この 4 種は書かれた値を候補の集合に対して
+// 解決する種別であり、解決できなければ拒む。**完全一致で照合される種別とは
+// 別の切り口である**——`text` も完全一致で照合されるが、任意の文字列を受け
+// 取るため所属を決められない。`combo` はリストと文字の複合だが任意の文字列を
+// 受け取るわけではなく、`図形 / 図形の種類` へ実在しない図形を書けば失敗し、
+// `四角形` は受理される。
 //
 // **在庫が探索の範囲を絞る。** 組み込みの図形（`円` `四角形` `三角形` `五角形`
 // `六角形` `星型` `ハート`）は訳語を持つため在庫に在り、データディレクトリの
-// svg はそもそも訳す対象ではないため在庫に無い。**在庫の外は試さない**以上、
-// 利用者の環境ごとに変わる値が表へ入る経路が構造的に存在せず、走らせる環境の
-// 中身によらず同じ出力になる。ファイル由来の候補は表ではなく、項目の説明が
-// 述べる（`図形の種類` は「ボタンクリックでsvgファイルを選択出来ます」を返す）。
+// svg はそもそも訳す対象ではないため在庫に無い。**表へ入るのは在庫のラベル
+// だけである**——試すのが在庫のラベルだけであることに加え、走査を始めた時点の
+// 値も在庫に無ければ落とす。`縁取り / パターン画像` の既定値は空文字列であり、
+// これが基底へ混じれば表は環境ごとに違うものになる。ファイル由来の候補は表では
+// なく、項目の説明が述べる（`図形の種類` は「ボタンクリックでsvgファイルを選択
+// 出来ます」を返す）。
 //
-// **判定が効かない項目は表へ入れない。** 拒否を確かめたのは `combo` 2 件だけで
-// あり、4 種の全項目が同じ振る舞いをするとは測っていない。値を解決せずに受け
-// 取る項目が現れれば在庫の過半を受理するため、そこで捕まえて報告へ回す
-// （`INDISCRIMINATE_RATIO`）。
+// **判定が効くことを項目ごとに確かめる。** 解決できない値を拒むことを実測した
+// のは `combo` 2 件だけであり、4 種の全項目が同じ振る舞いをするとは測っていない。
+// そこで在庫を総当たりする前に、**候補になり得ない文字列を 1 回書く**
+// （`NEGATIVE_CONTROL`）。拒まれればその項目は値を集合に対して解決しており、
+// 受理されれば解決していない——後者は総当たりしても受理の記録が並ぶだけである
+// ため、在庫を試さずに報告へ回す。
 //
 // # 値域
 //
@@ -42,6 +48,11 @@
 // **探りの値が値域の内側へ収まった側は測れない。** 受理されたことが言うのは
 // 「端が探りの外にある」ことだけであり、端が無いことの証明にはならない。
 // 測れなかった側は記録しない——**表に載せるのは測れた側だけとする。**
+//
+// 小数桁は**3 回の探りが返した表記を突き合わせて決める。** ホストがクランプした
+// 値と丸めた値を同じ桁で書き出すかは測っていないため、1 つの表記だけを根拠に
+// すると、クランプの表記が桁を落としている場合に誤った小数桁が黙って表へ入る。
+// 桁が食い違ったら、その項目の小数桁は測れていないものとして扱う。
 //
 // **`item_value_not_applied` 以外の失敗は測定ではない。** 移動を持つ項目は
 // `track_movement_present` で失敗し、探りの値そのものをホストが解釈できなければ
@@ -86,9 +97,10 @@ const LANGUAGE_DIRECTORIES = [
  *
  * 見積もりは 2 つの面の和である。
  *
- * - 候補: 1 項目あたり、境界拡張が最悪 `MAX_STEPS_PER_DIRECTION` × 2 方向、
- *   2 段目が在庫の全件でおよそ 600 回。合わせて 1000 回。対象が 4 種になった
- *   後の項目を 60 組と見て **60,000 回**
+ * - 候補: 1 項目あたり、負の対照が 1 回、境界拡張が最悪
+ *   `MAX_STEPS_PER_DIRECTION` × 2 方向、2 段目が在庫の全件でおよそ 600 回。
+ *   合わせて 1001 回。対象が 4 種になった後の項目を 60 組と見て **60,060 回**。
+ *   **判定が効かない項目は負の対照の 1 回だけで終わる**——在庫を総当たりしない
  * - 値域: 1 項目あたり上限・下限・小数桁で 3 回。数値の項目を 1000 組と見て
  *   **3,000 回**
  *
@@ -106,7 +118,14 @@ const DESCRIBE_BATCH = 10;
 /** 走査する効果の種別。 */
 const EFFECT_TYPES = ["input", "output", "control", "filter", "transition"];
 
-/** 候補を集める設定項目の種別。書き戻し照合が値を完全一致で比べる 4 種である。 */
+/**
+ * 候補を集める設定項目の種別。
+ *
+ * **書き込みが選択肢の形を受け取る 4 種である。** 値を候補の集合に対して解決
+ * する種別がこれだけであり、解決する以上は解決できない値を拒める。完全一致で
+ * 照合される種別はこれより広く、そちらには任意の文字列を受け取る `text` などが
+ * 含まれる。
+ */
 const CHOICE_ITEM_TYPES = ["select", "combo", "mask", "figure"];
 
 /** 値域を測る設定項目の種別。 */
@@ -136,28 +155,35 @@ const RANGE_PROBE = { max: 1_000_000_000, min: -1_000_000_000 };
 /**
  * 小数桁を測る探りの値。
  *
- * **値域の内側に在る必要が無い。** 値域を外れれば端へ倒され、内側なら項目の桁へ
- * 丸められるが、どちらの場合もホストが返す表記はその項目の小数桁で書かれている。
- * 測れないのは受理されたときだけであり、そのとき分かるのは 9 桁がそのまま残った
- * ことだけである。
+ * **値域の内側に在る必要は無いが、内側に在るかで表記の根拠が変わる。** 内側なら
+ * ホストは項目の桁へ丸めた値を返し、その表記が小数桁である。外側なら端へ倒され
+ * るが、**倒した値をホストが何桁で書き出すかは測っていない。** 桁を落として
+ * 書き出すのなら、この探りだけを根拠にすると誤った小数桁が表へ入る。
+ * したがって `measureRange` は 3 回の探りが返した表記を突き合わせ、食い違えば
+ * 小数桁を測れていないものとして扱う。
+ *
+ * 受理されたときも測れない。そのとき分かるのは 9 桁がそのまま残ったことだけで
+ * ある。
  */
 const DECIMALS_PROBE = 0.123456789;
 
 /**
- * 候補が在庫のこの割合を超えたら、判定が候補を選り分けていないと見なす。
+ * 判定が効くことを項目ごとに確かめる負の対照。
  *
- * 在庫は効果名・項目名・選択肢ラベルを平坦に並べたものであり、1 つの設定項目の
- * 選択肢がその過半を占めることは無い。半分を超える受理は、その項目が値を解決
- * せずに受け取っていることを示す——**候補の集合ではなく、判定が効いていないと
- * いう観測である。** 表へ入れずに報告へ回す。
+ * **在庫のラベルには成り得ない。** 在庫は `名前=訳語` の行から `=` の手前を
+ * 取るため（`readInventory`）、`=` を含む文字列が在庫に現れることは無い。
+ *
+ * これが拒まれた項目は、書かれた値を候補の集合に対して解決している——**受理
+ * された値が候補である**と言える。受理された項目は解決していないため、在庫を
+ * 総当たりしても受理の記録が並ぶだけであり、試さずに報告へ回す。
  */
-const INDISCRIMINATE_RATIO = 0.5;
+const NEGATIVE_CONTROL = "aviutl2-mcp=候補ではない文字列";
 
 /** 書き込みが受理されなかったことを表す応答の理由。 */
 const NOT_APPLIED = "item_value_not_applied";
 
 /** 書き込み 1 回の結末。 */
-const WRITE = {
+export const WRITE = {
   /** ホストが要求どおりの値を持った。 */
   accepted: "accepted",
   /** ホストが値を倒したか捨てた。読み直した値が `observed` に入る。 */
@@ -528,25 +554,49 @@ async function expandFromCurrent(target, inventory, positionOf, budget) {
  * 持つ項目（`track_movement_present`）と、探りの値そのものをホストが解釈できない
  * 場合がここへ来る。**黙って値域を持たない項目にはしない。**
  */
-async function measureRange(target, itemType, budget) {
+export async function measureRange(target, itemType, budget) {
+  const measuresDecimals = DECIMALS_ITEM_TYPES.includes(itemType);
   const probes = [
     ["max", RANGE_PROBE.max],
     ["min", RANGE_PROBE.min],
   ];
-  if (DECIMALS_ITEM_TYPES.includes(itemType)) probes.push(["decimals", DECIMALS_PROBE]);
+  if (measuresDecimals) probes.push(["decimals", DECIMALS_PROBE]);
 
   const range = { min: null, max: null, decimals: null };
+  // 探りが返した表記の小数桁。**測定の根拠が 1 つに絞れることを、複数の観測が
+  // 一致することで確かめる。**
+  const digits = new Set();
+  const unreadable = [];
+  let decimalsProbeAccepted = false;
   let writes = 0;
   for (const [part, value] of probes) {
     const result = await target.write({ type: itemType, value }, budget);
-    if (result.outcome === WRITE.exhausted) return { range, writes, halted: true, failure: null };
-    if (result.outcome === WRITE.failed) return { range, writes, halted: false, failure: result.reason };
+    if (result.outcome === WRITE.exhausted) {
+      return { range, writes, halted: true, failure: null, unreadable };
+    }
     writes += 1;
-    if (result.outcome === WRITE.accepted) continue;
-    if (part === "decimals") range.decimals = fractionDigits(result.observed);
-    else range[part] = observedNumber(result.observed);
+    if (result.outcome === WRITE.failed) {
+      return { range, writes, halted: false, failure: result.reason, unreadable };
+    }
+    if (result.outcome === WRITE.accepted) {
+      if (part === "decimals") decimalsProbeAccepted = true;
+      continue;
+    }
+    const observedDigits = fractionDigits(result.observed);
+    if (observedDigits === null) {
+      // 観測はあったが数として読めない。受理されたことと取り違えられないよう、
+      // 測れなかった理由として持ち帰る。
+      unreadable.push(`${part}: ${result.observed}`);
+      continue;
+    }
+    digits.add(observedDigits);
+    if (part !== "decimals") range[part] = observedNumber(result.observed);
   }
-  return { range, writes, halted: false, failure: null };
+  // **小数桁を書くのは、探りを掛けた種別で、桁が 1 つに定まったときだけである。**
+  if (measuresDecimals && !decimalsProbeAccepted && digits.size === 1) {
+    range.decimals = [...digits][0];
+  }
+  return { range, writes, halted: false, failure: null, unreadable };
 }
 
 /**
@@ -581,14 +631,21 @@ export function rangeFacet(range) {
 }
 
 /**
- * 候補の集合を在庫の並び順に整える。
+ * 候補の集合から、在庫に在るものだけを在庫の並び順で返す。
  *
- * 在庫に位置を持たない値は先頭へ置く。位置を持たないのは走査を始めた時点の
- * 現在値だけであり、他に順を決める材料が無い。
+ * **在庫に位置を持たない値は落とす。** 位置を持たないのは走査を始めた時点の値
+ * だけであり、それが在庫に無いということは、その値が在庫の外から来たという
+ * ことである——ホストが持つ既定値なり、利用者の環境に在るファイルなりである。
+ * `縁取り / パターン画像` の既定値は空文字列であり、`図形の種類` は svg の
+ * ファイル名を取り得る。**残せば基底が環境ごとに違う表になる。**
+ *
+ * 順を決める材料が無いことも同じ理由から来ている。在庫の外に在る値を並べる
+ * 位置は、在庫からは決まらない。
  */
 export function inInventoryOrder(values, positionOf) {
-  const position = (value) => positionOf.get(value) ?? -1;
-  return [...values].sort((left, right) => position(left) - position(right));
+  return [...values]
+    .filter((value) => positionOf.has(value))
+    .sort((left, right) => positionOf.get(left) - positionOf.get(right));
 }
 
 /**
@@ -681,8 +738,10 @@ async function main() {
         target,
         initialValue: target.currentValue,
         found: new Set(),
+        discriminates: null,
         range: null,
         failure: null,
+        unreadable: [],
         writes: 0,
         surveyed: false,
       });
@@ -690,8 +749,23 @@ async function main() {
     const choiceTargets = targets.filter((entry) => entry.facet === "choices");
     const rangeTargets = targets.filter((entry) => entry.facet === "range");
 
-    // 1 段目: 境界拡張。
+    // 0 段目: 負の対照。候補になり得ない文字列を 1 回書き、判定が効く項目だけを
+    // 在庫の総当たりへ進める。
     for (const entry of choiceTargets) {
+      const result = await entry.target.writeChoice(NEGATIVE_CONTROL, budget);
+      if (result.outcome === WRITE.exhausted) break;
+      entry.writes += 1;
+      entry.discriminates = result.outcome !== WRITE.accepted;
+      if (!entry.discriminates) {
+        // 在庫を試しても受理の記録が並ぶだけである。ここで終える。
+        entry.surveyed = true;
+        console.log(`対照 ${entry.effect} / ${entry.item}: 在庫に無い文字列を受理した`);
+      }
+    }
+    const discriminating = choiceTargets.filter((entry) => entry.discriminates === true);
+
+    // 1 段目: 境界拡張。
+    for (const entry of discriminating) {
       const result = await expandFromCurrent(entry.target, inventory, positionOf, budget);
       entry.found = result.found;
       entry.writes += result.writes;
@@ -700,7 +774,7 @@ async function main() {
     }
 
     // 2 段目: 1 段目が拾えなかったラベルを項目ごとに残らず試す。
-    for (const entry of choiceTargets) {
+    for (const entry of discriminating) {
       let recovered = 0;
       let halted = false;
       for (const label of inventory) {
@@ -725,6 +799,7 @@ async function main() {
       const result = await measureRange(entry.target, entry.itemType, budget);
       entry.range = result.range;
       entry.failure = result.failure;
+      entry.unreadable = result.unreadable;
       entry.writes += result.writes;
       if (result.halted) break;
       entry.surveyed = true;
@@ -738,24 +813,29 @@ async function main() {
       if (!entry.surveyed) {
         unreached.push({ ...pair, reason: `書き込みの上限 ${budget.limit} 回に達した` });
       } else if (entry.facet === "choices") {
-        if (entry.found.size <= 1) {
-          // 現在値しか残らなかった項目は、在庫がその選択肢を 1 つも覆っていない。
-          // 表へ入れても get_object が既に返す値をなぞるだけで、選べる先を示さない。
-          unreached.push({ ...pair, reason: `在庫が覆っておらず、${entry.initialValue} 以外を確認できない` });
-        } else if (entry.found.size > inventory.length * INDISCRIMINATE_RATIO) {
+        const values = inInventoryOrder(entry.found, positionOf);
+        if (!entry.discriminates) {
+          unreached.push({ ...pair, reason: "在庫に無い文字列を受理しており、値を候補の集合に対して解決していない" });
+        } else if (values.length <= 1) {
+          // 在庫がその項目の選択肢を 1 つも覆っていない。表へ入れても get_object が
+          // 既に返す値をなぞるだけで、選べる先を示さない。
           unreached.push({
             ...pair,
-            reason: `在庫 ${inventory.length} 件のうち ${entry.found.size} 件を受理しており、判定が候補を選り分けていない`,
+            reason: `在庫が覆っておらず、確認できた候補は ${values.length} 件（走査開始時の値は ${entry.initialValue}）`,
           });
         } else {
-          complete.push({ ...pair, facets: { choices: inInventoryOrder(entry.found, positionOf) } });
+          complete.push({ ...pair, facets: { choices: values } });
         }
       } else if (entry.failure) {
         unreached.push({ ...pair, reason: `探りが ${entry.failure} で失敗し、値域を測れない` });
       } else {
         const range = rangeFacet(entry.range);
         if (range) complete.push({ ...pair, facets: { range } });
-        else unreached.push({ ...pair, reason: "探りの値が値域の内側に収まり、上限も下限も小数桁も測れない" });
+        else if (entry.unreadable.length > 0) {
+          unreached.push({ ...pair, reason: `ホストが返した値を数として読めない（${entry.unreadable.join("、")}）` });
+        } else {
+          unreached.push({ ...pair, reason: "探りの値が値域の内側に収まり、上限も下限も小数桁も測れない" });
+        }
       }
     }
 
