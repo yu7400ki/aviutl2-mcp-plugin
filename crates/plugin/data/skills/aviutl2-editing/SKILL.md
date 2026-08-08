@@ -39,12 +39,11 @@ selector は自分で組み立てない。読み取りの応答が返した値�
 
 利用者が 1 回の Undo で戻したいと考えるまとまりを、1 回の呼び出しへ寄せる。逆に、途中まで残ってよい作業を apply_batch へ入れると、最後の 1 件の失敗で全部が巻き戻る。
 
-一般則には例外が 2 つある。
+一般則には例外が 3 つある。**いずれも、実行した後の 1 回の Undo はその前の編集へ飛ぶ。**
 
 - **set_selection は取り消し単位を作らない。** 実行後に取り消すと、その前に行った編集が取り消される。
+- **set_grid_bpm も取り消し単位を作らない。** 置き換える前の一覧は Undo では戻らない。戻せるようにしておきたいなら、読み取った一覧を自分で保持する。
 - **set_scene_settings は取り消せない。** こちらも取り消しはその前の編集へ飛ぶ。
-
-**create_object_section・delete_object_section・move_object_section・set_grid_bpm の 4 つは、取り消し単位を作るかを確かめていない。** 1 回の Undo で戻ることを前提にした手順を、この 4 つの上に組み立てない。
 
 ## 失敗したときにすること
 
@@ -88,8 +87,9 @@ tool の応答から決して得られないことだけを置いてある。作
 
 | 開くとき | 文書 |
 |---|---|
+| 画面のどこへ置くかを決める。大きさ・傾き・透け方を指定する | [references/coordinates.md](references/coordinates.md) |
 | 複数のオブジェクトを重ねる。どちらが手前かを決める | [references/layers.md](references/layers.md) |
 | オブジェクトの内側を知る。効果を足す。中間点や移動を持つ項目を扱う | [references/objects-and-effects.md](references/objects-and-effects.md) |
 | オブジェクトを 1 呼び出しで組み立てる。キーフレーム付きで作る。読み取った alias の生テキストを解釈する | [references/object-alias.md](references/object-alias.md) |
 
-座標系と単位（原点の位置、拡大率が何に対する比か、回転の向き）は**どの文書にも書いていない。実測していないためである。**
+**置いた場所と大きさの取り違えは、失敗として現れない。** 値域の内側であれば書き込みは通り、描画するまで分からない。

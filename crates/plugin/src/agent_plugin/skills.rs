@@ -26,6 +26,10 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
         include_str!("../../data/skills/aviutl2-editing/SKILL.md"),
     ),
     (
+        "aviutl2-editing/references/coordinates.md",
+        include_str!("../../data/skills/aviutl2-editing/references/coordinates.md"),
+    ),
+    (
         "aviutl2-editing/references/layers.md",
         include_str!("../../data/skills/aviutl2-editing/references/layers.md"),
     ),

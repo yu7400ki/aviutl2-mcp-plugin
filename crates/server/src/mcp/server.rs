@@ -1717,6 +1717,9 @@ impl AviUtl2McpServer {
     /// 差し替えるには、get_edit_info が返した grid_bpm を受け取り、その要素を書き換えて
     /// 全件を送る。一覧全体が置き換わるため、置き換え前の一覧を保持していなければ
     /// 同じ状態へは戻せない。
+    /// この tool は他の編集 tool と異なり取り消し単位を作らない。実行後に取り消し
+    /// 操作を行うと、グリッドではなく、その前に行った編集が取り消される。
+    /// 置き換え前の一覧は取り消し操作でも戻らない。
     /// entries を空配列にするとグリッドが消える。指定できるのは 256 件までである。
     /// start が一覧の中で重複する要求は invalid_argument（duplicate_target）となる。
     /// 値が範囲外の要求は invalid_argument（grid_bpm_out_of_range）となる。
@@ -3604,9 +3607,8 @@ mod tests {
         },
         HandedCheck {
             checked: "10 tool の説明が「この呼び出し 1 回が 1 つの取り消し単位になる」と述べること",
-            becomes: "SKILL.md が一般則を 1 度述べ、例外（set_selection は単位を作らない、\
-                      set_scene_settings は取り消せない）と、取り消し単位を作るか確かめて\
-                      いない 4 tool（中間点の 3 つと set_grid_bpm）を併せて名指しすること。\
+            becomes: "SKILL.md が一般則を 1 度述べ、例外（set_selection と set_grid_bpm は\
+                      単位を作らない、set_scene_settings は取り消せない）を名指しすること。\
                       層 1 に残る表明は [`undo_statement`] が持つ",
         },
         HandedCheck {
@@ -3852,37 +3854,38 @@ mod tests {
             1,
             "取り消し単位の一般則が 1 度ではありません"
         );
-        let mut unconfirmed = Vec::new();
+        let mut exceptions = 0usize;
         for name in edit_like_tools() {
             match undo_statement(name) {
-                UndoStatement::NoUnitAndJumpsBack => assert!(
-                    body.lines()
-                        .any(|line| line.contains(name) && line.contains("取り消し単位を作らない")),
-                    "{name} が単位を作らない例外として名指しされていません"
-                ),
-                UndoStatement::NotUndoableAndJumpsBack => assert!(
-                    body.lines()
-                        .any(|line| line.contains(name) && line.contains("取り消せない")),
-                    "{name} が取り消せない例外として名指しされていません"
-                ),
-                UndoStatement::Silent => unconfirmed.push(name),
+                UndoStatement::NoUnitAndJumpsBack => {
+                    exceptions += 1;
+                    assert!(
+                        body.lines()
+                            .any(|line| line.contains(name)
+                                && line.contains("取り消し単位を作らない")),
+                        "{name} が単位を作らない例外として名指しされていません"
+                    );
+                }
+                UndoStatement::NotUndoableAndJumpsBack => {
+                    exceptions += 1;
+                    assert!(
+                        body.lines()
+                            .any(|line| line.contains(name) && line.contains("取り消せない")),
+                        "{name} が取り消せない例外として名指しされていません"
+                    );
+                }
                 UndoStatement::ItsWholePurpose | UndoStatement::FollowsTheGeneralRule => {}
             }
         }
+        assert!(exceptions > 0, "例外が 1 つも名指しされていません");
+        // **確かめていないと名乗る行を残さない。** 一般則に従うと分かった tool へ
+        // 札が残ると、読み手は 1 回の Undo で戻る手順を避けることになる。
         assert!(
-            !unconfirmed.is_empty(),
-            "確かめていない tool が 1 つもありません"
+            !body
+                .lines()
+                .any(|line| line.contains("取り消し") && line.contains("確かめていない")),
+            "取り消し単位を確かめていないと述べる行が残っています"
         );
-        let line = body
-            .lines()
-            .find(|line| line.contains("取り消し単位") && line.contains("確かめていない"))
-            .expect("取り消し単位を確かめていないことを述べる行がありません");
-        for name in &unconfirmed {
-            assert!(
-                line.contains(name),
-                "取り消し単位を確かめていない {name} が名指しされていません: {line}"
-            );
-        }
 
         // 3. timeout を受けた後の手順。**値そのものは失敗の text content へ出る**
         //    ため、本文が持つのは読み方だけでよい。
@@ -4426,11 +4429,6 @@ mod tests {
         /// **冒頭に置くことまでを含めて固定する。** 末尾では、説明を要約する
         /// 要求元が落とす。
         NotUndoableAndJumpsBack,
-        /// 取り消しについて何も述べない。
-        ///
-        /// **説明は保証である。** 取り消し単位を作るかを確かめていない operation は
-        /// どちらも述べない。述べれば、確かめていないことを保証したことになる。
-        Silent,
     }
 
     /// tool 名から、説明が取り消しについて述べる内容を引く。
@@ -4440,19 +4438,25 @@ mod tests {
     fn undo_statement(name: &str) -> UndoStatement {
         match name {
             "apply_batch" => UndoStatement::ItsWholePurpose,
-            "create_object" | "move_object" | "set_object_name" | "set_object_item"
-            | "add_effect" | "set_effect_enabled" | "delete_effect" | "delete_object"
-            | "set_layer_state" => UndoStatement::FollowsTheGeneralRule,
-            "set_selection" => UndoStatement::NoUnitAndJumpsBack,
+            "create_object"
+            | "move_object"
+            | "set_object_name"
+            | "set_object_item"
+            | "add_effect"
+            | "set_effect_enabled"
+            | "delete_effect"
+            | "delete_object"
+            | "set_layer_state"
+            | "create_object_section"
+            | "delete_object_section"
+            | "move_object_section" => UndoStatement::FollowsTheGeneralRule,
+            // BPM グリッドはオブジェクトの編集ではない。SDK が編集区間の中で
+            // Undo へ登録すると述べているのはオブジェクトについてであり、実機でも
+            // 直後の取り消しは 1 つ前の編集へ飛んだ。
+            "set_selection" | "set_grid_bpm" => UndoStatement::NoUnitAndJumpsBack,
             // SDK は 3 つの setter を Undo 非対応と明記している。取り消せない
             // ことは、要求を出す前に読まれる場所へ置く。
             "set_scene_settings" => UndoStatement::NotUndoableAndJumpsBack,
-            // 中間点の 3 つと BPM グリッドの置き換えは 1 回の編集区間で実行するが、
-            // SDK が取り消し単位を作るかを確かめていない。
-            "create_object_section"
-            | "delete_object_section"
-            | "move_object_section"
-            | "set_grid_bpm" => UndoStatement::Silent,
             other => panic!("{other} の取り消しの説明が定義されていません"),
         }
     }
@@ -4466,10 +4470,9 @@ mod tests {
                     description.contains("1 つの取り消し単位"),
                     "{name} の説明に取り消し単位がありません"
                 ),
-                // 一般則に従う tool と、確かめていない tool は、どちらも層 1 で
-                // 黙る。言い換えも塞ぐ——1 つの語だけを見ていると、別の
-                // 言い回しで同じ保証が入り込む。
-                UndoStatement::FollowsTheGeneralRule | UndoStatement::Silent => {
+                // 一般則に従う tool は層 1 で黙る。言い換えも塞ぐ——1 つの語だけを
+                // 見ていると、別の言い回しで同じ保証が入り込む。
+                UndoStatement::FollowsTheGeneralRule => {
                     for forbidden in ["取り消し単位", "取り消し", "元に戻", "Undo", "undo"]
                     {
                         assert!(
