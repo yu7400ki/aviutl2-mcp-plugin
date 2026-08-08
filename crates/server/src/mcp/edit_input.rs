@@ -2110,6 +2110,28 @@ mod tests {
     }
 
     #[test]
+    fn a_movement_that_spells_a_flag_the_host_cannot_evaluate_is_refused() {
+        // 予約ビットを入力へ置いた以上、要求元は評価の死ぬ値を綴れる。黙って
+        // 落とさず拒否する——無言で値を変えるのは、この予約ビットが在る理由その
+        // ものである。
+        let input: ItemValueInput = serde_json::from_value(json!({
+            "type": "track",
+            "values": [-600.0, 600.0],
+            "mode": "直線移動",
+            "params": [],
+            "accelerate": false,
+            "decelerate": false,
+            "twopoint": false,
+            "reserved_flags": 8,
+        }))
+        .expect("受理される");
+        let value = input.to_value().expect("変換できる");
+        let error = aviutl2_mcp_core::validate_item_value(&value).expect_err("拒否されます");
+        assert_eq!(error.reason(), Some("track_flags_not_representable"));
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+    }
+
+    #[test]
     fn the_flags_without_a_name_survive_the_boundary() {
         // 読み取りが返した値をそのまま送り返す往復である。入力 schema が予約
         // ビットを持たないと、境界で 0 へ落ちて符号化から消える。
