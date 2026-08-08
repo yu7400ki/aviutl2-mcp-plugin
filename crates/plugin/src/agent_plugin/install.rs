@@ -396,6 +396,26 @@ mod tests {
     }
 
     #[test]
+    fn an_unchanged_executable_is_not_copied_again() {
+        // **実行中の exe は上書きできない。** 変わっていないのに置き換えへ
+        // 進めば、クライアントが server を動かしている間は起動のたびに共有
+        // 違反で失敗し、そうでなくても数 MB を保護ディレクトリへ書き直す。
+        let sandbox = Sandbox::new(b"server");
+        sandbox.apply(&all_on());
+
+        let copy = sandbox
+            .root
+            .join("plugins/aviutl2/bin")
+            .join(SERVER_EXECUTABLE);
+        let before = std::fs::metadata(&copy).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        sandbox.apply(&all_on());
+        let after = std::fs::metadata(&copy).unwrap().modified().unwrap();
+
+        assert_eq!(before, after, "変わっていない実行体を書き直しました");
+    }
+
+    #[test]
     fn a_rebuilt_executable_is_copied_again() {
         let sandbox = Sandbox::new(b"old build");
         sandbox.apply(&all_on());

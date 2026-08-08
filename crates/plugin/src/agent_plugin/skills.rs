@@ -18,6 +18,8 @@
 /// 集める経路はバイナリの中に無い。したがって data ディレクトリへ足したファイルが
 /// 黙って配布から漏れ得る。**それを塞ぐのは
 /// `the_embedded_tree_matches_the_files_on_disk` であり、この一覧の外に置いてある。**
+/// 突き合わせは拡張子を問わない——`include_str!` が受けないファイルを skill へ
+/// 置いたときも、素通りではなく検査の失敗として出る。
 pub const SKILL_FILES: &[(&str, &str)] = &[
     (
         "aviutl2-editing/SKILL.md",

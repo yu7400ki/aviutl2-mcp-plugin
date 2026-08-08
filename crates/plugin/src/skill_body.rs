@@ -55,17 +55,17 @@ fn skill_files() -> Vec<(String, String)> {
     files
 }
 
-/// ディレクトリを辿って markdown を集める。
-fn collect_markdown(root: &Path, dir: &Path, out: &mut Vec<String>) {
+/// ディレクトリを辿って**全ての**ファイルを集める。
+///
+/// **拡張子で絞らない。** 絞れば、埋め込みの一覧に無いファイルが「対象外」と
+/// して見逃され、配布から漏れたことに誰も気付かない。
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
     for entry in
         std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{} を辿れません: {e}", dir.display()))
     {
         let path = entry.expect("ディレクトリの要素を読めません").path();
         if path.is_dir() {
-            collect_markdown(root, &path, out);
-            continue;
-        }
-        if path.extension().is_none_or(|ext| ext != "md") {
+            collect_files(root, &path, out);
             continue;
         }
         out.push(
@@ -266,9 +266,14 @@ fn the_skill_tree_holds_only_directories_that_have_a_skill_md() {
 fn the_embedded_tree_matches_the_files_on_disk() {
     // **`include_str!` はリテラルしか受け付けない。** 一覧は手書きであり、
     // data ディレクトリへ足したファイルは黙って配布から漏れる。ここが
-    // その 1 経路を塞ぐ——漏れは「参照文書が開けない」として利用者側に出る。
+    // その経路を塞ぐ——漏れは「参照文書が開けない」として利用者側に出る。
+    //
+    // **拡張子で絞らずに突き合わせる。** 絞れば markdown 以外だけが素通りし、
+    // 塞いだつもりの穴が種類ごとに残る。`include_str!` はテキストしか受け
+    // ないため、二値のファイルを skill へ置くならまず埋め込みの形を決める
+    // ことになる——ここが落ちることでそれが分かる。
     let mut on_disk = Vec::new();
-    collect_markdown(&skills_dir(), &skills_dir(), &mut on_disk);
+    collect_files(&skills_dir(), &skills_dir(), &mut on_disk);
     on_disk.sort();
     let embedded: Vec<String> = skill_files().into_iter().map(|(path, _)| path).collect();
     assert_eq!(embedded, on_disk, "埋め込みの一覧とツリーが食い違います");
