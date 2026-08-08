@@ -845,13 +845,14 @@ fn item_value(
 /// 読まれ、書き戻したときにホストへ渡るのは我々が捏造した移動になる。
 ///
 /// 復号できない文字列も未知のまま返す。読めなかったことは、読めたふりより
-/// 安全である。
+/// 安全である。**壊れた移動行もここへ落ちる。** ホストが評価できない値を
+/// 「移動を持つ」として返せば、応答は在りもしない状態を報告することになる。
 ///
 /// 復号できても移動方法の名前を持たない値は返さない。`track` が非 `null` で
 /// あることと矛盾しており、どちらが実態かをこちら側では決められない。
 fn movement_or_unknown(raw: String, track: Option<&aviutl2_mcp_core::TrackInfo>) -> ItemValue {
     match track
-        .and_then(|_| decode_track_value(&raw))
+        .and_then(|_| decode_track_value(&raw).ok())
         .filter(|decoded| decoded.mode.is_some())
     {
         Some(decoded) => ItemValue::Track(decoded),
@@ -1491,6 +1492,28 @@ mod tests {
                 raw: "0.50".to_string()
             }
         );
+    }
+
+    #[test]
+    fn an_item_the_host_cannot_evaluate_is_reported_as_unknown() {
+        // 実測: 末尾フラグを 8 にした項目は 1 フレームも動かない。移動として
+        // 返すと、応答は在りもしない状態を報告し、書き戻しでその状態が黙って
+        // 直る——要求元は壊れた項目を見ていたことに気付けない。
+        //
+        // 生文字列をそのまま載せる。何が起きているかを読む材料はそこにしかない。
+        for raw in [
+            "-600.00,600.00,直線移動,8",
+            "-600.00,600.00,直線移動,8|",
+            "0.00,100.00,ランダム移動,8|30.00",
+        ] {
+            assert_eq!(
+                read_moving_value(&EffectItemType::Number, raw),
+                ItemValue::Unknown {
+                    raw: raw.to_string()
+                },
+                "{raw} が移動として読まれました"
+            );
+        }
     }
 
     #[test]

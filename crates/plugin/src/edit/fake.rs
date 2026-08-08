@@ -24,8 +24,8 @@ use crate::test_support::alias_with_effects;
 use aviutl2_mcp_core::{
     AvailableEffectItem, Cursor, DisplayRange, EffectFlags, EffectItem, EffectItemType, EffectType,
     EvaluatedItemKind, FiniteF64, FrameRange, GridBpm, ItemFacets, ItemValue, ModuleEntry,
-    ModuleType, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, TrackInfo, TrackValue,
-    decode_host_text, decode_track_value, encode_host_text,
+    ModuleType, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, TrackDecodeError, TrackInfo,
+    TrackValue, decode_host_text, decode_track_value, encode_host_text,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -2124,11 +2124,19 @@ pub(crate) fn raw_item_value(value: &ItemValue) -> String {
 fn host_write(item_type: &EffectItemType, value: &str, fonts: &[String]) -> Option<ItemValue> {
     // トラックバーの項目は数値と移動の 2 通りの表記を受ける。移動として読める
     // 文字列を数値として解釈すると、0 へ落ちて書き込みが黙って壊れる。
-    if item_type.evaluated_kind() == Some(EvaluatedItemKind::Track)
-        && let Some(track) = decode_track_value(value)
-        && track.mode.is_some()
-    {
-        return Some(host_write_track(&track));
+    if item_type.evaluated_kind() == Some(EvaluatedItemKind::Track) {
+        match decode_track_value(value) {
+            Ok(track) if track.mode.is_some() => return Some(host_write_track(&track)),
+            // 移動を表しているが我々が表せない行は、渡された文字列のまま保つ。
+            // ホストは壊れた行も保存して読み取りへ返す。数値へ倒すと、既に
+            // 壊れている項目を読む場面をこの上に作れない。
+            Err(TrackDecodeError::NotRepresentable) => {
+                return Some(ItemValue::Unknown {
+                    raw: value.to_string(),
+                });
+            }
+            Ok(_) | Err(TrackDecodeError::NotAMovement) => {}
+        }
     }
     match item_type {
         EffectItemType::Select
@@ -2217,7 +2225,7 @@ fn fatal_movement(item_type: &EffectItemType, value: &str) -> Option<String> {
     if item_type.evaluated_kind() != Some(EvaluatedItemKind::Track) {
         return None;
     }
-    let mode = decode_track_value(value)?.mode?;
+    let mode = decode_track_value(value).ok()?.mode?;
     (!TRACK_MODES.contains(&mode.as_str())).then_some(mode)
 }
 
@@ -2788,6 +2796,27 @@ mod tests {
                 written_back(&item_type, value, before),
                 expected,
                 "{item_type} へ {value} を書いた結果が違います"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fake_host_holds_a_movement_row_it_cannot_represent() {
+        // ホストは壊れた移動行も保存し、読み取りへそのまま返す。数値へ倒すと、
+        // 既に壊れている項目を読む場面をこの上に作れなくなる——新しく作る経路が
+        // 塞がれた後、その状態を持ち込む手段は他に無い。
+        let before = ItemValue::Number {
+            value: FiniteF64::try_new(1.0).expect("有限値"),
+        };
+        for raw in [
+            "-600.00,600.00,直線移動,8",
+            "-600.00,600.00,直線移動,8|",
+            "0.00,100.00,ランダム移動,8|30.00",
+        ] {
+            assert_eq!(
+                written_back(&EffectItemType::Number, raw, &before),
+                raw,
+                "{raw} が保たれません"
             );
         }
     }

@@ -280,7 +280,7 @@ pub fn write_drops_existing_movement(
     current: &str,
 ) -> bool {
     movement_check_reads_current_value(item_type, value)
-        && decode_track_value(current).is_some_and(|track| track.mode.is_some())
+        && decode_track_value(current).is_ok_and(|track| track.mode.is_some())
 }
 
 /// 書き込んだ直後に読み直した文字列をどう扱うか。
@@ -347,7 +347,7 @@ impl ReadBackComparison {
             }
             ReadBackComparison::Track => {
                 match (decode_track_value(written), decode_track_value(observed)) {
-                    (Some(written), Some(observed)) => track_read_back_matches(&written, &observed),
+                    (Ok(written), Ok(observed)) => track_read_back_matches(&written, &observed),
                     _ => false,
                 }
             }

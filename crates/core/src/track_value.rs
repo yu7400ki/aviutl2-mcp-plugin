@@ -12,6 +12,11 @@
 //! 移動方法の名前と、欠落したフラグは、ホストのプロセスを落とす。落とす形を
 //! 作れるのは符号化であり、作らせない規則を別の口に置くと、その口を通らない
 //! 呼び出しがそのまま落とす文字列を組み立てられる。
+//!
+//! **壊れ方はもう 1 つある。** フラグの 4 つ目のビットはフラグではなく、
+//! パラメータ節が続くことを示す構造上の印である（[`PARAM_SECTION_BIT`]）。立った
+//! 行はプロセスを落とさず、ホストが値を解けずにその項目が 1 フレームも動かなく
+//! なる。**落ちないため、書いた側も読んだ側も気付かない。**
 
 use crate::item_value::ItemWriteError;
 use crate::number::FiniteF64;
@@ -120,6 +125,9 @@ pub enum TrackValueError {
     /// 移動を持たない値に、移動の付帯情報が指定された。
     #[error("移動を持たない値にフラグとパラメータは指定できません")]
     MovementWithoutMode,
+    /// フラグに、ホストが移動として評価できないビットが含まれる。
+    #[error("移動のフラグに、ホストが評価できないビットが含まれています")]
+    FlagsNotRepresentable,
 }
 
 impl TrackValueError {
@@ -135,6 +143,7 @@ impl TrackValueError {
         TrackValueError::UnknownMode { known: Vec::new() },
         TrackValueError::ModeReadsAsNumber,
         TrackValueError::MovementWithoutMode,
+        TrackValueError::FlagsNotRepresentable,
     ];
 
     /// 失敗の種別を表す機械可読な名前を返す。
@@ -146,8 +155,29 @@ impl TrackValueError {
             TrackValueError::UnknownMode { .. } => "track_mode_unknown",
             TrackValueError::ModeReadsAsNumber => "track_mode_reads_as_number",
             TrackValueError::MovementWithoutMode => "track_movement_without_mode",
+            TrackValueError::FlagsNotRepresentable => "track_flags_not_representable",
         }
     }
+}
+
+/// ホストが返した文字列を移動として読めなかった理由。
+///
+/// **2 つに分ける。** 移動行かどうかを値の側でしか見分けられない場面があり、
+/// そこでは「移動行ではない」と「壊れた移動行である」を別に扱う必要がある。
+/// 1 つに畳むと、壊れた移動行が移動行でないものと同じ扱いになる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TrackDecodeError {
+    /// 移動行として読み始められない。
+    ///
+    /// テキスト・色・パスなど、そもそも移動を表していない文字列がここへ来る。
+    #[error("移動を表す文字列ではありません")]
+    NotAMovement,
+    /// 移動行として読み始められたが、表せる値にならない。
+    ///
+    /// 壊れた移動行である。読めたふりをすると、書き戻したときに我々が捏造した
+    /// 移動がホストへ渡る。
+    #[error("移動を表していますが、値として表せません")]
+    NotRepresentable,
 }
 
 /// 移動を書き込む対象の性質。
@@ -198,6 +228,9 @@ fn flag_bits(value: &TrackValue) -> u32 {
 ///   移動方法の名前として引き当てられずに例外を投げる
 /// - 移動を持つ値は 2 要素以上である。区間は必ず 1 つ以上あるためで、
 ///   正確な個数は区間の数を渡す [`validate_track_value`] が見る
+/// - 名前を持たないビットに [`PARAM_SECTION_BIT`] を含まない。**黙って落とさず
+///   拒否する。** 落とせば要求元は自分が何を書いたか分からなくなり、通せば
+///   評価の死んだ項目を作れる
 pub(crate) fn validate_track_syntax(value: &TrackValue) -> Result<(), ItemWriteError> {
     let Some(mode) = value.mode.as_deref() else {
         if value.values.len() != 1 {
@@ -212,6 +245,9 @@ pub(crate) fn validate_track_syntax(value: &TrackValue) -> Result<(), ItemWriteE
         }
         return Ok(());
     };
+    if value.reserved_flags & PARAM_SECTION_BIT != 0 {
+        return Err(TrackValueError::FlagsNotRepresentable.into());
+    }
     validate_item_text(mode)?;
     if mode.is_empty() {
         return Err(TextSyntaxError::Empty.into());
@@ -341,21 +377,29 @@ pub fn encode_track_value(
 /// 数え方はホストの解析と同じであり、これが値の個数を数える唯一の手掛かりで
 /// ある。
 ///
-/// **解析できない文字列では `None` を返す。** 呼び出し側は生の文字列を
-/// [`ItemValue::Unknown`](crate::item_value::ItemValue::Unknown) として保つ。
-/// 推測して部分的に埋めた値を返すと、それを書き戻したときにホストへ渡るのは
-/// 我々が捏造した移動になる。**読めなかったことは、読めたふりより安全である。**
+/// **解析できない文字列では [`TrackDecodeError`] を返す。** 呼び出し側は生の
+/// 文字列を [`ItemValue::Unknown`](crate::item_value::ItemValue::Unknown) として
+/// 保つ。推測して部分的に埋めた値を返すと、それを書き戻したときにホストへ渡るの
+/// は我々が捏造した移動になる。**読めなかったことは、読めたふりより安全である。**
 ///
-/// 判定は次のとおり。
+/// 判定は次の順に進む。
 ///
 /// - 区切りが無く 1 つの有限な数値であれば、移動を持たない値とする
 /// - 4 つ以上の欄があれば、末尾をフラグ、その 1 つ前を移動方法の名前、残りを
 ///   値とする。フラグは非負整数、名前は空でなく、数値として読めず、制御文字を
-///   含まないことを要求する
-/// - 値が 1 つしかない移動は読まない。区間は必ず 1 つ以上あるため、移動を持つ
-///   値の境界は 2 つ以上になる
-/// - `|` より後ろはパラメータとする。`|` の後ろが空のときはパラメータ無しと
-///   する。ホストはパラメータを持たない移動方法を `直線移動,0|` の形で返す
+///   含まないことを要求する。値が 1 つしかない移動は読まない——区間は必ず 1 つ
+///   以上あるため、移動を持つ値の境界は 2 つ以上になる。**ここまでが「移動行と
+///   して読み始められるか」の判定であり、届かなかった文字列は
+///   [`TrackDecodeError::NotAMovement`] になる**
+/// - フラグに [`PARAM_SECTION_BIT`] が立った行は表せない。ホストはその行を
+///   「パラメータ節が続く」と読んで評価で値を解けなくなり、項目は動かない。
+///   フラグとして運べば符号化がその行を書き戻せてしまう
+/// - 値と、`|` より後ろのパラメータを有限な数値として読む。`|` の後ろが空の
+///   ときはパラメータ無しとする。ホストはパラメータを持たない移動方法を
+///   `直線移動,0|` の形で返す
+///
+/// 読み始められたうえで表せなかった行は
+/// [`TrackDecodeError::NotRepresentable`] になる。
 ///
 /// **個数・移動方法の位置・文字種は符号化の定義域へ揃えてある。** 読めた値は
 /// 書式としては書き戻せる。**揃っていないのは長さの上限だけである**——上限は
@@ -366,26 +410,20 @@ pub fn encode_track_value(
 /// 名前を持つ 3 つのビット以外は [`TrackValue::reserved_flags`] へ入れる。
 /// **捨てない**——ホストの UI にはこの型が名前を持たないチェックボックスがあり、
 /// 捨てると読めた値を書き戻したときにその設定が消える。
-pub fn decode_track_value(raw: &str) -> Option<TrackValue> {
+pub fn decode_track_value(raw: &str) -> Result<TrackValue, TrackDecodeError> {
     let (head, tail) = match raw.split_once(PARAM_SEPARATOR) {
         Some((head, tail)) => (head, Some(tail)),
         None => (raw, None),
-    };
-    let params = match tail {
-        None | Some("") => Vec::new(),
-        Some(tail) => tail
-            .split(FIELD_SEPARATOR)
-            .map(parse_finite)
-            .collect::<Option<Vec<FiniteF64>>>()?,
     };
     let fields: Vec<&str> = head.split(FIELD_SEPARATOR).collect();
     if fields.len() == 1 {
         // 移動を持たない値はパラメータを取らない。
         if tail.is_some() {
-            return None;
+            return Err(TrackDecodeError::NotAMovement);
         }
-        return Some(TrackValue {
-            values: vec![parse_finite(fields[0])?],
+        let value = parse_finite(fields[0]).ok_or(TrackDecodeError::NotAMovement)?;
+        return Ok(TrackValue {
+            values: vec![value],
             mode: None,
             params: Vec::new(),
             accelerate: false,
@@ -395,26 +433,41 @@ pub fn decode_track_value(raw: &str) -> Option<TrackValue> {
         });
     }
     if fields.len() < MIN_MOVING_VALUES + 2 {
-        return None;
+        return Err(TrackDecodeError::NotAMovement);
     }
-    let flags: u32 = fields[fields.len() - 1].trim().parse().ok()?;
+    let flags: u32 = fields[fields.len() - 1]
+        .trim()
+        .parse()
+        .map_err(|_| TrackDecodeError::NotAMovement)?;
     let mode = fields[fields.len() - 2];
     if mode.is_empty() || reads_as_number(mode) || validate_control_free(mode).is_err() {
-        return None;
+        return Err(TrackDecodeError::NotAMovement);
+    }
+    if flags & PARAM_SECTION_BIT != 0 {
+        return Err(TrackDecodeError::NotRepresentable);
     }
     let values = fields[..fields.len() - 2]
         .iter()
         .copied()
         .map(parse_finite)
-        .collect::<Option<Vec<FiniteF64>>>()?;
-    Some(TrackValue {
+        .collect::<Option<Vec<FiniteF64>>>()
+        .ok_or(TrackDecodeError::NotRepresentable)?;
+    let params = match tail {
+        None | Some("") => Vec::new(),
+        Some(tail) => tail
+            .split(FIELD_SEPARATOR)
+            .map(parse_finite)
+            .collect::<Option<Vec<FiniteF64>>>()
+            .ok_or(TrackDecodeError::NotRepresentable)?,
+    };
+    Ok(TrackValue {
         values,
         mode: Some(mode.to_string()),
         params,
         accelerate: flags & FLAG_ACCELERATE != 0,
         decelerate: flags & FLAG_DECELERATE != 0,
         twopoint: flags & FLAG_TWOPOINT != 0,
-        reserved_flags: flags & !(NAMED_FLAGS | PARAM_SECTION_BIT),
+        reserved_flags: flags & !NAMED_FLAGS,
     })
 }
 
@@ -466,6 +519,7 @@ pub(crate) fn track_read_back_matches(written: &TrackValue, observed: &TrackValu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorCode;
 
     fn finite(values: &[f64]) -> Vec<FiniteF64> {
         values
@@ -575,37 +629,45 @@ mod tests {
         for (value, expected) in cases {
             assert_eq!(encoded(&value), Ok(expected.to_string()));
             // 復号も同じ割り当てで読む。往復だけでは割り当てを固定できない。
-            assert_eq!(decode_track_value(expected), Some(value));
+            assert_eq!(decode_track_value(expected), Ok(value));
         }
     }
 
     #[test]
     fn the_flag_bits_are_the_ones_the_host_reports() {
-        // 実測: `,5` は加速と中間点無視、`,15` は加速・減速・中間点無視。
+        // 実測: `,5` は加速と中間点無視、`,7` は加速・減速・中間点無視。
         let mut value = moving(&[-500.0, 500.0], "直線移動");
         value.accelerate = true;
         value.twopoint = true;
         assert_eq!(encoded(&value), Ok("-500,500,直線移動,5".to_string()));
-        assert_eq!(
-            decode_track_value("-500,500,直線移動,5"),
-            Some(value.clone())
-        );
+        assert_eq!(decode_track_value("-500,500,直線移動,5"), Ok(value.clone()));
 
         value.decelerate = true;
         assert_eq!(encoded(&value), Ok("-500,500,直線移動,7".to_string()));
-        // 15 は 3 ビット目も立っているが、読める 3 つのフラグは 7 と同じである。
-        assert_eq!(decode_track_value("-500,500,直線移動,15"), Some(value));
+        assert_eq!(decode_track_value("-500,500,直線移動,7"), Ok(value));
     }
 
     #[test]
-    fn the_fourth_bit_maps_to_none_of_the_flags() {
-        // 実測: `,8` を書いても 3 つのフラグはすべて偽のままである。
-        let decoded = decode_track_value("-600.00,600.00,直線移動,8").expect("解析できる");
-        assert!(!decoded.accelerate);
-        assert!(!decoded.decelerate);
-        assert!(!decoded.twopoint);
-        // 符号化はそのビットを立てる手段を持たない。
-        assert_eq!(encoded(&decoded), Ok("-600,600,直線移動,0".to_string()));
+    fn the_fourth_bit_marks_a_parameter_section_the_host_cannot_evaluate() {
+        // 実測: 末尾フラグだけを 8 にした項目は 1 フレームも動かない。同じ
+        // オブジェクトの別項目を 0 にした場合は動く。ホストの UI が立て下げる
+        // ビットは 1 / 2 / 4 / 16 であり、この位置は含まれない——立てるとホストは
+        // 空のパラメータ節を書き、評価で値を解けなくなる。
+        //
+        // 3 つのフラグを偽として読むと、動かない項目を「移動を持つ」と報告し、
+        // 書き戻しでその状態が黙って直る。**移動行として読み始められはするため、
+        // 移動行ではない値とは別の理由で失敗する。**
+        for raw in [
+            "-600,600,直線移動,8",
+            "-600,600,直線移動,8|",
+            "0,100,ランダム移動,8|30",
+        ] {
+            assert_eq!(
+                decode_track_value(raw),
+                Err(TrackDecodeError::NotRepresentable),
+                "{raw}"
+            );
+        }
     }
 
     #[test]
@@ -664,7 +726,7 @@ mod tests {
         let mut value = moving(&[0.0, 100.0], "ランダム移動");
         value.params = finite(&[30.0]);
         assert_eq!(encoded(&value), Ok("0,100,ランダム移動,0|30".to_string()));
-        assert_eq!(decode_track_value("0,100,ランダム移動,0|30"), Some(value));
+        assert_eq!(decode_track_value("0,100,ランダム移動,0|30"), Ok(value));
 
         let mut two = moving(&[0.0, 100.0], "ランダム移動");
         two.params = finite(&[30.0, -1.5]);
@@ -672,10 +734,7 @@ mod tests {
             encoded(&two),
             Ok("0,100,ランダム移動,0|30,-1.5".to_string())
         );
-        assert_eq!(
-            decode_track_value("0,100,ランダム移動,0|30,-1.5"),
-            Some(two)
-        );
+        assert_eq!(decode_track_value("0,100,ランダム移動,0|30,-1.5"), Ok(two));
     }
 
     #[test]
@@ -705,13 +764,15 @@ mod tests {
     fn the_decoding_absorbs_the_digits_the_host_adds() {
         assert_eq!(
             decode_track_value("-600.00,600.00,直線移動,0"),
-            Some(moving(&[-600.0, 600.0], "直線移動"))
+            Ok(moving(&[-600.0, 600.0], "直線移動"))
         );
-        assert_eq!(decode_track_value("0.00"), Some(static_value(0.0)));
+        assert_eq!(decode_track_value("0.00"), Ok(static_value(0.0)));
     }
 
     #[test]
-    fn the_decoding_refuses_what_it_cannot_read() {
+    fn what_cannot_be_read_as_a_movement_at_all_is_refused_as_such() {
+        // 移動行として読み始められない。末尾がフラグ整数で、その手前がモード名
+        // として読めるところまで進めなかったものである。
         for raw in [
             // 移動方法の名前が無い。
             "-600.00,600.00",
@@ -728,16 +789,34 @@ mod tests {
             "100,直線移動,0",
             // フラグが整数でない。
             "0,100,直線移動,x",
-            // 値が数値でない。
-            "0,あ,直線移動,0",
-            // パラメータが数値でない。
-            "0,100,直線移動,0|x",
             // 移動を持たない値にパラメータが付いている。
             "0.00|15",
             // 空文字列。
             "",
         ] {
-            assert_eq!(decode_track_value(raw), None, "{raw} が解析されました");
+            assert_eq!(
+                decode_track_value(raw),
+                Err(TrackDecodeError::NotAMovement),
+                "{raw} が解析されました"
+            );
+        }
+    }
+
+    #[test]
+    fn a_movement_row_that_cannot_be_represented_is_refused_as_a_movement_row() {
+        // 移動行として読み始められたうえで、表せる値にならなかったものである。
+        // 移動行ではない値と同じ理由に畳むと、壊れた行を素通しする判定を書ける。
+        for raw in [
+            // 値が数値でない。
+            "0,あ,直線移動,0",
+            // パラメータが数値でない。
+            "0,100,直線移動,0|x",
+        ] {
+            assert_eq!(
+                decode_track_value(raw),
+                Err(TrackDecodeError::NotRepresentable),
+                "{raw} が解析されました"
+            );
         }
     }
 
@@ -885,7 +964,11 @@ mod tests {
                 "{mode}"
             );
             // 復号も同じ名前を読まない。片側だけが読むと照合が必ず外れる。
-            assert_eq!(decode_track_value(&format!("0,1,{mode},0")), None, "{mode}");
+            assert_eq!(
+                decode_track_value(&format!("0,1,{mode},0")),
+                Err(TrackDecodeError::NotAMovement),
+                "{mode}"
+            );
         }
     }
 
@@ -960,10 +1043,74 @@ mod tests {
             let encoded = encoded(&value).expect("符号化");
             assert_eq!(
                 decode_track_value(&encoded),
-                Some(value.clone()),
+                Ok(value.clone()),
                 "{encoded} が往復しません"
             );
         }
+    }
+
+    #[test]
+    fn no_value_the_decoding_produces_can_encode_the_fourth_bit() {
+        // 復号が 4 つ目のビットを保持すると、読んだ値を書き戻すだけで評価の
+        // 死んだ行を作れる。フラグの全域を走査し、読めた値が同じ整数へ戻ること
+        // と、その整数がこのビットを含まないことを確かめる。
+        for flags in 0..64u32 {
+            let raw = format!("0,100,直線移動,{flags}");
+            let Ok(decoded) = decode_track_value(&raw) else {
+                continue;
+            };
+            let encoded = encoded(&decoded).expect("符号化");
+            let written: u32 = encoded
+                .rsplit(FIELD_SEPARATOR)
+                .next()
+                .expect("フラグの欄がある")
+                .parse()
+                .expect("フラグは整数");
+            assert_eq!(
+                written & PARAM_SECTION_BIT,
+                0,
+                "{raw} から {encoded} が作られました"
+            );
+            assert_eq!(written, flags, "{raw} のフラグが変わりました");
+        }
+    }
+
+    #[test]
+    fn spelling_the_fourth_bit_into_the_unnamed_flags_is_refused() {
+        let movements = movements();
+        let mut value = moving(&[0.0, 100.0], "直線移動");
+        value.reserved_flags = PARAM_SECTION_BIT;
+        // 検証と符号化の両方が拒否する。符号化だけが拒めば、検証を先に呼ぶ
+        // 経路が書き込みを発行してしまう。
+        assert_eq!(
+            validate_track_value(&value, target(1, &movements)),
+            Err(TrackValueError::FlagsNotRepresentable.into())
+        );
+        assert_eq!(
+            encode_track_value(&value, target(1, &movements)),
+            Err(TrackValueError::FlagsNotRepresentable.into())
+        );
+        // 拒否の名前と階級が、要求元が分岐に使う材料である。
+        let error: ItemWriteError = TrackValueError::FlagsNotRepresentable.into();
+        assert_eq!(error.reason(), Some("track_flags_not_representable"));
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+
+        // 名前を持つビットや他の名前の無いビットと重ねても変わらない。
+        let mut mixed = moving(&[0.0, 100.0], "直線移動");
+        mixed.accelerate = true;
+        mixed.reserved_flags = PARAM_SECTION_BIT | 16;
+        assert_eq!(
+            encode_track_value(&mixed, target(1, &movements)),
+            Err(TrackValueError::FlagsNotRepresentable.into())
+        );
+
+        // 移動を持たない値では、フラグを持つこと自体が拒否の理由である。
+        let mut still = static_value(0.0);
+        still.reserved_flags = PARAM_SECTION_BIT;
+        assert_eq!(
+            encode_track_value(&still, target(1, &movements)),
+            Err(TrackValueError::MovementWithoutMode.into())
+        );
     }
 
     #[test]
@@ -979,6 +1126,7 @@ mod tests {
                 "track_mode_unknown",
                 "track_mode_reads_as_number",
                 "track_movement_without_mode",
+                "track_flags_not_representable",
             ]
         );
     }

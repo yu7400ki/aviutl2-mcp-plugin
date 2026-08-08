@@ -895,14 +895,14 @@ proptest! {
         let (movements, section_count) = track_target_for(&value);
         let target = TrackWriteTarget { section_count, movements: &movements };
         let encoded = encode_track_value(&value, target).expect("生成した値は符号化できる");
-        prop_assert_eq!(decode_track_value(&encoded), Some(value));
+        prop_assert_eq!(decode_track_value(&encoded), Ok(value));
     }
 
     #[test]
     fn track_decoding_answers_for_any_string(raw in track_raw_strategy()) {
         // 復号が受け取るのはホストが返した文字列である。読めない並びに対して
         // 落ちず、読めなかったことを返す。
-        let Some(decoded) = decode_track_value(&raw) else {
+        let Ok(decoded) = decode_track_value(&raw) else {
             return Ok(());
         };
         // 読めた値は、対象さえ合えば書き戻せる。書式として書けない形は読まない。

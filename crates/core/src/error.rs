@@ -248,6 +248,7 @@ pub const REASON_VALUES: &[&str] = &[
     "section_move_crosses_boundary",
     "target_missing",
     "too_long",
+    "track_flags_not_representable",
     "track_mode_reads_as_number",
     "track_mode_unknown",
     "track_movement_present",

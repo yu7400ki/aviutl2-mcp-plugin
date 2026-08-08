@@ -901,7 +901,9 @@ fn fill_track_error_details(details: &mut Map<String, Value>, error: &TrackValue
         TrackValueError::UnknownMode { known } => {
             details.insert("known_movements".to_string(), json!(known));
         }
-        TrackValueError::ModeReadsAsNumber | TrackValueError::MovementWithoutMode => {}
+        TrackValueError::ModeReadsAsNumber
+        | TrackValueError::MovementWithoutMode
+        | TrackValueError::FlagsNotRepresentable => {}
     }
 }
 
