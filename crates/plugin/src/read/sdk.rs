@@ -1421,6 +1421,7 @@ mod tests {
             accelerate: false,
             decelerate: false,
             twopoint: false,
+            reserved_flags: 0,
         };
         assert_eq!(
             read_moving_value(&EffectItemType::Number, "-600.00,600.00,直線移動,0"),

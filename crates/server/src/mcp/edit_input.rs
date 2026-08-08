@@ -361,6 +361,13 @@ pub enum ItemValueInput {
         decelerate: bool,
         /// 中間点を無視するか。
         twopoint: bool,
+        /// 名前を持たないフラグのビット。省略すると 0 になる。
+        /// 読み取りが返した値をそのまま書き戻すためのものであり、
+        /// AviUtl2 が持つ、この応答が名前を知らないフラグを運ぶ。
+        /// 表せない値を綴ると invalid_argument となり、
+        /// details.reason が track_flags_not_representable を返す。
+        #[serde(default)]
+        reserved_flags: u32,
     },
     /// 未対応種別の生値。読み取りは返すが、書き込みには指定できない。
     Unknown {
@@ -398,6 +405,7 @@ impl ItemValueInput {
                 accelerate,
                 decelerate,
                 twopoint,
+                reserved_flags,
             } => ItemValue::Track(TrackValue {
                 values: finite_values("values", values)?,
                 mode: mode.clone(),
@@ -405,6 +413,7 @@ impl ItemValueInput {
                 accelerate: *accelerate,
                 decelerate: *decelerate,
                 twopoint: *twopoint,
+                reserved_flags: *reserved_flags,
             }),
             ItemValueInput::Unknown { raw } => ItemValue::Unknown { raw: raw.clone() },
         })
@@ -2019,6 +2028,9 @@ mod tests {
                 accelerate: false,
                 decelerate: false,
                 twopoint: false,
+                // 名前を持たないビットも往復の対象である。0 を標本に置くと、
+                // 入力型がこのフィールドを持たなくても往復が成り立ってしまう。
+                reserved_flags: 16,
             }),
             ItemValue::Track(_) => ItemValue::Unknown {
                 raw: "future=1".to_string(),
@@ -2091,9 +2103,48 @@ mod tests {
                 accelerate: false,
                 decelerate: false,
                 twopoint: false,
+                reserved_flags: 0,
             })
         );
         assert_eq!(aviutl2_mcp_core::validate_item_value(&value), Ok(()));
+    }
+
+    #[test]
+    fn the_flags_without_a_name_survive_the_boundary() {
+        // 読み取りが返した値をそのまま送り返す往復である。入力 schema が予約
+        // ビットを持たないと、境界で 0 へ落ちて符号化から消える。
+        let read = ItemValue::Track(TrackValue {
+            values: [-600.0, 600.0]
+                .into_iter()
+                .map(|value| FiniteF64::try_new(value).expect("有限値"))
+                .collect(),
+            mode: Some("直線移動".to_string()),
+            params: Vec::new(),
+            accelerate: false,
+            decelerate: false,
+            twopoint: false,
+            reserved_flags: 16,
+        });
+        let input: ItemValueInput =
+            serde_json::from_value(serde_json::to_value(&read).expect("直列化できる"))
+                .expect("入力型で受け取れる");
+        let converted = input.to_value().expect("変換できる");
+        assert_eq!(converted, read);
+
+        let ItemValue::Track(track) = converted else {
+            panic!("移動として受け取れません");
+        };
+        let movements = vec!["直線移動".to_string()];
+        assert_eq!(
+            aviutl2_mcp_core::encode_track_value(
+                &track,
+                aviutl2_mcp_core::TrackWriteTarget {
+                    section_count: 1,
+                    movements: &movements,
+                },
+            ),
+            Ok("-600,600,直線移動,16".to_string())
+        );
     }
 
     #[test]
@@ -2107,6 +2158,7 @@ mod tests {
             accelerate: false,
             decelerate: false,
             twopoint: false,
+            reserved_flags: 0,
         };
         for input in [
             track(vec![0.0, f64::INFINITY], Vec::new()),

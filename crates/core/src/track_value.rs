@@ -35,6 +35,16 @@ const FLAG_DECELERATE: u32 = 2;
 /// 中間点無視のビット。
 const FLAG_TWOPOINT: u32 = 4;
 
+/// この型が名前を持つフラグのビット。
+const NAMED_FLAGS: u32 = FLAG_ACCELERATE | FLAG_DECELERATE | FLAG_TWOPOINT;
+
+/// パラメータ節が続くことを示す構造上の印。
+///
+/// **フラグではない。** ホストの UI が立て下げするのは 1 / 2 / 4 / 16 であり、
+/// この位置に対応するチェックボックスは無い。立った行をホストは「パラメータ節が
+/// 続く」と読み、空の節を書き、評価でその値を解けなくなる。
+const PARAM_SECTION_BIT: u32 = 8;
+
 /// 移動を持つ値が取り得る最小の要素数。区間 1 個の境界の数である。
 const MIN_MOVING_VALUES: usize = 2;
 
@@ -74,6 +84,13 @@ pub struct TrackValue {
     pub decelerate: bool,
     /// 中間点を無視するか。
     pub twopoint: bool,
+    /// この型が名前を持たないフラグのビット。
+    ///
+    /// 復号は既知の 3 ビットを除いた残りをここへ入れ、符号化は 3 つの真偽値から
+    /// 組み立てたビットへ重ねる。**名前が無いことと、落としてよいことは別で
+    /// ある。** ホストの UI にはこの位置へ現れるチェックボックスがあり、落とすと
+    /// 読み取った値を書き戻したときにその設定が消える。
+    pub reserved_flags: u32,
 }
 
 /// トラックバーの移動を表す値の検証失敗。
@@ -157,11 +174,16 @@ pub struct TrackWriteTarget<'a> {
 }
 
 /// フラグのビット列を組み立てる。
+///
+/// 名前を持つ 3 つのビットへ、名前を持たない分（[`TrackValue::reserved_flags`]）を
+/// 重ねる。ホストが受け渡すのはこの整数 1 つであり、名前の有無は我々の側の区別で
+/// しかない。
 fn flag_bits(value: &TrackValue) -> u32 {
     let bit = |enabled: bool, mask: u32| if enabled { mask } else { 0 };
     bit(value.accelerate, FLAG_ACCELERATE)
         | bit(value.decelerate, FLAG_DECELERATE)
         | bit(value.twopoint, FLAG_TWOPOINT)
+        | value.reserved_flags
 }
 
 /// 対象を見なくても判定できる規則だけを検証する。
@@ -341,8 +363,9 @@ pub fn encode_track_value(
 /// 読めても書き戻せない。移動方法の一覧と区間の数も、対象を見なければ判定でき
 /// ないため復号は見ない。
 ///
-/// フラグの 3 ビット目以降は捨てる。**捨てても失われる情報は無い**——ホストの
-/// フラグはどれも 3 ビット目に対応せず、そのビットを立てても移動は変わらない。
+/// 名前を持つ 3 つのビット以外は [`TrackValue::reserved_flags`] へ入れる。
+/// **捨てない**——ホストの UI にはこの型が名前を持たないチェックボックスがあり、
+/// 捨てると読めた値を書き戻したときにその設定が消える。
 pub fn decode_track_value(raw: &str) -> Option<TrackValue> {
     let (head, tail) = match raw.split_once(PARAM_SEPARATOR) {
         Some((head, tail)) => (head, Some(tail)),
@@ -368,6 +391,7 @@ pub fn decode_track_value(raw: &str) -> Option<TrackValue> {
             accelerate: false,
             decelerate: false,
             twopoint: false,
+            reserved_flags: 0,
         });
     }
     if fields.len() < MIN_MOVING_VALUES + 2 {
@@ -390,6 +414,7 @@ pub fn decode_track_value(raw: &str) -> Option<TrackValue> {
         accelerate: flags & FLAG_ACCELERATE != 0,
         decelerate: flags & FLAG_DECELERATE != 0,
         twopoint: flags & FLAG_TWOPOINT != 0,
+        reserved_flags: flags & !(NAMED_FLAGS | PARAM_SECTION_BIT),
     })
 }
 
@@ -423,12 +448,15 @@ fn reads_as_number(mode: &str) -> bool {
 /// 不一致になり、成功した書き込みが失敗として返る。それでもこの規則を採るのは、
 /// 比べない側の誤りが「要求と違うパラメータが入ったことを黙って見逃す」ことだから
 /// である。**偽の失敗は、黙った破壊より安全な側である。**
+///
+/// **フラグは組み立てた整数どうしで比べる。** ホストが保存するのはその整数 1 つ
+/// であり、どのビットに名前が付いているかは我々の側の区別でしかない。真偽値と
+/// [`TrackValue::reserved_flags`] を別々に比べると、同じ整数を綴った 2 つの要求が
+/// 片方だけ食い違いとして返る。
 pub(crate) fn track_read_back_matches(written: &TrackValue, observed: &TrackValue) -> bool {
     if written.values != observed.values
         || written.mode != observed.mode
-        || written.accelerate != observed.accelerate
-        || written.decelerate != observed.decelerate
-        || written.twopoint != observed.twopoint
+        || flag_bits(written) != flag_bits(observed)
     {
         return false;
     }
@@ -454,6 +482,7 @@ mod tests {
             accelerate: false,
             decelerate: false,
             twopoint: false,
+            reserved_flags: 0,
         }
     }
 
@@ -465,6 +494,7 @@ mod tests {
             accelerate: false,
             decelerate: false,
             twopoint: false,
+            reserved_flags: 0,
         }
     }
 
@@ -576,6 +606,45 @@ mod tests {
         assert!(!decoded.twopoint);
         // 符号化はそのビットを立てる手段を持たない。
         assert_eq!(encoded(&decoded), Ok("-600,600,直線移動,0".to_string()));
+    }
+
+    #[test]
+    fn the_named_bits_read_and_write_as_they_did() {
+        for (raw, accelerate, decelerate, twopoint) in [
+            ("-600,600,直線移動,0", false, false, false),
+            ("-600,600,直線移動,4", false, false, true),
+            ("-600,600,直線移動,7", true, true, true),
+        ] {
+            let decoded = decode_track_value(raw).expect("解析できる");
+            assert_eq!(
+                (decoded.accelerate, decoded.decelerate, decoded.twopoint),
+                (accelerate, decelerate, twopoint),
+                "{raw}"
+            );
+            assert_eq!(decoded.reserved_flags, 0, "{raw}");
+            assert_eq!(encoded(&decoded), Ok(raw.to_string()));
+        }
+    }
+
+    #[test]
+    fn the_bits_without_a_name_survive_the_round_trip() {
+        // 実測: `直線移動,16` は `|` を足されずに保存され、評価も生きている。
+        // ホストの UI が持つ 4 つ目のチェックボックスであり、どの設定かは特定
+        // できていない。落とせば、読み取った値を書き戻したときに消える。
+        let decoded = decode_track_value("-600.00,600.00,直線移動,16").expect("解析できる");
+        assert_eq!(decoded.reserved_flags, 16);
+        assert!(!decoded.accelerate);
+        assert!(!decoded.decelerate);
+        assert!(!decoded.twopoint);
+        assert_eq!(encoded(&decoded), Ok("-600,600,直線移動,16".to_string()));
+
+        // 名前を持つ 3 つと重なっても、同じ整数へ戻る。
+        let mixed = decode_track_value("-600.00,600.00,直線移動,23").expect("解析できる");
+        assert_eq!(mixed.reserved_flags, 16);
+        assert!(mixed.accelerate);
+        assert!(mixed.decelerate);
+        assert!(mixed.twopoint);
+        assert_eq!(encoded(&mixed), Ok("-600,600,直線移動,23".to_string()));
     }
 
     #[test]

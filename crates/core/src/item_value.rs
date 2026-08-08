@@ -944,6 +944,7 @@ mod tests {
             accelerate: false,
             decelerate: false,
             twopoint: false,
+            reserved_flags: 0,
         }
     }
 
@@ -1011,6 +1012,7 @@ mod tests {
                 "accelerate": false,
                 "decelerate": false,
                 "twopoint": false,
+                "reserved_flags": 0,
             })
         );
     }
@@ -1093,6 +1095,7 @@ mod tests {
             accelerate: false,
             decelerate: false,
             twopoint: false,
+            reserved_flags: 0,
         }
     }
 

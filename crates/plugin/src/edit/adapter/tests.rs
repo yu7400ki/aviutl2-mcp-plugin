@@ -2190,6 +2190,7 @@ fn movement(values: &[f64], mode: &str) -> ItemValue {
         accelerate: false,
         decelerate: false,
         twopoint: false,
+        reserved_flags: 0,
     })
 }
 
@@ -2394,6 +2395,7 @@ fn a_movement_is_removed_by_writing_a_value_without_a_mode() {
                 accelerate: false,
                 decelerate: false,
                 twopoint: false,
+                reserved_flags: 0,
             }),
         ))
         .expect("移動を消す書き込みが拒否されました");

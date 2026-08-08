@@ -226,6 +226,10 @@ fn write_item_value(input: &mut FingerprintInput, value: &ItemValue) {
             input.boolean("item_value.track.accelerate", track.accelerate);
             input.boolean("item_value.track.decelerate", track.decelerate);
             input.boolean("item_value.track.twopoint", track.twopoint);
+            input.integer(
+                "item_value.track.reserved_flags",
+                i64::from(track.reserved_flags),
+            );
         }
         ItemValue::Unknown { raw } => {
             input.text("item_value.kind", "unknown");
@@ -656,6 +660,7 @@ mod tests {
             accelerate: false,
             decelerate: false,
             twopoint: false,
+            reserved_flags: 0,
         };
         let make = |track: crate::track_value::TrackValue| {
             effect_with(&[EffectItem {
@@ -695,6 +700,10 @@ mod tests {
             },
             crate::track_value::TrackValue {
                 twopoint: true,
+                ..base.clone()
+            },
+            crate::track_value::TrackValue {
+                reserved_flags: 16,
                 ..base.clone()
             },
             // 要素数だけが違う組。内容が違う組だけを並べると、並びの長さの

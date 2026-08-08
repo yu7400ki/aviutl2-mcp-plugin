@@ -693,6 +693,7 @@ fn item_value() -> Value {
                 ("accelerate", boolean()),
                 ("decelerate", boolean()),
                 ("twopoint", boolean()),
+                ("reserved_flags", unsigned()),
             ]),
             tagged("unknown", &[("raw", string())]),
         ]
@@ -997,6 +998,7 @@ mod tests {
                 accelerate: true,
                 decelerate: false,
                 twopoint: false,
+                reserved_flags: 16,
             }),
             ItemValue::Unknown {
                 raw: "raw".to_string(),

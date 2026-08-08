@@ -2238,7 +2238,8 @@ fn raw_track_value(track: &TrackValue) -> String {
     fields.push(mode.to_string());
     let flags = u32::from(track.accelerate)
         | (u32::from(track.decelerate) << 1)
-        | (u32::from(track.twopoint) << 2);
+        | (u32::from(track.twopoint) << 2)
+        | track.reserved_flags;
     fields.push(flags.to_string());
     let mut raw = fields.join(",");
     raw.push('|');
@@ -2483,6 +2484,7 @@ pub(crate) fn coordinate(index: usize, values: &[f64]) -> HostEffect {
         accelerate: false,
         decelerate: false,
         twopoint: false,
+        reserved_flags: 0,
     };
     let moving = ItemValue::Track(track);
     HostEffect {
@@ -2808,6 +2810,7 @@ mod tests {
             accelerate: false,
             decelerate: false,
             twopoint: false,
+            reserved_flags: 0,
         })
     }
 

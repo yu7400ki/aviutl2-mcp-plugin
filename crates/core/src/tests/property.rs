@@ -430,6 +430,15 @@ fn track_number_strategy() -> impl Strategy<Value = FiniteF64> {
     (-1e12f64..1e12f64).prop_map(|value| FiniteF64::try_new(value).expect("有限数のみを生成する"))
 }
 
+/// 名前を持たないフラグのビット。
+///
+/// **下位 4 ビットを生成しない。** 名前を持つ 3 つと重ねると、同じ整数を 2 通りに
+/// 綴れて往復が値として一致しなくなる。4 つ目のビットは符号化が拒む値であり、
+/// 生成すると「符号化できない」を数えるだけになる。どちらも単体検査が固定する。
+fn track_reserved_flags_strategy() -> impl Strategy<Value = u32> {
+    any::<u32>().prop_map(|bits| bits & !0xF)
+}
+
 /// 符号化が受け付ける移動の値。
 fn track_value_strategy() -> impl Strategy<Value = TrackValue> {
     let moving = (
@@ -437,15 +446,19 @@ fn track_value_strategy() -> impl Strategy<Value = TrackValue> {
         track_mode_strategy(),
         prop::collection::vec(track_number_strategy(), 0..4),
         any::<(bool, bool, bool)>(),
+        track_reserved_flags_strategy(),
     )
         .prop_map(
-            |(values, mode, params, (accelerate, decelerate, twopoint))| TrackValue {
-                values,
-                mode: Some(mode),
-                params,
-                accelerate,
-                decelerate,
-                twopoint,
+            |(values, mode, params, (accelerate, decelerate, twopoint), reserved_flags)| {
+                TrackValue {
+                    values,
+                    mode: Some(mode),
+                    params,
+                    accelerate,
+                    decelerate,
+                    twopoint,
+                    reserved_flags,
+                }
             },
         );
     let still = track_number_strategy().prop_map(|value| TrackValue {
@@ -455,6 +468,7 @@ fn track_value_strategy() -> impl Strategy<Value = TrackValue> {
         accelerate: false,
         decelerate: false,
         twopoint: false,
+        reserved_flags: 0,
     });
     prop_oneof![moving, still]
 }

@@ -813,6 +813,7 @@ fn the_same_movement_write_is_judged_the_same_way_alone_and_in_a_batch() {
                 accelerate: false,
                 decelerate: false,
                 twopoint: false,
+                reserved_flags: 0,
             }),
         ),
         // 移動を持たない項目へ移動を付ける。どちらも通す。

@@ -1964,6 +1964,7 @@ mod tests {
                 accelerate: false,
                 decelerate: false,
                 twopoint: false,
+                reserved_flags: 0,
             }),
             track: Some(TrackInfo {
                 mode: MOVEMENT_MODE.to_string(),
