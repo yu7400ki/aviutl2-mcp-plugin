@@ -16,7 +16,6 @@
 //! 数値の範囲は `aviutl2_mcp_core::settings` の下限・上限の定数から導く。
 //! **書き写さないため、tool や範囲が変わったときに画面だけが古くなる経路が無い。**
 
-use super::toggle::Toggle;
 use aviutl2_mcp_core::budget::{RequestBudgetKind, ScaledBudgets};
 use aviutl2_mcp_core::settings::{
     AgentPluginSettings, MAX_ARTIFACT_MAX_COUNT, MAX_ARTIFACT_MAX_TOTAL_BYTES,
@@ -300,7 +299,7 @@ impl AgentPluginToggle {
 /// 「エージェントプラグイン」ページの切り替え 1 つ。
 pub struct AgentPluginInput {
     toggle: AgentPluginToggle,
-    control: Toggle,
+    control: CheckBox,
     initial: bool,
 }
 
@@ -311,7 +310,7 @@ impl AgentPluginInput {
     }
 
     /// 画面に置くチェックボックス。
-    pub fn control(&self) -> Toggle {
+    pub fn control(&self) -> CheckBox {
         self.control.clone()
     }
 }
@@ -612,7 +611,7 @@ fn agent_plugin_toggles(settings: AgentPluginSettings) -> Vec<AgentPluginInput> 
             let initial = toggle.current(&settings);
             AgentPluginInput {
                 toggle,
-                control: Toggle::new(toggle.label())
+                control: CheckBox::new(toggle.label())
                     .checked(initial)
                     .enabled(toggle.is_consent() || settings.generate),
                 initial,
@@ -620,7 +619,7 @@ fn agent_plugin_toggles(settings: AgentPluginSettings) -> Vec<AgentPluginInput> 
         })
         .collect();
 
-    let breakdown: Vec<Toggle> = inputs
+    let breakdown: Vec<CheckBox> = inputs
         .iter()
         .filter(|input| !input.toggle.is_consent())
         .map(|input| input.control.clone())

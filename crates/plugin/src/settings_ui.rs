@@ -28,7 +28,6 @@
 //! AviUtl2 の UI であり、MCP は止まらない。
 
 pub mod form;
-pub mod toggle;
 
 use crate::settings;
 use aviutl2_mcp_core::settings::SettingsChange;
