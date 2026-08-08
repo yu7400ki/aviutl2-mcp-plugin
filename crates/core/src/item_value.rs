@@ -1208,7 +1208,11 @@ mod tests {
     fn an_unreadable_current_value_counts_as_no_movement() {
         // 読めない文字列は移動を名乗っていない。移動として扱うと、移動を持たない
         // 項目への数値の書き込みまで拒否される。
-        for current in ["", "?", "0,100,直線移動"] {
+        //
+        // ホストが評価できない移動行も同じ側である。動かない項目への数値の
+        // 書き込みを「移動を消す」として拒むと、消える移動が無いのに直す手段が
+        // 塞がれる。
+        for current in ["", "?", "0,100,直線移動", "-500.00,500.00,直線移動,8|"] {
             assert!(
                 !write_drops_existing_movement(
                     &EffectItemType::Number,

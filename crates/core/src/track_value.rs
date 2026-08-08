@@ -1010,6 +1010,30 @@ mod tests {
     }
 
     #[test]
+    fn the_read_back_compares_the_flag_integer_the_host_stores() {
+        // 名前を持たないビットが読み直しで消えていれば、要求した移動は入って
+        // いない。3 つの真偽値だけを比べると、その欠落を成功として返す。
+        let written = decode_track_value("-500,500,直線移動,16").expect("解析できる");
+        assert!(!track_read_back_matches(
+            &written,
+            &decode_track_value("-500.00,500.00,直線移動,0").expect("解析できる")
+        ));
+        assert!(track_read_back_matches(
+            &written,
+            &decode_track_value("-500.00,500.00,直線移動,16").expect("解析できる")
+        ));
+
+        // 同じ整数を別の綴り方で組み立てた要求は食い違いにしない。ホストが持つ
+        // のは整数 1 つであり、どのビットに名前が付くかは我々の側の区別である。
+        let spelled = TrackValue {
+            reserved_flags: FLAG_ACCELERATE,
+            ..moving(&[-500.0, 500.0], "直線移動")
+        };
+        let named = decode_track_value("-500.00,500.00,直線移動,1").expect("解析できる");
+        assert!(track_read_back_matches(&spelled, &named));
+    }
+
+    #[test]
     fn the_read_back_leaves_the_defaults_the_host_filled_in_alone() {
         // 空のパラメータは既定値を求める指定である。返ってきた既定値を
         // 食い違いとして扱うと、成功した書き込みが失敗になる。
