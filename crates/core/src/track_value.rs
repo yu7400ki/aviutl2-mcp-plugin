@@ -102,6 +102,9 @@ pub struct TrackValue {
     /// 組み立てたビットへ重ねる。**名前が無いことと、落としてよいことは別で
     /// ある。** ホストの UI にはこの位置へ現れるチェックボックスがあり、落とすと
     /// 読み取った値を書き戻したときにその設定が消える。
+    ///
+    /// 名前を持つビットの位置は、ここではなく 3 つの真偽値が表す。両方から同じ
+    /// 整数を綴れる形は書き込みが拒否する（[`validate_track_value`]）。
     pub reserved_flags: u32,
 }
 
@@ -132,8 +135,8 @@ pub enum TrackValueError {
     /// 移動を持たない値に、移動の付帯情報が指定された。
     #[error("移動を持たない値にフラグとパラメータは指定できません")]
     MovementWithoutMode,
-    /// フラグに、ホストが移動として評価できないビットが含まれる。
-    #[error("移動のフラグに、ホストが評価できないビットが含まれています")]
+    /// 名前を持たないビットに、この型が表せない値が指定された。
+    #[error("移動のフラグに、この形では表せないビットが含まれています")]
     FlagsNotRepresentable,
 }
 
@@ -235,9 +238,12 @@ fn flag_bits(value: &TrackValue) -> u32 {
 ///   移動方法の名前として引き当てられずに例外を投げる
 /// - 移動を持つ値は 2 要素以上である。区間は必ず 1 つ以上あるためで、
 ///   正確な個数は区間の数を渡す [`validate_track_value`] が見る
-/// - 名前を持たないビットに [`PARAM_SECTION_BIT`] を含まない。**黙って落とさず
-///   拒否する。** 落とせば要求元は自分が何を書いたか分からなくなり、通せば
-///   評価の死んだ項目を作れる
+/// - 名前を持たないビット（[`TrackValue::reserved_flags`]）が、この型で表せる
+///   値である。表せないビットは 2 つに分かれる——[`PARAM_SECTION_BIT`] は
+///   ホストが移動として評価できず、[`NAMED_FLAGS`] の位置は 3 つの真偽値が
+///   表す。どちらも同じ理由で拒否する。**黙って落とさない。** 落とせば要求元は
+///   自分が何を書いたか分からなくなり、通せば、評価の死んだ項目か、同じ整数を
+///   2 通りに綴れる値ができる
 pub(crate) fn validate_track_syntax(value: &TrackValue) -> Result<(), ItemWriteError> {
     let Some(mode) = value.mode.as_deref() else {
         if value.values.len() != 1 {
@@ -252,7 +258,7 @@ pub(crate) fn validate_track_syntax(value: &TrackValue) -> Result<(), ItemWriteE
         }
         return Ok(());
     };
-    if value.reserved_flags & PARAM_SECTION_BIT != 0 {
+    if value.reserved_flags & (NAMED_FLAGS | PARAM_SECTION_BIT) != 0 {
         return Err(TrackValueError::FlagsNotRepresentable.into());
     }
     validate_item_text(mode)?;
@@ -516,10 +522,8 @@ fn reads_as_number(mode: &str) -> bool {
 /// 比べない側の誤りが「要求と違うパラメータが入ったことを黙って見逃す」ことだから
 /// である。**偽の失敗は、黙った破壊より安全な側である。**
 ///
-/// **フラグは組み立てた整数どうしで比べる。** ホストが保存するのはその整数 1 つ
-/// であり、どのビットに名前が付いているかは我々の側の区別でしかない。真偽値と
-/// [`TrackValue::reserved_flags`] を別々に比べると、同じ整数を綴った 2 つの要求が
-/// 片方だけ食い違いとして返る。
+/// **フラグは組み立てた整数どうしで比べる。** ホストが受け渡すのはその整数 1 つ
+/// であり、どのビットに名前が付いているかは我々の側の区別でしかない。
 pub(crate) fn track_read_back_matches(written: &TrackValue, observed: &TrackValue) -> bool {
     if written.values != observed.values
         || written.mode != observed.mode
@@ -1047,15 +1051,6 @@ mod tests {
             &written,
             &decode_track_value("-500.00,500.00,直線移動,16").expect("解析できる")
         ));
-
-        // 同じ整数を別の綴り方で組み立てた要求は食い違いにしない。ホストが持つ
-        // のは整数 1 つであり、どのビットに名前が付くかは我々の側の区別である。
-        let spelled = TrackValue {
-            reserved_flags: FLAG_ACCELERATE,
-            ..moving(&[-500.0, 500.0], "直線移動")
-        };
-        let named = decode_track_value("-500.00,500.00,直線移動,1").expect("解析できる");
-        assert!(track_read_back_matches(&spelled, &named));
     }
 
     #[test]
@@ -1122,6 +1117,36 @@ mod tests {
             );
             assert_eq!(written, flags, "{raw} のフラグが変わりました");
         }
+    }
+
+    #[test]
+    fn a_bit_a_named_flag_already_owns_is_refused_in_the_unnamed_flags() {
+        // 名前を持つ位置を名前の無い側へ綴ると、同じ整数を 2 通りに表せる。
+        // 符号化してから復号すると必ず名前のある側へ寄るため、この値は復号の
+        // 出力にならない——型の定義域から外す。
+        let movements = movements();
+        for bit in [FLAG_ACCELERATE, FLAG_DECELERATE, FLAG_TWOPOINT] {
+            let mut value = moving(&[0.0, 100.0], "直線移動");
+            value.reserved_flags = bit;
+            assert_eq!(
+                validate_track_value(&value, target(1, &movements)),
+                Err(TrackValueError::FlagsNotRepresentable.into()),
+                "{bit}"
+            );
+            assert_eq!(
+                encode_track_value(&value, target(1, &movements)),
+                Err(TrackValueError::FlagsNotRepresentable.into()),
+                "{bit}"
+            );
+        }
+        // 名前の無い位置だけを立てた値は通る。拒否が広がると、読み取りが返した
+        // 値をそのまま書き戻せなくなる。
+        let mut carried = moving(&[0.0, 100.0], "直線移動");
+        carried.reserved_flags = 16;
+        assert_eq!(
+            encode_track_value(&carried, target(1, &movements)),
+            Ok("0,100,直線移動,16".to_string())
+        );
     }
 
     #[test]
