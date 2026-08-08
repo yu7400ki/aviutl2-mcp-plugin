@@ -72,6 +72,23 @@
 // 他の項目が先に主張するため候補から消え、`ディスプレイスメントマップ /
 // 変形方法` の `拡大変形` と `回転変形` も同様に落ちた。書き込みは毎秒 300 回を
 // 超えるため、在庫を項目ごとに全件試しても実時間は分単位に収まる。
+//
+// # スクラッチのオブジェクトは同時に 1 つだけ生かす
+//
+// **timeline に乗っているオブジェクトの数が、1 編集あたりの費用を決める。**
+// ホストは編集のたびにプレビューを描き直し、そのフレームに乗るオブジェクトを
+// 全て通す。走査に要るオブジェクトを作り置きして最後まで残すと、1 編集あたりの
+// 描画時間が対象の数に比例して伸びる——モーションブラーのような重い効果が
+// 混じれば数ミリ秒から数秒の桁へ移る。
+//
+// **これは走査の速さの問題では済まない。** 描画はホストのメインスレッドを塞ぐ
+// ため、その間 plugin は生存確認の ping を返せず、server はインスタンスを
+// `instance_stale` として扱う。作り置きの形は、対象が増えるほど確実に落ちる。
+//
+// そこで走査を**オブジェクトの作り方で束ね**、束ごとに「作る → その上に乗る
+// (効果, 項目) を全て測る → 消す」を回す（[`withScratchObject`]）。同時に生きる
+// スクラッチは常に 1 つであり、**1 編集あたりの描画費用は走査の総量に依らない。**
+// 片付けも同じ形から出る——途中で落ちても timeline に残るのは高々 1 つである。
 
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -354,20 +371,80 @@ class Survey {
     throw new Error("オブジェクトの selector に追従できません");
   }
 
+  /**
+   * 自分が作ったオブジェクトを 1 つ消す。消せたら `true` を返す。
+   *
+   * 読めないオブジェクトは既に消えているものとして扱い、追跡から外す。
+   * **消せなかったオブジェクトのレイヤーは占有されたままである**ため、
+   * 戻り値はレイヤーを再び貸し出してよいかの判断にも使う。
+   */
+  async destroyObject(selector) {
+    let removed = false;
+    try {
+      const object = await this.getObject(selector);
+      const response = await this.call("delete_object", { selector: object.summary.selector });
+      removed = !response.isError;
+    } catch {
+      // 既に消えているオブジェクトは片付ける対象ではない。
+    }
+    this.created = this.created.filter((entry) => entry !== selector);
+    return removed;
+  }
+
   /** 自分が作ったオブジェクトを全て消す。1 件の失敗で他を諦めない。 */
   async cleanup() {
     let removed = 0;
-    for (const selector of this.created) {
-      try {
-        const object = await this.getObject(selector);
-        const response = await this.call("delete_object", { selector: object.summary.selector });
-        if (!response.isError) removed += 1;
-      } catch {
-        // 既に消えているオブジェクトは片付ける対象ではない。
-      }
+    for (const selector of [...this.created]) {
+      if (await this.destroyObject(selector)) removed += 1;
     }
     this.created = [];
     return removed;
+  }
+}
+
+/**
+ * スクラッチを置くレイヤーを貸し出す。
+ *
+ * 消せたレイヤーは次の貸し出しへ回す。**同時に生きるスクラッチが 1 つである
+ * 限り、走査の規模に依らず占有するレイヤーも 1 つである。** 消せなかった
+ * オブジェクトのレイヤーは返却されず、次のスクラッチはその先へ置かれる。
+ */
+class ScratchLayers {
+  constructor(first) {
+    this.next = first;
+    this.free = [];
+  }
+
+  take() {
+    return this.free.pop() ?? this.next++;
+  }
+
+  release(layer) {
+    this.free.push(layer);
+  }
+}
+
+/**
+ * スクラッチのオブジェクトを 1 つ作り、渡した処理へ預けて、必ず消す。
+ *
+ * **同時に timeline へ乗るスクラッチを 1 つに抑えるのはこの形である。** 処理が
+ * 例外で抜けても消すため、走査が途中で落ちてもプロジェクトへ残るのは高々
+ * 1 つになる。
+ *
+ * オブジェクトを作れなかったときは処理を呼ばず、`created` が `false` の結果を
+ * 返す——作れないことは呼び出し側が報告へ回す観測である。
+ */
+async function withScratchObject(survey, layers, effectName, use) {
+  const layer = layers.take();
+  const selector = await survey.createObject(effectName, layer);
+  if (!selector) {
+    layers.release(layer);
+    return { created: false, value: null };
+  }
+  try {
+    return { created: true, value: await use(selector) };
+  } finally {
+    if (await survey.destroyObject(selector)) layers.release(layer);
   }
 }
 
@@ -413,21 +490,19 @@ async function describeAllEffects(survey) {
  *
  * 返すのは 効果名 → その効果を載せたオブジェクトを作れる効果名 の対応である。
  */
-async function resolveHosts(survey, targetNames, effects, layerOf) {
+async function resolveHosts(survey, targetNames, effects, layers) {
   const hosts = new Map();
   const tried = new Set();
 
   const probe = async (sourceName) => {
     if (tried.has(sourceName)) return;
     tried.add(sourceName);
-    const selector = await survey.createObject(sourceName, layerOf());
-    if (!selector) return;
-    const object = await survey.getObject(selector);
-    for (const effect of object.effects) {
-      if (!hosts.has(effect.name)) hosts.set(effect.name, sourceName);
-    }
-    await survey.call("delete_object", { selector: object.summary.selector });
-    survey.created = survey.created.filter((entry) => entry !== selector);
+    await withScratchObject(survey, layers, sourceName, async (selector) => {
+      const object = await survey.getObject(selector);
+      for (const effect of object.effects) {
+        if (!hosts.has(effect.name)) hosts.set(effect.name, sourceName);
+      }
+    });
   };
 
   for (const name of targetNames) {
@@ -569,14 +644,15 @@ export async function measureRange(target, itemType, budget) {
   const unreadable = [];
   let decimalsProbeAccepted = false;
   let writes = 0;
+  const outcome = () => ({ range, writes, halted: false, failure: null, unreadable });
   for (const [part, value] of probes) {
     const result = await target.write({ type: itemType, value }, budget);
     if (result.outcome === WRITE.exhausted) {
-      return { range, writes, halted: true, failure: null, unreadable };
+      return { ...outcome(), halted: true };
     }
     writes += 1;
     if (result.outcome === WRITE.failed) {
-      return { range, writes, halted: false, failure: result.reason, unreadable };
+      return { ...outcome(), failure: result.reason };
     }
     if (result.outcome === WRITE.accepted) {
       if (part === "decimals") decimalsProbeAccepted = true;
@@ -596,7 +672,7 @@ export async function measureRange(target, itemType, budget) {
   if (measuresDecimals && !decimalsProbeAccepted && digits.size === 1) {
     range.decimals = [...digits][0];
   }
-  return { range, writes, halted: false, failure: null, unreadable };
+  return outcome();
 }
 
 /**
@@ -669,6 +745,121 @@ export function buildDocument(entries) {
   return { effects };
 }
 
+/**
+ * 測る組を、オブジェクトの作り方ごとに束ねる。
+ *
+ * 束が走査の単位であり、**同時に生きるスクラッチの数は束の数ではなく 1 である。**
+ * 束の並びも束の中の並びも `pairs` の順そのものにする——報告の並びが走査の順に
+ * 従い、途中で止まったときにどこまで進んだかが読める。
+ *
+ * オブジェクトの作り方が決まらなかった組は束に入らない。呼び出し側が既に
+ * 報告へ回している。
+ */
+export function groupBySource(pairs, hosts) {
+  const groups = new Map();
+  for (const pair of pairs) {
+    const source = hosts.get(pair.effect);
+    if (source === undefined) continue;
+    const record = {
+      ...pair,
+      source,
+      target: null,
+      initialValue: null,
+      found: new Set(),
+      discriminates: null,
+      range: null,
+      failure: null,
+      unreadable: [],
+      blocked: null,
+      writes: 0,
+      surveyed: false,
+    };
+    const group = groups.get(source);
+    if (group) group.push(record);
+    else groups.set(source, [record]);
+  }
+  return groups;
+}
+
+/**
+ * 1 つのスクラッチのオブジェクトに乗る組を、段を追って測る。
+ *
+ * 段の並びは 負の対照 → 境界拡張 → 未割当の回収 → 値域 である。**変わるのは
+ * 段が回る範囲だけであり、どの段が何を書くかは束ね方に依らない。**
+ *
+ * 予算を使い切った段はそこで抜ける。続く段の最初の書き込みも同じく尽きるため、
+ * 測り終えなかった組は `surveyed` が偽のまま呼び出し側の報告へ回る。
+ */
+async function surveyGroup(survey, objectSelector, group, context) {
+  const { inventory, positionOf, budget } = context;
+  for (const record of group) {
+    const target = new Target(survey, objectSelector, record.effect, record.item);
+    await target.refresh();
+    record.target = target;
+    record.initialValue = target.currentValue;
+  }
+  const choiceRecords = group.filter((record) => record.facet === "choices");
+  const rangeRecords = group.filter((record) => record.facet === "range");
+
+  // 0 段目: 負の対照。候補になり得ない文字列を 1 回書き、判定が効く項目だけを
+  // 在庫の総当たりへ進める。
+  for (const entry of choiceRecords) {
+    const result = await entry.target.writeChoice(NEGATIVE_CONTROL, budget);
+    if (result.outcome === WRITE.exhausted) break;
+    entry.writes += 1;
+    entry.discriminates = result.outcome !== WRITE.accepted;
+    if (!entry.discriminates) {
+      // 在庫を試しても受理の記録が並ぶだけである。ここで終える。
+      entry.surveyed = true;
+      console.log(`対照 ${entry.effect} / ${entry.item}: 在庫に無い文字列を受理した`);
+    }
+  }
+  const discriminating = choiceRecords.filter((entry) => entry.discriminates === true);
+
+  // 1 段目: 境界拡張。
+  for (const entry of discriminating) {
+    const result = await expandFromCurrent(entry.target, inventory, positionOf, budget);
+    entry.found = result.found;
+    entry.writes += result.writes;
+    if (result.halted) break;
+    console.log(`拡張 ${entry.effect} / ${entry.item}: 書き込み ${result.writes} 回で ${result.found.size} 件`);
+  }
+
+  // 2 段目: 1 段目が拾えなかったラベルを項目ごとに残らず試す。
+  for (const entry of discriminating) {
+    let recovered = 0;
+    let halted = false;
+    for (const label of inventory) {
+      if (entry.found.has(label)) continue;
+      const result = await entry.target.writeChoice(label, budget);
+      if (result.outcome === WRITE.exhausted) {
+        halted = true;
+        break;
+      }
+      entry.writes += 1;
+      if (result.outcome !== WRITE.accepted) continue;
+      entry.found.add(label);
+      recovered += 1;
+    }
+    if (halted) break;
+    entry.surveyed = true;
+    if (recovered > 0) console.log(`回収 ${entry.effect} / ${entry.item}: ${recovered} 件`);
+  }
+
+  // 値域: 1 項目あたり上限・下限・小数桁の 3 回。
+  for (const entry of rangeRecords) {
+    const result = await measureRange(entry.target, entry.itemType, budget);
+    entry.range = result.range;
+    entry.failure = result.failure;
+    entry.unreadable = result.unreadable;
+    entry.writes += result.writes;
+    if (result.halted) break;
+    entry.surveyed = true;
+    const measured = rangeFacet(result.range);
+    if (measured) console.log(`値域 ${entry.effect} / ${entry.item}: ${JSON.stringify(measured)}`);
+  }
+}
+
 async function main() {
   const options = parseArguments(process.argv.slice(2));
   const language = resolveLanguageFile(options.language);
@@ -683,10 +874,9 @@ async function main() {
   try {
     survey = await Survey.open(mcp);
     const existing = await survey.listObjects();
-    const layers = existing.map((object) => object.selector.layer);
-    let nextLayer = (layers.length > 0 ? Math.max(...layers) : -1) + 1;
-    const layerOf = () => nextLayer++;
-    console.log(`既存のオブジェクト ${existing.length} 件。レイヤー ${nextLayer} 以降を使います`);
+    const occupied = existing.map((object) => object.selector.layer);
+    const layers = new ScratchLayers((occupied.length > 0 ? Math.max(...occupied) : -1) + 1);
+    console.log(`既存のオブジェクト ${existing.length} 件。レイヤー ${layers.next} 以降を使います`);
 
     const effects = await describeAllEffects(survey);
     const byType = {};
@@ -708,7 +898,7 @@ async function main() {
     console.log(`測る (効果, 項目): ${pairs.length} 組 ${JSON.stringify(byItemType)}`);
 
     const targetEffectNames = [...new Set(pairs.map((pair) => pair.effect))];
-    const hosts = await resolveHosts(survey, targetEffectNames, effects, layerOf);
+    const hosts = await resolveHosts(survey, targetEffectNames, effects, layers);
     for (const name of targetEffectNames) {
       if (hosts.has(name)) continue;
       for (const pair of pairs.filter((entry) => entry.effect === name)) {
@@ -716,101 +906,28 @@ async function main() {
       }
     }
 
-    // 対象の効果を載せたオブジェクトを、作り方ごとに 1 つずつ用意する。
-    const objects = new Map();
-    for (const sourceName of new Set([...hosts.values()])) {
-      const selector = await survey.createObject(sourceName, layerOf());
-      if (selector) objects.set(sourceName, selector);
-    }
+    // 作り方ごとに束ねる。束の間だけスクラッチのオブジェクトを 1 つ生かす。
+    const groups = groupBySource(pairs, hosts);
 
-    const targets = [];
-    for (const pair of pairs) {
-      const sourceName = hosts.get(pair.effect);
-      const selector = sourceName ? objects.get(sourceName) : null;
-      if (!selector) {
-        if (sourceName) unreached.push({ ...pair, reason: `${sourceName} からオブジェクトを作れない` });
-        continue;
+    let position = 0;
+    for (const [sourceName, group] of groups) {
+      position += 1;
+      if (budget.exhausted) break;
+      console.log(`[${position}/${groups.size}] ${sourceName} から ${group.length} 組`);
+      const scratch = await withScratchObject(survey, layers, sourceName, (selector) =>
+        surveyGroup(survey, selector, group, { inventory, positionOf, budget }),
+      );
+      if (!scratch.created) {
+        for (const record of group) record.blocked = `${sourceName} からオブジェクトを作れない`;
       }
-      const target = new Target(survey, selector, pair.effect, pair.item);
-      await target.refresh();
-      targets.push({
-        ...pair,
-        target,
-        initialValue: target.currentValue,
-        found: new Set(),
-        discriminates: null,
-        range: null,
-        failure: null,
-        unreadable: [],
-        writes: 0,
-        surveyed: false,
-      });
-    }
-    const choiceTargets = targets.filter((entry) => entry.facet === "choices");
-    const rangeTargets = targets.filter((entry) => entry.facet === "range");
-
-    // 0 段目: 負の対照。候補になり得ない文字列を 1 回書き、判定が効く項目だけを
-    // 在庫の総当たりへ進める。
-    for (const entry of choiceTargets) {
-      const result = await entry.target.writeChoice(NEGATIVE_CONTROL, budget);
-      if (result.outcome === WRITE.exhausted) break;
-      entry.writes += 1;
-      entry.discriminates = result.outcome !== WRITE.accepted;
-      if (!entry.discriminates) {
-        // 在庫を試しても受理の記録が並ぶだけである。ここで終える。
-        entry.surveyed = true;
-        console.log(`対照 ${entry.effect} / ${entry.item}: 在庫に無い文字列を受理した`);
-      }
-    }
-    const discriminating = choiceTargets.filter((entry) => entry.discriminates === true);
-
-    // 1 段目: 境界拡張。
-    for (const entry of discriminating) {
-      const result = await expandFromCurrent(entry.target, inventory, positionOf, budget);
-      entry.found = result.found;
-      entry.writes += result.writes;
-      if (result.halted) break;
-      console.log(`拡張 ${entry.effect} / ${entry.item}: 書き込み ${result.writes} 回で ${result.found.size} 件`);
-    }
-
-    // 2 段目: 1 段目が拾えなかったラベルを項目ごとに残らず試す。
-    for (const entry of discriminating) {
-      let recovered = 0;
-      let halted = false;
-      for (const label of inventory) {
-        if (entry.found.has(label)) continue;
-        const result = await entry.target.writeChoice(label, budget);
-        if (result.outcome === WRITE.exhausted) {
-          halted = true;
-          break;
-        }
-        entry.writes += 1;
-        if (result.outcome !== WRITE.accepted) continue;
-        entry.found.add(label);
-        recovered += 1;
-      }
-      if (halted) break;
-      entry.surveyed = true;
-      if (recovered > 0) console.log(`回収 ${entry.effect} / ${entry.item}: ${recovered} 件`);
-    }
-
-    // 値域: 1 項目あたり上限・下限・小数桁の 3 回。
-    for (const entry of rangeTargets) {
-      const result = await measureRange(entry.target, entry.itemType, budget);
-      entry.range = result.range;
-      entry.failure = result.failure;
-      entry.unreadable = result.unreadable;
-      entry.writes += result.writes;
-      if (result.halted) break;
-      entry.surveyed = true;
-      const measured = rangeFacet(result.range);
-      if (measured) console.log(`値域 ${entry.effect} / ${entry.item}: ${JSON.stringify(measured)}`);
     }
 
     const complete = [];
-    for (const entry of targets) {
+    for (const entry of [...groups.values()].flat()) {
       const pair = { effect: entry.effect, item: entry.item };
-      if (!entry.surveyed) {
+      if (entry.blocked) {
+        unreached.push({ ...pair, reason: entry.blocked });
+      } else if (!entry.surveyed) {
         unreached.push({ ...pair, reason: `書き込みの上限 ${budget.limit} 回に達した` });
       } else if (entry.facet === "choices") {
         const values = inInventoryOrder(entry.found, positionOf);
