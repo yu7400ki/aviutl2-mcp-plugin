@@ -34,8 +34,8 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
         include_str!("../../data/skills/aviutl2-editing/references/object-alias.md"),
     ),
     (
-        "aviutl2-editing/references/workflows.md",
-        include_str!("../../data/skills/aviutl2-editing/references/workflows.md"),
+        "aviutl2-editing/references/objects-and-effects.md",
+        include_str!("../../data/skills/aviutl2-editing/references/objects-and-effects.md"),
     ),
 ];
 

@@ -151,6 +151,7 @@ const ALLOWED_REFERENCE_SECTIONS: &[(&str, &[&str])] = &[
         &[
             "なぜ使うか",
             "構造",
+            "複数のオブジェクトを持つ形",
             "frame 行が区間を決める",
             "トラックバーの値と移動",
             "黙って捨てられる書き方がある",
@@ -159,11 +160,12 @@ const ALLOWED_REFERENCE_SECTIONS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "references/workflows.md",
+        "references/objects-and-effects.md",
         &[
-            "見る → 組み立てる → 作る → 描いて確かめる",
-            "空のプロジェクトから始めるとき",
-            "失敗を踏んだとき",
+            "オブジェクトは区間と効果の列である",
+            "種別が、何になれるかを決める",
+            "中間点は区間を割る",
+            "移動を持つ項目は 1 つの数値では読めない",
         ],
     ),
 ];
@@ -191,6 +193,9 @@ const IDENTIFIERS_THE_SKILL_MAY_NAME: &[&str] = &[
     // 対象のインスタンスを決める経路。
     "instance_id",
     "list_instances",
+    // 宛先を現在シーンへ限る照合材料。
+    "scene_id",
+    "expected_scene_id",
     // プロジェクト境界の照合材料と、それを運ばない要求。
     "project_epoch",
     "expected_project_epoch",
@@ -209,6 +214,10 @@ const IDENTIFIERS_THE_SKILL_MAY_NAME: &[&str] = &[
     "apply_batch",
     // 失敗を読むときのコードとキー。
     "precondition_failed",
+    "edit_blocked",
+    "retry_requires",
+    "retry_after_ms",
+    "edit_state",
     "current_object",
     "failed_object",
     "mutation_issued",
@@ -217,6 +226,7 @@ const IDENTIFIERS_THE_SKILL_MAY_NAME: &[&str] = &[
     "list_available_effects",
     "describe_effects",
     "get_object",
+    "get_effect_item_values",
     "list_fonts",
     // オブジェクトを 1 呼び出しで組み立てる入力。
     "object_alias",
