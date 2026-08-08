@@ -750,15 +750,22 @@ fn encode_path(path: &str) -> Result<String, ItemWriteError> {
 mod tests {
     use super::*;
     use crate::error::REASON_VALUES;
+    use crate::track_value::Movement;
     use crate::validation::{MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS};
 
     /// 検査で使う移動方法の一覧。
-    fn sample_movements() -> Vec<String> {
-        vec!["直線移動".to_string(), "曲線移動".to_string()]
+    fn sample_movements() -> Vec<Movement> {
+        ["直線移動", "曲線移動"]
+            .iter()
+            .map(|name| Movement {
+                name: name.to_string(),
+                writable: true,
+            })
+            .collect()
     }
 
     /// 区間 1 個の対象。標本の移動は 2 要素であり、この対象へ書ける。
-    fn sample_target(movements: &[String]) -> TrackWriteTarget<'_> {
+    fn sample_target(movements: &[Movement]) -> TrackWriteTarget<'_> {
         TrackWriteTarget {
             section_count: 1,
             movements,

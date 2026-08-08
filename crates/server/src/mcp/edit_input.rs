@@ -2153,7 +2153,10 @@ mod tests {
         let ItemValue::Track(track) = converted else {
             panic!("移動として受け取れません");
         };
-        let movements = vec!["直線移動".to_string()];
+        let movements = vec![aviutl2_mcp_core::Movement {
+            name: "直線移動".to_string(),
+            writable: true,
+        }];
         assert_eq!(
             aviutl2_mcp_core::encode_track_value(
                 &track,

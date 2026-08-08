@@ -653,7 +653,7 @@ fn read_document(path: &Path) -> Result<SidecarDocument, SidecarRejection> {
 /// **serde の struct はシーケンス形の入力も受け付ける。** `[]` のような配列は
 /// 表ではないが、そのまま渡すとフィールドの既定値だけを持つ表として通り、
 /// 書き手には何も伝わらないまま候補が 0 件になる。
-fn parse_object<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+pub(crate) fn parse_object<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     if !value.is_object() {
         return None;

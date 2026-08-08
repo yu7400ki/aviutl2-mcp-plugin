@@ -108,6 +108,22 @@ pub struct TrackValue {
     pub reserved_flags: u32,
 }
 
+/// ホストが受け付ける移動方法 1 件。
+///
+/// **名前と、その名前で書けるかどうかを 1 つの値として運ぶ。** 一覧を出す側と
+/// 書き込みを拒む側が同じ値を見るため、片方にだけ条件を足すことができない。
+///
+/// `writable` が偽の移動方法は、登録されていて名前としては正しいが、書き込むと
+/// 読み直しがその移動を失う。移動を消すには [`TrackValue::mode`] を `None` に
+/// する。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Movement {
+    /// 移動方法の名前。
+    pub name: String,
+    /// この名前で移動を書けるか。
+    pub writable: bool,
+}
+
 /// トラックバーの移動を表す値の検証失敗。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TrackValueError {
@@ -122,13 +138,22 @@ pub enum TrackValueError {
     /// 移動方法の名前が既知の一覧に無い。
     #[error("移動方法の名前が既知の一覧にありません")]
     UnknownMode {
-        /// 判定に用いた、ホストが受け付ける移動方法の名前の一覧。
+        /// 判定に用いた、ホストが受け付ける移動方法の一覧。
         ///
         /// 要求元が指定した名前ではなく、[`TrackWriteTarget::movements`] が
         /// 運んでいたホストの状態である。要求元がここへ書き直せば通り得る値の
         /// 集合そのものであるため、エラー応答へ載せてよい。
-        known: Vec<String>,
+        known: Vec<Movement>,
     },
+    /// 移動方法は一覧に在るが、その名前では書けない。
+    ///
+    /// **[`TrackValueError::UnknownMode`] と別に立てる。** 名前が無いのなら
+    /// 一覧から選び直せば通るが、書けない名前ではどう選び直しても通らない。
+    /// 移動を消す指定（[`TrackValue::mode`] を `None`）へ持ち替えるほかない。
+    ///
+    /// **値を持たない。** 一覧を添えても、要求元が次に取る手は変わらない。
+    #[error("この移動方法は一覧にありますが書き込めません")]
+    ModeNotWritable,
     /// 移動方法の名前が数値として読める。
     #[error("移動方法の名前に数値として読める文字列は指定できません")]
     ModeReadsAsNumber,
@@ -151,6 +176,7 @@ impl TrackValueError {
             actual: 2,
         },
         TrackValueError::UnknownMode { known: Vec::new() },
+        TrackValueError::ModeNotWritable,
         TrackValueError::ModeReadsAsNumber,
         TrackValueError::MovementWithoutMode,
         TrackValueError::FlagsNotRepresentable,
@@ -163,6 +189,7 @@ impl TrackValueError {
         match self {
             TrackValueError::ValueCount { .. } => "track_value_count",
             TrackValueError::UnknownMode { .. } => "track_mode_unknown",
+            TrackValueError::ModeNotWritable => "track_mode_not_writable",
             TrackValueError::ModeReadsAsNumber => "track_mode_reads_as_number",
             TrackValueError::MovementWithoutMode => "track_movement_without_mode",
             TrackValueError::FlagsNotRepresentable => "track_flags_not_representable",
@@ -209,8 +236,10 @@ pub enum TrackDecodeError {
 pub struct TrackWriteTarget<'a> {
     /// 対象オブジェクトの区間の数。中間点が 2 個なら 3。
     pub section_count: usize,
-    /// ホストが受け付ける移動方法の名前。
-    pub movements: &'a [String],
+    /// ホストが受け付ける移動方法。
+    ///
+    /// 失敗の応答へ載せる一覧そのものであり、書き込みの可否もここから決まる。
+    pub movements: &'a [Movement],
 }
 
 /// フラグのビット列を組み立てる。
@@ -288,7 +317,8 @@ pub(crate) fn validate_track_syntax(value: &TrackValue) -> Result<(), ItemWriteE
 /// - 移動を持つ値の要素数は「区間数 + 1」である。**多い場合をホストは拒否せず、
 ///   余った値は保存されるが評価に使われない**（観測）。**少ない場合の挙動は
 ///   観測していない。** どちらにせよ止められるのはここだけである
-/// - 移動方法の名前が、呼び出し側が渡した一覧に含まれる
+/// - 移動方法の名前が、呼び出し側が渡した一覧に含まれる。**含まれていても
+///   書けない名前は別の失敗になる**——一覧から選び直しても通らないためである
 ///
 /// **移動方法の検証は「選択肢はヒントであってゲートではない」という規則の例外で
 /// ある。** 選択肢の候補は一覧に無い値でも通す。ホストが受け付ける値の全体像を
@@ -316,11 +346,14 @@ pub fn validate_track_value(
         }
         .into());
     }
-    if !target.movements.iter().any(|known| known == mode) {
+    let Some(movement) = target.movements.iter().find(|known| known.name == mode) else {
         return Err(TrackValueError::UnknownMode {
             known: target.movements.to_vec(),
         }
         .into());
+    };
+    if !movement.writable {
+        return Err(TrackValueError::ModeNotWritable.into());
     }
     Ok(())
 }
@@ -570,7 +603,21 @@ mod tests {
         }
     }
 
-    fn movements() -> Vec<String> {
+    fn writable(name: &str) -> Movement {
+        Movement {
+            name: name.to_string(),
+            writable: true,
+        }
+    }
+
+    fn unwritable(name: &str) -> Movement {
+        Movement {
+            name: name.to_string(),
+            writable: false,
+        }
+    }
+
+    fn movements() -> Vec<Movement> {
         [
             "直線移動",
             "曲線移動",
@@ -579,11 +626,11 @@ mod tests {
             "再生範囲",
         ]
         .iter()
-        .map(|name| name.to_string())
+        .map(|name| writable(name))
         .collect()
     }
 
-    fn target(section_count: usize, movements: &[String]) -> TrackWriteTarget<'_> {
+    fn target(section_count: usize, movements: &[Movement]) -> TrackWriteTarget<'_> {
         TrackWriteTarget {
             section_count,
             movements,
@@ -591,7 +638,7 @@ mod tests {
     }
 
     /// 生成した値をそのまま受け入れる対象。符号化そのものを見るときに使う。
-    fn matching_target<'a>(value: &TrackValue, movements: &'a [String]) -> TrackWriteTarget<'a> {
+    fn matching_target<'a>(value: &TrackValue, movements: &'a [Movement]) -> TrackWriteTarget<'a> {
         TrackWriteTarget {
             section_count: value.values.len().saturating_sub(1),
             movements,
@@ -981,11 +1028,11 @@ mod tests {
     fn a_mode_name_that_reads_as_a_number_is_rejected_before_the_host_sees_it() {
         // 区切り文字と同じ失敗を起こす。ホストは末尾から数えた位置に数値を
         // 見つけて例外を投げる。一覧に載っていても通さない。
-        let movements: Vec<String> = ["12", "-1.5", "1e3", " 7 "]
+        let movements: Vec<Movement> = ["12", "-1.5", "1e3", " 7 "]
             .iter()
-            .map(|name| name.to_string())
+            .map(|name| writable(name))
             .collect();
-        for mode in &movements {
+        for mode in movements.iter().map(|movement| movement.name.as_str()) {
             let value = moving(&[0.0, 1.0], mode);
             assert_eq!(
                 encode_track_value(&value, target(1, &movements)),
@@ -1198,6 +1245,7 @@ mod tests {
             vec![
                 "track_value_count",
                 "track_mode_unknown",
+                "track_mode_not_writable",
                 "track_mode_reads_as_number",
                 "track_movement_without_mode",
                 "track_flags_not_representable",
@@ -1218,7 +1266,49 @@ mod tests {
         let ItemWriteError::Track(TrackValueError::UnknownMode { known }) = error else {
             panic!("UnknownMode ではありません: {error:?}");
         };
-        assert!(!known.contains(&secret.to_string()), "{known:?}");
+        assert!(
+            !known.iter().any(|movement| movement.name == secret),
+            "{known:?}"
+        );
+        assert_eq!(known, movements);
+    }
+
+    #[test]
+    fn a_mode_the_list_marks_as_unwritable_is_refused_under_its_own_name() {
+        // 一覧に在って書けない名前は、一覧に無い名前とは別の失敗になる。
+        // 同じ理由に畳むと、要求元は名前を選び直すという通らない手を打つ。
+        let movements = vec![writable("直線移動"), unwritable("移動無し")];
+        assert_eq!(
+            validate_track_value(&moving(&[0.0, 1.0], "移動無し"), target(1, &movements)),
+            Err(TrackValueError::ModeNotWritable.into())
+        );
+        assert_eq!(
+            encode_track_value(&moving(&[0.0, 1.0], "移動無し"), target(1, &movements)),
+            Err(TrackValueError::ModeNotWritable.into())
+        );
+
+        let error: ItemWriteError = TrackValueError::ModeNotWritable.into();
+        assert_eq!(error.reason(), Some("track_mode_not_writable"));
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+        assert_ne!(
+            error.reason(),
+            ItemWriteError::from(TrackValueError::UnknownMode { known: movements }).reason()
+        );
+    }
+
+    #[test]
+    fn a_mode_the_list_marks_as_unwritable_stays_in_the_list_it_carries() {
+        // 一覧から外すと、実在する移動方法が「無い」として拒否される。名前は
+        // 正しく、使い方が違うだけである。
+        let movements = vec![writable("直線移動"), unwritable("移動無し")];
+        let error = validate_track_value(
+            &moving(&[0.0, 1.0], "存在しない移動"),
+            target(1, &movements),
+        )
+        .expect_err("拒否されます");
+        let ItemWriteError::Track(TrackValueError::UnknownMode { known }) = error else {
+            panic!("UnknownMode ではありません: {error:?}");
+        };
         assert_eq!(known, movements);
     }
 }

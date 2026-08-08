@@ -24,8 +24,8 @@ use crate::test_support::alias_with_effects;
 use aviutl2_mcp_core::{
     AvailableEffectItem, Cursor, DisplayRange, EffectFlags, EffectItem, EffectItemType, EffectType,
     EvaluatedItemKind, FiniteF64, FrameRange, GridBpm, ItemFacets, ItemValue, ModuleEntry,
-    ModuleType, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, TrackDecodeError, TrackInfo,
-    TrackValue, decode_host_text, decode_track_value, encode_host_text,
+    ModuleType, Movement, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, TrackDecodeError,
+    TrackInfo, TrackValue, decode_host_text, decode_track_value, encode_host_text,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -451,8 +451,8 @@ pub(crate) struct FakeEditHost {
     layer_names: Mutex<Vec<Option<String>>>,
     /// 設定項目の書き込みへ渡された値を、渡された順に覚える。
     item_values: Mutex<Vec<String>>,
-    /// ホストが受け付ける移動方法の名前。
-    movements: Mutex<Vec<String>>,
+    /// ホストが受け付ける移動方法と、その名前で書けるかどうか。
+    movements: Mutex<Vec<Movement>>,
     /// 実機ならプロセスを落としていた移動方法を、渡された順に覚える。
     ///
     /// **panic だけに頼らない。** 編集の入口は panic を捕捉して失敗の応答へ
@@ -500,7 +500,15 @@ impl FakeEditHost {
             calls: Mutex::new(Vec::new()),
             layer_names: Mutex::new(Vec::new()),
             item_values: Mutex::new(Vec::new()),
-            movements: Mutex::new(TRACK_MODES.iter().map(|name| name.to_string()).collect()),
+            movements: Mutex::new(
+                TRACK_MODES
+                    .iter()
+                    .map(|name| Movement {
+                        name: name.to_string(),
+                        writable: true,
+                    })
+                    .collect(),
+            ),
             fatal_movements: Mutex::new(Vec::new()),
             alias_data_dir: Mutex::new(None),
         }
@@ -572,11 +580,13 @@ impl FakeEditHost {
         self.item_values.lock().unwrap().clone()
     }
 
-    /// ホストが受け付ける移動方法の名前を差し替える。
+    /// ホストが受け付ける移動方法を差し替える。
     ///
     /// 空にすると「一覧を引けない環境」になる。実機では設定ファイルを読めない
     /// 場合がこれにあたる。
-    pub(crate) fn set_movements(&self, movements: Vec<String>) {
+    ///
+    /// 可否を偽にした名前は、一覧に載るのに書けない移動方法になる。
+    pub(crate) fn set_movements(&self, movements: Vec<Movement>) {
         *self.movements.lock().unwrap() = movements;
     }
 
@@ -1569,7 +1579,7 @@ impl SceneEditor for FakeSceneEditor<'_> {
             .sections())
     }
 
-    fn movements(&self) -> Vec<String> {
+    fn movements(&self) -> Vec<Movement> {
         self.host.movements.lock().unwrap().clone()
     }
 
@@ -2842,9 +2852,15 @@ mod tests {
         })
     }
 
-    /// フェイクが受け付ける移動方法の名前。
-    fn track_movements() -> Vec<String> {
-        TRACK_MODES.iter().map(|name| name.to_string()).collect()
+    /// フェイクが受け付ける移動方法。
+    fn track_movements() -> Vec<Movement> {
+        TRACK_MODES
+            .iter()
+            .map(|name| Movement {
+                name: name.to_string(),
+                writable: true,
+            })
+            .collect()
     }
 
     /// 移動を含まない値を渡すときの対象。

@@ -22,7 +22,7 @@ use aviutl2_mcp_core::{
     DeleteObjectSectionParams, Destination, EditOperation, EffectFlags, EffectItem, EffectItemType,
     EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemChoices,
     ItemFacets, ItemRange, ItemValue, LayerNameChange, MAX_GRID_BPM_ENTRIES,
-    MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSelector, Placement, SceneSize,
+    MoveObjectSectionParams, Movement, ObjectSectionsOutcome, ObjectSelector, Placement, SceneSize,
     TableSource,
 };
 use serde_json::json;
@@ -2578,7 +2578,10 @@ fn a_movement_that_reaches_the_host_with_an_unknown_mode_is_recorded() {
         !TRACK_MODES.contains(&unknown),
         "ホストが知っている名前を未知の名前として使っています"
     );
-    harness.host.set_movements(vec![unknown.to_string()]);
+    harness.host.set_movements(vec![Movement {
+        name: unknown.to_string(),
+        writable: true,
+    }]);
 
     let error = with_silent_panic_hook(|| {
         harness

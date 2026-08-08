@@ -34,7 +34,7 @@ use aviutl2_mcp_core::{
     CreateObjectParams, CreateObjectSectionParams, Cursor, DeleteEffectParams, DeleteObjectParams,
     DeleteObjectSectionParams, DisplayRange, DisplayStart, EditOutcome, EffectInfo, EffectType,
     FocusChange, FrameRange, GridBpmOutcome, ItemValue, ItemWrite, ItemWriteError, LayerInfo,
-    LayerStateOutcome, MoveObjectParams, MoveObjectSectionParams, ObjectSectionsOutcome,
+    LayerStateOutcome, MoveObjectParams, MoveObjectSectionParams, Movement, ObjectSectionsOutcome,
     ObjectSelector, ObjectSource, ObjectSummary, ObservedSelection, RangeChange, ReadBackCheck,
     SceneSettingsOutcome, SectionRange, SelectionField, SelectionState, SetEffectEnabledParams,
     SetGridBpmParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
@@ -607,7 +607,7 @@ pub(crate) fn track_write_target(
 /// 所有する側をここに置き、借用は呼び出し側の局所で作る。
 pub(crate) struct TrackTarget {
     section_count: usize,
-    movements: Vec<String>,
+    movements: Vec<Movement>,
 }
 
 impl TrackTarget {

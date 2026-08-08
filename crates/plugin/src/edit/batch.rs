@@ -850,7 +850,7 @@ impl SceneEditor for CachingEditor<'_> {
         self.inner.object_sections(object)
     }
 
-    fn movements(&self) -> Vec<String> {
+    fn movements(&self) -> Vec<aviutl2_mcp_core::Movement> {
         self.inner.movements()
     }
 

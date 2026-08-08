@@ -25,7 +25,8 @@ use aviutl2::generic::{
     EditSection, EditSectionError, EffectHandle, MediaFileSupportMode, ObjectHandle, ReadSection,
 };
 use aviutl2_mcp_core::{
-    AvailableEffectItem, Cursor, DisplayRange, EffectItemType, FrameRange, GridBpm, SectionRange,
+    AvailableEffectItem, Cursor, DisplayRange, EffectItemType, FrameRange, GridBpm, Movement,
+    SectionRange,
 };
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -444,7 +445,7 @@ impl SceneEditor for SdkSceneEditor<'_> {
         Ok(to_inclusive_sections(ranges))
     }
 
-    fn movements(&self) -> Vec<String> {
+    fn movements(&self) -> Vec<Movement> {
         crate::movement::movements().to_vec()
     }
 

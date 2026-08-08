@@ -886,7 +886,7 @@ fn item_value_and_track(
 mod tests {
     use super::*;
     use aviutl2_mcp_core::{
-        AvailableEffectItem, ErrorCode, ItemWriteError, PALETTE_COLOR_COUNT, TrackValue,
+        AvailableEffectItem, ErrorCode, ItemWriteError, Movement, PALETTE_COLOR_COUNT, TrackValue,
         TrackWriteTarget, prepare_item_write,
     };
 
@@ -1585,7 +1585,10 @@ mod tests {
             name: "X".to_string(),
             item_type: EffectItemType::Number,
         }];
-        let movements = vec!["直線移動".to_string()];
+        let movements = vec![Movement {
+            name: "直線移動".to_string(),
+            writable: true,
+        }];
         let write = prepare_item_write(
             &items,
             "X",

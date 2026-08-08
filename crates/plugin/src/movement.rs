@@ -1,19 +1,59 @@
-//! ホストが受け付ける移動方法の名前。
+//! ホストが受け付ける移動方法と、その名前で書けるかどうか。
 //!
-//! AviUtl2 のデータディレクトリ直下の `aviutl2.ini` が `[Movement.<名前>]` の
-//! 節として並べている。SDK には一覧を引く手段が無く、ファイルだけが供給源で
-//! ある。
+//! 名前は AviUtl2 のデータディレクトリ直下の `aviutl2.ini` が
+//! `[Movement.<名前>]` の節として並べている。SDK には一覧を引く手段が無く、
+//! ファイルだけが供給源である。
 //!
 //! **一覧は書き込みのゲートである。** 一覧に無い名前をトラックバーへ書くと、
 //! ホストが投げた C++ の例外が `extern "C"` の境界を越えて入り、巻き戻せずに
 //! プロセスごと落ちる。設定項目の選択肢と違い、「一覧はヒントであってゲートでは
 //! ない」を適用できない。
 //!
+//! **一覧に載るのに書けない名前がある。** 登録されていて名前としては正しく、
+//! 書き込みも受理されるが、読み直しがその移動を失う。移動を消すには移動方法を
+//! 指定しない指定（`mode` が `null`）を使う。
+//!
+//! # 一覧と拒否は同じ表を読む
+//!
+//! 名前と可否は 1 つの値（[`Movement`]）として組み立て、要求元へ並べる一覧と
+//! 書き込みの検証（[`aviutl2_mcp_core::validate_track_value`]）が同じ値を見る。
+//! **こうしなければ「一覧に載る ⇒ 書ける」が 1 件ずつについて成り立たない**
+//! ——一覧を出す側と拒む側が別々に可否を決めれば、片方にだけ条件を足せてしまい、
+//! 要求元は使えない名前を選ぶか、使える名前を拒まれる。
+//!
+//! # 書けない名前の表
+//!
+//! 可否は [`BUILTIN_FACETS`] が持つ。**名前をコードへ埋め込まない**——移動方法の
+//! 集合は環境ごとに違い、この plugin が知らない名前に同じ性質のものが無いとは
+//! 言えない。表に無い名前は書ける側になる。基底に載るのは実測できた分だけで
+//! ある。
+//!
 //! 解決はデータディレクトリと同じく plugin の生存期間中に 1 度だけ行う
 //! （[`crate::alias::data_directory`]）。ファイルは編集中に書き換わり得るが、
 //! 移動方法の集合は AviUtl2 の版で決まるため、1 度確定させて使う。
+//!
+//! # 表の形
+//!
+//! **可否を起こす生成器が書き出すのもこの形である。**
+//!
+//! ```json
+//! {
+//!   "movements": {
+//!     "移動無し": { "writable": false },
+//!     "直線移動": { "writable": true }
+//!   }
+//! }
+//! ```
+//!
+//! - `movements` は移動方法の名前から可否を引く。**省略できない。**
+//! - `writable` は真偽値であり、省略できない。「測っていない」を表す形は無い
+//!   ——測れていない名前は表に載せない。
 
 use crate::alias::{data_directory, read_bounded};
+use crate::item_facets::parse_object;
+use aviutl2_mcp_core::Movement;
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -23,16 +63,37 @@ const SETTINGS_FILE: &str = "aviutl2.ini";
 /// 移動方法 1 つの節の見出しが始まる並び。
 const SECTION_PREFIX: &str = "[Movement.";
 
+/// 埋め込む可否の基底。
+const BUILTIN_FACETS: &str = include_str!("../data/movement_facets.json");
+
 /// 設定ファイルとして読み込む最大バイト数。
 ///
 /// この経路の費用は要求の内容で決まらないため、予算では守れない。上限は
 /// 要求元が動かせない。
 pub const MAX_SETTINGS_INI_BYTES: u64 = 4 * 1024 * 1024;
 
-/// 解決した移動方法の名前。
-static MOVEMENTS: OnceLock<Vec<String>> = OnceLock::new();
+/// 移動方法 1 件について表が述べたこと。
+///
+/// **未知のフィールドを拒む。** 書き手は我々であり、綴りを外したのなら生成器の
+/// 誤りである。素通しにすると、可否が全件「書ける」へ戻ったことに誰も気付け
+/// ない。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MovementFacet {
+    writable: bool,
+}
 
-/// ホストが受け付ける移動方法の名前を返す。
+/// 可否の表 1 つの外形。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FacetsDocument {
+    movements: HashMap<String, MovementFacet>,
+}
+
+/// 解決した移動方法。
+static MOVEMENTS: OnceLock<Vec<Movement>> = OnceLock::new();
+
+/// ホストが受け付ける移動方法を返す。
 ///
 /// **読めなければ空の一覧を返す。** データディレクトリを解決できない、設定
 /// ファイルが無い、大きすぎる、UTF-8 として読めない、`[Movement.*]` の節が
@@ -44,16 +105,54 @@ static MOVEMENTS: OnceLock<Vec<String>> = OnceLock::new();
 ///
 /// 静的な値（`mode` が `null` の移動）と、移動を含まない数値の書き込みは
 /// 一覧を要さないため、読めなくても従来どおり書ける。
-pub fn movements() -> &'static [String] {
+pub fn movements() -> &'static [Movement] {
     MOVEMENTS.get_or_init(|| {
         let names = data_directory().map(read_movements).unwrap_or_default();
-        if names.is_empty() {
+        let movements = with_facets(names, &builtin_facets());
+        let unwritable = movements
+            .iter()
+            .filter(|movement| !movement.writable)
+            .count();
+        if movements.is_empty() {
             tracing::info!("移動方法の一覧を読めませんでした。トラックバーの移動は書き込めません");
         } else {
-            tracing::info!("移動方法の一覧: {} 件", names.len());
+            tracing::info!(
+                "移動方法の一覧: {} 件、うち書けないもの {unwritable} 件",
+                movements.len()
+            );
         }
-        names
+        movements
     })
+}
+
+/// 埋め込んだ基底を解釈する。
+///
+/// **解釈できなければ panic する。** ホストと利用者の環境にある `aviutl2.ini`
+/// とは扱いを変えている。あちらは無いことも壊れていることも正常な状態のひとつ
+/// であり、我々に直す手が無い。こちらは我々が生成してビルドへ焼き込んだもので
+/// あり、壊れていれば我々の誤りである。空へ畳むと、可否が全件「書ける」へ戻った
+/// 状態が「表を持たない環境」と見分けられないまま出荷される。
+///
+/// この経路は本番では起こらない。構文はこのモジュールの検査が押さえており、
+/// 外れていればビルドの前に落ちる。
+fn builtin_facets() -> HashMap<String, MovementFacet> {
+    parse_object::<FacetsDocument>(BUILTIN_FACETS.as_bytes())
+        .expect("埋め込んだ可否の表を解釈できません")
+        .movements
+}
+
+/// 名前の並びへ可否を添える。
+///
+/// **表に無い名前は書ける側になる。** 表に載るのは実測できた分だけであり、
+/// 環境ごとに追加された移動方法はそこに現れない。
+fn with_facets(names: Vec<String>, facets: &HashMap<String, MovementFacet>) -> Vec<Movement> {
+    names
+        .into_iter()
+        .map(|name| Movement {
+            writable: facets.get(&name).is_none_or(|facet| facet.writable),
+            name,
+        })
+        .collect()
 }
 
 /// 設定ファイルから移動方法の名前を読む。失敗はすべて空の一覧に畳む。
@@ -98,6 +197,7 @@ fn movement_names(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aviutl2_mcp_core::{FiniteF64, TrackValue, TrackWriteTarget, validate_track_value};
     use std::fs;
 
     /// 実機の `aviutl2.ini` が並べる形。値の側は移動方法ごとに異なる。
@@ -176,5 +276,139 @@ mod tests {
         }
         write_settings(&dir, &text);
         assert_eq!(read_movements(&dir), Vec::<String>::new());
+    }
+
+    /// 可否の表を JSON から組み立てる。
+    fn facets(text: &str) -> HashMap<String, MovementFacet> {
+        parse_object::<FacetsDocument>(text.as_bytes())
+            .expect("解釈できる")
+            .movements
+    }
+
+    /// 名前の並びを作る。
+    fn names(values: &[&str]) -> Vec<String> {
+        values.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn the_builtin_facets_are_valid_json() {
+        // `include_str!` は文字列を取り込むだけで、JSON として解釈できることを
+        // 保証しない。解釈できなければ移動方法の一覧そのものが引けない。
+        assert!(
+            parse_object::<FacetsDocument>(BUILTIN_FACETS.as_bytes()).is_some(),
+            "基底を JSON として解釈できません"
+        );
+    }
+
+    #[test]
+    fn the_builtin_facets_refuse_a_shape_they_did_not_intend() {
+        // 書き手は我々である。綴りを外した表を素通しにすると、可否が全件
+        // 「書ける」へ戻ったことに誰も気付けない。
+        for source in [
+            // トップレベルの綴り違い。
+            r#"{"movement":{"移動無し":{"writable":false}}}"#,
+            // 知らない欄が増えた。
+            r#"{"movements":{},"notice":"読む人は居ません"}"#,
+            // 葉の綴り違い。**素通しにすると 1 件ずつ静かに書ける側へ倒れる。**
+            r#"{"movements":{"移動無し":{"writeable":false}}}"#,
+            // 可否そのものが無い。測れていない名前は表に載せない。
+            r#"{"movements":{"移動無し":{}}}"#,
+            // 表ではない。
+            "[]",
+            r#"[{"movements":{}}]"#,
+        ] {
+            assert!(
+                parse_object::<FacetsDocument>(source.as_bytes()).is_none(),
+                "基底が {source} を受け入れました"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_the_facets_do_not_mention_is_writable() {
+        // 表に載るのは実測できた分だけである。環境ごとに追加された移動方法は
+        // そこに現れず、書ける側で返る。
+        let facets = facets(r#"{"movements":{"移動無し":{"writable":false}}}"#);
+        assert_eq!(
+            with_facets(names(&["直線移動", "移動無し", "提供者の移動"]), &facets),
+            vec![
+                Movement {
+                    name: "直線移動".to_string(),
+                    writable: true,
+                },
+                Movement {
+                    name: "移動無し".to_string(),
+                    writable: false,
+                },
+                Movement {
+                    name: "提供者の移動".to_string(),
+                    writable: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_name_the_facets_call_unwritable_stays_in_the_list() {
+        // 外すと「一覧に無い名前」として拒否され、実在する移動方法を無いと
+        // 告げることになる。名前は正しく、使い方が違うだけである。
+        let facets = facets(r#"{"movements":{"移動無し":{"writable":false}}}"#);
+        let movements = with_facets(names(&["直線移動", "移動無し"]), &facets);
+        assert!(
+            movements.iter().any(|movement| movement.name == "移動無し"),
+            "{movements:?}"
+        );
+    }
+
+    #[test]
+    fn what_the_list_calls_unwritable_is_what_the_write_refuses() {
+        // **一覧と拒否が同じ表を読む。** 一覧が返した 1 件ずつについて、書けない
+        // と名乗ったものは検証が拒み、書けると名乗ったものは名前を理由に拒まれ
+        // ない。名前を書き並べた検査は、表が変わったときにこの規律を守らない。
+        let facets = facets(
+            r#"{"movements":{"移動無し":{"writable":false},"書けない移動":{"writable":false}}}"#,
+        );
+        let movements = with_facets(
+            names(&["直線移動", "移動無し", "曲線移動", "書けない移動"]),
+            &facets,
+        );
+        let target = TrackWriteTarget {
+            section_count: 1,
+            movements: &movements,
+        };
+        for movement in &movements {
+            let value = TrackValue {
+                values: vec![
+                    FiniteF64::try_new(0.0).expect("有限値"),
+                    FiniteF64::try_new(100.0).expect("有限値"),
+                ],
+                mode: Some(movement.name.clone()),
+                params: Vec::new(),
+                accelerate: false,
+                decelerate: false,
+                twopoint: false,
+                reserved_flags: 0,
+            };
+            let reason = validate_track_value(&value, target)
+                .err()
+                .and_then(|error| error.reason());
+            if movement.writable {
+                assert!(
+                    !matches!(
+                        reason,
+                        Some("track_mode_unknown" | "track_mode_not_writable")
+                    ),
+                    "{} が名前を理由に拒まれました: {reason:?}",
+                    movement.name
+                );
+            } else {
+                assert_eq!(
+                    reason,
+                    Some("track_mode_not_writable"),
+                    "{} が書けないと名乗ったのに拒まれません",
+                    movement.name
+                );
+            }
+        }
     }
 }

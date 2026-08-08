@@ -901,7 +901,10 @@ fn fill_track_error_details(details: &mut Map<String, Value>, error: &TrackValue
         TrackValueError::UnknownMode { known } => {
             details.insert("known_movements".to_string(), json!(known));
         }
-        TrackValueError::ModeReadsAsNumber
+        // 復旧は移動を消す指定へ持ち替えることであり、一覧を添えても要求元の
+        // 次の一手は変わらない。
+        TrackValueError::ModeNotWritable
+        | TrackValueError::ModeReadsAsNumber
         | TrackValueError::MovementWithoutMode
         | TrackValueError::FlagsNotRepresentable => {}
     }
@@ -924,7 +927,21 @@ pub(crate) mod tests {
     use super::*;
     use crate::read::EditState;
     use crate::test_support::sample_object_summary;
-    use aviutl2_mcp_core::{EffectItemType, PathSyntaxError, TextSyntaxError};
+    use aviutl2_mcp_core::{EffectItemType, Movement, PathSyntaxError, TextSyntaxError};
+
+    /// 検査で使う移動方法の一覧。書けるものと書けないものを混ぜて持つ。
+    fn sample_movements() -> Vec<Movement> {
+        vec![
+            Movement {
+                name: "直線移動".to_string(),
+                writable: true,
+            },
+            Movement {
+                name: "移動無し".to_string(),
+                writable: false,
+            },
+        ]
+    }
 
     /// 全 variant の代表値。新しい variant を足したらここへも足す。
     pub(crate) fn all_errors() -> Vec<EditError> {
@@ -990,9 +1007,10 @@ pub(crate) mod tests {
                 actual: 2,
             })),
             // 移動方法の名前がホストの一覧に無い。判定に使った一覧をそのまま
-            // 運ぶ。要求元が指定した名前ではない。
+            // 運ぶ。要求元が指定した名前ではない。**書けない移動方法を含めた
+            // 一覧が運ばれる。**
             EditError::ItemWrite(ItemWriteError::Track(TrackValueError::UnknownMode {
-                known: vec!["直線移動".to_string(), "曲線移動".to_string()],
+                known: sample_movements(),
             })),
             EditError::UnsupportedTarget {
                 reason: UnsupportedReason::EffectNotRegistered,
@@ -1682,6 +1700,9 @@ pub(crate) mod tests {
             "expected_value_count",
             "actual_value_count",
             "known_movements",
+            // 一覧の要素が名乗る、その名前で移動を書けるか。ホストの状態から
+            // 決まる真偽値であり、設定値そのものではない。
+            "writable",
             "sdk_operation",
             "retry_requires",
             "mutation_issued",
@@ -1802,13 +1823,20 @@ pub(crate) mod tests {
     #[test]
     fn a_track_mode_unknown_failure_names_the_movements_the_host_accepts() {
         // 判定に使った一覧をそのまま運ぶ。要求元はこれを見て、対象を読み直さ
-        // ずに通り得る名前を選び直せる。
+        // ずに通り得る名前を選び直せる。**名前だけでは足りない**——一覧には
+        // 書けない移動方法も並ぶため、要素ごとに可否を名乗る。
         let error = EditError::ItemWrite(ItemWriteError::Track(TrackValueError::UnknownMode {
-            known: vec!["直線移動".to_string(), "曲線移動".to_string()],
+            known: sample_movements(),
         }));
         let details = error.details();
         assert_eq!(details["reason"], json!("track_mode_unknown"));
-        assert_eq!(details["known_movements"], json!(["直線移動", "曲線移動"]));
+        assert_eq!(
+            details["known_movements"],
+            json!([
+                { "name": "直線移動", "writable": true },
+                { "name": "移動無し", "writable": false },
+            ])
+        );
     }
 
     #[test]
@@ -1818,16 +1846,30 @@ pub(crate) mod tests {
         // それ自体が矛盾になる。
         let requested = "存在しない移動";
         let error = EditError::ItemWrite(ItemWriteError::Track(TrackValueError::UnknownMode {
-            known: vec!["直線移動".to_string(), "曲線移動".to_string()],
+            known: sample_movements(),
         }));
         let details = error.details();
         assert!(
             !details["known_movements"]
                 .as_array()
                 .expect("配列です")
-                .contains(&json!(requested)),
+                .iter()
+                .any(|movement| movement["name"] == json!(requested)),
             "{details}"
         );
+    }
+
+    #[test]
+    fn a_mode_that_cannot_be_written_is_not_the_same_failure_as_an_unknown_one() {
+        // 復旧手順が違う。一覧に無い名前は選び直せば通るが、書けない名前は
+        // どう選び直しても通らない。同じ理由なら要求元は同じ手を打つ。
+        let error = EditError::ItemWrite(ItemWriteError::Track(TrackValueError::ModeNotWritable));
+        let details = error.details();
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+        assert_eq!(details["reason"], json!("track_mode_not_writable"));
+        assert_ne!(details["reason"], json!("track_mode_unknown"));
+        // 一覧を添えても次の一手は変わらないため、値を運ばない。
+        assert!(details.get("known_movements").is_none(), "{details}");
     }
 
     #[test]

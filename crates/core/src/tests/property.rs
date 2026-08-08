@@ -22,7 +22,9 @@ use crate::number::FiniteF64;
 use crate::render::RenderFrameParams;
 use crate::selector::ObjectSelector;
 use crate::text_codec::{decode_host_text, encode_host_text};
-use crate::track_value::{TrackValue, TrackWriteTarget, decode_track_value, encode_track_value};
+use crate::track_value::{
+    Movement, TrackValue, TrackWriteTarget, decode_track_value, encode_track_value,
+};
 use crate::validation::{
     MAX_PATH_UTF16_UNITS, PathSyntaxError, validate_object_alias_name, validate_path,
 };
@@ -474,9 +476,17 @@ fn track_value_strategy() -> impl Strategy<Value = TrackValue> {
 }
 
 /// 生成した値をそのまま受け入れる対象。
-fn track_target_for(value: &TrackValue) -> (Vec<String>, usize) {
+fn track_target_for(value: &TrackValue) -> (Vec<Movement>, usize) {
     (
-        value.mode.clone().into_iter().collect(),
+        value
+            .mode
+            .clone()
+            .into_iter()
+            .map(|name| Movement {
+                name,
+                writable: true,
+            })
+            .collect(),
         value.values.len().saturating_sub(1),
     )
 }
