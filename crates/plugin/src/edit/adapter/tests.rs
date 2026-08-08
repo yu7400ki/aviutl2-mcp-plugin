@@ -2567,6 +2567,56 @@ fn a_movement_with_an_unknown_mode_never_reaches_the_host() {
 }
 
 #[test]
+fn what_the_list_calls_unwritable_is_what_set_object_item_refuses() {
+    // **一覧と拒否が同じ表を読む。** 一覧が返した 1 件ずつについて、書けないと
+    // 名乗ったものは書き込みが拒み、書けると名乗ったものは名前を理由に拒まれ
+    // ない。名前を書き並べた検査は、一覧が変わったときにこの規律を守らない。
+    let harness = harness_with_track_effect();
+    let movements = vec![
+        Movement {
+            name: "直線移動".to_string(),
+            writable: true,
+        },
+        Movement {
+            name: "移動無し".to_string(),
+            writable: false,
+        },
+    ];
+    harness.host.set_movements(movements.clone());
+
+    for movement_entry in &movements {
+        let result = harness.edit.set_object_item(&set_movement(
+            &harness,
+            movement(&[0.0, 50.0, 100.0], &movement_entry.name),
+        ));
+        if movement_entry.writable {
+            result.unwrap_or_else(|error| {
+                panic!("{} が拒否されました: {error}", movement_entry.name)
+            });
+        } else {
+            let error = result.expect_err("書けない移動方法が受理されました");
+            assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+            assert_eq!(
+                error.details()["reason"],
+                json!("track_mode_not_writable"),
+                "{} の拒否の理由",
+                movement_entry.name
+            );
+            // 名前を選び直す手は通らない。一覧に無い名前とは別の失敗である。
+            assert_ne!(error.details()["reason"], json!("track_mode_unknown"));
+        }
+    }
+
+    // 拒否は書き込みを発行する手前で起きる。記録が空でなければ、検証を通り
+    // 抜けた入力がホストへ届いている。
+    assert_eq!(
+        harness.host.fatal_movement_writes(),
+        Vec::<String>::new(),
+        "書けない移動方法がホストへ届きました"
+    );
+}
+
+#[test]
 fn a_movement_that_reaches_the_host_with_an_unknown_mode_is_recorded() {
     // **記録に入る経路があることを確かめる。** 空であることしか見ない検査は、
     // 記録そのものが壊れていても緑のまま通り、検証を外した変更を捕まえられない。
