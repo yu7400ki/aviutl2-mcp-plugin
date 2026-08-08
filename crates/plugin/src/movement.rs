@@ -105,23 +105,15 @@ static MOVEMENTS: OnceLock<Vec<Movement>> = OnceLock::new();
 ///
 /// 静的な値（`mode` が `null` の移動）と、移動を含まない数値の書き込みは
 /// 一覧を要さないため、読めなくても従来どおり書ける。
+///
+/// **一覧を組み立てるのは [`resolve`] だけである。** ここは解決した結果を
+/// 覚えるだけであり、名前を絞る手も並べ替える手も持たない。
 pub fn movements() -> &'static [Movement] {
     MOVEMENTS.get_or_init(|| {
-        let names = data_directory().map(read_movements).unwrap_or_default();
-        let movements = with_facets(names, &builtin_facets());
-        let unwritable = movements
-            .iter()
-            .filter(|movement| !movement.writable)
-            .count();
-        if movements.is_empty() {
-            tracing::info!("移動方法の一覧を読めませんでした。トラックバーの移動は書き込めません");
-        } else {
-            tracing::info!(
-                "移動方法の一覧: {} 件、うち書けないもの {unwritable} 件",
-                movements.len()
-            );
-        }
-        movements
+        resolve(
+            data_directory().map(read_movements).unwrap_or_default(),
+            &builtin_facets(),
+        )
     })
 }
 
@@ -141,18 +133,34 @@ fn builtin_facets() -> HashMap<String, MovementFacet> {
         .movements
 }
 
-/// 名前の並びへ可否を添える。
+/// 読んだ名前の並びへ可否を添えて一覧を組み立てる。
+///
+/// **名前を落とさず、並びも変えない。** 書けない名前を外すと、それは「一覧に
+/// 無い名前」として拒否され、実在する移動方法を無いと告げることになる。
 ///
 /// **表に無い名前は書ける側になる。** 表に載るのは実測できた分だけであり、
 /// 環境ごとに追加された移動方法はそこに現れない。
-fn with_facets(names: Vec<String>, facets: &HashMap<String, MovementFacet>) -> Vec<Movement> {
-    names
+fn resolve(names: Vec<String>, facets: &HashMap<String, MovementFacet>) -> Vec<Movement> {
+    let movements: Vec<Movement> = names
         .into_iter()
         .map(|name| Movement {
             writable: facets.get(&name).is_none_or(|facet| facet.writable),
             name,
         })
-        .collect()
+        .collect();
+    if movements.is_empty() {
+        tracing::info!("移動方法の一覧を読めませんでした。トラックバーの移動は書き込めません");
+    } else {
+        tracing::info!(
+            "移動方法の一覧: {} 件、うち書けないもの {} 件",
+            movements.len(),
+            movements
+                .iter()
+                .filter(|movement| !movement.writable)
+                .count()
+        );
+    }
+    movements
 }
 
 /// 設定ファイルから移動方法の名前を読む。失敗はすべて空の一覧に畳む。
@@ -313,6 +321,9 @@ mod tests {
             r#"{"movements":{"移動無し":{"writeable":false}}}"#,
             // 可否そのものが無い。測れていない名前は表に載せない。
             r#"{"movements":{"移動無し":{}}}"#,
+            // 可否に「測れていない」を表す形は無い。
+            r#"{"movements":{"移動無し":{"writable":null}}}"#,
+            r#"{"movements":null}"#,
             // 表ではない。
             "[]",
             r#"[{"movements":{}}]"#,
@@ -330,7 +341,7 @@ mod tests {
         // そこに現れず、書ける側で返る。
         let facets = facets(r#"{"movements":{"移動無し":{"writable":false}}}"#);
         assert_eq!(
-            with_facets(names(&["直線移動", "移動無し", "提供者の移動"]), &facets),
+            resolve(names(&["直線移動", "移動無し", "提供者の移動"]), &facets),
             vec![
                 Movement {
                     name: "直線移動".to_string(),
@@ -349,14 +360,22 @@ mod tests {
     }
 
     #[test]
-    fn a_name_the_facets_call_unwritable_stays_in_the_list() {
-        // 外すと「一覧に無い名前」として拒否され、実在する移動方法を無いと
-        // 告げることになる。名前は正しく、使い方が違うだけである。
-        let facets = facets(r#"{"movements":{"移動無し":{"writable":false}}}"#);
-        let movements = with_facets(names(&["直線移動", "移動無し"]), &facets);
-        assert!(
-            movements.iter().any(|movement| movement.name == "移動無し"),
-            "{movements:?}"
+    fn the_resolved_list_carries_every_name_that_was_read_in_the_order_it_was_read() {
+        // **一覧は名前を落とさない。** 書けない名前を外すと、それは「一覧に無い
+        // 名前」として拒否され、実在する移動方法を無いと告げることになる。
+        //
+        // 入力の並びと出力の名前の並びを突き合わせる。落ちた 1 件を個別に名指し
+        // する形では、標本に無い名前が落ちても通ってしまう。
+        let facets =
+            facets(r#"{"movements":{"移動無し":{"writable":false},"回転":{"writable":false}}}"#);
+        let read = names(&["回転", "直線移動", "移動無し", "提供者の移動"]);
+        let resolved = resolve(read.clone(), &facets);
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|movement| movement.name.clone())
+                .collect::<Vec<String>>(),
+            read
         );
     }
 
@@ -368,7 +387,7 @@ mod tests {
         let facets = facets(
             r#"{"movements":{"移動無し":{"writable":false},"書けない移動":{"writable":false}}}"#,
         );
-        let movements = with_facets(
+        let movements = resolve(
             names(&["直線移動", "移動無し", "曲線移動", "書けない移動"]),
             &facets,
         );
