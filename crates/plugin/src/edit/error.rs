@@ -1840,35 +1840,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_track_mode_unknown_failure_never_carries_the_requested_name() {
-        // known_movements はホストの一覧であり、拒否された要求の名前ではない。
-        // 一覧に無いからこそ拒否されているのだから、要求の名前が紛れ込めば
-        // それ自体が矛盾になる。
-        let requested = "存在しない移動";
-        let error = EditError::ItemWrite(ItemWriteError::Track(TrackValueError::UnknownMode {
-            known: sample_movements(),
-        }));
-        let details = error.details();
-        assert!(
-            !details["known_movements"]
-                .as_array()
-                .expect("配列です")
-                .iter()
-                .any(|movement| movement["name"] == json!(requested)),
-            "{details}"
-        );
-    }
-
-    #[test]
-    fn a_mode_that_cannot_be_written_is_not_the_same_failure_as_an_unknown_one() {
-        // 復旧手順が違う。一覧に無い名前は選び直せば通るが、書けない名前は
-        // どう選び直しても通らない。同じ理由なら要求元は同じ手を打つ。
+    fn a_mode_that_cannot_be_written_is_drawn_with_its_own_reason_and_no_list() {
+        // 復旧手順が違うため、一覧に無い名前とは別の名前で描く。一覧を添えても
+        // 次の一手は変わらないため、値は運ばない。
+        //
+        // **どの入力がこの失敗になるかは、ここでは見ていない。** 見ているのは
+        // 組み立てた失敗の描き方だけである。
         let error = EditError::ItemWrite(ItemWriteError::Track(TrackValueError::ModeNotWritable));
         let details = error.details();
         assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
         assert_eq!(details["reason"], json!("track_mode_not_writable"));
-        assert_ne!(details["reason"], json!("track_mode_unknown"));
-        // 一覧を添えても次の一手は変わらないため、値を運ばない。
         assert!(details.get("known_movements").is_none(), "{details}");
     }
 

@@ -2567,6 +2567,39 @@ fn a_movement_with_an_unknown_mode_never_reaches_the_host() {
 }
 
 #[test]
+fn a_rejected_movement_name_never_comes_back_in_the_failure() {
+    // known_movements が運ぶのはホストの一覧であり、拒否された要求の名前では
+    // ない。一覧に無いからこそ拒否されているのだから、要求の名前が紛れ込めば
+    // それ自体が矛盾になる。
+    //
+    // **要求を通して組み立てた失敗で確かめる。** 手で組み立てた失敗では、
+    // 要求の名前が応答へ入り込む経路そのものを通らない。
+    let harness = harness_with_track_effect();
+    let requested = "存在しない移動";
+    let error = harness
+        .edit
+        .set_object_item(&set_movement(
+            &harness,
+            movement(&[0.0, 50.0, 100.0], requested),
+        ))
+        .expect_err("存在しない移動方法が受理されました");
+
+    let details = error.details();
+    assert!(
+        !details.to_string().contains(requested),
+        "拒否された要求の名前が応答に現れました: {details}"
+    );
+    // 一覧そのものは運ぶ。運ばなければ要求元は選び直す材料を持たない。
+    assert_eq!(
+        details["known_movements"]
+            .as_array()
+            .expect("配列です")
+            .len(),
+        TRACK_MODES.len()
+    );
+}
+
+#[test]
 fn what_the_list_calls_unwritable_is_what_set_object_item_refuses() {
     // **一覧と拒否が同じ表を読む。** 一覧が返した 1 件ずつについて、書けないと
     // 名乗ったものは書き込みが拒み、書けると名乗ったものは名前を理由に拒まれ
