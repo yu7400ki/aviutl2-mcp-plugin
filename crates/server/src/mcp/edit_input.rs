@@ -341,8 +341,12 @@ pub enum ItemValueInput {
     /// そのとき details.item_type と details.value_kind が種別と値の形を返す。
     /// 項目が現在移動を持つかは get_object が返す track が null かどうかで分かり、
     /// 値も移動を持つ項目でだけ track の形で返る。
-    /// mode には AviUtl2 が持つ移動方法の名前を指定する。一覧に無い名前は
-    /// 受け付けない。時間制御はフラグではなく移動方法の名前の変種が担うため、
+    /// mode には AviUtl2 が持つ移動方法の名前を指定する。
+    /// 一覧に無い名前は受け付けず track_mode_unknown を返す。
+    /// 一覧に在る名前でも書けないものがあり track_mode_not_writable となる。
+    /// 可否は details.known_movements の要素ごとの writable が名乗る。
+    /// 書けない名前で移動を消そうとせず、mode を null にする。
+    /// 時間制御はフラグではなく移動方法の名前の変種が担うため、
     /// 時間制御を使うにはその変種の名前を mode に指定する。
     /// get_object の track が返す timecontrol はホストの報告であり、ここで
     /// 指定する先は無い。
@@ -2034,6 +2038,28 @@ mod tests {
             },
             ItemValue::Unknown { .. } => return None,
         })
+    }
+
+    #[test]
+    fn the_track_input_states_that_a_listed_movement_may_still_be_unwritable() {
+        // 一覧に載る名前が使えるという規律は、載らない名前を拒むだけでは
+        // 成り立たない。**書けない名前が混じることと、そのときの持ち替え先を
+        // 述べる。** 述べなければ、要求元は一覧から選び直すという通らない手を
+        // 打ち続ける。
+        let schema = serde_json::to_value(schemars::schema_for!(ItemValueInput))
+            .expect("schema は直列化できる")
+            .to_string();
+        for phrase in [
+            "一覧に無い名前は受け付けず track_mode_unknown を返す",
+            "一覧に在る名前でも書けないものがあり track_mode_not_writable となる",
+            "可否は details.known_movements の要素ごとの writable が名乗る",
+            "書けない名前で移動を消そうとせず、mode を null にする",
+        ] {
+            assert!(
+                schema.contains(phrase),
+                "移動方法の説明に「{phrase}」がありません"
+            );
+        }
     }
 
     /// 入力 schema が受け付ける種別名。
