@@ -158,16 +158,33 @@ const FACET_OF_ITEM_TYPE = new Map([
 ]);
 
 /**
+ * ホストが設定項目の値を持つ表現の幅。
+ *
+ * **ホストは値を、項目の小数桁で目盛った 32 ビット整数として持つ。** 実測が
+ * この形を指す——`拡大率`（小数 3 桁）は 2,000,000 を書くと上限 `10000.000` を
+ * 返すが 20,000,000 では `0.000` を返し、`X`（小数 2 桁）は 20,000,000 まで
+ * `100000.00` を返して 100,000,000 で `0.00` になる。境目はどちらも
+ * 「探り × 10^小数桁 が本値に収まるか」に一致する。
+ *
+ * **幅を超えた探りは端へ倒れず、巻き戻った値が `observed_value` に載る。**
+ * それは端ではない——上限として表へ入れれば嘘になる。
+ */
+const HOST_VALUE_SCALE_LIMIT = 2 ** 31;
+
+/**
  * 値域を測る探りの値。
  *
- * **`integer` と `number` で別に決めた上で、同じ大きさに落ち着いている。**
- * `integer` はホスト側の整数の幅に縛られる——SDK のヘッダーは幅を述べておらず、
- * `i64` の両端を書くと収まらない可能性がある。10 億は 32 ビット整数の上限の
- * 半分以下であり、設定項目が取り得る大きさ（`サイズ` の上限が 4000、座標が
- * 数万）より 5 桁大きい。`number` は倍精度であるためこの縛りを受けないが、
- * **極端な値をホストが解釈できるかは測っていない。まず収まる範囲で試す。**
+ * **[`HOST_VALUE_SCALE_LIMIT`] の内側に留めた上で、値域より十分に大きく採る。**
+ * 200 万は小数 3 桁の項目まで幅に収まり（2,000,000 × 1000 < 2^31）、設定項目が
+ * 取り得る大きさ（`サイズ` の上限が 4000、`拡大率` が 10000、座標が 100000）
+ * より 1 桁以上大きい。`integer` と `number` で別に決める理由は無い——
+ * 幅を決めるのは種別ではなく小数桁である。
+ *
+ * **この探りより外に端を持つ項目は測れない。** 探りは受理され、その側の端が
+ * 探りの外に在ることしか分からない。測れなかった側を書かないのは他の場合と
+ * 同じである。
  */
-const RANGE_PROBE = { max: 1_000_000_000, min: -1_000_000_000 };
+const RANGE_PROBE = { max: 2_000_000, min: -2_000_000 };
 
 /**
  * 小数桁を測る探りの値。
@@ -628,6 +645,10 @@ async function expandFromCurrent(target, inventory, positionOf, budget) {
  * 受理と拒否以外の失敗が返ったら、そこで測るのをやめて理由を持ち帰る。移動を
  * 持つ項目（`track_movement_present`）と、探りの値そのものをホストが解釈できない
  * 場合がここへ来る。**黙って値域を持たない項目にはしない。**
+ *
+ * 観測が端であることは、**探りがホストの表現の幅に収まっていたときにしか
+ * 言えない**（[`probeFitsHostScale`]）。収まらなかった観測は巻き戻った値であり、
+ * 端として持ち帰らずに `overflowed` へ回す。
  */
 export async function measureRange(target, itemType, budget) {
   const measuresDecimals = DECIMALS_ITEM_TYPES.includes(itemType);
@@ -642,9 +663,10 @@ export async function measureRange(target, itemType, budget) {
   // 一致することで確かめる。**
   const digits = new Set();
   const unreadable = [];
+  const overflowed = [];
   let decimalsProbeAccepted = false;
   let writes = 0;
-  const outcome = () => ({ range, writes, halted: false, failure: null, unreadable });
+  const outcome = () => ({ range, writes, halted: false, failure: null, unreadable, overflowed });
   for (const [part, value] of probes) {
     const result = await target.write({ type: itemType, value }, budget);
     if (result.outcome === WRITE.exhausted) {
@@ -665,6 +687,12 @@ export async function measureRange(target, itemType, budget) {
       unreadable.push(`${part}: ${result.observed}`);
       continue;
     }
+    if (!probeFitsHostScale(value, observedDigits)) {
+      // 探りが表現の幅を超えている。返った値は端ではなく巻き戻りであり、
+      // 小数桁の根拠にもならない。
+      overflowed.push(`${part}: ${value} に ${result.observed}`);
+      continue;
+    }
     digits.add(observedDigits);
     if (part !== "decimals") range[part] = observedNumber(result.observed);
   }
@@ -673,6 +701,16 @@ export async function measureRange(target, itemType, budget) {
     range.decimals = [...digits][0];
   }
   return outcome();
+}
+
+/**
+ * 探りが、その小数桁の項目についてホストの表現の幅に収まるか。
+ *
+ * 収まらない探りに返る値は端ではない。**幅を超えた入力は端へ倒れず巻き戻る**
+ * ため、上限・下限として読めば誤った値が表へ入る。
+ */
+export function probeFitsHostScale(probe, digits) {
+  return Math.abs(probe) * 10 ** digits < HOST_VALUE_SCALE_LIMIT;
 }
 
 /**
@@ -770,6 +808,7 @@ export function groupBySource(pairs, hosts) {
       range: null,
       failure: null,
       unreadable: [],
+      overflowed: [],
       blocked: null,
       writes: 0,
       surveyed: false,
@@ -852,6 +891,7 @@ async function surveyGroup(survey, objectSelector, group, context) {
     entry.range = result.range;
     entry.failure = result.failure;
     entry.unreadable = result.unreadable;
+    entry.overflowed = result.overflowed;
     entry.writes += result.writes;
     if (result.halted) break;
     entry.surveyed = true;
@@ -948,7 +988,12 @@ async function main() {
       } else {
         const range = rangeFacet(entry.range);
         if (range) complete.push({ ...pair, facets: { range } });
-        else if (entry.unreadable.length > 0) {
+        else if (entry.overflowed.length > 0) {
+          unreached.push({
+            ...pair,
+            reason: `探りがホストの表現の幅を超えて巻き戻り、端を測れない（${entry.overflowed.join("、")}）`,
+          });
+        } else if (entry.unreadable.length > 0) {
           unreached.push({ ...pair, reason: `ホストが返した値を数として読めない（${entry.unreadable.join("、")}）` });
         } else {
           unreached.push({ ...pair, reason: "探りの値が値域の内側に収まり、上限も下限も小数桁も測れない" });
