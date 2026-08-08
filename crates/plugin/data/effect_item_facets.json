@@ -1,5 +1,67 @@
 {
   "effects": {
+    "ObjectMotionBlur_LK": {
+      "Mix": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 2
+        }
+      },
+      "Preview Limit": {
+        "range": {
+          "min": 0,
+          "max": 4096,
+          "decimals": 0
+        }
+      },
+      "Sample Limit": {
+        "range": {
+          "min": 1,
+          "max": 4096,
+          "decimals": 0
+        }
+      },
+      "Shutter Angle": {
+        "range": {
+          "min": 0,
+          "max": 360,
+          "decimals": 1
+        }
+      }
+    },
+    "Rusty Pixel Sort Filter": {
+      "しきい値": {
+        "range": {
+          "min": 0,
+          "max": 1,
+          "decimals": 3
+        }
+      }
+    },
+    "ぼかし": {
+      "光の強さ": {
+        "range": {
+          "min": 0,
+          "max": 60,
+          "decimals": 1
+        }
+      },
+      "範囲": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "縦横比": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 2
+        }
+      }
+    },
     "インターレース解除": {
       "解除方法": {
         "choices": [
@@ -9,7 +71,53 @@
         ]
       }
     },
+    "エッジ抽出": {
+      "しきい値": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 2
+        }
+      },
+      "強さ": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 1
+        }
+      }
+    },
+    "オブジェクト分割": {
+      "横分割数": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "縦分割数": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 0
+        }
+      }
+    },
     "カウンター": {
+      "サイズ": {
+        "range": {
+          "min": 1,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "初期値": {
+        "range": {
+          "min": -9999,
+          "max": 9999,
+          "decimals": 1
+        }
+      },
       "装飾タイプ": {
         "choices": [
           "標準文字",
@@ -20,6 +128,92 @@
           "縁取り文字(太)",
           "縁取り文字(角)"
         ]
+      },
+      "速度": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 1
+        }
+      }
+    },
+    "カメラ制御": {
+      "X": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Z": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "傾き": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "深度ぼけ": {
+        "range": {
+          "min": 0,
+          "max": 20,
+          "decimals": 2
+        }
+      },
+      "焦点レイヤー": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "目標X": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "目標Y": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "目標Z": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "目標レイヤー": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "視野角": {
+        "range": {
+          "min": 0,
+          "max": 120,
+          "decimals": 2
+        }
       }
     },
     "カメラ制御オプション": {
@@ -32,7 +226,97 @@
         ]
       }
     },
+    "カラーキー": {
+      "境界補正": {
+        "range": {
+          "min": 0,
+          "max": 80,
+          "decimals": 0
+        }
+      },
+      "色差範囲": {
+        "range": {
+          "min": 0,
+          "max": 4096,
+          "decimals": 0
+        }
+      },
+      "輝度範囲": {
+        "range": {
+          "min": 0,
+          "max": 4096,
+          "decimals": 0
+        }
+      }
+    },
+    "クリッピング": {
+      "上": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
+      },
+      "下": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
+      },
+      "右": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
+      },
+      "左": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
+      }
+    },
+    "クロマキー": {
+      "境界補正": {
+        "range": {
+          "min": 0,
+          "max": 8,
+          "decimals": 0
+        }
+      },
+      "彩度範囲": {
+        "range": {
+          "min": 0,
+          "max": 256,
+          "decimals": 0
+        }
+      },
+      "色相範囲": {
+        "range": {
+          "min": 0,
+          "max": 256,
+          "decimals": 0
+        }
+      }
+    },
     "グラデーション": {
+      "中心X": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "中心Y": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
       "合成モード": {
         "choices": [
           "輝度",
@@ -50,6 +334,20 @@
           "差分"
         ]
       },
+      "幅": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 0
+        }
+      },
+      "強さ": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
       "形状": {
         "choices": [
           "線形",
@@ -57,9 +355,104 @@
           "矩形",
           "凸形"
         ]
+      },
+      "角度": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      }
+    },
+    "グループ制御": {
+      "X": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "X軸回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Y軸回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "Z": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Z軸回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "拡大率": {
+        "range": {
+          "min": 0,
+          "max": 10000,
+          "decimals": 3
+        }
+      }
+    },
+    "グループ制御(音声)": {
+      "左右": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 2
+        }
+      },
+      "音量": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 2
+        }
       }
     },
     "グロー": {
+      "しきい値": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "ぼかし": {
+        "range": {
+          "min": 0,
+          "max": 50,
+          "decimals": 0
+        }
+      },
+      "強さ": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 2
+        }
+      },
       "形状": {
         "choices": [
           "通常",
@@ -70,9 +463,69 @@
           "クロス(12本)",
           "ライン"
         ]
+      },
+      "拡散": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 0
+        }
+      },
+      "比率": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "角度": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      }
+    },
+    "シャープ": {
+      "強さ": {
+        "range": {
+          "min": 0,
+          "max": 800,
+          "decimals": 1
+        }
+      },
+      "範囲": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        }
+      }
+    },
+    "シーン": {
+      "再生速度": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 2
+        }
       }
     },
     "シーンチェンジ": {
+      "ぼかし": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "分割数": {
+        "range": {
+          "min": 2,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
       "種類": {
         "choices": [
           "ぼかし",
@@ -96,9 +549,102 @@
           "縮小回転",
           "キューブ回転"
         ]
+      },
+      "角度": {
+        "range": {
+          "min": 0,
+          "max": 360,
+          "decimals": 0
+        }
+      }
+    },
+    "スポット光源(カメラ制御)": {
+      "X": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Z": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "ぼかし": {
+        "range": {
+          "min": 0,
+          "max": 90,
+          "decimals": 2
+        }
+      },
+      "明るさ": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 2
+        }
+      },
+      "減衰": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 2
+        }
+      },
+      "目標X": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "目標Y": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "目標Z": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "範囲": {
+        "range": {
+          "min": 0,
+          "max": 90,
+          "decimals": 2
+        }
       }
     },
     "テキスト": {
+      "サイズ": {
+        "range": {
+          "min": 1,
+          "max": 1000,
+          "decimals": 2
+        }
+      },
+      "字間": {
+        "range": {
+          "min": -500,
+          "max": 500,
+          "decimals": 2
+        }
+      },
       "文字揃え": {
         "choices": [
           "左寄せ[上]",
@@ -131,26 +677,287 @@
           "縁取り文字(太)",
           "縁取り文字(角)"
         ]
+      },
+      "行間": {
+        "range": {
+          "min": -500,
+          "max": 500,
+          "decimals": 2
+        }
+      },
+      "表示速度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 2
+        }
       }
     },
     "ディスプレイスメントマップ": {
+      "X": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "ぼかし": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "サイズ": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
+      },
+      "マップの種類": {
+        "choices": [
+          "背景",
+          "円",
+          "四角形",
+          "三角形",
+          "五角形",
+          "六角形",
+          "星型",
+          "ハート"
+        ]
+      },
+      "回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "回転変形": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 2
+        }
+      },
+      "変形X": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 2
+        }
+      },
+      "変形Y": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 2
+        }
+      },
       "変形方法": {
         "choices": [
           "拡大変形",
           "回転変形",
           "移動変形"
         ]
+      },
+      "拡大変形": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 2
+        }
+      },
+      "拡大縦横": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 3
+        }
+      },
+      "縦横比": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 3
+        }
+      }
+    },
+    "ドロップシャドウ": {
+      "X": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "拡散": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 0
+        }
+      },
+      "濃さ": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
       }
     },
     "ノイズ": {
+      "しきい値": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
       "合成モード": {
         "choices": [
           "アルファ値と乗算",
           "明るさと乗算"
         ]
+      },
+      "周期X": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 2
+        }
+      },
+      "周期Y": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 2
+        }
+      },
+      "変化速度": {
+        "range": {
+          "min": 0,
+          "max": 800,
+          "decimals": 1
+        }
+      },
+      "強さ": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "速度X": {
+        "range": {
+          "min": -800,
+          "max": 800,
+          "decimals": 1
+        }
+      },
+      "速度Y": {
+        "range": {
+          "min": -800,
+          "max": 800,
+          "decimals": 1
+        }
+      }
+    },
+    "ノイズ除去": {
+      "しきい値": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 0
+        }
+      },
+      "強さ": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "範囲": {
+        "range": {
+          "min": 1,
+          "max": 8,
+          "decimals": 0
+        }
       }
     },
     "パーティクル出力": {
+      "X": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Z": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "出力方向": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "出力終了調整": {
+        "range": {
+          "min": 0,
+          "max": 600,
+          "decimals": 1
+        }
+      },
+      "出力速度": {
+        "range": {
+          "min": 0,
+          "max": 20000,
+          "decimals": 1
+        }
+      },
+      "出力頻度": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 1
+        }
+      },
+      "加速度": {
+        "range": {
+          "min": -20000,
+          "max": 20000,
+          "decimals": 1
+        }
+      },
       "合成モード": {
         "choices": [
           "輝度",
@@ -167,16 +974,616 @@
           "明暗",
           "差分"
         ]
+      },
+      "回転角": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "回転速度": {
+        "range": {
+          "min": -10,
+          "max": 10,
+          "decimals": 2
+        }
+      },
+      "拡大率": {
+        "range": {
+          "min": 0,
+          "max": 10000,
+          "decimals": 3
+        }
+      },
+      "拡大速度": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 3
+        }
+      },
+      "拡散角度": {
+        "range": {
+          "min": 0,
+          "max": 360,
+          "decimals": 2
+        }
+      },
+      "生存時間": {
+        "range": {
+          "min": 0,
+          "max": 600,
+          "decimals": 1
+        }
+      },
+      "透過率": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 2
+        }
+      },
+      "透過速度": {
+        "range": {
+          "min": -200,
+          "max": 200,
+          "decimals": 2
+        }
+      },
+      "重力": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 2
+        }
+      }
+    },
+    "フェード": {
+      "アウト": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 2
+        }
+      },
+      "イン": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 2
+        }
+      }
+    },
+    "フレア": {
+      "サイズ": {
+        "range": {
+          "min": 10,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "光芒変化速度": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 1
+        }
+      },
+      "光芒強さ": {
+        "range": {
+          "min": 0,
+          "max": 1,
+          "decimals": 2
+        }
+      },
+      "光芒数": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "光芒長さ": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "水平光芒": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "水平光芒数": {
+        "range": {
+          "min": 1,
+          "max": 8,
+          "decimals": 0
+        }
+      },
+      "水平光芒高さ": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 2
+        }
+      },
+      "点滅": {
+        "range": {
+          "min": 0,
+          "max": 1,
+          "decimals": 1
+        }
+      }
+    },
+    "ページめくり(シーンチェンジ)": {
+      "奥行き": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "陰影": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "マスク": {
+      "X": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "ぼかし": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "サイズ": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
+      },
+      "マスクの種類": {
+        "choices": [
+          "背景",
+          "円",
+          "四角形",
+          "三角形",
+          "五角形",
+          "六角形",
+          "星型",
+          "ハート"
+        ]
+      },
+      "回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "縦横比": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 2
+        }
+      }
+    },
+    "ミラー": {
+      "境目調整": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 0
+        }
+      },
+      "減衰": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 1
+        }
+      },
+      "透明度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "メッシュ変形": {
+      "分割数": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "変形率": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "横格子点": {
+        "range": {
+          "min": 2,
+          "max": 20,
+          "decimals": 0
+        }
+      },
+      "縦格子点": {
+        "range": {
+          "min": 2,
+          "max": 20,
+          "decimals": 0
+        }
+      }
+    },
+    "モザイク": {
+      "サイズ": {
+        "range": {
+          "min": 1,
+          "max": 2000,
+          "decimals": 0
+        }
+      }
+    },
+    "モノラル化": {
+      "比率": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 2
+        }
+      }
+    },
+    "モーションブラー": {
+      "分解能": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "間隔": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 2
+        }
+      }
+    },
+    "ライト": {
+      "強さ": {
+        "range": {
+          "min": 0,
+          "max": 300,
+          "decimals": 1
+        }
+      },
+      "拡散": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 0
+        }
+      },
+      "比率": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "ライトブルーム(カメラ制御)": {
+      "強さ": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 1
+        }
+      },
+      "拡散": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 0
+        }
+      }
+    },
+    "ライン(移動軌跡)": {
+      "ライン幅": {
+        "range": {
+          "min": 2,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "主線描画(%)": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "先端": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 1
+        }
+      },
+      "先端位置補正": {
+        "range": {
+          "min": -500,
+          "max": 500,
+          "decimals": 1
+        }
+      },
+      "先端図形": {
+        "choices": [
+          "背景",
+          "円",
+          "四角形",
+          "三角形",
+          "五角形",
+          "六角形",
+          "星型",
+          "ハート"
+        ]
+      },
+      "先端角度": {
+        "range": {
+          "min": 0,
+          "max": 360,
+          "decimals": 2
+        }
+      },
+      "固定速度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 2
+        }
+      },
+      "描画間隔": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "最小間隔": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "補助描画(%)": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "ラスター": {
+      "周期": {
+        "range": {
+          "min": -40,
+          "max": 40,
+          "decimals": 2
+        }
+      },
+      "横幅": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 0
+        }
+      },
+      "高さ": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 0
+        }
       }
     },
     "ランダム小物配置(カメラ制御)": {
+      "サイズ": {
+        "range": {
+          "min": 1,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "回転速度": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
       "形状": {
         "choices": [
-          "球形",
           "四角形",
           "三角形",
           "星型"
         ]
+      },
+      "数": {
+        "range": {
+          "min": 1,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "範囲": {
+        "range": {
+          "min": 0,
+          "max": 80000,
+          "decimals": 1
+        }
+      }
+    },
+    "ランダム方向から登場": {
+      "ライト": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "回転": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 1
+        }
+      },
+      "時間": {
+        "range": {
+          "min": -5,
+          "max": 5,
+          "decimals": 1
+        }
+      }
+    },
+    "ランダム配置": {
+      "回転": {
+        "range": {
+          "min": 0,
+          "max": 20,
+          "decimals": 2
+        }
+      },
+      "拡散": {
+        "range": {
+          "min": 0,
+          "max": 20000,
+          "decimals": 1
+        }
+      },
+      "数": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
+      },
+      "範囲": {
+        "range": {
+          "min": 0,
+          "max": 20000,
+          "decimals": 1
+        }
+      }
+    },
+    "ランダム間隔で落ちながら登場": {
+      "時間": {
+        "range": {
+          "min": -5,
+          "max": 5,
+          "decimals": 1
+        }
+      },
+      "距離": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "間隔": {
+        "range": {
+          "min": 0,
+          "max": 5,
+          "decimals": 1
+        }
+      }
+    },
+    "リサイズ": {
+      "X": {
+        "range": {
+          "min": 0,
+          "max": 10000,
+          "decimals": 3
+        }
+      },
+      "Y": {
+        "range": {
+          "min": 0,
+          "max": 10000,
+          "decimals": 3
+        }
+      },
+      "拡大率": {
+        "range": {
+          "min": 0,
+          "max": 10000,
+          "decimals": 3
+        }
+      }
+    },
+    "リール回転": {
+      "ブラー": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "回転数": {
+        "range": {
+          "min": -50,
+          "max": 50,
+          "decimals": 0
+        }
+      }
+    },
+    "リール回転(シーンチェンジ)": {
+      "ブラー": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "回転数": {
+        "range": {
+          "min": -50,
+          "max": 50,
+          "decimals": 0
+        }
       }
     },
     "ルミナンスキー": {
@@ -189,9 +1596,79 @@
           "基準部分を透過",
           "基準部分を透過(補間無し)"
         ]
+      },
+      "基準輝度": {
+        "range": {
+          "min": -4096,
+          "max": 8192,
+          "decimals": 0
+        }
+      },
+      "輝度範囲": {
+        "range": {
+          "min": 0,
+          "max": 4096,
+          "decimals": 0
+        }
       }
     },
-    "レンズブラー": {
+    "レンズフレア": {
+      "サイズ": {
+        "range": {
+          "min": 10,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "光芒変化速度": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 1
+        }
+      },
+      "光芒強さ": {
+        "range": {
+          "min": 0,
+          "max": 1,
+          "decimals": 2
+        }
+      },
+      "光芒拡大率": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 1
+        }
+      },
+      "光芒数": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "光芒長さ": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 1
+        }
+      },
+      "光輪強さ": {
+        "range": {
+          "min": 0,
+          "max": 1,
+          "decimals": 2
+        }
+      },
+      "光輪拡大率": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 1
+        }
+      },
       "形状": {
         "choices": [
           "背景",
@@ -203,9 +1680,123 @@
           "星型",
           "ハート"
         ]
+      },
+      "形状角度": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "方向X": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "方向Y": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "点滅": {
+        "range": {
+          "min": 0,
+          "max": 1,
+          "decimals": 2
+        }
+      },
+      "虹輪強さ": {
+        "range": {
+          "min": 0,
+          "max": 1,
+          "decimals": 2
+        }
+      },
+      "虹輪拡大率": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 1
+        }
+      },
+      "虹輪数": {
+        "range": {
+          "min": 0,
+          "max": 5,
+          "decimals": 0
+        }
+      },
+      "虹輪開閉率": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 1
+        }
+      }
+    },
+    "レンズブラー": {
+      "光の強さ": {
+        "range": {
+          "min": 0,
+          "max": 60,
+          "decimals": 1
+        }
+      },
+      "形状": {
+        "choices": [
+          "背景",
+          "円",
+          "四角形",
+          "三角形",
+          "五角形",
+          "六角形",
+          "星型",
+          "ハート"
+        ]
+      },
+      "範囲": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      }
+    },
+    "ローテーション": {
+      "90度回転": {
+        "range": {
+          "min": -4,
+          "max": 4,
+          "decimals": 0
+        }
       }
     },
     "ワイプ": {
+      "ぼかし": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "アウト": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 2
+        }
+      },
+      "イン": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 2
+        }
+      },
       "ワイプの種類": {
         "choices": [
           "ワイプ(円)",
@@ -218,7 +1809,501 @@
         ]
       }
     },
+    "万華鏡": {
+      "中心X": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "中心Y": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 1
+        }
+      },
+      "固定サイズ": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 1
+        }
+      },
+      "繰り返し回数": {
+        "range": {
+          "min": 0,
+          "max": 50,
+          "decimals": 0
+        }
+      },
+      "角数(偶数)": {
+        "range": {
+          "min": 4,
+          "max": 50,
+          "decimals": 0
+        }
+      },
+      "長さ": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 1
+        }
+      }
+    },
+    "何処からともなく登場": {
+      "ぼかし": {
+        "range": {
+          "min": 0,
+          "max": 5,
+          "decimals": 1
+        }
+      },
+      "位置": {
+        "range": {
+          "min": 0,
+          "max": 5,
+          "decimals": 1
+        }
+      },
+      "時間": {
+        "range": {
+          "min": -5,
+          "max": 5,
+          "decimals": 1
+        }
+      }
+    },
+    "円形配置": {
+      "ずらし": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "円周": {
+        "range": {
+          "min": 0,
+          "max": 800,
+          "decimals": 2
+        }
+      },
+      "半径": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 1
+        }
+      },
+      "数": {
+        "range": {
+          "min": 1,
+          "max": 500,
+          "decimals": 0
+        }
+      }
+    },
+    "凸エッジ": {
+      "幅": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "角度": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "高さ": {
+        "range": {
+          "min": 0,
+          "max": 3,
+          "decimals": 2
+        }
+      }
+    },
+    "動画ファイル": {
+      "再生速度": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 2
+        }
+      }
+    },
+    "単色化": {
+      "強さ": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "反復移動": {
+      "ずらし": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "角度": {
+        "range": {
+          "min": 0,
+          "max": 360,
+          "decimals": 1
+        }
+      },
+      "距離": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "速さ": {
+        "range": {
+          "min": 0.1,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "周辺ボケ光量": {
+      "ボケ": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "光の強さ": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "光量": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "半径": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "境界": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "色ずれ量": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      }
+    },
+    "回転": {
+      "X": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "Z": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      }
+    },
+    "図形": {
+      "サイズ": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
+      },
+      "ライン幅": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
+      },
+      "図形の種類": {
+        "choices": [
+          "背景",
+          "円",
+          "四角形",
+          "三角形",
+          "五角形",
+          "六角形",
+          "星型",
+          "ハート"
+        ]
+      },
+      "縦横比": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 2
+        }
+      }
+    },
+    "図形で隠す(シーンチェンジ)": {
+      "エッジ幅": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "エッジ角度": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 1
+        }
+      },
+      "エッジ高さ": {
+        "range": {
+          "min": 0,
+          "max": 0.3,
+          "decimals": 1
+        }
+      },
+      "回転速度": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 1
+        }
+      },
+      "図形名": {
+        "choices": [
+          "背景",
+          "円",
+          "四角形",
+          "三角形",
+          "五角形",
+          "六角形",
+          "星型",
+          "ハート"
+        ]
+      },
+      "拡大率": {
+        "range": {
+          "min": 1,
+          "max": 400,
+          "decimals": 1
+        }
+      },
+      "数": {
+        "range": {
+          "min": 1,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "方向": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 1
+        }
+      },
+      "角度": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 1
+        }
+      }
+    },
+    "図形で隠す(放射)(シーンチェンジ)": {
+      "エッジ幅": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "エッジ角度": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 1
+        }
+      },
+      "エッジ高さ": {
+        "range": {
+          "min": 0,
+          "max": 0.3,
+          "decimals": 1
+        }
+      },
+      "回転速度": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 1
+        }
+      },
+      "図形名": {
+        "choices": [
+          "背景",
+          "円",
+          "四角形",
+          "三角形",
+          "五角形",
+          "六角形",
+          "星型",
+          "ハート"
+        ]
+      },
+      "拡大率": {
+        "range": {
+          "min": 1,
+          "max": 400,
+          "decimals": 1
+        }
+      },
+      "数": {
+        "range": {
+          "min": 1,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "角度": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 1
+        }
+      },
+      "速度": {
+        "range": {
+          "min": 1,
+          "max": 1000,
+          "decimals": 1
+        }
+      }
+    },
+    "図形ワイプ(シーンチェンジ)": {
+      "サイズ": {
+        "range": {
+          "min": 8,
+          "max": 400,
+          "decimals": 0
+        }
+      },
+      "ディレイ時間": {
+        "range": {
+          "min": 0,
+          "max": 400,
+          "decimals": 1
+        }
+      },
+      "回転速度": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 1
+        }
+      },
+      "図形名": {
+        "choices": [
+          "背景",
+          "円",
+          "四角形",
+          "三角形",
+          "五角形",
+          "六角形",
+          "星型",
+          "ハート"
+        ]
+      },
+      "拡大率": {
+        "range": {
+          "min": 1,
+          "max": 400,
+          "decimals": 1
+        }
+      },
+      "方向": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 1
+        }
+      },
+      "角度": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 1
+        }
+      }
+    },
     "基本出力": {
+      "X": {
+        "range": {
+          "min": -10000,
+          "max": 10000,
+          "decimals": 0
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -10000,
+          "max": 10000,
+          "decimals": 0
+        }
+      },
       "合成モード": {
         "choices": [
           "輝度",
@@ -235,9 +2320,667 @@
           "明暗",
           "差分"
         ]
+      },
+      "拡大率": {
+        "range": {
+          "min": 0,
+          "max": 10000,
+          "decimals": 3
+        }
+      },
+      "透明度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 2
+        }
+      }
+    },
+    "境界ぼかし": {
+      "範囲": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "縦横比": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 2
+        }
+      }
+    },
+    "多角形": {
+      "ライン幅": {
+        "range": {
+          "min": 2,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "固定ｻｲｽﾞ": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 0
+        }
+      },
+      "縦横比": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "繰り返し分周": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "繰り返し描画数": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "頂点数": {
+        "range": {
+          "min": 2,
+          "max": 16,
+          "decimals": 0
+        }
+      }
+    },
+    "平行光源(カメラ制御)": {
+      "傾き": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "明るさ": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 2
+        }
+      },
+      "経度": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "緯度": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      }
+    },
+    "広がって登場": {
+      "時間": {
+        "range": {
+          "min": -5,
+          "max": 5,
+          "decimals": 1
+        }
+      }
+    },
+    "座標": {
+      "X": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Z": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      }
+    },
+    "座標の回転(個別オブジェクト)": {
+      "中心X": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "中心Y": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "角度": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 1
+        }
+      }
+    },
+    "座標の拡大縮小(個別オブジェクト)": {
+      "中心X": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "中心Y": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "拡大率": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 1
+        }
+      }
+    },
+    "弾む": {
+      "ずらし": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "角度": {
+        "range": {
+          "min": 0,
+          "max": 360,
+          "decimals": 1
+        }
+      },
+      "速さ": {
+        "range": {
+          "min": 0.1,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "高さ": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 1
+        }
+      }
+    },
+    "弾んで登場": {
+      "回数": {
+        "range": {
+          "min": 1,
+          "max": 20,
+          "decimals": 1
+        }
+      },
+      "時間": {
+        "range": {
+          "min": -5,
+          "max": 5,
+          "decimals": 1
+        }
+      },
+      "高さ": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 1
+        }
+      }
+    },
+    "扇クリッピング": {
+      "ぼかし": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 0
+        }
+      },
+      "中心X": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "中心Y": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "基準角": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "範囲角": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 2
+        }
+      }
+    },
+    "扇型": {
+      "サイズ": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "ライン幅": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "中心角": {
+        "range": {
+          "min": 0,
+          "max": 360,
+          "decimals": 1
+        }
+      }
+    },
+    "手ぶれ": {
+      "振幅": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "角度": {
+        "range": {
+          "min": 0,
+          "max": 180,
+          "decimals": 2
+        }
+      },
+      "間隔": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "拡大率": {
+      "X": {
+        "range": {
+          "min": 0,
+          "max": 10000,
+          "decimals": 3
+        }
+      },
+      "Y": {
+        "range": {
+          "min": 0,
+          "max": 10000,
+          "decimals": 3
+        }
+      },
+      "Z": {
+        "range": {
+          "min": 0,
+          "max": 10000,
+          "decimals": 3
+        }
+      },
+      "拡大率": {
+        "range": {
+          "min": 0,
+          "max": 10000,
+          "decimals": 3
+        }
+      }
+    },
+    "拡大縮小して登場": {
+      "拡大率": {
+        "range": {
+          "min": 0,
+          "max": 800,
+          "decimals": 1
+        }
+      },
+      "時間": {
+        "range": {
+          "min": -5,
+          "max": 5,
+          "decimals": 1
+        }
+      }
+    },
+    "拡張色設定": {
+      "B": {
+        "range": {
+          "min": 0,
+          "max": 255,
+          "decimals": 0
+        }
+      },
+      "G": {
+        "range": {
+          "min": 0,
+          "max": 255,
+          "decimals": 0
+        }
+      },
+      "R": {
+        "range": {
+          "min": 0,
+          "max": 255,
+          "decimals": 0
+        }
+      }
+    },
+    "拡散光": {
+      "強さ": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "拡散": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 0
+        }
+      }
+    },
+    "振り子": {
+      "ずらし": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "角度": {
+        "range": {
+          "min": 0,
+          "max": 180,
+          "decimals": 1
+        }
+      },
+      "速さ": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 1
+        }
+      }
+    },
+    "振動": {
+      "X": {
+        "range": {
+          "min": -500,
+          "max": 500,
+          "decimals": 0
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -500,
+          "max": 500,
+          "decimals": 0
+        }
+      },
+      "Z": {
+        "range": {
+          "min": -500,
+          "max": 500,
+          "decimals": 0
+        }
+      },
+      "周期": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 0
+        }
+      }
+    },
+    "放射ブラー": {
+      "X": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "範囲": {
+        "range": {
+          "min": 0,
+          "max": 80,
+          "decimals": 2
+        }
+      }
+    },
+    "斜めクリッピング": {
+      "ぼかし": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 0
+        }
+      },
+      "中心X": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "中心Y": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "幅": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 0
+        }
+      },
+      "角度": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      }
+    },
+    "方向ブラー": {
+      "範囲": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "角度": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      }
+    },
+    "星": {
+      "サイズ": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "フェードアウト時間": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 2
+        }
+      },
+      "フェードイン時間": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 2
+        }
+      },
+      "個数": {
+        "range": {
+          "min": 1,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "奥行き": {
+        "range": {
+          "min": 0,
+          "max": 50,
+          "decimals": 1
+        }
+      },
+      "広がり": {
+        "range": {
+          "min": 0,
+          "max": 50,
+          "decimals": 1
+        }
+      },
+      "形状": {
+        "choices": [
+          "背景",
+          "円",
+          "四角形",
+          "三角形",
+          "五角形",
+          "六角形",
+          "星型",
+          "ハート"
+        ]
+      },
+      "速度": {
+        "range": {
+          "min": -50,
+          "max": 50,
+          "decimals": 1
+        }
       }
     },
     "映像再生": {
+      "X": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "X軸回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Y軸回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "Z": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Z軸回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "中心X": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 2
+        }
+      },
+      "中心Y": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 2
+        }
+      },
+      "中心Z": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 2
+        }
+      },
       "合成モード": {
         "choices": [
           "輝度",
@@ -254,9 +2997,176 @@
           "明暗",
           "差分"
         ]
+      },
+      "左右": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 2
+        }
+      },
+      "拡大率": {
+        "range": {
+          "min": 0,
+          "max": 10000,
+          "decimals": 3
+        }
+      },
+      "縦横比": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 3
+        }
+      },
+      "透明度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 2
+        }
+      },
+      "音量": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 2
+        }
+      }
+    },
+    "材質設定(カメラ制御)": {
+      "光沢度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        }
+      }
+    },
+    "枠線": {
+      "X": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "サイズ": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "丸み": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      }
+    },
+    "極座標変換": {
+      "中心幅": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 0
+        }
+      },
+      "回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "拡大率": {
+        "range": {
+          "min": 100,
+          "max": 800,
+          "decimals": 2
+        }
+      },
+      "渦巻": {
+        "range": {
+          "min": -8,
+          "max": 8,
+          "decimals": 3
+        }
       }
     },
     "標準描画": {
+      "X": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "X軸回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Y軸回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "Z": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Z軸回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "中心X": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 2
+        }
+      },
+      "中心Y": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 2
+        }
+      },
+      "中心Z": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 2
+        }
+      },
       "合成モード": {
         "choices": [
           "輝度",
@@ -273,9 +3183,316 @@
           "明暗",
           "差分"
         ]
+      },
+      "拡大率": {
+        "range": {
+          "min": 0,
+          "max": 10000,
+          "decimals": 3
+        }
+      },
+      "縦横比": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 3
+        }
+      },
+      "透明度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 2
+        }
+      }
+    },
+    "水面": {
+      "位置補正": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "傾き": {
+        "range": {
+          "min": 0,
+          "max": 90,
+          "decimals": 1
+        }
+      },
+      "方向": {
+        "range": {
+          "min": -180,
+          "max": 180,
+          "decimals": 1
+        }
+      },
+      "水平境界ぼかし": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "波紋": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "波紋位置": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "波紋幅": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "波紋速度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "解像度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "速度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "波紋": {
+      "中心X": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "中心Y": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "幅": {
+        "range": {
+          "min": 1,
+          "max": 400,
+          "decimals": 1
+        }
+      },
+      "速度": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "高さ": {
+        "range": {
+          "min": -400,
+          "max": 400,
+          "decimals": 1
+        }
+      }
+    },
+    "点光源(カメラ制御)": {
+      "X": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "Z": {
+        "range": {
+          "min": -100000,
+          "max": 100000,
+          "decimals": 2
+        }
+      },
+      "明るさ": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 2
+        }
+      },
+      "減衰": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 2
+        }
+      }
+    },
+    "点滅": {
+      "消灯速度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "点滅割合": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "点灯速度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "速さ": {
+        "range": {
+          "min": 0,
+          "max": 15,
+          "decimals": 2
+        }
+      }
+    },
+    "点滅して登場": {
+      "時間": {
+        "range": {
+          "min": -5,
+          "max": 5,
+          "decimals": 1
+        }
+      },
+      "点滅間隔": {
+        "range": {
+          "min": 1,
+          "max": 5,
+          "decimals": 0
+        }
+      }
+    },
+    "特定色域変換": {
+      "境界補正": {
+        "range": {
+          "min": 0,
+          "max": 8,
+          "decimals": 0
+        }
+      },
+      "彩度範囲": {
+        "range": {
+          "min": 0,
+          "max": 256,
+          "decimals": 0
+        }
+      },
+      "色相範囲": {
+        "range": {
+          "min": 0,
+          "max": 256,
+          "decimals": 0
+        }
+      }
+    },
+    "球体(カメラ制御)": {
+      "サイズ": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 1
+        }
+      }
+    },
+    "環境光(カメラ制御)": {
+      "明るさ": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 2
+        }
+      }
+    },
+    "画像ファイル": {
+      "再生速度": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 2
+        }
+      }
+    },
+    "画像ループ": {
+      "オフセットX": {
+        "range": {
+          "min": -10000,
+          "max": 10000,
+          "decimals": 3
+        }
+      },
+      "オフセットY": {
+        "range": {
+          "min": -10000,
+          "max": 10000,
+          "decimals": 3
+        }
+      },
+      "横回数": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "縦回数": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 0
+        }
       }
     },
     "画像合成": {
+      "X": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
       "合成モード": {
         "choices": [
           "前方から合成",
@@ -284,9 +3501,425 @@
           "輝度をアルファ値として上書き",
           "輝度をアルファ値として乗算"
         ]
+      },
+      "拡大率": {
+        "range": {
+          "min": 0,
+          "max": 800,
+          "decimals": 2
+        }
+      }
+    },
+    "画面外から登場": {
+      "数": {
+        "range": {
+          "min": 1,
+          "max": 16,
+          "decimals": 0
+        }
+      },
+      "時間": {
+        "range": {
+          "min": -5,
+          "max": 5,
+          "decimals": 1
+        }
+      },
+      "角度": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 1
+        }
+      }
+    },
+    "発光": {
+      "しきい値": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "強さ": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 1
+        }
+      },
+      "拡散": {
+        "range": {
+          "min": 10,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "拡散速度": {
+        "range": {
+          "min": 0,
+          "max": 60,
+          "decimals": 0
+        }
+      }
+    },
+    "発光(シーンチェンジ)": {
+      "明るさ": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "目標サイズ固定視野角": {
+      "増減値": {
+        "range": {
+          "min": -120,
+          "max": 120,
+          "decimals": 2
+        }
+      }
+    },
+    "目標中心回転": {
+      "垂直回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "水平回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "距離": {
+        "range": {
+          "min": -10000,
+          "max": 10000,
+          "decimals": 2
+        }
+      }
+    },
+    "砕け散る": {
+      "ランダム回転": {
+        "range": {
+          "min": 0,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "ランダム方向": {
+        "range": {
+          "min": 0,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "中心X": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "中心Y": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "中心Z": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "再生速度": {
+        "range": {
+          "min": -10,
+          "max": 10,
+          "decimals": 2
+        }
+      },
+      "時間差": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "破片サイズ": {
+        "range": {
+          "min": 5,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "距離影響": {
+        "range": {
+          "min": 0,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "速度": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "重力": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "開始時間": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 2
+        }
+      }
+    },
+    "砕け散る(シーンチェンジ)": {
+      "サイズ": {
+        "range": {
+          "min": 5,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "ランダム回転": {
+        "range": {
+          "min": 0,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "ランダム方向": {
+        "range": {
+          "min": 0,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "中心X": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "中心Y": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "中心Z": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "再生速度": {
+        "range": {
+          "min": -10,
+          "max": 10,
+          "decimals": 2
+        }
+      },
+      "時間差": {
+        "range": {
+          "min": -1000,
+          "max": 1000,
+          "decimals": 1
+        }
+      },
+      "距離影響": {
+        "range": {
+          "min": 0,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "速度": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "重力": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 1
+        }
+      }
+    },
+    "立方体(カメラ制御)": {
+      "サイズ": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 1
+        }
+      }
+    },
+    "簡易変形": {
+      "分割数": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "時間経過": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "簡易変形(カメラ制御)": {
+      "分割数": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "時間経過": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "粒子化": {
+      "ぼかし": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "ゆがみ": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 0
+        }
+      },
+      "ゆらぎ": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 0
+        }
+      },
+      "再生速度": {
+        "range": {
+          "min": -10,
+          "max": 10,
+          "decimals": 2
+        }
+      },
+      "拡大速度": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 2
+        }
+      },
+      "粒子速度": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 2
+        }
+      },
+      "角度": {
+        "range": {
+          "min": -360,
+          "max": 360,
+          "decimals": 1
+        }
+      },
+      "起点X": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "起点Y": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "速度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "開始時間": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 2
+        }
+      }
+    },
+    "縁取り": {
+      "ぼかし": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        }
+      },
+      "サイズ": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 0
+        }
       }
     },
     "色ずれ": {
+      "ずれ幅": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "強さ": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        }
+      },
       "色ずれの種類": {
         "choices": [
           "赤緑A",
@@ -296,15 +3929,528 @@
           "赤青B",
           "緑青B"
         ]
+      },
+      "角度": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      }
+    },
+    "色調補正": {
+      "コントラスト": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 2
+        }
+      },
+      "彩度": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 2
+        }
+      },
+      "明るさ": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 2
+        }
+      },
+      "色相": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "輝度": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 2
+        }
+      }
+    },
+    "走査線": {
+      "ライン幅": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "濃さ": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "間隔補正": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "起き上がって登場": {
+      "勢い": {
+        "range": {
+          "min": 0,
+          "max": 8,
+          "decimals": 1
+        }
+      },
+      "時間": {
+        "range": {
+          "min": -5,
+          "max": 5,
+          "decimals": 1
+        }
+      }
+    },
+    "起き上がる(シーンチェンジ)": {
+      "勢い": {
+        "range": {
+          "min": 0,
+          "max": 8,
+          "decimals": 1
+        }
+      }
+    },
+    "透明度": {
+      "透明度": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 2
+        }
+      }
+    },
+    "部分フィルタ": {
+      "X": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 0
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -5000,
+          "max": 5000,
+          "decimals": 0
+        }
+      },
+      "ぼかし": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0
+        }
+      },
+      "サイズ": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
+      },
+      "マスクの種類": {
+        "choices": [
+          "背景",
+          "円",
+          "四角形",
+          "三角形",
+          "五角形",
+          "六角形",
+          "星型",
+          "ハート"
+        ]
+      },
+      "回転": {
+        "range": {
+          "min": -3600,
+          "max": 3600,
+          "decimals": 2
+        }
+      },
+      "縦横比": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 2
+        }
       }
     },
     "閃光": {
+      "X": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "Y": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
       "合成モード": {
         "choices": [
           "光成分のみ",
           "前方に合成",
           "後方に合成"
         ]
+      },
+      "強さ": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "集中線": {
+      "中心幅": {
+        "range": {
+          "min": 0,
+          "max": 2000,
+          "decimals": 1
+        }
+      },
+      "濃さ": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "速さ": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "雨": {
+      "個数": {
+        "range": {
+          "min": 1,
+          "max": 4000,
+          "decimals": 1
+        }
+      },
+      "奥行き": {
+        "range": {
+          "min": 0,
+          "max": 50,
+          "decimals": 1
+        }
+      },
+      "拡散": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "方向": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "速度": {
+        "range": {
+          "min": -10,
+          "max": 10,
+          "decimals": 1
+        }
+      },
+      "長さ": {
+        "range": {
+          "min": 0.1,
+          "max": 5,
+          "decimals": 1
+        }
+      }
+    },
+    "雪": {
+      "ゆらぎ幅": {
+        "range": {
+          "min": 0,
+          "max": 20,
+          "decimals": 1
+        }
+      },
+      "ゆらぎ速度": {
+        "range": {
+          "min": 0,
+          "max": 20,
+          "decimals": 1
+        }
+      },
+      "サイズ": {
+        "range": {
+          "min": 1,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "個数": {
+        "range": {
+          "min": 1,
+          "max": 5000,
+          "decimals": 1
+        }
+      },
+      "奥行き": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "形状": {
+        "choices": [
+          "背景",
+          "円",
+          "四角形",
+          "三角形",
+          "五角形",
+          "六角形",
+          "星型",
+          "ハート"
+        ]
+      },
+      "方向": {
+        "range": {
+          "min": -50,
+          "max": 50,
+          "decimals": 1
+        }
+      },
+      "速度": {
+        "range": {
+          "min": -50,
+          "max": 50,
+          "decimals": 1
+        }
+      }
+    },
+    "雲": {
+      "位置補正": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "傾き": {
+        "range": {
+          "min": 0,
+          "max": 90,
+          "decimals": 1
+        }
+      },
+      "変化速度": {
+        "range": {
+          "min": 0,
+          "max": 50,
+          "decimals": 1
+        }
+      },
+      "形状": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 1
+        }
+      },
+      "方向": {
+        "range": {
+          "min": -180,
+          "max": 180,
+          "decimals": 1
+        }
+      },
+      "濃さ": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "空気遠近": {
+        "range": {
+          "min": 0,
+          "max": 200,
+          "decimals": 1
+        }
+      },
+      "解像度": {
+        "range": {
+          "min": 10,
+          "max": 100,
+          "decimals": 1
+        }
+      },
+      "速度": {
+        "range": {
+          "min": 0,
+          "max": 50,
+          "decimals": 1
+        }
+      }
+    },
+    "震える": {
+      "振幅": {
+        "range": {
+          "min": 0,
+          "max": 500,
+          "decimals": 1
+        }
+      },
+      "角度": {
+        "range": {
+          "min": 0,
+          "max": 180,
+          "decimals": 1
+        }
+      },
+      "間隔": {
+        "range": {
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        }
+      }
+    },
+    "音声ファイル": {
+      "再生速度": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 2
+        }
+      }
+    },
+    "音声再生": {
+      "左右": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 2
+        }
+      },
+      "音量": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 2
+        }
+      }
+    },
+    "音声波形表示": {
+      "再生速度": {
+        "range": {
+          "min": -2000,
+          "max": 2000,
+          "decimals": 2
+        }
+      },
+      "横幅": {
+        "range": {
+          "min": 10,
+          "max": 4000,
+          "decimals": 0
+        }
+      },
+      "音量": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 2
+        }
+      },
+      "高さ": {
+        "range": {
+          "min": 10,
+          "max": 4000,
+          "decimals": 0
+        }
+      }
+    },
+    "音量フェード": {
+      "アウト": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 2
+        }
+      },
+      "イン": {
+        "range": {
+          "min": 0,
+          "max": 10,
+          "decimals": 2
+        }
+      }
+    },
+    "音量調整": {
+      "左右": {
+        "range": {
+          "min": -100,
+          "max": 100,
+          "decimals": 2
+        }
+      },
+      "音量": {
+        "range": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 2
+        }
+      }
+    },
+    "領域拡張": {
+      "上": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
+      },
+      "下": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
+      },
+      "右": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
+      },
+      "左": {
+        "range": {
+          "min": 0,
+          "max": 4000,
+          "decimals": 0
+        }
       }
     }
   }
