@@ -361,11 +361,8 @@ pub enum ItemValueInput {
         decelerate: bool,
         /// 中間点を無視するか。
         twopoint: bool,
-        /// 名前を持たないフラグのビット。省略すると 0 になる。
-        /// 読み取りが返した値をそのまま書き戻すためのものであり、
-        /// AviUtl2 が持つ、この応答が名前を知らないフラグを運ぶ。
-        /// 表せない値を綴ると invalid_argument となり、
-        /// details.reason が track_flags_not_representable を返す。
+        /// 読み取りが返した値をそのまま書き戻すためのフラグ。省略すると 0 になる。
+        /// 表せない値を綴ると invalid_argument となり track_flags_not_representable を返す。
         #[serde(default)]
         reserved_flags: u32,
     },

@@ -666,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn the_fourth_bit_marks_a_parameter_section_the_host_cannot_evaluate() {
+    fn the_fourth_bit_is_refused_by_the_decoding_because_the_host_cannot_evaluate_it() {
         // 実測: 末尾フラグだけを 8 にした項目は 1 フレームも動かない。同じ
         // オブジェクトの別項目を 0 にした場合は動く。ホストの UI が立て下げる
         // ビットは 1 / 2 / 4 / 16 であり、この位置は含まれない——立てるとホストは

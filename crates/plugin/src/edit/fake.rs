@@ -2803,8 +2803,7 @@ mod tests {
     #[test]
     fn the_fake_host_holds_a_movement_row_it_cannot_represent() {
         // ホストは壊れた移動行も保存し、読み取りへそのまま返す。数値へ倒すと、
-        // 既に壊れている項目を読む場面をこの上に作れなくなる——新しく作る経路が
-        // 塞がれた後、その状態を持ち込む手段は他に無い。
+        // 既に壊れている項目を読む場面をこの上に作れなくなる。
         let before = ItemValue::Number {
             value: FiniteF64::try_new(1.0).expect("有限値"),
         };
