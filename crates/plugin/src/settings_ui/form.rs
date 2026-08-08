@@ -243,9 +243,9 @@ fn clamp_to_i32(value: u64) -> i32 {
 pub enum AgentPluginToggle {
     /// 生成するかどうか。**同意そのものである。**
     Generate,
-    /// Claude Code 方言を生成する。
+    /// Claude Code が読む形を生成する。
     Claude,
-    /// agent-plugins.org 方言を生成する。
+    /// Agent Plugins の仕様に従う形を生成する。
     AgentPlugins,
     /// skill を同梱する。
     Skill,
@@ -266,11 +266,15 @@ impl AgentPluginToggle {
     }
 
     /// 見出しの文字列。
+    ///
+    /// **「方言」と呼ばない。** 2 つの形が歩み寄らないことは生成する側の事情で
+    /// あり、利用者が選んでいるのは**どの相手に向けて置くか**である。相手の名前
+    /// で名乗る。
     pub fn label(self) -> &'static str {
         match self {
-            AgentPluginToggle::Generate => "agent plugin を生成する",
-            AgentPluginToggle::Claude => "Claude Code 方言を生成する",
-            AgentPluginToggle::AgentPlugins => "agent-plugins.org 方言を生成する",
+            AgentPluginToggle::Generate => "エージェントプラグインを生成する",
+            AgentPluginToggle::Claude => "Claude Code 向けに生成する",
+            AgentPluginToggle::AgentPlugins => "Agent Plugins 向けに生成する",
             AgentPluginToggle::Skill => "skill を同梱する",
         }
     }

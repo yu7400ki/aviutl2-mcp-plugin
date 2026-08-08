@@ -43,6 +43,12 @@ use windows::Win32::Foundation::HWND;
 /// ホストの設定メニューに出す名前。
 pub const MENU_NAME: &str = "AviUtl2 MCP";
 
+/// agent plugin の生成を扱うページの見出し。
+///
+/// **生成物の `README.md` がこの名前で画面への道順を示す。** 写しにすると
+/// 見出しを変えたときに片方だけが古くなり、読み手が存在しないページを探す。
+pub const AGENT_PLUGIN_PAGE: &str = "エージェントプラグイン";
+
 /// ダイアログとメッセージボックスの見出し。
 ///
 /// **メニューの名前より 1 語長い。** 窓は親の見出しを伴わずに開くため、
@@ -108,7 +114,7 @@ fn open(parent: HWND) {
             Tabs::new()
                 .with_page("公開する tool", tool_page(&form))
                 .with_page("動作", behavior_page(&form))
-                .with_page("エージェントプラグイン", agent_plugin_page(&form))
+                .with_page(AGENT_PLUGIN_PAGE, agent_plugin_page(&form))
                 .with_selected(0),
         )
         .with_layout(button_row(&form, &handle));

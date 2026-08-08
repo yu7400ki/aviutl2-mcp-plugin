@@ -202,8 +202,8 @@ pub fn readme() -> String {
 `plugins/{plugin}/bin/{exe}` も同じで、プラグイン本体の隣にある実行体と
 起動ごとに照合され、違えば複製し直される。
 
-生成をやめるには、AviUtl2 の「設定」→「{menu}」→「エージェントプラグイン」で
-「agent plugin を生成する」を外す。**外せば上の 4 つは消える。**
+生成をやめるには、AviUtl2 の「設定」→「{menu}」→「{page}」で
+「{consent}」を外す。**外せば上の 4 つは消える。**
 
 生成の対象ではないもの（プラグインが別の目的で使っており、設定を外しても
 消えない）:
@@ -217,6 +217,8 @@ version {version}
         plugin = PLUGIN_NAME,
         exe = super::SERVER_EXECUTABLE,
         menu = crate::settings_ui::MENU_NAME,
+        page = crate::settings_ui::AGENT_PLUGIN_PAGE,
+        consent = crate::settings_ui::form::AgentPluginToggle::Generate.label(),
         version = VERSION,
     )
 }
@@ -434,5 +436,52 @@ mod tests {
         for kept in ["settings.json", "instances/", "artifacts/"] {
             assert!(text.contains(kept), "README が {kept} に触れていません");
         }
+    }
+
+    /// README が示す道順が、画面に実在する見出しであること。
+    ///
+    /// **README は「設定 → メニュー → ページ → 切り替え」を辿らせる。** 4 つの
+    /// うち 1 つでも写しにすると、見出しを変えたときに片方だけが古くなり、読み手
+    /// は存在しないものを探す。**画面の側の定数から引いていることを固定する。**
+    #[test]
+    fn the_readme_names_the_headings_the_screen_actually_has() {
+        let text = readme();
+        for heading in [
+            crate::settings_ui::MENU_NAME,
+            crate::settings_ui::AGENT_PLUGIN_PAGE,
+            crate::settings_ui::form::AgentPluginToggle::Generate.label(),
+        ] {
+            assert!(
+                text.contains(heading),
+                "README が画面の見出し「{heading}」を示していません"
+            );
+        }
+    }
+
+    /// 切り替えの見出しが設計の語彙を持ち出さないこと。
+    ///
+    /// **「方言」は生成する側の事情である。** 2 つの形が歩み寄らないことを
+    /// 利用者は知らなくてよく、選んでいるのはどの相手に向けて置くかである。
+    /// 相手の名前は綴りのまま出す。
+    #[test]
+    fn the_toggles_name_the_client_and_not_the_shape_of_its_files() {
+        use crate::settings_ui::form::AgentPluginToggle;
+        for toggle in AgentPluginToggle::ALL {
+            let label = toggle.label();
+            assert!(
+                !label.contains("方言"),
+                "「{label}」が設計の語彙を利用者へ出しています"
+            );
+        }
+        assert!(
+            AgentPluginToggle::Claude.label().contains("Claude Code"),
+            "Claude Code を名指ししていません"
+        );
+        assert!(
+            AgentPluginToggle::AgentPlugins
+                .label()
+                .contains("Agent Plugins"),
+            "Agent Plugins を綴りのまま名指ししていません"
+        );
     }
 }
