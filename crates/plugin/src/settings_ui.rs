@@ -259,19 +259,34 @@ fn button_row(form: &Rc<SettingsForm>, handle: &DialogHandle) -> FlexLayout {
 }
 
 /// OK を押したときの処理。
+fn on_accept(form: &SettingsForm, handle: &DialogHandle) {
+    guarded_accept(form, handle, saving_and_syncing(settings::save));
+}
+
+/// 保存に続けて生成物へ反映する口を組み立てる。
 ///
-/// **適用した時点で生成物へ反映する。** 有効にした直後に何も現れないのは、
-/// 利用者から見て失敗と区別が付かない。起動時にも同じ関数を通り、そちらは
-/// 差分の是正であって別の判断を持たない。
+/// **適用した時点で反映する。** 有効にした直後に何も現れないのは、利用者から
+/// 見て失敗と区別が付かない。起動時（`register`）も同じ
+/// [`crate::agent_plugin::sync`] を呼び、そちらは差分の是正であって別の判断を
+/// 持たない。
+///
+/// **保存が失敗したら反映しない。** 書けなかった設定に合わせて生成物を動かせば、
+/// 画面が示す状態とディスクの状態が食い違う。
 ///
 /// これは設定画面の規律を破らない——生成に要るのは設定と自 DLL のパスだけで
 /// あり、plugin の singleton にも編集ハンドルにも触れない。
-fn on_accept(form: &SettingsForm, handle: &DialogHandle) {
-    guarded_accept(form, handle, |change| {
-        settings::save(change)?;
+///
+/// 保存の口を引数に取るのは、合成そのものを画面なしで確かめられるようにする
+/// ためである。
+fn saving_and_syncing<S>(save: S) -> impl FnOnce(&SettingsChange) -> anyhow::Result<()>
+where
+    S: FnOnce(&SettingsChange) -> anyhow::Result<()>,
+{
+    move |change| {
+        save(change)?;
         crate::agent_plugin::sync();
         Ok(())
-    });
+    }
 }
 
 /// 保存の口を差し替えられる形の OK。
@@ -419,6 +434,58 @@ mod tests {
         fn count(&self) -> usize {
             self.saved.borrow().len()
         }
+    }
+
+    /// 同意そのものの切り替え。
+    fn consent(form: &SettingsForm) -> &form::AgentPluginInput {
+        form.agent_plugin()
+            .iter()
+            .find(|input| input.toggle().is_consent())
+            .expect("同意の切り替えが画面にありません")
+    }
+
+    /// 保存した後に生成物へ反映すること。
+    ///
+    /// **有効にした直後に何も現れないのは、利用者から見て失敗と区別が付かない。**
+    /// 起動時と設定画面が同じ関数を通ることを、画面の側から固定する。
+    #[test]
+    fn accepting_reflects_the_saved_settings_on_the_generated_tree() {
+        let _hook = crate::agent_plugin::test_hook::install();
+        let form = SettingsForm::new(&Settings::default());
+        consent(&form).control().set_checked(true);
+        let saver = RecordingSave::default();
+
+        assert_eq!(
+            accept_outcome(&form, saving_and_syncing(saver.save())),
+            Ok(())
+        );
+
+        assert_eq!(saver.count(), 1);
+        assert_eq!(
+            crate::agent_plugin::test_hook::calls(),
+            1,
+            "保存しただけで生成物へ反映していません"
+        );
+    }
+
+    /// 保存に失敗したら反映しないこと。
+    ///
+    /// 書けなかった設定に合わせて生成物を動かせば、画面が示す状態とディスクの
+    /// 状態が食い違う。
+    #[test]
+    fn a_failed_save_reflects_nothing() {
+        let _hook = crate::agent_plugin::test_hook::install();
+        let form = SettingsForm::new(&Settings::default());
+        consent(&form).control().set_checked(true);
+
+        let saving = saving_and_syncing(|_: &SettingsChange| Err(anyhow::anyhow!("書けません")));
+        assert!(accept_outcome(&form, saving).is_err());
+
+        assert_eq!(
+            crate::agent_plugin::test_hook::calls(),
+            0,
+            "保存に失敗したのに生成物へ反映しました"
+        );
     }
 
     /// 何も変えていなければ保存しないこと。

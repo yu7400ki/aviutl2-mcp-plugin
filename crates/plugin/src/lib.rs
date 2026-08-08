@@ -314,10 +314,10 @@ impl aviutl2::generic::GenericPlugin for AviUtl2McpPlugin {
         // server が失敗していれば marketplace の指す先が動かない。**どちらも
         // 「生成しない」が正しい。**
         //
-        // 失敗は握り潰してログへ残す。panic まで捕らえるのは、記録の経路自体が
-        // panic 源であり得るためである（終了手順が段ごとに隔離しているのと同じ
-        // 理由）。ここは登録の最後であり、捕らえたところで飛ばされる後続は無い。
-        let _ = std::panic::catch_unwind(agent_plugin::sync);
+        // 失敗も panic も呼び出し先が握って記録する。設定画面で確定したときと
+        // **同じ関数を呼ぶ**——起動時のものは差分の是正であり、別の判断を
+        // 持たない。
+        agent_plugin::sync();
     }
 
     fn plugin_info(&self) -> aviutl2::generic::GenericPluginTable {

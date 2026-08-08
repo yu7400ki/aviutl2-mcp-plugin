@@ -35,6 +35,8 @@ pub mod skills;
 mod install;
 
 pub use install::sync;
+#[cfg(test)]
+pub(crate) use install::test_hook;
 
 use aviutl2_mcp_core::settings::AgentPluginSettings;
 use std::collections::BTreeSet;

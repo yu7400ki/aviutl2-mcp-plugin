@@ -42,8 +42,37 @@ use std::path::{Path, PathBuf};
 /// 触れるのは設定の読み書き口と自 DLL のパスだけである。plugin の singleton
 /// にも編集ハンドルにも触れないため、設定画面のコールバックから呼べる。
 pub fn sync() {
-    if let Err(e) = sync_now() {
-        tracing::warn!("agent plugin の生成に失敗しました: {e:#}");
+    #[cfg(test)]
+    if test_hook::record() {
+        return;
+    }
+    guarded(sync_now);
+}
+
+/// 生成の失敗も panic も、記録して呼び出し元へ返さない。
+///
+/// **panic の内容もここで記録する。** 捕まえた側が記録しなければどこにも
+/// 残らない——DLL として読み込まれた状態では標準エラーの行き先が無いことが
+/// あり、既定の hook が書いた行が消える。
+fn guarded(work: impl FnOnce() -> Result<()>) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("agent plugin の生成に失敗しました: {e:#}"),
+        Err(payload) => tracing::error!(
+            "agent plugin の生成で panic を捕捉しました: {}",
+            panic_message(&*payload)
+        ),
+    }
+}
+
+/// panic の payload から人が読める説明を取り出す。
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(text) = payload.downcast_ref::<&'static str>() {
+        text
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.as_str()
+    } else {
+        "内容を読み取れない panic"
     }
 }
 
@@ -168,6 +197,53 @@ fn ensure_directories(root: &Path, directory: &Path) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// 反映の呼び出しだけを数える差し替え。
+///
+/// **[`sync`] は基底ディレクトリを実際に触る。** 「呼ばれたこと」を確かめる
+/// 検査が開発機の生成物を消してしまわないよう、印が生きている間は数えるだけに
+/// する。差し替えをスレッドに閉じるのは [`crate::settings::test_override`] と
+/// 同じ理由による——同時に走る他の検査が本来の経路を通り続ける。
+#[cfg(test)]
+pub(crate) mod test_hook {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CALLS: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    /// 差し替えが有効な間だけ生きる印。
+    pub(crate) struct Guard(Option<usize>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            CALLS.with(|slot| slot.set(previous));
+        }
+    }
+
+    /// このスレッドの [`super::sync`] を、数えるだけの口へ差し替える。
+    #[must_use = "印を束縛しないと差し替えは即座に元へ戻る"]
+    pub(crate) fn install() -> Guard {
+        Guard(CALLS.with(|slot| slot.replace(Some(0))))
+    }
+
+    /// 差し替えてから数えた回数。
+    pub(crate) fn calls() -> usize {
+        CALLS.with(Cell::get).expect("差し替えの印が立っていません")
+    }
+
+    /// 実体の代わりに数える。差し替えが無ければ `false` を返し、実体が走る。
+    pub(crate) fn record() -> bool {
+        CALLS.with(|slot| match slot.get() {
+            Some(count) => {
+                slot.set(Some(count + 1));
+                true
+            }
+            None => false,
+        })
+    }
 }
 
 /// 同一ディレクトリに採る一時ファイルのパス。
@@ -391,6 +467,39 @@ mod tests {
                 .root
                 .join(".agents/plugins/marketplace.json")
                 .is_file()
+        );
+    }
+
+    #[test]
+    fn a_panic_while_generating_is_caught_and_its_message_is_recorded() {
+        // **捕まえた側が記録しなければどこにも残らない。** DLL として読み込まれた
+        // 状態では標準エラーの行き先が無いことがあり、既定の hook が書いた行が
+        // 消える。生成が黙って走らなくなる経路を作らない。
+        let logs = crate::test_support::with_silent_panic_hook(|| {
+            crate::test_support::capture_logs(|| {
+                guarded(|| panic!("生成の途中で panic させます"));
+            })
+        });
+
+        assert!(
+            logs.contains("ERROR") && logs.contains("panic を捕捉しました"),
+            "捕捉した panic が記録されていません: {logs}"
+        );
+        assert!(
+            logs.contains("生成の途中で panic させます"),
+            "panic の内容が記録されていません: {logs}"
+        );
+    }
+
+    #[test]
+    fn a_failure_while_generating_is_recorded_without_escaping() {
+        let logs = crate::test_support::capture_logs(|| {
+            guarded(|| Err(anyhow::anyhow!("書き出せませんでした")));
+        });
+
+        assert!(
+            logs.contains("WARN") && logs.contains("書き出せませんでした"),
+            "生成の失敗が記録されていません: {logs}"
         );
     }
 
