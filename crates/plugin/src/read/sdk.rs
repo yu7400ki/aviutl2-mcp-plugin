@@ -508,8 +508,9 @@ impl SdkSceneReader<'_> {
                 .section
                 .get_effect_item_value(effect, &definition.name)
                 .map_err(|_| sdk("get_effect_item_value"))?;
+            let (value, track) = item_value_and_track(&item_type, raw, track);
             items.push(EffectItem {
-                value: item_value(&item_type, raw, track.as_ref()),
+                value,
                 name: definition.name,
                 item_type,
                 track,
@@ -849,7 +850,9 @@ fn item_value(
 /// 「移動を持つ」として返せば、応答は在りもしない状態を報告することになる。
 ///
 /// 復号できても移動方法の名前を持たない値は返さない。`track` が非 `null` で
-/// あることと矛盾しており、どちらが実態かをこちら側では決められない。
+/// あることと矛盾しており、どちらが実態かをこちら側では決められない。**逆向きの
+/// 矛盾は [`item_value_and_track`] が閉じる**——ここが移動を返さなかった項目に
+/// 移動情報は添えない。
 fn movement_or_unknown(raw: String, track: Option<&aviutl2_mcp_core::TrackInfo>) -> ItemValue {
     match track
         .and_then(|_| decode_track_value(&raw).ok())
@@ -858,6 +861,25 @@ fn movement_or_unknown(raw: String, track: Option<&aviutl2_mcp_core::TrackInfo>)
         Some(decoded) => ItemValue::Track(decoded),
         None => ItemValue::Unknown { raw },
     }
+}
+
+/// 設定項目の値と、それに添える移動情報を組み立てる。
+///
+/// **移動情報を添えるのは、値を移動として読めたときだけである。** 値と移動情報は
+/// ホストの別々の呼び出しから来るため、片方だけを見て応答を組み立てると 2 つが
+/// 食い違う。食い違った応答は、動かない項目を「移動を持つ」と報告する——移動の
+/// 有無を移動情報から読む要求元にとって、値が生値であることは手掛かりにならない。
+///
+/// **判定は [`movement_or_unknown`] が下した 1 つだけである。** 移動情報の側が
+/// 別に判定を持つと、片方だけを直したときに食い違いが戻る。
+fn item_value_and_track(
+    item_type: &EffectItemType,
+    raw: String,
+    track: Option<aviutl2_mcp_core::TrackInfo>,
+) -> (ItemValue, Option<aviutl2_mcp_core::TrackInfo>) {
+    let value = item_value(item_type, raw, track.as_ref());
+    let track = track.filter(|_| matches!(value, ItemValue::Track(_)));
+    (value, track)
 }
 
 #[cfg(test)]
@@ -904,14 +926,17 @@ mod tests {
 
     /// 移動を持たない項目の読み取り。
     fn read_value(item_type: &EffectItemType, raw: &str) -> ItemValue {
-        item_value(item_type, raw.to_string(), None)
+        item_value_and_track(item_type, raw.to_string(), None).0
     }
 
-    /// 移動を持つ項目の読み取り。
+    /// 移動を持つ項目の読み取り。値と、それに添える移動情報の両方を返す。
     ///
     /// ホストが返す移動情報の中身は値の解釈に使わない。使うのは「移動を持つ」
     /// という事実だけであり、区間ごとの値は生文字列の側にしかない。
-    fn read_moving_value(item_type: &EffectItemType, raw: &str) -> ItemValue {
+    fn read_moving_item(
+        item_type: &EffectItemType,
+        raw: &str,
+    ) -> (ItemValue, Option<aviutl2_mcp_core::TrackInfo>) {
         let track = aviutl2_mcp_core::TrackInfo {
             mode: "直線移動".to_string(),
             params: Vec::new(),
@@ -923,7 +948,12 @@ mod tests {
             group_index: 0,
             group_name: None,
         };
-        item_value(item_type, raw.to_string(), Some(&track))
+        item_value_and_track(item_type, raw.to_string(), Some(track))
+    }
+
+    /// 移動を持つ項目の値だけを読む。
+    fn read_moving_value(item_type: &EffectItemType, raw: &str) -> ItemValue {
+        read_moving_item(item_type, raw).0
     }
 
     fn placement(frame_start: usize, frame_end: usize) -> HostObjectPlacement {
@@ -1501,17 +1531,47 @@ mod tests {
         // 直る——要求元は壊れた項目を見ていたことに気付けない。
         //
         // 生文字列をそのまま載せる。何が起きているかを読む材料はそこにしかない。
+        //
+        // **移動情報も落とす。** 値が生値でも移動情報が残れば、移動の有無を
+        // そちらから読む要求元には「移動を持つ」と見える。
         for raw in [
             "-600.00,600.00,直線移動,8",
             "-600.00,600.00,直線移動,8|",
             "0.00,100.00,ランダム移動,8|30.00",
         ] {
             assert_eq!(
-                read_moving_value(&EffectItemType::Number, raw),
-                ItemValue::Unknown {
-                    raw: raw.to_string()
-                },
+                read_moving_item(&EffectItemType::Number, raw),
+                (
+                    ItemValue::Unknown {
+                        raw: raw.to_string()
+                    },
+                    None
+                ),
                 "{raw} が移動として読まれました"
+            );
+        }
+    }
+
+    #[test]
+    fn movement_details_only_ride_along_with_a_value_read_as_a_movement() {
+        // 値と移動情報はホストの別々の呼び出しから来る。片方だけを見て応答を
+        // 組み立てると 2 つが食い違い、応答は在りもしない状態を報告する。
+        let (value, track) = read_moving_item(&EffectItemType::Number, "-600.00,600.00,直線移動,0");
+        assert!(matches!(value, ItemValue::Track(_)));
+        assert_eq!(track.map(|track| track.mode), Some("直線移動".to_string()));
+
+        // 復号できない値、移動方法を持たない値、種別が移動を取らない値。
+        // いずれも移動として読めていない。
+        for (item_type, raw) in [
+            (EffectItemType::Number, "-600.00,600.00,直線移動"),
+            (EffectItemType::Integer, "0.50"),
+            (EffectItemType::Number, "12.50"),
+            (EffectItemType::Color, "ffffff"),
+        ] {
+            assert_eq!(
+                read_moving_item(&item_type, raw).1,
+                None,
+                "{item_type} の {raw} に移動情報が添えられました"
             );
         }
     }
