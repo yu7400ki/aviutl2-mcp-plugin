@@ -5,8 +5,8 @@ use crate::error::ErrorCode;
 use crate::number::FiniteF64;
 use crate::text_codec::encode_host_text;
 use crate::track_value::{
-    TrackValue, TrackValueError, TrackWriteTarget, decode_track_value, encode_track_value,
-    track_read_back_matches, validate_track_syntax,
+    TrackDecodeError, TrackValue, TrackValueError, TrackWriteTarget, decode_track_value,
+    encode_track_value, track_read_back_matches, validate_track_syntax,
 };
 use crate::validation::{
     PathSyntaxError, TextSyntaxError, limit_item_value_bytes, validate_item_text,
@@ -269,6 +269,11 @@ pub fn movement_check_reads_current_value(item_type: &EffectItemType, value: &It
 /// `current` はホストが返した生の文字列である。移動の有無はその文字列にしか
 /// 現れないため、対象を読まずには判定できない。
 ///
+/// **表せない移動行は、移動を持っている側である。** 読めなかったことは、移動が
+/// 無いことを意味しない。通せば、保存されている移動が黙って消え、要求元は現在値
+/// を受け取る機会ごと失う。**移動を書き換える要求は現在値を見ないため、この
+/// 判定は壊れた項目を直す手段を塞がない。**
+///
 /// **答えが真になり得る組み合わせは、現在値を読む組み合わせと同じである。**
 /// したがって [`movement_check_reads_current_value`] をそのまま前段に置く。
 /// 同じ条件を 2 通りに書けば、片方だけを直したときに読まない組み合わせを拒否
@@ -280,7 +285,11 @@ pub fn write_drops_existing_movement(
     current: &str,
 ) -> bool {
     movement_check_reads_current_value(item_type, value)
-        && decode_track_value(current).is_ok_and(|track| track.mode.is_some())
+        && match decode_track_value(current) {
+            Ok(track) => track.mode.is_some(),
+            Err(TrackDecodeError::NotRepresentable) => true,
+            Err(TrackDecodeError::NotAMovement) => false,
+        }
 }
 
 /// 書き込んだ直後に読み直した文字列をどう扱うか。
@@ -1206,19 +1215,46 @@ mod tests {
 
     #[test]
     fn an_unreadable_current_value_counts_as_no_movement() {
-        // 読めない文字列は移動を名乗っていない。移動として扱うと、移動を持たない
-        // 項目への数値の書き込みまで拒否される。
-        //
-        // ホストが評価できない移動行も同じ側である。動かない項目への数値の
-        // 書き込みを「移動を消す」として拒むと、消える移動が無いのに直す手段が
-        // 塞がれる。
-        for current in ["", "?", "0,100,直線移動", "-500.00,500.00,直線移動,8|"] {
+        // 移動を表していない文字列は移動を名乗っていない。移動として扱うと、
+        // 移動を持たない項目への数値の書き込みまで拒否される。
+        for current in ["", "?", "0,100,直線移動"] {
             assert!(
                 !write_drops_existing_movement(
                     &EffectItemType::Number,
                     &ItemValue::Number {
                         value: FiniteF64::try_new(0.0).unwrap(),
                     },
+                    current,
+                ),
+                "{current}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_movement_that_cannot_be_represented_still_counts_as_a_movement() {
+        // 読めなかったことは、移動が無いことを意味しない。数値を通せば保存されて
+        // いる移動が黙って消え、要求元は現在値を受け取る機会ごと失う。
+        for current in [
+            "-500.00,500.00,直線移動,8",
+            "-500.00,500.00,直線移動,8|",
+            "0.00,100.00,ランダム移動,8|30.00",
+        ] {
+            assert!(
+                write_drops_existing_movement(
+                    &EffectItemType::Number,
+                    &ItemValue::Number {
+                        value: FiniteF64::try_new(0.0).unwrap(),
+                    },
+                    current,
+                ),
+                "{current}"
+            );
+            // 移動を書き換える要求は現在値を見ない。直す手段は塞がれていない。
+            assert!(
+                !write_drops_existing_movement(
+                    &EffectItemType::Number,
+                    &ItemValue::Track(sample_track()),
                     current,
                 ),
                 "{current}"
