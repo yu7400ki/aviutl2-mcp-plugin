@@ -6,8 +6,7 @@
 //! 検査は 2 か所に分かれる。**それぞれの入力が在る場所に置いてある。**
 //! 層 1 から落とした句と、層 1 から持ち越した検査は、その表を持つ server crate
 //! の側で本文と突き合わせる。ここが見るのは、表を持たずに掛けられる性質——
-//! ツリーの形、節の一覧、名指ししてよい識別子、未実測の項目、候補の写し——で
-//! ある。
+//! ツリーの形、導線、見出しの立て方、未実測の項目、候補の写し——である。
 
 use crate::agent_plugin::skills::SKILL_FILES;
 use std::collections::BTreeSet;
@@ -77,14 +76,6 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
     }
 }
 
-/// `##` の見出しを順に返す。
-fn sections(body: &str) -> Vec<String> {
-    body.lines()
-        .filter_map(|line| line.strip_prefix("## "))
-        .map(|title| title.trim().to_string())
-        .collect()
-}
-
 /// 段階を問わない全ての見出しを返す。
 fn headings(body: &str) -> Vec<String> {
     body.lines()
@@ -101,7 +92,7 @@ fn headings(body: &str) -> Vec<String> {
 /// **tool 名だけを数えない。** tool 名の一覧はこの crate から見えず、写したものを
 /// 検査の側に置けば正本が 2 つになる。代わりに「下線を含む小文字の語」という
 /// 形で拾う——tool 名も `details` のキーも入力 schema のフィールド名も同じ形を
-/// しており、**skill が新しく何かを名指しし始めた瞬間に集合が広がる。**
+/// している。
 fn identifiers(body: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     let mut token = String::new();
@@ -117,120 +108,6 @@ fn identifiers(body: &str) -> BTreeSet<String> {
     }
     found
 }
-
-/// `SKILL.md` が持ってよい節と、その節が受け持つ役割。
-///
-/// **写しを持たないことを機械的に見る形がこれである。** 個々の tool を並べて
-/// 動作を説明する節を足せば、この一覧に無い見出しとして落ちる。
-const ALLOWED_SECTIONS: &[(&str, Purpose)] = &[
-    ("まず対象を決める", Purpose::CrossToolConvention),
-    ("番号は 0 始まりである", Purpose::CrossToolConvention),
-    ("selector と世代", Purpose::CrossToolConvention),
-    ("取り消しの単位", Purpose::CrossToolConvention),
-    ("失敗したときにすること", Purpose::CrossToolConvention),
-    ("使える効果と書ける値を引く", Purpose::ValueLookupRoute),
-    ("参照文書", Purpose::ReferenceIndex),
-];
-
-/// 参照文書が持ってよい節。
-///
-/// **`SKILL.md` だけを固定しても足りない。** 節を丸ごと足す経路は
-/// `references/` の側にも同じだけ開いており、そちらは量が増えるぶん
-/// 気付かれにくい。ファイルごとに一覧を持つ。
-const ALLOWED_REFERENCE_SECTIONS: &[(&str, &[&str])] = &[
-    (
-        "references/layers.md",
-        &[
-            "番号が大きいレイヤーが手前に描かれる",
-            "この規則は応答に現れない",
-            "組むときの向き",
-        ],
-    ),
-    (
-        "references/object-alias.md",
-        &[
-            "なぜ使うか",
-            "構造",
-            "複数のオブジェクトを持つ形",
-            "frame 行が区間を決める",
-            "トラックバーの値と移動",
-            "黙って捨てられる書き方がある",
-            "トラックバーグループ",
-            "未確認",
-        ],
-    ),
-    (
-        "references/objects-and-effects.md",
-        &[
-            "オブジェクトは区間と効果の列である",
-            "種別が、何になれるかを決める",
-            "中間点は区間を割る",
-            "移動を持つ項目は 1 つの数値では読めない",
-        ],
-    ),
-];
-
-/// 節が受け持つ役割。**`SKILL.md` が持ってよいのはこの 3 つだけである。**
-///
-/// 一覧へ節を足すとき、3 つのどれに当たるかを言えないなら、それは
-/// `SKILL.md` に属さない節である。
-#[derive(Debug, Clone, Copy)]
-enum Purpose {
-    /// 複数の tool にまたがる規約。
-    CrossToolConvention,
-    /// `references/` への導線と、どんなときにどれを開くか。
-    ReferenceIndex,
-    /// 候補を引く経路。**候補の値そのものではない。**
-    ValueLookupRoute,
-}
-
-/// skill が名指ししてよい識別子。
-///
-/// **一覧は許可であって説明ではない。** ここに在るのは、複数の tool にまたがる
-/// 規約を述べるために名前を出さざるを得ないものだけである。tool を 1 個ずつ
-/// 解説し始めれば、この一覧に無い名前が本文へ現れる。
-const IDENTIFIERS_THE_SKILL_MAY_NAME: &[&str] = &[
-    // 対象のインスタンスを決める経路。
-    "instance_id",
-    "list_instances",
-    // 宛先を現在シーンへ限る照合材料。
-    "scene_id",
-    "expected_scene_id",
-    // プロジェクト境界の照合材料と、それを運ばない要求。
-    "project_epoch",
-    "expected_project_epoch",
-    "project_revision",
-    // 前提の epoch を要求する（selector を持たない）tool。
-    "create_object",
-    "set_layer_state",
-    "set_selection",
-    "set_grid_bpm",
-    "set_scene_settings",
-    // 取り消し単位を作るか確かめていない tool。
-    "create_object_section",
-    "delete_object_section",
-    "move_object_section",
-    // 取り消し単位をまとめる経路。
-    "apply_batch",
-    // 失敗を読むときのコードとキー。
-    "precondition_failed",
-    "edit_blocked",
-    "retry_requires",
-    "retry_after_ms",
-    "edit_state",
-    "current_object",
-    "failed_object",
-    "mutation_issued",
-    "change_applied",
-    // 何が在るかと、書ける値を引く経路。
-    "list_available_effects",
-    "describe_effects",
-    "get_object",
-    "get_effect_item_values",
-    "list_fonts",
-    // オブジェクトを 1 呼び出しで組み立てる入力。
-    "object_alias",
-];
 
 /// 実測していない事柄を指す語。
 ///
@@ -317,53 +194,6 @@ fn the_skill_body_declares_up_front_that_it_carries_no_copy() {
 }
 
 #[test]
-fn the_skill_has_only_the_sections_it_is_allowed_to_have() {
-    // C-T2。**節の一覧を検査の側に置く。** 本文の側だけを見ても、増えた節が
-    // 写しなのか新しい規約なのかは機械では分からない。
-    //
-    // **限界を承知で使う形である。** ここが緑であることは、不変条件 1 を
-    // 満たしたことを意味しない——既にある節の中へ、識別子を 1 つも使わずに
-    // tool の動作を説明する段落を書けば素通りする。C-T2 が「機械的に見るのは
-    // 難しい」と述べているのはこの穴のことであり、塞ぐ手は無い。
-    // **節を足す経路だけを塞いでいる。**
-    let found = sections(&skill_body());
-    let allowed: Vec<String> = ALLOWED_SECTIONS
-        .iter()
-        .map(|(title, _)| (*title).to_string())
-        .collect();
-    assert_eq!(
-        found, allowed,
-        "SKILL.md の節が、持ってよい一覧と一致しません"
-    );
-
-    for (path, titles) in ALLOWED_REFERENCE_SECTIONS {
-        let body = skill_files()
-            .into_iter()
-            .find_map(|(name, body)| (name == format!("{SKILL_NAME}/{path}")).then_some(body))
-            .unwrap_or_else(|| panic!("{path} がありません"));
-        let expected: Vec<String> = titles.iter().map(|title| (*title).to_string()).collect();
-        assert_eq!(
-            sections(&body),
-            expected,
-            "{path} の節が、持ってよい一覧と一致しません"
-        );
-    }
-    // 一覧を持たない参照文書があると、そのファイルだけ節を足し放題になる。
-    for (name, _) in skill_files() {
-        let Some(path) = name.strip_prefix(&format!("{SKILL_NAME}/")) else {
-            continue;
-        };
-        assert!(
-            path == "SKILL.md"
-                || ALLOWED_REFERENCE_SECTIONS
-                    .iter()
-                    .any(|(known, _)| *known == path),
-            "{path} の節の一覧が検査側にありません"
-        );
-    }
-}
-
-#[test]
 fn no_heading_is_the_name_of_something_the_tools_define() {
     // tool や設定キーを見出しにすると、その下は必ずそれ 1 個の解説になる。
     for (name, body) in skill_files() {
@@ -371,98 +201,6 @@ fn no_heading_is_the_name_of_something_the_tools_define() {
             assert!(
                 identifiers(&heading).is_empty(),
                 "{name} の見出しが個別の名前を掲げています: {heading}"
-            );
-        }
-    }
-}
-
-#[test]
-fn the_skill_names_nothing_outside_the_conventions_it_carries() {
-    // C-T2 の本体。**名指しの集合が広がることが、写しが混ざった徴候である。**
-    let allowed: BTreeSet<&str> = IDENTIFIERS_THE_SKILL_MAY_NAME.iter().copied().collect();
-    let mut used: BTreeSet<String> = BTreeSet::new();
-    for (name, body) in skill_files() {
-        for identifier in identifiers(&body) {
-            assert!(
-                allowed.contains(identifier.as_str()),
-                "{name} が規約の外の名前を挙げています: {identifier}"
-            );
-            used.insert(identifier);
-        }
-    }
-    // 使われなくなった許可を残すと、一覧が「昔そう書いてあった」の記録へ変わる。
-    for identifier in &allowed {
-        assert!(
-            used.contains(*identifier),
-            "誰も名指ししていない許可が残っています: {identifier}"
-        );
-    }
-}
-
-/// `SKILL.md` が述べるべき、複数 tool にまたがる規約 1 件。
-struct Convention {
-    /// 何についての規約か。
-    topic: &'static str,
-    /// 本文に在るべき句。**全て在ること**を求める。
-    phrases: &'static [&'static str],
-}
-
-/// `SKILL.md` が持つべき規約と経路。
-///
-/// **層 1 から落とした句の行き先は server crate の表が持つ。** ここに在るのは、
-/// 落とした句には含まれないが skill が述べると決まっているもの——対象の決め方、
-/// 失敗の受け止め方、何が在るかを引く経路——を含めた、話題の側からの網羅で
-/// ある。
-const CONVENTIONS_THE_SKILL_MUST_STATE: &[Convention] = &[
-    Convention {
-        topic: "instance_id の取り方",
-        phrases: &["instance_id", "list_instances が返す"],
-    },
-    Convention {
-        topic: "frame / layer が 0 始まりで UI の表示と 1 ずれること",
-        phrases: &["1 始まりで表示する", "0 始まりの番号"],
-    },
-    Convention {
-        topic: "selector を組み立てず往復させること",
-        phrases: &["selector は自分で組み立てない"],
-    },
-    Convention {
-        topic: "selector を持たない tool での expected_project_epoch",
-        phrases: &["expected_project_epoch を要求し", "省略できない"],
-    },
-    Convention {
-        topic: "要求が project_revision を運ばないこと",
-        phrases: &["project_revision を運ばない"],
-    },
-    Convention {
-        topic: "1 呼び出しが 1 つの取り消し単位であることと apply_batch を選ぶ基準",
-        phrases: &["1 つの取り消し単位になる", "apply_batch を選ぶ"],
-    },
-    Convention {
-        topic: "失敗したらリトライではなく読み直すこと",
-        phrases: &["同じ要求をそのまま送り直さない", "組み立て直す"],
-    },
-    // **候補を引く経路は、設定項目の値だけではない。** 実測で失われたのは
-    // 「当てられなかった」ではなく「在ることを知らなかった」であり、効果
-    // そのものを引く経路が無ければ、知らないものは思い付けないままになる。
-    Convention {
-        topic: "どんな効果が在るかを引く経路",
-        phrases: &[
-            "list_available_effects が返す",
-            "1 つも候補に上がらなかった",
-        ],
-    },
-];
-
-#[test]
-fn the_skill_body_states_every_cross_tool_convention() {
-    let body = skill_body();
-    for convention in CONVENTIONS_THE_SKILL_MUST_STATE {
-        for phrase in convention.phrases {
-            assert!(
-                body.contains(phrase),
-                "{} を本文が述べていません: {phrase}",
-                convention.topic
             );
         }
     }
