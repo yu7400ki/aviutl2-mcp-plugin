@@ -1784,6 +1784,23 @@ mod tests {
         )
     }
 
+    /// グローの 2 件が成すグループの所属アイテム名。
+    ///
+    /// **設定項目の列挙順と並びを変えてある。** グループ内の位置を列挙順から
+    /// 作った実装は、ホストが返した位置と食い違って結果に現れる。
+    const GLOW_AXES: [&str; 2] = ["グローの項目0", "グローの項目1"];
+
+    /// グローだけがグループを持ち、その中でも属さない項目が残る答え。
+    ///
+    /// 別々のグループを 2 つ置く。どちらの位置も列挙順とは一致しない。
+    fn mixed_groups() -> Vec<((String, String), FakeItemGroup)> {
+        vec![
+            member_group("グロー", "グローの項目1", 1, &GLOW_AXES),
+            member_group("グロー", "グローの項目0", 0, &GLOW_AXES),
+            member_group("グロー", "グローの項目3", 0, &["グローの項目3"]),
+        ]
+    }
+
     /// フェイクの effect カタログ。
     ///
     /// 種別ごとに複数件を並べる。1 件ずつしか無いと、種別で絞ってから窓を切る
@@ -4192,13 +4209,13 @@ mod tests {
         // 設定項目の一覧は平らな列で返る。どこが 1 つの組かを述べるのは
         // グループだけであり、位置も所属アイテム名もホストが返した値のまま運ぶ。
         //
-        // 同じグループに属する 2 件へ別々の位置を持たせてある。位置を取り違えた
-        // 実装は結果に現れる。
-        let members = ["グローの項目1", "グローの項目0"];
+        // 同じグループに属する 2 件へ別々の位置を持たせ、どちらの位置も設定項目の
+        // 列挙順とは一致させない。位置を取り違えた実装も、ホストの戻り値ではなく
+        // 列挙順から位置を作った実装も、結果に現れる。
         let adapter = adapter_with(|_| FakeHost {
             groups: vec![
-                member_group("グロー", "グローの項目1", 0, &members),
-                member_group("グロー", "グローの項目0", 1, &members),
+                member_group("グロー", "グローの項目1", 1, &GLOW_AXES),
+                member_group("グロー", "グローの項目0", 0, &GLOW_AXES),
             ],
             ..FakeHost::new()
         });
@@ -4208,9 +4225,9 @@ mod tests {
 
         let items = &result.effects[0].items;
         assert_eq!(items[0].name, "グローの項目1");
-        assert_eq!(items[0].group, Some(item_group(0, &members)));
+        assert_eq!(items[0].group, Some(item_group(1, &GLOW_AXES)));
         assert_eq!(items[1].name, "グローの項目0");
-        assert_eq!(items[1].group, Some(item_group(1, &members)));
+        assert_eq!(items[1].group, Some(item_group(0, &GLOW_AXES)));
     }
 
     #[test]
@@ -4263,9 +4280,10 @@ mod tests {
         // 所属アイテム名の位置番目が問い合わせた項目名と一致することは
         // 確かめない。一致しないときに採れる手は落とすことしか無く、落とせば
         // 「グループに属さない」として届いて引けなかったことと同じ形になる。
+        let names = ["別の項目A", "別の項目B", "別の項目C"];
         let adapter = adapter_with(|_| FakeHost {
             groups: vec![
-                member_group("グロー", "グローの項目1", 0, &["別の項目A", "別の項目B"]),
+                member_group("グロー", "グローの項目1", 2, &names),
                 // 位置が所属アイテム名の外を指す。
                 member_group("グロー", "グローの項目0", 5, &["グローの項目0"]),
             ],
@@ -4278,7 +4296,7 @@ mod tests {
         let items = &result.effects[0].items;
         assert_eq!(
             items[0].group,
-            Some(item_group(0, &["別の項目A", "別の項目B"])),
+            Some(item_group(2, &names)),
             "問い合わせた項目名を含まないグループが落とされました"
         );
         assert_eq!(
@@ -4292,14 +4310,8 @@ mod tests {
     fn describe_effects_mixes_grouped_and_ungrouped_items_in_one_effect() {
         // 1 つの effect の中で、別々のグループへ属する項目と属さない項目が
         // 混ざる。グループが隣の項目や別の effect へ漏れないことを列全体で見る。
-        let axes = ["グローの項目1", "グローの項目0"];
-        let single = ["グローの項目3"];
         let adapter = adapter_with(|_| FakeHost {
-            groups: vec![
-                member_group("グロー", "グローの項目1", 0, &axes),
-                member_group("グロー", "グローの項目0", 1, &axes),
-                member_group("グロー", "グローの項目3", 0, &single),
-            ],
+            groups: mixed_groups(),
             ..FakeHost::new()
         });
         let result = adapter
@@ -4314,9 +4326,9 @@ mod tests {
         assert_eq!(
             described,
             vec![
-                ("グローの項目1", Some(item_group(0, &axes))),
-                ("グローの項目0", Some(item_group(1, &axes))),
-                ("グローの項目3", Some(item_group(0, &single))),
+                ("グローの項目1", Some(item_group(1, &GLOW_AXES))),
+                ("グローの項目0", Some(item_group(0, &GLOW_AXES))),
+                ("グローの項目3", Some(item_group(0, &["グローの項目3"]))),
                 ("グローの項目2", None),
             ],
             "グループが別の項目へ付いているか、属さない項目に現れています"
@@ -4332,9 +4344,15 @@ mod tests {
 
     #[test]
     fn describe_effects_asks_for_the_group_once_per_item() {
-        // グループは項目ごとに引く。所属アイテム名から他の項目のグループを
-        // 導く形にすると、項目名が effect の中で一意であることを前提に置く。
-        let adapter = adapter();
+        // グループは項目ごとに引く。引いたグループの所属アイテム名から他の項目の
+        // グループを導くと、項目名が effect の中で一意であることを前提に置く。
+        //
+        // **導ける材料が実際に返る状況で数える。** 属する項目が 1 件も無ければ
+        // 導きようが無く、導く実装でも回数が項目数と等しくなる。
+        let adapter = adapter_with(|_| FakeHost {
+            groups: mixed_groups(),
+            ..FakeHost::new()
+        });
         let result = adapter
             .describe_effects(&describe_params(&["グロー", "ぼかし"]))
             .unwrap();
