@@ -230,6 +230,17 @@ fn playback_blocks_the_edit_before_the_section_is_entered() {
             .expect_err("{state} 中の編集が受理されました");
 
         assert_eq!(error.error_code(), ErrorCode::EditBlocked);
+        // 落ちたのは編集である。読み取りとして名乗ると、要求元は読み取りだけを
+        // 試して通ると読む。
+        assert_eq!(
+            error.to_string(),
+            format!("{state}のため編集できません"),
+            "編集の拒否が編集として名乗っていません"
+        );
+        let details = error.details();
+        assert_eq!(details["edit_state"], json!(state.as_str()));
+        assert_eq!(details["retry_after_ms"], json!(2_000));
+        assert_eq!(details["retry_requires"], json!("resend"));
         assert_eq!(harness.host.enter_calls(), 0, "{state} で区間へ入りました");
         harness.assert_untouched();
     }

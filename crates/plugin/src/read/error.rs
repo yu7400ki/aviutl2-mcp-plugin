@@ -15,6 +15,17 @@ const NOT_READY_RETRY_AFTER_MS: u64 = 500;
 /// 再生や出力は利用者の操作が終わるまで続くため、準備待ちより長く採る。
 const EDIT_BLOCKED_RETRY_AFTER_MS: u64 = 2_000;
 
+/// 再生・出力中の拒否が応答へ載せる補助情報を組み立てる。
+///
+/// 読み取りの拒否と編集の拒否は、名乗る文言だけが違う。案内する待ち時間も
+/// 補助情報のキーも同じものであり、写して 2 つにすると片方だけが古くなる。
+pub(crate) fn edit_blocked_details(state: EditState) -> Value {
+    json!({
+        "edit_state": state.as_str(),
+        "retry_after_ms": EDIT_BLOCKED_RETRY_AFTER_MS,
+    })
+}
+
 /// 編集情報を取得する SDK 関数の名前。
 ///
 /// 呼び出しの失敗と値の範囲外は同じ関数から来る。同じ名前を 2 か所に書くと、
@@ -205,10 +216,7 @@ impl ReadError {
     pub fn details(&self) -> Value {
         match self {
             ReadError::NotReady => json!({ "retry_after_ms": NOT_READY_RETRY_AFTER_MS }),
-            ReadError::EditBlocked { state } => json!({
-                "edit_state": state.as_str(),
-                "retry_after_ms": EDIT_BLOCKED_RETRY_AFTER_MS,
-            }),
+            ReadError::EditBlocked { state } => edit_blocked_details(*state),
             ReadError::SceneMismatch { expected, current } => json!({
                 "expected_scene_id": expected,
                 "current_scene_id": current,

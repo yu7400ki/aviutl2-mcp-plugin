@@ -72,7 +72,7 @@ impl<H: EditHost> HostEditAdapter<H> {
         }
         match self.edit_state()? {
             EditState::Edit => Ok(()),
-            state => Err(ReadError::EditBlocked { state }.into()),
+            state => Err(EditError::EditBlocked { state }),
         }
     }
 

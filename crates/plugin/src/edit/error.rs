@@ -1,7 +1,8 @@
 //! 編集の失敗を表す型と、応答へ載せる安全な補助情報。
 
 use crate::alias::{AliasAdmissionError, AliasRejection, AliasRowRejection};
-use crate::read::ReadError;
+use crate::read::error::edit_blocked_details;
+use crate::read::{EditState, ReadError};
 use aviutl2_mcp_core::{ErrorCode, ItemValue, ItemWriteError, TrackValueError};
 use serde_json::{Map, Value, json};
 
@@ -395,6 +396,19 @@ pub enum EditError {
     /// 層が要り、対応の取り違えを招く。
     #[error(transparent)]
     Read(#[from] ReadError),
+    /// 再生中・出力中で編集区間へ入れない。
+    ///
+    /// [`ReadError::EditBlocked`] とは分ける。[`EditError::Read`] は編集の途中で
+    /// 実際に読み取りが落ちる場合にも使われており、そちらは読み取りとして名乗る
+    /// のが正しい。どちらの経路で落ちたかは文言だけで読める。
+    ///
+    /// エラーコードも補助情報も読み取りの拒否と同じものを名乗る。要求元へ求める
+    /// 行動（同じ時間だけ待って送り直す）が変わらないためである。
+    #[error("{state}のため編集できません")]
+    EditBlocked {
+        /// 編集を妨げている編集状態。
+        state: EditState,
+    },
     /// 作成・移動の宛先に既存オブジェクトがある。
     #[error("宛先に既存のオブジェクトがあります")]
     DestinationOccupied {
@@ -740,6 +754,7 @@ impl EditError {
     pub fn error_code(&self) -> ErrorCode {
         match self {
             EditError::Read(error) => error.error_code(),
+            EditError::EditBlocked { .. } => ErrorCode::EditBlocked,
             EditError::DestinationOccupied { .. }
             | EditError::LayerLocked { .. }
             | EditError::EpochMismatch { .. }
@@ -827,7 +842,8 @@ impl EditError {
                 }
             },
             EditError::Read(ReadError::NotReady)
-            | EditError::Read(ReadError::EditBlocked { .. }) => RetryRequires::Resend,
+            | EditError::Read(ReadError::EditBlocked { .. })
+            | EditError::EditBlocked { .. } => RetryRequires::Resend,
             // 読み直せば宛先の空きが分かる。
             EditError::DestinationOccupied { .. } => RetryRequires::Refetch,
             // ロックの解除は別の operation であり、同じ要求を送り直しても対象を
@@ -862,6 +878,7 @@ impl EditError {
     fn fill_details(&self, details: &mut Map<String, Value>) {
         match self {
             EditError::Read(error) => merge(details, error.details()),
+            EditError::EditBlocked { state } => merge(details, edit_blocked_details(*state)),
             EditError::DestinationOccupied {
                 layer,
                 frame,
@@ -1104,7 +1121,6 @@ fn truncate(text: &str) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::read::EditState;
     use crate::test_support::sample_object_summary;
     use aviutl2_mcp_core::{EffectItemType, Movement, PathSyntaxError, TextSyntaxError};
 
@@ -1145,6 +1161,13 @@ pub(crate) mod tests {
                 operation: "get_object_alias",
             }),
             EditError::Read(ReadError::Panicked),
+            // 編集の拒否。読み取りの拒否と同じく、状態は 2 通り現れる。
+            EditError::EditBlocked {
+                state: EditState::Preview,
+            },
+            EditError::EditBlocked {
+                state: EditState::Save,
+            },
             EditError::DestinationOccupied {
                 layer: 3,
                 frame: 240,
@@ -1343,6 +1366,7 @@ pub(crate) mod tests {
     fn variant_name(error: &EditError) -> &'static str {
         match error {
             EditError::Read(_) => "Read",
+            EditError::EditBlocked { .. } => "EditBlocked",
             EditError::DestinationOccupied { .. } => "DestinationOccupied",
             EditError::EpochMismatch { .. } => "EpochMismatch",
             EditError::LayerLocked { .. } => "LayerLocked",
@@ -1374,6 +1398,7 @@ pub(crate) mod tests {
         // 落ちたものは応答コードも再試行の案内も許可キーも守られない。
         const VARIANTS: &[&str] = &[
             "Read",
+            "EditBlocked",
             "DestinationOccupied",
             "EpochMismatch",
             "LayerLocked",
@@ -1487,6 +1512,9 @@ pub(crate) mod tests {
                 ErrorCode::AmbiguousSelector,
                 ErrorCode::SdkError,
                 ErrorCode::InternalError,
+                // 編集の拒否。読み取りの拒否と同じコードで返る。
+                ErrorCode::EditBlocked,
+                ErrorCode::EditBlocked,
                 ErrorCode::PreconditionFailed,
                 // 前提の epoch と focus の epoch を別々に名乗る 2 つ。
                 ErrorCode::PreconditionFailed,
@@ -1667,6 +1695,33 @@ pub(crate) mod tests {
             .details()["retry_requires"],
             json!("resend")
         );
+        assert_eq!(
+            EditError::EditBlocked {
+                state: EditState::Save
+            }
+            .details()["retry_requires"],
+            json!("resend")
+        );
+    }
+
+    #[test]
+    fn a_blocked_edit_says_it_cannot_edit_while_a_blocked_read_says_it_cannot_read() {
+        // どちらの経路で落ちたかが文言だけで読める。同じ状態を指す 2 つの失敗が
+        // 同じ文を名乗ると、要求元も運用者も切り分けられない。
+        let edit = EditError::EditBlocked {
+            state: EditState::Preview,
+        };
+        let read = EditError::Read(ReadError::EditBlocked {
+            state: EditState::Preview,
+        });
+        assert_eq!(edit.to_string(), "プレビュー再生中のため編集できません");
+        assert_eq!(read.to_string(), "プレビュー再生中のため読み取りできません");
+        // 文言以外は 1 つも変わらない。要求元へ求める行動が同じであるため、
+        // コードも案内も同じものを名乗る。
+        assert_eq!(edit.error_code(), read.error_code());
+        assert_eq!(edit.details(), read.details());
+        assert_eq!(edit.details()["edit_state"], json!("preview"));
+        assert_eq!(edit.details()["retry_after_ms"], json!(2_000));
     }
 
     #[test]
