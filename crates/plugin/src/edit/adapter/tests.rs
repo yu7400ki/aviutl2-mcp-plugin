@@ -3917,6 +3917,46 @@ fn an_added_effect_reports_where_it_landed_in_the_column() {
 }
 
 #[test]
+fn every_effect_changing_response_reports_the_column_position() {
+    // 既定の対象は `動画ファイル` と `ぼかし` を持つ。先頭の `ぼかし` は同名内で
+    // 0 番目・列では 1 番目であり、2 つの数が食い違う。応答が返す位置は、その
+    // 時点の列を読み直した添字である。
+    let harness = Harness::new();
+    let outcomes = [
+        (
+            "set_object_item",
+            harness
+                .edit
+                .set_object_item(&SetObjectItemParams {
+                    selector: harness.effect_selector(1, 100, "ぼかし", 0),
+                    item: "範囲".to_string(),
+                    value: ItemValue::Integer { value: 30 },
+                })
+                .expect("set_object_item"),
+        ),
+        (
+            "set_effect_enabled",
+            harness
+                .edit
+                .set_effect_enabled(&SetEffectEnabledParams {
+                    selector: harness.effect_selector(1, 100, "ぼかし", 0),
+                    enabled: false,
+                })
+                .expect("set_effect_enabled"),
+        ),
+    ];
+    for (tool, outcome) in outcomes {
+        let effect = outcome.effect.expect("変更後の effect");
+        assert_eq!(effect.index, 0, "{tool}");
+        assert_eq!(effect.position, 1, "{tool}");
+        let scene = harness.host.scene();
+        let effects = &scene.layers[1].objects[0].effects;
+        assert_eq!(effects[effect.position].name, effect.name, "{tool}");
+        assert_eq!(effects[effect.position].index, effect.index, "{tool}");
+    }
+}
+
+#[test]
 fn moving_reports_the_placement_the_host_chose() {
     // ホストが宛先を調整しても移動そのものは成功している。要求値との一致を
     // 求めると、成功した移動が対象の不在として返る。
