@@ -50,6 +50,14 @@ const MAX_DETAIL_STRING_CHARS: usize = 1_024;
 /// `details` の配列に残す最大要素数。
 const MAX_DETAIL_ARRAY_ITEMS: usize = 32;
 
+/// 上限で切った配列の位置と、切る前の要素数を載せる key。
+///
+/// [`sanitize_details`] が書く予約された key である。走査が配列を 1 つでも切った
+/// ときは、接続先が同じ名前で送ってきた値をこの記録で置き換える。1 つも切らな
+/// かったときは他の key と同じに扱って通す。予約はトップレベルだけであり、入れ子
+/// の同名 key はただの値である。
+const TRUNCATED_KEY: &str = "truncated";
+
 /// `details` を辿る最大の深さ。
 const MAX_DETAIL_DEPTH: usize = 8;
 
@@ -223,7 +231,7 @@ pub fn text(error: &ErrorObject) -> String {
 /// 値は compact JSON で書く。`structuredContent` に載る字面と一致させ、両方を
 /// 読む要求元が同じものだと分かるようにするためである。
 fn detail_lines(details: &Value) -> Vec<String> {
-    let sanitized = sanitize_details(details, 0);
+    let sanitized = sanitize_details(details);
     let Some(map) = sanitized.as_object() else {
         return Vec::new();
     };
@@ -303,13 +311,47 @@ fn batch_failure_lines(details: &Value) -> Vec<String> {
 /// `details` は key の断片で選別できるが、`message` は自由文のため長さを
 /// 抑えるだけで内容は選別できない。message に何を書くかは接続先の責務である。
 fn sanitize(error: ErrorObject) -> ErrorObject {
-    let details = sanitize_details(&error.details, 0);
+    let details = sanitize_details(&error.details);
     let message = clamp_chars(&error.message, MAX_MESSAGE_CHARS);
     ErrorObject::new(error.code, message, error.retryable).with_details(details)
 }
 
 /// `details` から秘匿され得る値と過大な値を取り除く。
-pub fn sanitize_details(value: &Value, depth: usize) -> Value {
+///
+/// [`MAX_DETAIL_ARRAY_ITEMS`] で切った配列は、切ったことを [`TRUNCATED_KEY`] の
+/// 下へ記録する。黙って切ると、要求元は落とした要素を「無い」と読む。
+///
+/// 記録の key は切られた配列の位置であり、object の key と配列の添字を同じ区切りで
+/// 並べたドット綴りである（`known_movements` / `outer.inner` / `rows.0`）。値は切る
+/// 前の要素数である。
+///
+/// 名乗る先はトップレベルの object である。`details` は object か `null` であり、
+/// 他の形の値には記録を足さない。
+///
+/// 二度通しても結果は変わらない。切り詰め済みの配列は再び上限に掛からず、1 度目の
+/// 記録はそのまま通る。
+pub fn sanitize_details(value: &Value) -> Value {
+    let mut truncated = Map::new();
+    let sanitized = sanitize_value(value, 0, &mut Vec::new(), &mut truncated);
+    match sanitized {
+        Value::Object(mut map) if !truncated.is_empty() => {
+            map.insert(TRUNCATED_KEY.to_string(), Value::Object(truncated));
+            Value::Object(map)
+        }
+        sanitized => sanitized,
+    }
+}
+
+/// `details` を辿りながら選別と切り詰めを行い、切った配列を `truncated` へ集める。
+///
+/// `path` はいま辿っている値のトップレベルからの位置である。秘匿対象の key は
+/// 辿る前に落とすため、集まる位置がその名前を含むことはない。
+fn sanitize_value(
+    value: &Value,
+    depth: usize,
+    path: &mut Vec<String>,
+    truncated: &mut Map<String, Value>,
+) -> Value {
     if depth >= MAX_DETAIL_DEPTH {
         return Value::Null;
     }
@@ -320,17 +362,33 @@ pub fn sanitize_details(value: &Value, depth: usize) -> Value {
                 if is_sensitive_key(key) {
                     continue;
                 }
-                sanitized.insert(key.clone(), sanitize_details(item, depth + 1));
+                path.push(key.clone());
+                sanitized.insert(
+                    key.clone(),
+                    sanitize_value(item, depth + 1, path, truncated),
+                );
+                path.pop();
             }
             Value::Object(sanitized)
         }
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .take(MAX_DETAIL_ARRAY_ITEMS)
-                .map(|item| sanitize_details(item, depth + 1))
-                .collect(),
-        ),
+        Value::Array(items) => {
+            if items.len() > MAX_DETAIL_ARRAY_ITEMS {
+                truncated.insert(path.join("."), Value::from(items.len()));
+            }
+            Value::Array(
+                items
+                    .iter()
+                    .take(MAX_DETAIL_ARRAY_ITEMS)
+                    .enumerate()
+                    .map(|(index, item)| {
+                        path.push(index.to_string());
+                        let item = sanitize_value(item, depth + 1, path, truncated);
+                        path.pop();
+                        item
+                    })
+                    .collect(),
+            )
+        }
         Value::String(text) => Value::String(clamp_chars(text, MAX_DETAIL_STRING_CHARS)),
         other => other.clone(),
     }
@@ -552,13 +610,10 @@ mod tests {
 
     #[test]
     fn sensitive_details_are_removed_from_nested_objects() {
-        let details = sanitize_details(
-            &serde_json::json!({
-                "outer": { "auth_secret": "x", "revision": 3 },
-                "list": [{ "server_nonce": "y", "count": 1 }],
-            }),
-            0,
-        );
+        let details = sanitize_details(&serde_json::json!({
+            "outer": { "auth_secret": "x", "revision": 3 },
+            "list": [{ "server_nonce": "y", "count": 1 }],
+        }));
         assert_eq!(
             details,
             serde_json::json!({
@@ -572,7 +627,6 @@ mod tests {
     fn long_detail_strings_are_clamped() {
         let details = sanitize_details(
             &serde_json::json!({ "note": "あ".repeat(MAX_DETAIL_STRING_CHARS * 2) }),
-            0,
         );
         let note = details["note"].as_str().expect("note は文字列");
         assert_eq!(note.chars().count(), MAX_DETAIL_STRING_CHARS);
@@ -628,10 +682,77 @@ mod tests {
         let items: Vec<Value> = (0..MAX_DETAIL_ARRAY_ITEMS * 3)
             .map(|i| serde_json::json!(i))
             .collect();
-        let details = sanitize_details(&serde_json::json!({ "items": items }), 0);
+        let details = sanitize_details(&serde_json::json!({ "items": items }));
         let truncated = details["items"].as_array().expect("items は配列");
         assert_eq!(truncated.len(), MAX_DETAIL_ARRAY_ITEMS);
         assert_eq!(truncated[0], serde_json::json!(0));
+    }
+
+    #[test]
+    fn a_truncated_array_names_its_position_and_how_many_items_it_had() {
+        // 黙って切ると、要求元は落とした要素を「無い」と読む。残った件数は
+        // 上限そのものであり、元が何件だったかは切った側にしか分からない。
+        const ITEMS: usize = 47;
+        let items: Vec<Value> = (0..ITEMS).map(|index| serde_json::json!(index)).collect();
+        let details = sanitize_details(&serde_json::json!({ "known_movements": items }));
+        assert_eq!(
+            details["known_movements"]
+                .as_array()
+                .expect("known_movements は配列")
+                .len(),
+            MAX_DETAIL_ARRAY_ITEMS
+        );
+        assert_eq!(
+            details[TRUNCATED_KEY],
+            serde_json::json!({ "known_movements": ITEMS })
+        );
+    }
+
+    #[test]
+    fn an_array_that_fits_is_not_named_as_truncated() {
+        // 上限ちょうどでは 1 件も落ちていない。落ちていないのに名乗ると、
+        // 要求元は在りもしない欠落を探す。
+        let items: Vec<Value> = (0..MAX_DETAIL_ARRAY_ITEMS)
+            .map(|index| serde_json::json!(index))
+            .collect();
+        let details = sanitize_details(&serde_json::json!({ "items": items }));
+        assert!(details.get(TRUNCATED_KEY).is_none(), "{details}");
+    }
+
+    #[test]
+    fn a_nested_array_is_named_by_its_position() {
+        // 位置に依らず 1 つの規則で綴る。object の key と配列の添字は同じ
+        // 区切りで並ぶ。
+        let nested: Vec<Value> = (0..MAX_DETAIL_ARRAY_ITEMS + 1)
+            .map(|index| serde_json::json!(index))
+            .collect();
+        let in_array: Vec<Value> = (0..MAX_DETAIL_ARRAY_ITEMS + 8)
+            .map(|index| serde_json::json!(index))
+            .collect();
+        let details = sanitize_details(&serde_json::json!({
+            "outer": { "inner": nested },
+            "rows": [in_array],
+        }));
+        assert_eq!(
+            details[TRUNCATED_KEY],
+            serde_json::json!({
+                "outer.inner": MAX_DETAIL_ARRAY_ITEMS + 1,
+                "rows.0": MAX_DETAIL_ARRAY_ITEMS + 8,
+            })
+        );
+    }
+
+    #[test]
+    fn the_truncation_key_is_not_a_sensitive_fragment() {
+        // 断片と重なれば名乗りは黙って落ち、切り詰めが名乗られていた事実ごと
+        // 消える。
+        for fragment in SENSITIVE_KEY_FRAGMENTS {
+            assert!(
+                !TRUNCATED_KEY.contains(fragment),
+                "{fragment} と重なっています"
+            );
+        }
+        assert!(!is_sensitive_key(TRUNCATED_KEY));
     }
 
     #[test]
@@ -640,7 +761,7 @@ mod tests {
         for _ in 0..MAX_DETAIL_DEPTH + 2 {
             value = serde_json::json!({ "nested": value });
         }
-        let sanitized = sanitize_details(&value, 0);
+        let sanitized = sanitize_details(&value);
         let text = serde_json::to_string(&sanitized).expect("直列化できる");
         assert!(!text.contains("leaf"), "深すぎる値が残っています: {text}");
     }
@@ -842,6 +963,38 @@ mod tests {
     }
 
     #[test]
+    fn a_truncated_list_says_so_in_both_the_text_and_the_structured_content() {
+        // 切り詰めは両方へ及ぶ。片方だけが名乗ると、もう片方を読む要求元は
+        // 落ちた要素を「無い」と読んだままになる。
+        const ITEMS: usize = 47;
+        let movements: Vec<Value> = (0..ITEMS)
+            .map(|index| serde_json::json!({ "name": format!("移動{index}"), "writable": true }))
+            .collect();
+        let remote = ErrorObject::new(
+            ErrorCode::UnsupportedOperation,
+            "移動方法の名前が既知の一覧にありません",
+            false,
+        )
+        .with_details(serde_json::json!({
+            "reason": "track_mode_unknown",
+            "known_movements": movements,
+        }));
+        let error = from_pipe_error(
+            &PipeClientError::Remote(Box::new(remote)),
+            OPERATION_MOVE_OBJECT,
+        );
+        assert_eq!(
+            structured(&error)["details"][TRUNCATED_KEY],
+            serde_json::json!({ "known_movements": ITEMS })
+        );
+        let text = text(&error);
+        assert!(
+            text.contains(r#"details.truncated={"known_movements":47}"#),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn detail_lines_are_reproducible_and_ordered_by_key() {
         // 同じ失敗が呼ぶたびに違う並びで返ると、要求元は差分を取れず、
         // 応答の比較でしか分からない退行を見逃す。
@@ -1036,8 +1189,9 @@ mod tests {
             "items": (0..MAX_DETAIL_ARRAY_ITEMS * 3).collect::<Vec<_>>(),
             "deep": deep,
         });
-        let once = sanitize_details(&details, 0);
-        assert_eq!(sanitize_details(&once, 0), once);
+        let once = sanitize_details(&details);
+        assert!(once.get(TRUNCATED_KEY).is_some(), "{once}");
+        assert_eq!(sanitize_details(&once), once);
     }
 
     #[test]
