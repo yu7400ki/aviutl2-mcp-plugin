@@ -4027,20 +4027,28 @@ mod tests {
 
     #[test]
     fn create_object_says_where_an_alias_name_comes_from_and_how_it_is_checked() {
-        // 名前の出どころ・使えない文字・生テキストより厳しい検証。どれも要求元が
-        // 名前を用意する前に要る。とくに禁止文字は AviUtl2 の UI が課すもので
-        // あり、我々が決めた制約ではない。**値を書く場所の隣が述べる。**
+        // 名前の出どころと使えない文字。どちらも要求元が名前を用意する前に要る。
+        // とくに禁止文字は AviUtl2 の UI が課すものであり、我々が決めた制約では
+        // ない。**値を書く場所の隣が述べる。**
         let source = object_source_description("alias_name");
         for phrase in [
             "list_object_aliases が返した名前",
             "中身を読む必要は無い",
             r#"\ / : * ? " ' < > | % = , ."#,
             "AviUtl2 の UI",
-            "object_alias（生テキスト）より検証が厳しい",
         ] {
             assert!(
                 source.contains(phrase),
                 "作成元の alias_name が {phrase} に触れていません: {source}"
+            );
+        }
+        // **作成元どうしを比べない。** 2 つの作成元が通す検証は包含関係に無く、
+        // 片方をもう片方より厳しいと述べれば、どちら向きに述べても嘘になる。何が
+        // どちらに掛かるかは tool の説明が作成元ごとに述べる。
+        for phrase in ["より検証が厳しい", "生テキスト"] {
+            assert!(
+                !source.contains(phrase),
+                "作成元の alias_name が {phrase} と述べています: {source}"
             );
         }
         // 拒否される条件は tool の説明に残る。その呼び出しが失敗する条件そのもので

@@ -128,8 +128,6 @@ pub enum ObjectSourceInput {
         name: String,
     },
     /// 登録済みオブジェクトエイリアスの名前から作成する。
-    ///
-    /// object_alias（生テキスト）より検証が厳しい。
     AliasName {
         /// list_object_aliases が返した名前。エイリアスファイルの中身を読む必要は無い。
         /// `\ / : * ? " ' < > | % = , .` は含められない。これは AviUtl2 の UI が登録時に課す制約である。
