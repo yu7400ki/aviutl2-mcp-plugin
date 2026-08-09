@@ -23,9 +23,10 @@ use crate::read::host::{
 use crate::test_support::alias_with_effects;
 use aviutl2_mcp_core::{
     AvailableEffectItem, Cursor, DisplayRange, EffectFlags, EffectItem, EffectItemType, EffectType,
-    EvaluatedItemKind, FiniteF64, FrameRange, GridBpm, ItemFacets, ItemValue, ModuleEntry,
-    ModuleType, Movement, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange, TrackDecodeError,
-    TrackInfo, TrackValue, decode_host_text, decode_track_value, encode_host_text,
+    EvaluatedItemKind, FiniteF64, FrameRange, GridBpm, ItemFacets, ItemGroup, ItemValue,
+    ModuleEntry, ModuleType, Movement, PALETTE_COLOR_COUNT, PaletteEntry, Rgba, SectionRange,
+    TrackDecodeError, TrackInfo, TrackValue, decode_host_text, decode_track_value,
+    encode_host_text,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -917,6 +918,26 @@ impl ReadHost for FakeReadHost {
             .ok_or(ReadError::Sdk {
                 operation: "enum_effect_item",
             })
+    }
+
+    fn effect_item_group(
+        &self,
+        effect_name: &str,
+        item_name: &str,
+    ) -> Result<Option<ItemGroup>, ReadError> {
+        match self
+            .0
+            .catalog
+            .iter()
+            .find(|entry| entry.name == effect_name)
+            .and_then(|entry| entry.groups.get(item_name))
+        {
+            Some(FakeItemGroup::Member(group)) => Ok(Some(group.clone())),
+            Some(FakeItemGroup::Unavailable) => Err(ReadError::Sdk {
+                operation: "get_effect_item_group_names",
+            }),
+            None => Ok(None),
+        }
     }
 
     fn effect_help(&self, _effect_name: &str) -> HostEffectHelp {
@@ -2531,6 +2552,7 @@ pub(crate) fn shape_catalog_entry() -> FakeCatalogEntry {
         flags: EffectFlags::from_raw(1),
         items: item_definitions(shape(0).items),
         facets: HashMap::new(),
+        groups: HashMap::new(),
     }
 }
 
@@ -2593,6 +2615,7 @@ pub(crate) fn coordinate_catalog_entry() -> FakeCatalogEntry {
         flags: EffectFlags::from_raw(1),
         items: item_definitions(coordinate(0, &[0.0, 1.0]).items),
         facets: HashMap::new(),
+        groups: HashMap::new(),
     }
 }
 
@@ -2725,6 +2748,21 @@ pub(crate) struct FakeCatalogEntry {
     /// 挙動の側である。**既定は空である**——表を持たない環境がそのまま既定で
     /// あり、面が得られることを前提にした経路を作らない。
     pub(crate) facets: HashMap<String, ItemFacets>,
+    /// 設定項目名から引くグループ。
+    ///
+    /// **一覧に無い項目はグループに属さない。** 属さないことと引けないことを
+    /// 別々に作れるよう、引けない項目は [`FakeItemGroup::Unavailable`] で置く。
+    /// **既定は空である。**
+    pub(crate) groups: HashMap<String, FakeItemGroup>,
+}
+
+/// 設定項目 1 件についてホストがグループをどう答えるか。
+#[derive(Debug, Clone)]
+pub(crate) enum FakeItemGroup {
+    /// グループに属する。
+    Member(ItemGroup),
+    /// 引けない。
+    Unavailable,
 }
 
 impl FakeCatalogEntry {
@@ -2761,6 +2799,7 @@ pub(crate) fn fake_catalog() -> Vec<FakeCatalogEntry> {
                 item_type: EffectItemType::Integer,
             }],
             facets: HashMap::new(),
+            groups: HashMap::new(),
         },
         FakeCatalogEntry {
             name: "動画ファイル".to_string(),
@@ -2768,6 +2807,7 @@ pub(crate) fn fake_catalog() -> Vec<FakeCatalogEntry> {
             flags: EffectFlags::from_raw(3),
             items: Vec::new(),
             facets: HashMap::new(),
+            groups: HashMap::new(),
         },
         FakeCatalogEntry {
             name: "音声フェード".to_string(),
@@ -2776,6 +2816,7 @@ pub(crate) fn fake_catalog() -> Vec<FakeCatalogEntry> {
             flags: EffectFlags::from_raw(2),
             items: Vec::new(),
             facets: HashMap::new(),
+            groups: HashMap::new(),
         },
         FakeCatalogEntry {
             name: "標準描画".to_string(),
@@ -2783,6 +2824,7 @@ pub(crate) fn fake_catalog() -> Vec<FakeCatalogEntry> {
             flags: EffectFlags::from_raw(1),
             items: Vec::new(),
             facets: HashMap::new(),
+            groups: HashMap::new(),
         },
     ]
 }
@@ -3083,5 +3125,37 @@ mod tests {
                 "{value:?} の読み直しが渡した文字列と一致しません"
             );
         }
+    }
+
+    #[test]
+    fn the_fake_read_host_answers_about_a_group_in_three_ways() {
+        // グループに属する・属さない・引けないの 3 通りを作り分けられる。
+        // 引けないを作れなければ、失敗を「属さない」へ倒した実装を検査できない。
+        let group = ItemGroup {
+            index: 1,
+            item_names: vec!["図形の種類".to_string(), "サイズ".to_string()],
+        };
+        let mut entry = shape_catalog_entry();
+        entry
+            .groups
+            .insert("サイズ".to_string(), FakeItemGroup::Member(group.clone()));
+        entry
+            .groups
+            .insert("色".to_string(), FakeItemGroup::Unavailable);
+        let mut edit = FakeEditHost::new();
+        edit.catalog.push(entry);
+        let host = FakeReadHost(Arc::new(edit));
+
+        assert_eq!(
+            host.effect_item_group(SHAPE, "サイズ").unwrap(),
+            Some(group)
+        );
+        assert_eq!(host.effect_item_group(SHAPE, "メモ").unwrap(), None);
+        assert!(matches!(
+            host.effect_item_group(SHAPE, "色"),
+            Err(ReadError::Sdk {
+                operation: "get_effect_item_group_names"
+            })
+        ));
     }
 }

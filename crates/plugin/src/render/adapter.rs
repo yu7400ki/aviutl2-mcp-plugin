@@ -599,6 +599,14 @@ mod tests {
             Ok(Vec::new())
         }
 
+        fn effect_item_group(
+            &self,
+            _effect_name: &str,
+            _item_name: &str,
+        ) -> Result<Option<aviutl2_mcp_core::ItemGroup>, ReadError> {
+            Ok(None)
+        }
+
         fn effect_help(&self, _effect_name: &str) -> HostEffectHelp {
             HostEffectHelp::default()
         }

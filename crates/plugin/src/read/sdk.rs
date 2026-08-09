@@ -16,8 +16,8 @@ use crate::read::host::{
 use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection};
 use aviutl2_mcp_core::{
     AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, EffectType, FiniteF64,
-    FrameRange, GridBpm, ItemValue, ModuleEntry, ModuleType, Rgba, SectionRange, decode_host_text,
-    decode_track_value, parse_check_value,
+    FrameRange, GridBpm, ItemGroup, ItemValue, ModuleEntry, ModuleType, Rgba, SectionRange,
+    decode_host_text, decode_track_value, parse_check_value,
 };
 use std::collections::HashMap;
 use std::ops::Range;
@@ -91,6 +91,18 @@ impl ReadHost for SdkReadHost {
                 item_type: EffectItemType::from_raw(i32::from(item.item_type)),
             })
             .collect())
+    }
+
+    fn effect_item_group(
+        &self,
+        effect_name: &str,
+        item_name: &str,
+    ) -> Result<Option<ItemGroup>, ReadError> {
+        // ラッパーは所属アイテム数が 0 のとき `None` を返す。
+        Ok(EDIT_HANDLE
+            .get_effect_item_group_names(effect_name, item_name)
+            .map_err(|_| sdk("get_effect_item_group_names"))?
+            .map(|(index, item_names)| ItemGroup { index, item_names }))
     }
 
     fn effect_help(&self, effect_name: &str) -> HostEffectHelp {

@@ -870,6 +870,7 @@ fn an_effect_source_does_not_go_through_the_media_path_check() {
             flags: EffectFlags::from_raw(1),
             items: Vec::new(),
             facets: HashMap::new(),
+            groups: HashMap::new(),
         });
     });
     harness.host.clear_calls();
@@ -6658,6 +6659,7 @@ fn an_effect_the_catalog_does_not_describe_is_let_through() {
                 flags: EffectFlags::from_raw(1),
                 items: Vec::new(),
                 facets: HashMap::new(),
+                groups: HashMap::new(),
             });
             host.scene.get_mut().unwrap().layers[1].objects[0].effects =
                 vec![blur(0, 10), unlisted(name)];

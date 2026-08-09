@@ -8,7 +8,7 @@
 use crate::read::error::ReadError;
 use aviutl2_mcp_core::{
     AvailableEffectItem, EffectFlags, EffectItem, EffectType, FiniteF64, FrameRange, GridBpm,
-    ItemFacets, ModuleEntry, Rgba, SectionRange,
+    ItemFacets, ItemGroup, ModuleEntry, Rgba, SectionRange,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -445,6 +445,24 @@ pub trait ReadHost: Send + Sync {
     /// 確定させる材料ではなく、説明が書かれていない項目も、書かれているのに
     /// 登録されていない項目も在り得る。
     fn effect_items(&self, effect_name: &str) -> Result<Vec<AvailableEffectItem>, ReadError>;
+
+    /// effect 1 件の設定項目が属するグループを返す。参照区間を必要としない。
+    ///
+    /// **`None` は「グループに属さない」を表す。** ホストは所属アイテムを持たない
+    /// 項目についてもそう名乗る。引けなかったことは `Err` として返り、**両者は
+    /// 区別される**——属さない項目を失敗にせず、引けなかった項目を属さないことに
+    /// もしない。
+    ///
+    /// **戻り値はホストが返したものをそのまま運ぶ。** 所属アイテム名の
+    /// [`ItemGroup::index`] 番目が `item_name` と一致することは確かめない。
+    ///
+    /// **項目ごとに 1 度引く呼び出しである。** 全項目について呼ぶと費用が項目数で
+    /// 決まるため、呼び出し側は応答へ載せる分に限る。
+    fn effect_item_group(
+        &self,
+        effect_name: &str,
+        item_name: &str,
+    ) -> Result<Option<ItemGroup>, ReadError>;
 
     /// effect 1 件に対してホストが同梱する説明を返す。参照区間を必要としない。
     ///

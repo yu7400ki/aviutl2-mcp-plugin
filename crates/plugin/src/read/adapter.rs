@@ -811,7 +811,7 @@ mod tests {
     };
     use aviutl2_mcp_core::{
         AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
-        FiniteF64, FrameRange, GridBpm, ItemChoices, ItemFacets, ItemRange, ItemValue,
+        FiniteF64, FrameRange, GridBpm, ItemChoices, ItemFacets, ItemGroup, ItemRange, ItemValue,
         PALETTE_COLOR_COUNT, Rgba, SectionRange, TableSource, TrackInfo, TrackValue,
     };
     use std::sync::Mutex;
@@ -867,6 +867,15 @@ mod tests {
         objects: Vec<FakeObject>,
     }
 
+    /// 設定項目 1 件についてホストがグループをどう答えるか。
+    #[derive(Debug, Clone)]
+    enum FakeItemGroup {
+        /// グループに属する。
+        Member(ItemGroup),
+        /// 引けない。
+        Unavailable,
+    }
+
     /// SDK の代わりに定型データを返すホスト。
     ///
     /// 呼び出された経路を記録するため、受付前に SDK を呼ばないことを検証できる。
@@ -894,6 +903,11 @@ mod tests {
         /// **既定は空である。** 中身を持たない基底だけの環境がそのまま既定で
         /// あり、面が得られることを前提にした経路を作らない。
         facets: Vec<(String, HostEffectFacets)>,
+        /// 設定項目ごとのグループ。effect 名と設定項目名の組で引く。
+        ///
+        /// **一覧に無い項目はグループに属さない。** 属さないことと引けないことを
+        /// 別々に作れるよう、引けない項目は [`FakeItemGroup::Unavailable`] で置く。
+        groups: Vec<((String, String), FakeItemGroup)>,
         /// 設定項目の数を問い合わせた effect 名を、問い合わせた順に覚える。
         ///
         /// 窓の外の effect について問い合わせていないことを、件数でも名前でも
@@ -1008,6 +1022,7 @@ mod tests {
                 catalog: fake_catalog(),
                 help: Vec::new(),
                 facets: Vec::new(),
+                groups: Vec::new(),
                 item_count_queries: Mutex::new(Vec::new()),
                 panic_at: None,
                 object_read_fails_at: None,
@@ -1129,6 +1144,27 @@ mod tests {
                 .ok_or(ReadError::Sdk {
                     operation: "enum_effect_item",
                 })
+        }
+
+        fn effect_item_group(
+            &self,
+            effect_name: &str,
+            item_name: &str,
+        ) -> Result<Option<ItemGroup>, ReadError> {
+            self.assert_ready("get_effect_item_group_names");
+            self.record("effect_item_group");
+            match self
+                .groups
+                .iter()
+                .find(|((effect, item), _)| effect == effect_name && item == item_name)
+                .map(|(_, group)| group)
+            {
+                Some(FakeItemGroup::Member(group)) => Ok(Some(group.clone())),
+                Some(FakeItemGroup::Unavailable) => Err(ReadError::Sdk {
+                    operation: "get_effect_item_group_names",
+                }),
+                None => Ok(None),
+            }
         }
 
         fn effect_help(&self, effect_name: &str) -> HostEffectHelp {
@@ -4125,6 +4161,44 @@ mod tests {
             .filter(|call| **call == "effect_help")
             .count();
         assert_eq!(asked, 2, "効果の数と説明を引いた回数が食い違っています");
+    }
+
+    #[test]
+    fn the_fake_host_answers_about_a_group_in_three_ways() {
+        // グループに属する・属さない・引けないの 3 通りを作り分けられる。
+        // 引けないを作れなければ、失敗を「属さない」へ倒した実装を検査できない。
+        let group = ItemGroup {
+            index: 1,
+            item_names: vec!["グローの項目1".to_string(), "グローの項目0".to_string()],
+        };
+        let host = FakeHost {
+            groups: vec![
+                (
+                    ("グロー".to_string(), "グローの項目0".to_string()),
+                    FakeItemGroup::Member(group.clone()),
+                ),
+                (
+                    ("グロー".to_string(), "グローの項目2".to_string()),
+                    FakeItemGroup::Unavailable,
+                ),
+            ],
+            ..FakeHost::new()
+        };
+
+        assert_eq!(
+            host.effect_item_group("グロー", "グローの項目0").unwrap(),
+            Some(group)
+        );
+        assert_eq!(
+            host.effect_item_group("グロー", "グローの項目3").unwrap(),
+            None
+        );
+        assert!(matches!(
+            host.effect_item_group("グロー", "グローの項目2"),
+            Err(ReadError::Sdk {
+                operation: "get_effect_item_group_names"
+            })
+        ));
     }
 
     #[test]
