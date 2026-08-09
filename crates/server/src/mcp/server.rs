@@ -1458,9 +1458,9 @@ impl AviUtl2McpServer {
     /// details.reported_position にホストが名乗った位置が入る。
     /// 切り詰めで列が動いた場合は元の並びへ戻す。details.restored が真なら列は
     /// 要求の前と同じであり、このとき details.retry_requires は none になる。
-    /// 偽なら戻せておらず details.consistency_unknown が立つ。
     /// 対象が既に下限に居て列が 1 件も動かなかった場合も details.restored は真になる。
     /// 列が動いていない失敗では要求に使った selector がそのまま通る。
+    /// details.restored が偽なら戻せておらず details.consistency_unknown が立つ。
     /// 応答の effect には移動後に読み直した effect が入る。
     /// 成功して列の位置が変われば、要求に使った selector は使えなくなる——
     /// fingerprint が変わり、同名 effect があれば effect_index も入れ替わる。
@@ -3429,10 +3429,11 @@ mod tests {
     }
 
     #[test]
-    fn only_the_tools_without_a_selector_ask_for_an_expected_epoch() {
-        // 前提の epoch を運ぶのは selector を持たない tool だけである。持つ tool へ
-        // 宣言すると、同じ意味の値が 1 要求の 2 か所へ並ぶ。どちらの側に属するかを
-        // 表で固定するので、tool を足したときに素通りしない。
+    fn only_the_tools_that_may_carry_no_selector_ask_for_an_expected_epoch() {
+        // 前提の epoch を運ぶのは、要求が selector を 1 つも運ばないことがある
+        // tool だけである。必ず運ぶ tool へ宣言すると、同じ意味の値が 1 要求の
+        // 2 か所へ並ぶ。どちらの側に属するかを表で固定するので、tool を足した
+        // ときに素通りしない。
         for name in edit_like_tools() {
             let properties = tool_named(name).input_schema["properties"]
                 .as_object()
@@ -5260,8 +5261,9 @@ mod tests {
 
     #[test]
     fn input_schemas_declare_the_expected_epoch_only_where_it_is_used() {
-        // 前提の epoch を持つのは、対象を指す selector を持たない tool だけで
-        // ある。持つ tool へ宣言すると、同じ意味の値が 1 要求の 2 か所へ並ぶ。
+        // 前提の epoch を持つのは、要求が対象を指す selector を 1 つも運ばない
+        // ことがある tool だけである。必ず運ぶ tool へ宣言すると、同じ意味の値が
+        // 1 要求の 2 か所へ並ぶ。
         for name in edit_like_tools() {
             let tool = tool_named(name);
             let properties = tool
