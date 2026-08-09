@@ -156,7 +156,8 @@ pub use track_value::{
 pub use validation::{
     MAX_ALIAS_BYTES, MAX_ITEM_VALUE_BYTES, MAX_NAME_UTF16_UNITS, MAX_PATH_UTF16_UNITS,
     PathSyntaxError, TextSyntaxError, limit_item_value_bytes, validate_alias,
-    validate_control_free, validate_control_free_except_layout, validate_item_text,
-    validate_multiline_item_text, validate_name, validate_object_alias_name, validate_path,
+    validate_alias_text_escapes, validate_control_free, validate_control_free_except_layout,
+    validate_item_text, validate_multiline_item_text, validate_name, validate_object_alias_name,
+    validate_path,
 };
 pub use wire_format::{format_utc_timestamp, parse_utc_timestamp};

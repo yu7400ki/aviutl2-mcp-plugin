@@ -59,6 +59,9 @@ pub enum TextSyntaxError {
     /// 後ろに LF が続かない CR を含む。
     #[error("単独の復帰 (CR) を含む文字列は指定できません")]
     LoneCarriageReturn,
+    /// エスケープを組まない `\` を含む。
+    #[error("エスケープを組まないバックスラッシュを含む文字列は指定できません")]
+    UnescapedBackslash,
     /// UTF-16 code unit 数の上限を超えた。
     #[error("文字列が長すぎます: {units} UTF-16 code units (上限 {max})")]
     TooLongUtf16 {
@@ -88,6 +91,7 @@ impl TextSyntaxError {
         TextSyntaxError::ContainsControl,
         TextSyntaxError::ForbiddenCharacter,
         TextSyntaxError::LoneCarriageReturn,
+        TextSyntaxError::UnescapedBackslash,
         TextSyntaxError::TooLongUtf16 {
             units: MAX_NAME_UTF16_UNITS + 1,
             max: MAX_NAME_UTF16_UNITS,
@@ -108,6 +112,7 @@ impl TextSyntaxError {
             TextSyntaxError::ContainsControl => "contains_control",
             TextSyntaxError::ForbiddenCharacter => "forbidden_character",
             TextSyntaxError::LoneCarriageReturn => "lone_carriage_return",
+            TextSyntaxError::UnescapedBackslash => "unescaped_backslash",
             TextSyntaxError::TooLongUtf16 { .. } | TextSyntaxError::TooLongBytes { .. } => {
                 "too_long"
             }
@@ -308,6 +313,32 @@ pub fn validate_alias(alias: &str) -> Result<(), TextSyntaxError> {
     limit_bytes(alias, MAX_ALIAS_BYTES)
 }
 
+/// object alias のテキスト種別の値が持つ `\` の綴りを検証する。
+///
+/// `\` の次が `n` でも `\` でもない並びを拒否する。値の末尾の `\`（次の文字が
+/// 無いもの）も拒否する。
+///
+/// **ホストが `\` を解くのはテキスト種別の値だけである。** パス種別と選択肢
+/// 種別の値は `\` を 1 つも解かず、書いた綴りがそのまま保存される。したがって
+/// この規則を掛ける相手は呼び出し側が種別で選ぶ。
+///
+/// 落とす綴りは必ず書き換えられる——`\` を 2 つにすればよく、それは AviUtl2
+/// 自身が値を書き出すときの綴りでもある。規則を通る綴りは 1 通りに定まり、
+/// `\n` が改行を指すことが読んで分かる。
+pub fn validate_alias_text_escapes(value: &str) -> Result<(), TextSyntaxError> {
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            continue;
+        }
+        match chars.next() {
+            Some('n' | '\\') => {}
+            _ => return Err(TextSyntaxError::UnescapedBackslash),
+        }
+    }
+    Ok(())
+}
+
 /// パスの構文を検証する。
 ///
 /// 判定は次の順で行う。いずれも OS へ問い合わせずに決まる規則である。
@@ -469,6 +500,7 @@ mod tests {
             TextSyntaxError::ContainsControl => "ContainsControl",
             TextSyntaxError::ForbiddenCharacter => "ForbiddenCharacter",
             TextSyntaxError::LoneCarriageReturn => "LoneCarriageReturn",
+            TextSyntaxError::UnescapedBackslash => "UnescapedBackslash",
             TextSyntaxError::TooLongUtf16 { .. } => "TooLongUtf16",
             TextSyntaxError::TooLongBytes { .. } => "TooLongBytes",
         }
@@ -495,6 +527,7 @@ mod tests {
             "ContainsControl",
             "ForbiddenCharacter",
             "LoneCarriageReturn",
+            "UnescapedBackslash",
             "TooLongUtf16",
             "TooLongBytes",
         ];
@@ -726,6 +759,55 @@ mod tests {
                 bytes: MAX_ITEM_VALUE_BYTES + 1,
                 max: MAX_ITEM_VALUE_BYTES,
             })
+        );
+    }
+
+    #[test]
+    fn alias_text_escapes_admit_only_the_two_spellings_the_host_writes() {
+        // `\n` は改行、`\\` は `\` 1 つである。どちらも AviUtl2 自身が値を
+        // 書き出すときに使う。
+        for value in [
+            "",
+            "こんにちは",
+            r"1 行目\n2 行目",
+            r"C:\\temp\\note",
+            r"末尾は 2 つ\\",
+            // `\\` を先に読み切るため、その次の文字は綴りの一部にならない。
+            r"\\t",
+            r"\\\\",
+        ] {
+            assert_eq!(
+                validate_alias_text_escapes(value),
+                Ok(()),
+                "{value:?} が拒否されました"
+            );
+        }
+    }
+
+    #[test]
+    fn alias_text_escapes_reject_a_backslash_that_stands_alone() {
+        // 2 文字とも残る綴りでも、`\` を 2 つにすれば同じ値を書ける。表現力を
+        // 失わないまま、規則を通る綴りが 1 通りに定まる。
+        for value in [
+            r"A\tB",
+            r"A\rB",
+            r"A\qB",
+            r"C:\temp\note.png",
+            // 末尾の単独 `\`。値としては保たれるが、位置に依らない規則にする。
+            r"A\",
+            r"\",
+            // 奇数個の並びは最後の 1 つが余る。
+            r"\\\",
+        ] {
+            assert_eq!(
+                validate_alias_text_escapes(value),
+                Err(TextSyntaxError::UnescapedBackslash),
+                "{value:?} が受理されました"
+            );
+        }
+        assert_eq!(
+            TextSyntaxError::UnescapedBackslash.reason(),
+            "unescaped_backslash"
         );
     }
 

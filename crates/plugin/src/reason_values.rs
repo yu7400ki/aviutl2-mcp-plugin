@@ -19,8 +19,9 @@ use aviutl2_mcp_core::error::REASON_VALUES;
 use aviutl2_mcp_core::{
     BatchInputError, DescribeEffectsInputError, DescribeEffectsParams, EditInputError,
     ItemWriteError, MAX_DESCRIBED_EFFECTS, MAX_ITEM_VALUE_BYTES, MAX_NAME_UTF16_UNITS,
-    MAX_PATH_UTF16_UNITS, PathSyntaxError, TextSyntaxError, validate_alias, validate_item_text,
-    validate_multiline_item_text, validate_name, validate_object_alias_name, validate_path,
+    MAX_PATH_UTF16_UNITS, PathSyntaxError, TextSyntaxError, validate_alias,
+    validate_alias_text_escapes, validate_item_text, validate_multiline_item_text, validate_name,
+    validate_object_alias_name, validate_path,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -51,6 +52,10 @@ fn text_syntax_case(variant: &TextSyntaxError) -> Vec<TextSyntaxError> {
         TextSyntaxError::LoneCarriageReturn => {
             vec![rejected(validate_multiline_item_text("1 行目\r2 行目"))]
         }
+        TextSyntaxError::UnescapedBackslash => vec![
+            rejected(validate_alias_text_escapes(r"A\tB")),
+            rejected(validate_alias_text_escapes(r"末尾\")),
+        ],
         TextSyntaxError::TooLongUtf16 { .. } => {
             vec![rejected(validate_name(
                 &"a".repeat(MAX_NAME_UTF16_UNITS + 1),

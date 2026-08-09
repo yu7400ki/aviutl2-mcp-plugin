@@ -259,6 +259,7 @@ pub const REASON_VALUES: &[&str] = &[
     "track_value_count",
     "track_value_unavailable",
     "unc_path",
+    "unescaped_backslash",
 ];
 
 #[cfg(test)]
