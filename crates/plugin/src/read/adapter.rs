@@ -17,7 +17,7 @@ use crate::read::{Page, ProjectStatus, ReadAdapter, Snapshot};
 use aviutl2_mcp_core::{
     AvailableEffect, Cursor, DescribeEffectsParams, DescribeEffectsResult, DisplayRange, EditInfo,
     EffectDescription, EffectInfo, EffectItem, EffectItemDescription, EffectItemValues,
-    EffectSelector, EffectType, EvaluatedItem, EvaluatedItemKind, Extent, FrameRange,
+    EffectSelector, EffectType, EvaluatedItem, EvaluatedItemKind, Extent,
     GetEffectItemValuesParams, LayerInfo, ListAvailableEffectsResult, ListObjectAliasesResult,
     ListPalettesResult, MAX_EVALUATED_ITEMS, ModuleEntry, ModuleType, ObjectDetail, ObjectFilter,
     ObjectSelector, ObjectSummary, PageWindow, PaletteEntry, SceneInfo, SelectionSnapshot,
@@ -171,7 +171,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
                 frame_num: info.display_frame_num,
                 layer_num: info.display_layer_num,
             },
-            selected_range: selected_range(&info),
+            selected_range: info.selected_range,
             grid_bpm,
             project_epoch: epoch,
             project_revision: revision,
@@ -797,14 +797,6 @@ fn object_detail(summary: ObjectSummary, revision: u64, detail: HostObjectDetail
     }
 }
 
-/// フレーム範囲選択を組み立てる。片側しか得られない場合は未選択として扱う。
-fn selected_range(info: &HostEditInfo) -> Option<FrameRange> {
-    match (info.select_range_start, info.select_range_end) {
-        (Some(start), Some(end)) => Some(FrameRange { start, end }),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,8 +810,8 @@ mod tests {
     };
     use aviutl2_mcp_core::{
         AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, ErrorCode, Fingerprint,
-        FiniteF64, GridBpm, ItemChoices, ItemFacets, ItemRange, ItemValue, PALETTE_COLOR_COUNT,
-        Rgba, SectionRange, TableSource, TrackInfo, TrackValue,
+        FiniteF64, FrameRange, GridBpm, ItemChoices, ItemFacets, ItemRange, ItemValue,
+        PALETTE_COLOR_COUNT, Rgba, SectionRange, TableSource, TrackInfo, TrackValue,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1518,8 +1510,7 @@ mod tests {
             display_layer_start: 0,
             display_frame_num: 600,
             display_layer_num: 10,
-            select_range_start: Some(10),
-            select_range_end: Some(20),
+            selected_range: Some(FrameRange { start: 10, end: 20 }),
         }
     }
 
@@ -2765,8 +2756,7 @@ mod tests {
     fn unselected_range_is_absent() {
         let adapter = adapter_with(|_| FakeHost {
             info: HostEditInfo {
-                select_range_start: None,
-                select_range_end: None,
+                selected_range: None,
                 ..fake_edit_info()
             },
             ..FakeHost::new()

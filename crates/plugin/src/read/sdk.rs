@@ -15,9 +15,9 @@ use crate::read::host::{
 };
 use aviutl2::generic::{EditSectionError, EffectHandle, ObjectHandle, ReadSection};
 use aviutl2_mcp_core::{
-    AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, EffectType, FiniteF64, GridBpm,
-    ItemValue, ModuleEntry, ModuleType, Rgba, SectionRange, decode_host_text, decode_track_value,
-    parse_check_value,
+    AvailableEffectItem, EffectFlags, EffectItem, EffectItemType, EffectType, FiniteF64,
+    FrameRange, GridBpm, ItemValue, ModuleEntry, ModuleType, Rgba, SectionRange, decode_host_text,
+    decode_track_value, parse_check_value,
 };
 use std::collections::HashMap;
 use std::ops::Range;
@@ -675,14 +675,10 @@ pub(crate) fn host_edit_info(info: &aviutl2::generic::EditInfo) -> Result<HostEd
         // 差を自分で取ると終端の意味が変わったときに黙ってずれる。
         display_frame_num: non_negative(info.display_frame.len()),
         display_layer_num: non_negative(info.display_layer.len()),
-        select_range_start: info
-            .select_range
-            .as_ref()
-            .map(|range| non_negative(*range.start())),
-        select_range_end: info
-            .select_range
-            .as_ref()
-            .map(|range| non_negative(*range.end())),
+        selected_range: info.select_range.as_ref().map(|range| FrameRange {
+            start: non_negative(*range.start()),
+            end: non_negative(*range.end()),
+        }),
     })
 }
 
@@ -1296,8 +1292,7 @@ mod tests {
         // 未選択は両端を -1 で表す。両端を含む範囲として写すため、
         // 選択された区間は同じ 2 つの番号のまま届く。
         let unselected = mapped(&raw_edit_info()).expect("正常な編集情報です");
-        assert_eq!(unselected.select_range_start, None);
-        assert_eq!(unselected.select_range_end, None);
+        assert_eq!(unselected.selected_range, None);
 
         let info = mapped(&aviutl2::sys::plugin2::EDIT_INFO {
             select_range_start: 10,
@@ -1305,8 +1300,7 @@ mod tests {
             ..raw_edit_info()
         })
         .expect("正常な編集情報です");
-        assert_eq!(info.select_range_start, Some(10));
-        assert_eq!(info.select_range_end, Some(20));
+        assert_eq!(info.selected_range, Some(FrameRange { start: 10, end: 20 }));
     }
 
     #[test]

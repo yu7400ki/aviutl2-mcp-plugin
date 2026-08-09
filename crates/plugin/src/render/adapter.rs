@@ -641,8 +641,7 @@ mod tests {
             display_layer_start: 0,
             display_frame_num: 100,
             display_layer_num: 2,
-            select_range_start: None,
-            select_range_end: None,
+            selected_range: None,
         }
     }
 

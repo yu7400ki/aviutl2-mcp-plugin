@@ -360,8 +360,7 @@ mod tests {
             display_layer_start: 0,
             display_frame_num: 10,
             display_layer_num: 10,
-            select_range_start: None,
-            select_range_end: None,
+            selected_range: None,
         }
     }
 

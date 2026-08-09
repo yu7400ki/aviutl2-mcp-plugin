@@ -167,10 +167,7 @@ impl EditHost for SdkEditHost {
                 frame: info.cursor_frame,
                 layer: info.cursor_layer,
             },
-            selected_range: match (info.select_range_start, info.select_range_end) {
-                (Some(start), Some(end)) => Some(FrameRange { start, end }),
-                _ => None,
-            },
+            selected_range: info.selected_range,
             focus,
             display: DisplayRange {
                 frame_start: info.display_frame_start,

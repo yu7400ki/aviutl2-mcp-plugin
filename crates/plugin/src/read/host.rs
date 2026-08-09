@@ -7,8 +7,8 @@
 
 use crate::read::error::ReadError;
 use aviutl2_mcp_core::{
-    AvailableEffectItem, EffectFlags, EffectItem, EffectType, FiniteF64, GridBpm, ItemFacets,
-    ModuleEntry, Rgba, SectionRange,
+    AvailableEffectItem, EffectFlags, EffectItem, EffectType, FiniteF64, FrameRange, GridBpm,
+    ItemFacets, ModuleEntry, Rgba, SectionRange,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -80,10 +80,8 @@ pub struct HostEditInfo {
     pub display_frame_num: usize,
     /// タイムラインの表示レイヤー数。
     pub display_layer_num: usize,
-    /// フレーム範囲選択の開始フレーム番号。未選択は `None`。
-    pub select_range_start: Option<usize>,
-    /// フレーム範囲選択の終了フレーム番号。未選択は `None`。
-    pub select_range_end: Option<usize>,
+    /// フレーム範囲選択。両端を含む。未選択は `None`。
+    pub selected_range: Option<FrameRange>,
 }
 
 /// レイヤーの属性。
