@@ -6,8 +6,8 @@
 //! 検査は 2 か所に分かれる。**それぞれの入力が在る場所に置いてある。**
 //! 層 1 から落とした句と、層 1 から持ち越した検査は、その表を持つ server crate
 //! の側で本文と突き合わせる。ここが見るのは、表を持たずに掛けられる性質——
-//! ツリーの形、導線、見出しの立て方、未実測の項目、候補の写し、根拠に挙げた値
-//! ——である。
+//! ツリーの形、導線、見出しの立て方、未実測の項目、候補の写し、根拠に挙げた値、
+//! 失敗の名指し——である。
 
 use crate::agent_plugin::skills::SKILL_FILES;
 use std::collections::BTreeSet;
@@ -136,6 +136,18 @@ const MAX_TRACK_FLAGS: u64 = 7;
 
 /// 上限の外の値を挙げてよい行——禁止そのものを述べる行——を見分ける語。
 const FORBIDDEN_BIT: &str = "bit3";
+
+/// 待つべき時間を運ぶ `details` のキー。
+const RETRY_AFTER_KEY: &str = "retry_after_ms";
+
+/// 待ち時間を運ぶ失敗の扱いに現れるべき名前。
+///
+/// **[`RETRY_AFTER_KEY`] を運ぶ失敗は 1 種類ではない。** `host_busy` を名指し
+/// しなければ、本文の一般則——失敗したら同じ要求をそのまま送り直さない——が
+/// そこへ当たり、正しい要求を作り直すことになる。そして待っても解けない側が
+/// 在るため、**その先で名乗る `instance_stale` まで含めて初めて扱いが述べ
+/// られる。**
+const WAITING_FAILURE_NAMES: &[&str] = &["host_busy", "instance_stale"];
 
 /// 行に現れるインラインコードのうち、移動行として読めるものからフラグを返す。
 ///
@@ -393,4 +405,23 @@ fn the_alias_reference_grounds_its_flag_bits_in_a_value_it_allows() {
         }
     }
     assert!(grounds > 0, "{name} にフラグの根拠を述べる行がありません");
+}
+
+#[test]
+fn the_skill_names_every_failure_that_carries_a_wait() {
+    // **待ち時間を運ぶ失敗を 1 つしか名乗らないと、残りへ一般則が当たる。**
+    // 一般則は「同じ要求をそのまま送り直さない」であり、正しい要求を作り直す
+    // という最も無駄な一手を選ばせる。名指しは同じ節で行う——別の節に置けば、
+    // 失敗を読んでいる読み手のところに届かない。
+    let body = skill_body();
+    let section = body
+        .split("\n## ")
+        .find(|section| section.contains(RETRY_AFTER_KEY))
+        .unwrap_or_else(|| panic!("{RETRY_AFTER_KEY} を述べる節がありません"));
+    for failure in WAITING_FAILURE_NAMES {
+        assert!(
+            section.contains(failure),
+            "待ち時間を運ぶ失敗の扱いに {failure} が現れません"
+        );
+    }
 }
