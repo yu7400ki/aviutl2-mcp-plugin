@@ -189,8 +189,7 @@ impl<H: EditHost> HostEditAdapter<H> {
     /// 作成にだけ条件を足せば「一覧に出た名前は必ず作成できる」が崩れる。
     ///
     /// 移動方法の一覧は設定項目を書く経路と同じ口から引く
-    /// （[`EditHost::movements`]）。一覧を出す側と拒む側が別々に可否を決めれば、
-    /// 片方にだけ条件を足せる形ができる。
+    /// （[`EditHost::movements`]）。
     fn admit_alias_track_rows(&self, alias: &str) -> Result<(), EditError> {
         Ok(crate::alias::admit_track_rows(
             alias,

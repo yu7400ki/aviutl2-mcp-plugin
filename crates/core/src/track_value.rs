@@ -501,8 +501,6 @@ pub fn encode_track_value(
 /// ないため復号は見ない。
 ///
 /// 名前を持つ 3 つのビット以外は [`TrackValue::reserved_flags`] へ入れる。
-/// **捨てない**——ホストの UI にはこの型が名前を持たないチェックボックスがあり、
-/// 捨てると読めた値を書き戻したときにその設定が消える。
 pub fn decode_track_value(raw: &str) -> Result<TrackValue, TrackDecodeError> {
     let (head, tail) = match raw.split_once(PARAM_SEPARATOR) {
         Some((head, tail)) => (head, Some(tail)),

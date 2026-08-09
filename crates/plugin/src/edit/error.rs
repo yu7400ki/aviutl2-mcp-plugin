@@ -954,8 +954,6 @@ fn fill_track_error_details(details: &mut Map<String, Value>, error: &TrackValue
         TrackValueError::UnknownMode { known } => {
             details.insert("known_movements".to_string(), json!(known));
         }
-        // 復旧は移動を消す指定へ持ち替えることであり、一覧を添えても要求元の
-        // 次の一手は変わらない。
         TrackValueError::ModeNotWritable
         | TrackValueError::ModeReadsAsNumber
         | TrackValueError::MovementWithoutMode
