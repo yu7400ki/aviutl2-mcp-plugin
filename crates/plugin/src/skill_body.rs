@@ -6,7 +6,8 @@
 //! 検査は 2 か所に分かれる。**それぞれの入力が在る場所に置いてある。**
 //! 層 1 から落とした句と、層 1 から持ち越した検査は、その表を持つ server crate
 //! の側で本文と突き合わせる。ここが見るのは、表を持たずに掛けられる性質——
-//! ツリーの形、導線、見出しの立て方、未実測の項目、候補の写し——である。
+//! ツリーの形、導線、見出しの立て方、未実測の項目、候補の写し、根拠に挙げた値
+//! ——である。
 
 use crate::agent_plugin::skills::SKILL_FILES;
 use std::collections::BTreeSet;
@@ -121,6 +122,36 @@ const UNMEASURED_TERMS: &[&str] = &["X軸回転", "Y軸回転", "奥行き"];
 
 /// 実測していないことを名乗る句。
 const UNMEASURED_DISCLAIMER: &str = "実測していない";
+
+/// 実測を述べる行を見分ける語。
+const MEASUREMENT_MARK: &str = "実測";
+
+/// alias の書式を定めている参照文書。
+const ALIAS_REFERENCE: &str = "references/object-alias.md";
+
+/// 移動のフラグに書いてよい値の上限。
+///
+/// [`ALIAS_REFERENCE`] 自身が「フラグに書いてよいのは 0〜7」と定めている。
+const MAX_TRACK_FLAGS: u64 = 7;
+
+/// 上限の外の値を挙げてよい行——禁止そのものを述べる行——を見分ける語。
+const FORBIDDEN_BIT: &str = "bit3";
+
+/// 行に現れるインラインコードのうち、移動行として読めるものからフラグを返す。
+///
+/// 移動行は `<値>,…,<移動モード名>,<フラグ>[|<パラメータ>…]` であり、フラグは
+/// 最後のコンマの後ろに在る。**整数として読めない末尾は移動行ではない**——
+/// フラグを欠いた行も、コンマを含むただのテキストも、ここで落ちる。
+fn track_flags(line: &str) -> Vec<u64> {
+    line.split('`')
+        .skip(1)
+        .step_by(2)
+        .filter_map(|span| {
+            let (_, tail) = span.rsplit_once(',')?;
+            tail.split('|').next().unwrap_or(tail).parse::<u64>().ok()
+        })
+        .collect()
+}
 
 #[test]
 fn the_skill_tree_holds_only_directories_that_have_a_skill_md() {
@@ -335,4 +366,31 @@ fn the_skill_copies_no_choice_from_the_builtin_table() {
         }
     }
     assert!(groups > 0, "基底の表に候補が 1 つもありません");
+}
+
+#[test]
+fn the_alias_reference_grounds_its_flag_bits_in_a_value_it_allows() {
+    // **文書が自らの禁止に触れる例を根拠にしない。** 0〜7 の外を挙げれば、
+    // 写した読み手はその文書が禁じた状態を作る。禁止そのものを述べる行だけが
+    // 外の値を挙げてよい——そこでは値が根拠ではなく対象である。
+    let name = format!("{SKILL_NAME}/{ALIAS_REFERENCE}");
+    let body = skill_files()
+        .into_iter()
+        .find_map(|(path, body)| (path == name).then_some(body))
+        .unwrap_or_else(|| panic!("{name} が埋め込まれていません"));
+
+    let mut grounds = 0usize;
+    for line in body.lines() {
+        if !line.contains(MEASUREMENT_MARK) || line.contains(FORBIDDEN_BIT) {
+            continue;
+        }
+        for flags in track_flags(line) {
+            assert!(
+                flags <= MAX_TRACK_FLAGS,
+                "{name} が 0〜{MAX_TRACK_FLAGS} の外のフラグを根拠にしています（{flags}）: {line}"
+            );
+            grounds += 1;
+        }
+    }
+    assert!(grounds > 0, "{name} にフラグの根拠を述べる行がありません");
 }
