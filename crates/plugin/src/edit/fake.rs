@@ -757,6 +757,23 @@ impl EditHost for FakeEditHost {
         Ok(self.catalog.iter().map(FakeCatalogEntry::summary).collect())
     }
 
+    fn effect_item_catalog(
+        &self,
+        effect_name: &str,
+    ) -> Result<Vec<AvailableEffectItem>, EditError> {
+        self.assert_ready("enum_effect_item");
+        self.record("effect_item_catalog");
+        // カタログに無い名前は列挙そのものが失敗する。SDK は「その名前の効果が
+        // 無い」と「列挙に失敗した」を同じ形で返す。
+        self.catalog
+            .iter()
+            .find(|entry| entry.name == effect_name)
+            .map(|entry| entry.items.clone())
+            .ok_or(EditError::Sdk {
+                operation: "enum_effect_item",
+            })
+    }
+
     fn alias_data_directory(&self) -> Option<PathBuf> {
         self.record("alias_data_directory");
         self.alias_data_dir.lock().unwrap().clone()
@@ -866,6 +883,13 @@ impl EditHost for Arc<FakeEditHost> {
 
     fn effect_catalog(&self) -> Result<Vec<HostEffectSummary>, EditError> {
         self.as_ref().effect_catalog()
+    }
+
+    fn effect_item_catalog(
+        &self,
+        effect_name: &str,
+    ) -> Result<Vec<AvailableEffectItem>, EditError> {
+        self.as_ref().effect_item_catalog(effect_name)
     }
 
     fn alias_data_directory(&self) -> Option<PathBuf> {

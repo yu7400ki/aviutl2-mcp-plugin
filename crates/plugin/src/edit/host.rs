@@ -433,6 +433,15 @@ pub trait EditHost: Send + Sync {
     /// 登録済み effect のカタログ。編集区間を必要としない。
     fn effect_catalog(&self) -> Result<Vec<HostEffectSummary>, EditError>;
 
+    /// effect 名が公開している設定項目の一覧。編集区間を必要としない。
+    ///
+    /// 対象のオブジェクトを要さない。一覧は登録済みプラグインが定めるもので
+    /// あり、プロジェクトの編集内容から独立している。**解決済みの effect を
+    /// 受け取る [`SceneEditor::effect_items`] とは引く相手が違う** ——あちらは
+    /// 編集区間の内側で、いま在る対象について引く。
+    fn effect_item_catalog(&self, effect_name: &str)
+    -> Result<Vec<AvailableEffectItem>, EditError>;
+
     /// 登録済みエイリアスを収めた AviUtl2 のデータディレクトリ。
     ///
     /// 解決できなければ `None`。編集区間を必要とせず、プロジェクトの内容にも

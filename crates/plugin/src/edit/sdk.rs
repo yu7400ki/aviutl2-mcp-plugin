@@ -142,6 +142,13 @@ impl EditHost for SdkEditHost {
         Ok(SdkReadHost.effect_catalog()?)
     }
 
+    fn effect_item_catalog(
+        &self,
+        effect_name: &str,
+    ) -> Result<Vec<AvailableEffectItem>, EditError> {
+        Ok(SdkReadHost.effect_items(effect_name)?)
+    }
+
     fn alias_data_directory(&self) -> Option<std::path::PathBuf> {
         crate::alias::data_directory().map(std::path::Path::to_path_buf)
     }
