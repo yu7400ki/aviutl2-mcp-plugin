@@ -309,6 +309,18 @@ mod tests {
     }
 
     #[test]
+    fn the_builtin_facets_still_name_a_movement_that_cannot_be_written() {
+        // 基底は実測の記録である。空へ戻っても、書けない名前だけが消えても構文
+        // としては通り、可否は全件「書ける」へ静かに倒れる。個別の名前を挙げる
+        // 形では押さえられない——集合は環境ごとに違い、基底に載るのは実測できた
+        // 分だけである。
+        assert!(
+            builtin_facets().values().any(|facet| !facet.writable),
+            "埋め込んだ基底が、書けない移動方法を 1 つも名乗っていません"
+        );
+    }
+
+    #[test]
     fn the_builtin_facets_refuse_a_shape_they_did_not_intend() {
         // 書き手は我々である。綴りを外した表を素通しにすると、可否が全件
         // 「書ける」へ戻ったことに誰も気付けない。
