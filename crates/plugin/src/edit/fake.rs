@@ -82,8 +82,20 @@ pub(crate) enum Fault {
     AddTwoEffects,
     /// effect の順序の移動を無言で無視する。
     IgnoreEffectMove,
-    /// effect を要求した位置ではなく列の末尾へ動かす。
+    /// 1 度目の移動だけ、effect を要求した位置ではなく列の末尾へ動かす。
+    ///
+    /// 2 度目以降は要求どおりに動かす。移動先を切り詰めるホストは、受け付け
+    /// られる位置を指した移動までは拒まない。
     AppendMovedEffect,
+    /// 1 度目の移動で effect を列の末尾へ動かし、2 度目以降の移動を無言で
+    /// 無視する。
+    ///
+    /// **戻す移動だけが効かない状況を作る。** 移動の要求は 1 度目が前向きの
+    /// 移動、2 度目が巻き戻しである。ホストは移動の成否を返さないため、列が
+    /// 戻らなかったことは読み直してからでないと分からない。
+    ///
+    /// 数えるのは編集区間ごとであり、要求をまたいで積み上がらない。
+    IgnoreEffectMoveRestore,
     /// effect は要求した位置へ動かすが、戻り値だけ別の数を名乗る。
     MisreportEffectPosition,
     /// effect の順序の移動が、動かした 1 件とは別の 1 件を列から落とす。
@@ -825,6 +837,7 @@ impl EditHost for FakeEditHost {
             objects: RefCell::new(Vec::new()),
             effects: RefCell::new(Vec::new()),
             item_writes: Cell::new(0),
+            effect_moves: Cell::new(0),
         };
         // クロージャから漏れた巻き戻しを記録してから伝え直す。実際の SDK では
         // ここが C の関数ポインタ境界であり、漏れた時点でプロセスが落ちる。
@@ -964,6 +977,7 @@ impl ReadHost for FakeReadHost {
             objects: RefCell::new(Vec::new()),
             effects: RefCell::new(Vec::new()),
             item_writes: Cell::new(0),
+            effect_moves: Cell::new(0),
         };
         Ok(f(&editor))
     }
@@ -982,6 +996,11 @@ struct FakeSceneEditor<'a> {
     /// [`Fault::IgnoreItemRestore`] が「戻す書き込み」を見分ける唯一の手掛かり
     /// である。区間ごとに数えるため、要求をまたいで積み上がらない。
     item_writes: Cell<usize>,
+    /// この区間で effect の順序を動かした回数。
+    ///
+    /// [`Fault::AppendMovedEffect`] と [`Fault::IgnoreEffectMoveRestore`] が
+    /// 前向きの移動と戻す移動を見分ける手掛かりである。
+    effect_moves: Cell<usize>,
 }
 
 impl FakeSceneEditor<'_> {
@@ -1760,6 +1779,14 @@ impl SceneEditor for FakeSceneEditor<'_> {
         if knobs.fault == Some(Fault::IgnoreEffectMove) {
             return Ok(position);
         }
+        let moves = self.effect_moves.get();
+        self.effect_moves.set(moves + 1);
+        // 2 度目以降の移動だけが効かない。発行そのものは成功として返す——
+        // ホストは移動の成否を返さないため、効かなかったことは読み直して
+        // からでないと分からない。
+        if moves > 0 && knobs.fault == Some(Fault::IgnoreEffectMoveRestore) {
+            return Ok(position);
+        }
         let id = self.object_id(object.slot())?;
         let (_, from) = self.effect_ref(effect.slot())?;
         let mut scene = self.host.scene.lock().unwrap();
@@ -1768,7 +1795,11 @@ impl SceneEditor for FakeSceneEditor<'_> {
         })?;
         let moved = object.effects.remove(from);
         // 抜いた後の列に対する挿し込みであり、末尾までを受け付ける。
-        let to = if knobs.fault == Some(Fault::AppendMovedEffect) {
+        let appends = matches!(
+            knobs.fault,
+            Some(Fault::AppendMovedEffect | Fault::IgnoreEffectMoveRestore)
+        );
+        let to = if appends && moves == 0 {
             object.effects.len()
         } else {
             position.min(object.effects.len())

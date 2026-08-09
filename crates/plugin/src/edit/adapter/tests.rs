@@ -6607,14 +6607,14 @@ fn a_different_effect_at_the_destination_is_not_taken_for_the_moved_one() {
 
     assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
     assert_eq!(error.details()["reason"], json!("change_not_applied"));
-    // 移動先に居るのは同名・同状態の別の 1 件である。
+    // 動いてしまった列は移動前の並びへ戻る。
     assert_eq!(
         effect_column(&harness),
         vec![
             video_entry(),
+            blur_entry(10),
             blur_entry(20),
-            blur_entry(30),
-            blur_entry(10)
+            blur_entry(30)
         ]
     );
 }
@@ -6704,11 +6704,13 @@ fn a_host_that_ignores_the_move_and_one_that_moves_it_elsewhere_name_different_r
     // 移動先は現在位置（1）でも末尾（3）でもない 2 を指す。現在位置を指せば
     // 無視するホストが、末尾を指せば末尾へ動かすホストが、それぞれ正しい移動と
     // 区別できなくなる。
+    // 巻き戻しの有無も分かれる。動いた列だけが戻り、動かなかった列には戻すもの
+    // が無い。
     let cases = [
-        (Fault::IgnoreEffectMove, "effect_not_movable"),
-        (Fault::AppendMovedEffect, "change_not_applied"),
+        (Fault::IgnoreEffectMove, "effect_not_movable", false),
+        (Fault::AppendMovedEffect, "change_not_applied", true),
     ];
-    for (fault, expected) in cases {
+    for (fault, expected, restores) in cases {
         let harness = Harness::with(|host| {
             host.arm(|knobs| knobs.fault = Some(fault));
             host.scene.get_mut().unwrap().layers[1].objects[0].effects =
@@ -6727,6 +6729,14 @@ fn a_host_that_ignores_the_move_and_one_that_moves_it_elsewhere_name_different_r
         assert_eq!(error.details()["reason"], json!(expected), "{fault:?}");
         // 発行の後に落ちた失敗である。
         assert_eq!(error.details()["mutation_issued"], json!(true), "{fault:?}");
+        let details = error.details();
+        match restores {
+            true => assert_eq!(details["restored"], json!(true), "{fault:?}"),
+            false => assert!(
+                details.get("restored").is_none(),
+                "戻すものが無い枝が巻き戻しを名乗りました: {details}"
+            ),
+        }
     }
 }
 
@@ -6816,6 +6826,119 @@ fn moving_an_effect_to_where_it_already_is_still_reaches_the_host() {
     );
     assert_eq!(effect_column(&harness), before, "列が動きました");
     assert_eq!(outcome.effect.expect("移動後の effect").position, 1);
+}
+
+/// 移動先を切り詰めるホストと、そのうえ戻す移動も効かないホストを作る。
+fn harness_with_displacing_host(fault: Fault) -> Harness {
+    Harness::with(|host| {
+        host.arm(|knobs| knobs.fault = Some(fault));
+        host.scene.get_mut().unwrap().layers[1].objects[0].effects =
+            vec![video_effect(), blur(0, 10), blur(1, 20), blur(2, 30)];
+    })
+}
+
+/// 移動前の列。巻き戻しの照合に使う。
+fn column_before_the_move() -> Vec<(String, ItemValue)> {
+    vec![
+        video_entry(),
+        blur_entry(10),
+        blur_entry(20),
+        blur_entry(30),
+    ]
+}
+
+/// 変更 API のうち、effect の順序を動かした回数。
+fn move_calls(harness: &Harness) -> usize {
+    harness
+        .host
+        .calls()
+        .iter()
+        .filter(|call| **call == "move_effect")
+        .count()
+}
+
+#[test]
+fn a_move_that_landed_elsewhere_puts_the_column_back() {
+    // 失敗が状態を変える経路を残さない。列が動いたままだと、要求元が要求に
+    // 使った selector も一緒に無効になる。
+    let harness = harness_with_displacing_host(Fault::AppendMovedEffect);
+    let error = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 2))
+        .expect_err("別の位置へ動いた移動が成功として返りました");
+
+    assert_eq!(error.details()["reason"], json!("change_not_applied"));
+    assert_eq!(error.details()["restored"], json!(true));
+    assert!(
+        error.details().get("consistency_unknown").is_none(),
+        "戻せているのに中途半端な状態を名乗りました: {}",
+        error.details()
+    );
+    // 動いた 1 件だけでなく、間に在った effect の並びまで戻っている。
+    assert_eq!(effect_column(&harness), column_before_the_move());
+}
+
+#[test]
+fn a_move_the_host_ignored_is_not_followed_by_a_restore() {
+    // ホストが動かさなかった列に戻すものは無い。戻す移動を発行すると、要らない
+    // 書き込みが 1 つプロジェクトへ届く。
+    let harness = harness_with_displacing_host(Fault::IgnoreEffectMove);
+    let error = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 2))
+        .expect_err("動かなかった移動が成功として返りました");
+
+    assert_eq!(error.details()["reason"], json!("effect_not_movable"));
+    assert!(
+        error.details().get("restored").is_none(),
+        "戻すものが無い枝が巻き戻しを名乗りました: {}",
+        error.details()
+    );
+    assert_eq!(move_calls(&harness), 1, "戻す移動が発行されました");
+    assert_eq!(effect_column(&harness), column_before_the_move());
+}
+
+#[test]
+fn a_restore_that_does_not_take_names_the_state_unknown() {
+    // ホストは移動の成否を返さない。戻す移動が通ったことは、列を読み直して
+    // 移動前の並びと比べるまで確かめられない。
+    let harness = harness_with_displacing_host(Fault::IgnoreEffectMoveRestore);
+    let error = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 2))
+        .expect_err("別の位置へ動いた移動が成功として返りました");
+
+    assert_eq!(error.details()["reason"], json!("change_not_applied"));
+    assert_eq!(error.details()["restored"], json!(false));
+    assert_eq!(error.details()["consistency_unknown"], json!(true));
+    // 戻す移動そのものは発行されている。発行していなければ、戻せなかったことは
+    // 何も言っていない。
+    assert_eq!(move_calls(&harness), 2, "戻す移動が発行されていません");
+    assert_eq!(
+        effect_column(&harness),
+        vec![
+            video_entry(),
+            blur_entry(20),
+            blur_entry(30),
+            blur_entry(10)
+        ],
+        "列が動いたままであることを名乗れていません"
+    );
+}
+
+#[test]
+fn a_restored_move_advances_the_revision_at_most_once() {
+    // 巻き戻しは同じ許可で発行する。許可は最初の発行で確定した revision を
+    // 保つため、移動が 2 回でも revision は 1 つしか進まない。
+    let harness = harness_with_displacing_host(Fault::AppendMovedEffect);
+    let error = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 2))
+        .expect_err("別の位置へ動いた移動が成功として返りました");
+
+    assert_eq!(move_calls(&harness), 2, "戻す移動が発行されていません");
+    assert_eq!(harness.project.revision(), 1, "revision が 2 つ進みました");
+    assert_eq!(error.details()["current_project_revision"], json!(1));
 }
 
 #[test]
