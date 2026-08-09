@@ -2741,6 +2741,52 @@ fn a_rejected_movement_name_never_comes_back_in_the_failure() {
 }
 
 #[test]
+fn what_the_list_calls_unwritable_is_what_a_raw_alias_refuses() {
+    // **移動を書く経路は 2 本あり、どちらも同じ 1 つの表を読む。** 片方にだけ
+    // 条件を足せば、生テキストで作れるオブジェクトと設定項目として書ける値が
+    // 食い違う。一覧を渡し損ねた実装も、可否を落とした一覧を渡す実装も、
+    // ここで落ちる。
+    let movements = vec![
+        Movement {
+            name: "直線移動".to_string(),
+            writable: true,
+        },
+        Movement {
+            name: "移動無し".to_string(),
+            writable: false,
+        },
+    ];
+    for movement_entry in &movements {
+        let harness = Harness::new();
+        harness.host.set_movements(movements.clone());
+        let alias = format!(
+            "[Object]\r\nframe=0,80\r\n[Object.0]\r\neffect.name=標準描画\r\nX=0.00,100.00,{},0\r\n",
+            movement_entry.name
+        );
+        let result = harness
+            .edit
+            .create_object(&create_from_raw_alias_params(&harness, &alias));
+        if movement_entry.writable {
+            result.unwrap_or_else(|error| {
+                panic!("{} が拒否されました: {error}", movement_entry.name)
+            });
+        } else {
+            let error = result.expect_err("書けない移動方法が受理されました");
+            assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+            assert_eq!(
+                error.details()["reason"],
+                json!("track_mode_not_writable"),
+                "{} の拒否の理由",
+                movement_entry.name
+            );
+            // 名前を選び直す手は通らない。一覧に無い名前とは別の失敗である。
+            assert_ne!(error.details()["reason"], json!("track_mode_unknown"));
+            harness.assert_untouched();
+        }
+    }
+}
+
+#[test]
 fn what_the_list_calls_unwritable_is_what_set_object_item_refuses() {
     // **一覧と拒否が同じ表を読む。** 一覧が返した 1 件ずつについて、書けないと
     // 名乗ったものは書き込みが拒み、書けると名乗ったものは名前を理由に拒まれ

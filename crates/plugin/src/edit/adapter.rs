@@ -188,12 +188,13 @@ impl<H: EditHost> HostEditAdapter<H> {
     /// **名前で指定されたエイリアスには掛けない。** 一覧は移動行を見ておらず、
     /// 作成にだけ条件を足せば「一覧に出た名前は必ず作成できる」が崩れる。
     ///
-    /// 移動方法の一覧は要求元へ並べるものと同じ表から引く。一覧を出す側と
-    /// 拒む側が別々に可否を決めれば、片方にだけ条件を足せる形ができる。
+    /// 移動方法の一覧は設定項目を書く経路と同じ口から引く
+    /// （[`EditHost::movements`]）。一覧を出す側と拒む側が別々に可否を決めれば、
+    /// 片方にだけ条件を足せる形ができる。
     fn admit_alias_track_rows(&self, alias: &str) -> Result<(), EditError> {
         Ok(crate::alias::admit_track_rows(
             alias,
-            crate::movement::movements(),
+            &self.host.movements(),
         )?)
     }
 
@@ -603,7 +604,9 @@ fn created_placements(
 /// `get_object` が `sections` として返すのと同じ経路であり、要求元が読んだ
 /// 区間の数がそのまま「値の個数 - 1」になる。
 ///
-/// 移動方法の一覧はホストから引く（[`SceneEditor::movements`]）。
+/// 移動方法の一覧は区間の外で引き終えたものを受け取る
+/// （[`EditHost::movements`]）。プロジェクトの内容に連動しないため、区間の
+/// 内側で引く理由が無い。
 ///
 /// **値の形で呼び分けない。** 移動を含まない値では中身が参照されないが、
 /// 呼び分けを置くと、その判定を誤った経路が検証を通らずに符号化へ届く。
@@ -611,10 +614,11 @@ fn created_placements(
 pub(crate) fn track_write_target(
     editor: &dyn SceneEditor,
     object: &ResolvedObject<'_>,
+    movements: &[Movement],
 ) -> Result<TrackTarget, EditError> {
     Ok(TrackTarget {
         section_count: editor.object_sections(object)?.len(),
-        movements: editor.movements(),
+        movements: movements.to_vec(),
     })
 }
 
@@ -1130,6 +1134,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
     fn set_object_item(&self, params: &SetObjectItemParams) -> Result<EditOutcome, EditError> {
         self.ensure_editable()?;
         let project = self.project.as_ref();
+        let movements = self.host.movements();
 
         self.edit_section(move |editor| {
             let boundary = verify_boundary(
@@ -1145,7 +1150,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             // 設定項目の実在と種別の照合は、対象 effect が公開する一覧に対して
             // 行う。要求内容だけでは判定できない。
             let items = editor.effect_items(&effect)?;
-            let target = track_write_target(editor, &object)?;
+            let target = track_write_target(editor, &object, &movements)?;
             let write = match prepare_item_write(
                 &items,
                 &params.item,
@@ -1637,6 +1642,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
     fn apply_batch(&self, params: &ApplyBatchParams) -> Result<BatchOutcome, EditError> {
         self.ensure_editable()?;
         let project = self.project.as_ref();
+        let movements = self.host.movements();
 
         let applied = self.edit_section(move |editor| {
             // 全 sub-operation のセレクターをまとめて渡す。判定は段ごとに全対象へ
@@ -1660,7 +1666,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             .map_err(|error| {
                 batch::locate_boundary_failure(&params.operations, &project.epoch(), error)
             })?;
-            batch::apply_batch(editor, project, &boundary, &params.operations)
+            batch::apply_batch(editor, project, &boundary, &params.operations, &movements)
         });
         applied.map_err(batch::mark_lost_section)
     }

@@ -737,6 +737,10 @@ impl EditHost for FakeEditHost {
         self.alias_data_dir.lock().unwrap().clone()
     }
 
+    fn movements(&self) -> Vec<Movement> {
+        self.movements.lock().unwrap().clone()
+    }
+
     fn observed_selection(&self) -> Result<HostSelection, EditError> {
         self.assert_ready("get_edit_info");
         self.record("observed_selection");
@@ -840,6 +844,10 @@ impl EditHost for Arc<FakeEditHost> {
 
     fn alias_data_directory(&self) -> Option<PathBuf> {
         self.as_ref().alias_data_directory()
+    }
+
+    fn movements(&self) -> Vec<Movement> {
+        self.as_ref().movements()
     }
 
     fn observed_selection(&self) -> Result<HostSelection, EditError> {
@@ -1577,10 +1585,6 @@ impl SceneEditor for FakeSceneEditor<'_> {
                 operation: "get_object_section_frame",
             })?
             .sections())
-    }
-
-    fn movements(&self) -> Vec<Movement> {
-        self.host.movements.lock().unwrap().clone()
     }
 
     fn create_object_section(

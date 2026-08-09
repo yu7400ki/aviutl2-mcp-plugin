@@ -146,6 +146,10 @@ impl EditHost for SdkEditHost {
         crate::alias::data_directory().map(std::path::Path::to_path_buf)
     }
 
+    fn movements(&self) -> Vec<Movement> {
+        crate::movement::movements().to_vec()
+    }
+
     fn observed_selection(&self) -> Result<HostSelection, EditError> {
         let info = SdkReadHost.edit_info()?;
         // フォーカス対象は参照区間の内側でしか読めない。編集区間を抜けた後で
@@ -443,10 +447,6 @@ impl SceneEditor for SdkSceneEditor<'_> {
             .get_object_section_ranges(self.object(object.slot())?)
             .map_err(|_| sdk("get_object_section_frame"))?;
         Ok(to_inclusive_sections(ranges))
-    }
-
-    fn movements(&self) -> Vec<Movement> {
-        crate::movement::movements().to_vec()
     }
 
     fn create_object_section(

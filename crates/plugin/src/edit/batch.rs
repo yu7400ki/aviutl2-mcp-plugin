@@ -44,7 +44,7 @@ use crate::read::host::{
 use crate::read::resolve::effect_info_at;
 use aviutl2_mcp_core::{
     AvailableEffectItem, BatchOperation, BatchOutcome, BatchStepOutcome, FrameRange, GridBpm,
-    ItemWrite, ItemWriteError, ObjectSelector, ObjectSummary, prepare_item_write,
+    ItemWrite, ItemWriteError, Movement, ObjectSelector, ObjectSummary, prepare_item_write,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -59,9 +59,10 @@ pub(crate) fn apply_batch(
     project: &ProjectState,
     boundary: &Boundary,
     operations: &[BatchOperation],
+    movements: &[Movement],
 ) -> Result<BatchOutcome, EditError> {
     let cache = CachingEditor::new(editor);
-    let plan = plan(&cache, boundary, operations)?;
+    let plan = plan(&cache, boundary, operations, movements)?;
 
     // 許可は全 sub-operation の解決と逆操作の構築が終わってから取る。
     let permit = boundary.issue_permit(project)?;
@@ -216,10 +217,12 @@ fn plan<'sec>(
     editor: &'sec dyn SceneEditor,
     boundary: &Boundary,
     operations: &[BatchOperation],
+    movements: &[Movement],
 ) -> Result<BatchPlan<'sec>, EditError> {
     let mut steps = Vec::with_capacity(operations.len());
     for (position, operation) in operations.iter().enumerate() {
-        let step = plan_step(editor, boundary, operation).map_err(|error| at(position, error))?;
+        let step = plan_step(editor, boundary, operation, movements)
+            .map_err(|error| at(position, error))?;
         steps.push(step);
     }
     ensure_distinct(&steps)?;
@@ -231,6 +234,7 @@ fn plan_step<'sec>(
     editor: &'sec dyn SceneEditor,
     boundary: &Boundary,
     operation: &BatchOperation,
+    movements: &[Movement],
 ) -> Result<PlannedStep<'sec>, EditError> {
     match operation {
         BatchOperation::MoveObject {
@@ -264,7 +268,7 @@ fn plan_step<'sec>(
         } => {
             let (object, effect) = resolve_effect(editor, boundary, selector)?;
             let items = editor.effect_items(&effect)?;
-            let target = track_write_target(editor, &object)?;
+            let target = track_write_target(editor, &object, movements)?;
             let write = match prepare_item_write(&items, item, value, target.as_write_target()) {
                 Ok(write) => write,
                 Err(ItemWriteError::ItemNotFound { item }) => {
@@ -848,10 +852,6 @@ impl SceneEditor for CachingEditor<'_> {
         object: &ResolvedObject<'_>,
     ) -> Result<Vec<aviutl2_mcp_core::SectionRange>, EditError> {
         self.inner.object_sections(object)
-    }
-
-    fn movements(&self) -> Vec<aviutl2_mcp_core::Movement> {
-        self.inner.movements()
     }
 
     fn create_object_section(
