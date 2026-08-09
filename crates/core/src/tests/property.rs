@@ -3,8 +3,8 @@
 use crate::batch::{ApplyBatchParams, BatchOperation, MAX_BATCH_OPERATIONS};
 use crate::edit::{
     AddEffectParams, CreateObjectParams, DeleteEffectParams, DeleteObjectParams, Destination,
-    MoveObjectParams, SetEffectEnabledParams, SetObjectItemParams, SetObjectNameParams,
-    SetSelectionParams,
+    MoveEffectParams, MoveObjectParams, SetEffectEnabledParams, SetObjectItemParams,
+    SetObjectNameParams, SetSelectionParams,
 };
 use crate::effect::{EffectItem, EffectItemType, TrackInfo};
 use crate::fingerprint::{
@@ -948,6 +948,7 @@ proptest! {
         assert_decodes_or_errors!(AddEffectParams);
         assert_decodes_or_errors!(DeleteEffectParams);
         assert_decodes_or_errors!(SetEffectEnabledParams);
+        assert_decodes_or_errors!(MoveEffectParams);
         assert_decodes_or_errors!(SetSelectionParams);
         assert_decodes_or_errors!(ApplyBatchParams);
         assert_decodes_or_errors!(RenderFrameParams);
@@ -972,6 +973,7 @@ proptest! {
         assert_decodes_or_errors!(AddEffectParams);
         assert_decodes_or_errors!(DeleteEffectParams);
         assert_decodes_or_errors!(SetEffectEnabledParams);
+        assert_decodes_or_errors!(MoveEffectParams);
         assert_decodes_or_errors!(SetSelectionParams);
         assert_decodes_or_errors!(ApplyBatchParams);
         assert_decodes_or_errors!(RenderFrameParams);

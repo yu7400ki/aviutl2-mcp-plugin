@@ -502,6 +502,31 @@ impl SetEffectEnabledParams {
     }
 }
 
+/// `move_effect` の params。
+///
+/// 移動先はセレクターの外の引数として受け取る。[`EffectSelector`] は対象を指す
+/// 材料だけを運び、列の中での位置を含まない。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveEffectParams {
+    /// 動かす effect。
+    pub selector: EffectSelector,
+    /// 移動先の、列全体での 0 始まりの位置。
+    pub position: usize,
+}
+
+impl MoveEffectParams {
+    /// 要求内容だけで決まる検証を行う。
+    ///
+    /// 見るのはセレクターが持つ位置指定と、移動先が受け渡せる範囲に収まることだけ
+    /// である。列の長さとの比較は対象の現在の状態を要するため、変更を適用する側が
+    /// 行う。
+    pub fn validate(&self) -> Result<(), EditInputError> {
+        validate_effect_selector_position(&self.selector)?;
+        validate_index(FIELD_POSITION, self.position)
+    }
+}
+
 /// `set_selection` の params。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1090,6 +1115,8 @@ const FIELD_SAMPLE_RATE: &str = "sample_rate";
 const FIELD_ITEM: &str = "item";
 /// `effect_name` フィールド名。
 const FIELD_EFFECT_NAME: &str = "effect_name";
+/// `position` フィールド名。
+const FIELD_POSITION: &str = "position";
 /// `enabled` フィールド名。
 const FIELD_ENABLED: &str = "enabled";
 /// `locked` フィールド名。
@@ -1753,6 +1780,13 @@ mod tests {
         }
     }
 
+    fn sample_move_effect() -> MoveEffectParams {
+        MoveEffectParams {
+            selector: sample_effect_selector(),
+            position: 2,
+        }
+    }
+
     fn sample_set_layer_state() -> SetLayerStateParams {
         SetLayerStateParams {
             expected_scene_id: 0,
@@ -1863,6 +1897,7 @@ mod tests {
             selector: sample_effect_selector(),
             enabled: false,
         });
+        assert_roundtrip(sample_move_effect());
         assert_roundtrip(sample_set_selection());
         assert_roundtrip(SetSelectionParams {
             selected_range: Some(RangeChange::Clear {}),
@@ -1926,6 +1961,7 @@ mod tests {
                 enabled: true,
             }
         );
+        assert_rejects_unknown!(MoveEffectParams, sample_move_effect());
         assert_rejects_unknown!(SetSelectionParams, sample_set_selection());
         assert_rejects_unknown!(SetLayerStateParams, sample_set_layer_state());
         assert_rejects_unknown!(
@@ -3181,8 +3217,13 @@ mod tests {
             }
             .validate(),
             SetEffectEnabledParams {
-                selector: effect,
+                selector: effect.clone(),
                 enabled: true,
+            }
+            .validate(),
+            MoveEffectParams {
+                selector: effect,
+                position: 0,
             }
             .validate(),
             SetSelectionParams {
@@ -3200,6 +3241,41 @@ mod tests {
             let error = failure.expect_err("範囲外のセレクターが受理されました");
             assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
         }
+    }
+
+    #[test]
+    fn move_effect_params_only_bound_the_destination() {
+        // 列の長さとの比較は対象の現在の状態を要する。要求内容だけの検証は、
+        // 移動先が受け渡せる範囲に収まることまでしか見ない。
+        sample_move_effect()
+            .validate()
+            .expect("移動先の位置が拒否されました");
+
+        let error = MoveEffectParams {
+            position: MAX_POSITION as usize + 1,
+            ..sample_move_effect()
+        }
+        .validate()
+        .expect_err("i32 に収まらない移動先が受理されました");
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+        assert!(
+            matches!(
+                error,
+                EditInputError::IndexOutOfRange {
+                    field: FIELD_POSITION,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn move_effect_params_reject_a_negative_destination() {
+        // 負値は usize へ復号できない。実行口へ届く前に落ちる。
+        let mut value = serde_json::to_value(sample_move_effect()).unwrap();
+        value["position"] = json!(-1);
+        assert!(serde_json::from_value::<MoveEffectParams>(value).is_err());
     }
 
     fn sample_create_section() -> CreateObjectSectionParams {
