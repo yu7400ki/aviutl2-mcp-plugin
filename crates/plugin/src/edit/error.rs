@@ -54,9 +54,10 @@ pub enum UnsupportedReason {
     EffectStateImmutable,
     /// その effect は列の中で順序を動かせない。
     ///
-    /// 順序を動かせるのはフィルタ効果だけである。カタログの種別が既知で
-    /// フィルタでない対象は発行の前に落ち、種別から判断できない対象は発行後の
-    /// 読み直しがここへ落とす。
+    /// 順序を動かせるのはフィルタ効果だけである。**名乗るのは発行の前だけで
+    /// ある**——カタログの種別を読んで判定しており、名前が主張する内容を確かめ
+    /// ている。発行の後の食い違いは
+    /// [`EditError::EffectMoveNotApplied`] が名乗る。
     EffectNotMovable,
     /// SDK が対応しないメディアファイル。
     MediaNotSupported,

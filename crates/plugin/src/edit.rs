@@ -67,8 +67,12 @@ pub trait EditAdapter: Send + Sync {
 
     /// effect を列の別の位置へ動かす。
     ///
-    /// 動かせるのはフィルタ効果だけである。順序を動かせない対象は
-    /// [`UnsupportedReason::EffectNotMovable`] になる。
+    /// 動かせるのはフィルタ効果だけである。種別から順序を動かせないと分かる
+    /// 対象は発行の前に [`UnsupportedReason::EffectNotMovable`] になり、発行
+    /// した移動が列に現れなければ [`EditError::EffectMoveNotApplied`] になる。
+    ///
+    /// **要求と違う位置へ動いた列は移動前の並びへ戻す。** 戻さなければ、失敗が
+    /// 要求元のセレクターを無効にする。
     ///
     /// **成功すると、要求に使ったセレクターは古くなる。** 列の位置が変われば
     /// fingerprint が変わり、同名 effect が在れば同名内の順序も変わる。応答が
