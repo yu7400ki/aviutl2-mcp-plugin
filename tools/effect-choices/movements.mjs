@@ -18,6 +18,25 @@
 // 読めない表記も同じ扱いにする——どちらも「書けない」の証拠にならず、表に載せず
 // 理由付きで報告へ回す。
 //
+// # 「書けない」は区間の数を変えた 2 回の観測で確かめる
+//
+// **`writable: false` はバイナリへ焼き込まれ、以後その名前は全オブジェクトで
+// 拒まれる。** 1 回の観測では 2 つの誤りを分けられない——その 1 回だけホストが
+// 書き込みを無視した場合と、**区間の境界より多くの制御点を要する移動方法**の
+// 場合である。後者は区間が多いオブジェクトでなら書けるのに、全域で拒まれる。
+//
+// そこで 1 回目で移動を失った名前だけを、スクラッチへ中間点を 1 つ足してから
+// 測り直す。両方が失えば記録し、区間の数で結果が変わるなら**その性質は名前に
+// ついての表に書けない**ため報告へ回す。**受理された側は補強を要さない**——
+// 書き戻し照合が値・移動方法・フラグ整数の構造一致を要求するためである。
+//
+// # 1 件の失敗で走査を止めない
+//
+// 名前 1 件の測定は例外まで含めて [`attempt`] の中に閉じる。ホストは移動の
+// パラメータを補って fingerprint を変えるため、追従しきれずに落ちる経路が実在
+// する。走査ごと止めれば、書き出しはループの後にあるためそれまでに測った全件が
+// 失われる。**走査を止めるのは、測定を 1 件も始められないときだけである。**
+//
 // # 測る前に移動を消す
 //
 // 名前を 1 つ測るたび、まず移動を消して静的な値へ戻す。**書ける名前を測った後は
@@ -96,7 +115,7 @@ const NOT_APPLIED = "item_value_not_applied";
 /** 移動を持たない値の表記。区切りを持たない単一の数値である。 */
 const LONE_NUMBER = /^-?\d+(?:\.\d+)?$/;
 
-/** 書き込み 1 回の結末。 */
+/** 測定 1 回の結末。 */
 export const WRITE = {
   /** ホストが要求どおりの移動を持った。 */
   accepted: "accepted",
@@ -104,6 +123,10 @@ export const WRITE = {
   notApplied: "not_applied",
   /** 上記以外の失敗。ホストが名乗った理由が `reason` に入る。 */
   failed: "failed",
+  /** 測る土台を作れなかった。妨げた結末の説明が `reason` に入る。 */
+  unprepared: "unprepared",
+  /** 測定が例外で落ちた。文面が `reason` に入る。 */
+  raised: "raised",
 };
 
 /**
@@ -117,32 +140,86 @@ export function observedHasMovement(observed) {
   return !LONE_NUMBER.test(String(observed ?? "").trim());
 }
 
+/** その結末が「移動を失った」という観測か。 */
+export function lostMovement(result) {
+  return result.outcome === WRITE.notApplied && !observedHasMovement(result.observed);
+}
+
+/** その結末が「移動を失わなかった」という観測か。 */
+function keptMovement(result) {
+  return (
+    result.outcome === WRITE.accepted ||
+    (result.outcome === WRITE.notApplied && observedHasMovement(result.observed))
+  );
+}
+
+/** 説明へ、名乗られた理由を括弧で添える。名乗られていなければ何も添えない。 */
+function withReason(text, reason) {
+  return typeof reason === "string" && reason.length > 0 ? `${text}（${reason}）` : text;
+}
+
+/** 測定 1 回の結末を 1 行で述べる。 */
+function describeWrite(result) {
+  switch (result.outcome) {
+    case WRITE.accepted:
+      return "受理された";
+    case WRITE.notApplied:
+      return `${NOT_APPLIED}: ${result.observed}`;
+    default:
+      return withReason("失敗した", result.reason);
+  }
+}
+
+/** 移動を失ったという観測にならなかった結末を、表に載せない理由として述べる。 */
+function droppedReason(result) {
+  switch (result.outcome) {
+    case WRITE.notApplied:
+      return `読み直した値が移動を失っていない（${result.observed}）`;
+    case WRITE.unprepared:
+      return withReason("測る土台を作れなかった", result.reason);
+    case WRITE.raised:
+      return withReason("測定が例外で落ちた", result.reason);
+    default:
+      return result.reason === MODE_NOT_WRITABLE
+        ? `${MODE_NOT_WRITABLE} で書き込みの発行前に拒まれた。配置されている plugin が読む表が古い可能性がある`
+        : withReason("書き込みが失敗した", result.reason);
+  }
+}
+
 /**
- * 書き込み 1 回の結末から、その名前を表へどう載せるかを決める。
+ * 名前 1 件について集めた結末から、表へどう載せるかを決める。
+ *
+ * `first` は区間の数がそのままの測定、`second` は中間点を足して区間を増やして
+ * から測り直した結果である。**結末の振り分けはここに集める**——測定の側は結末を
+ * 組み立てるだけで、表への載せ方を決めない。
+ *
+ * **`writable: false` は 2 回の観測が揃って初めて記録する。** 焼き込まれた偽は
+ * その名前を全オブジェクトで拒むため、1 回の観測では確定させない。区間の数で
+ * 結果が変わる名前は、名前についての表に書ける性質を持たない。
  *
  * **覆えなかった名前は表に入らない。** 「測っていない」を表す形が表に無いため、
  * 判定が付かなかった名前は理由を添えて呼び出し側の報告へ回す。
  */
-export function verdict(result) {
-  if (result.outcome === WRITE.accepted) {
+export function verdict(first, second = null) {
+  if (first.outcome === WRITE.accepted) {
     return { recorded: true, writable: true };
   }
-  if (result.outcome === WRITE.notApplied) {
-    if (observedHasMovement(result.observed)) {
-      return {
-        recorded: false,
-        reason: `読み直した値が移動を失っていない（${result.observed}）`,
-      };
-    }
+  if (!lostMovement(first)) {
+    return { recorded: false, reason: droppedReason(first) };
+  }
+  if (second === null) {
+    return { recorded: false, reason: "移動を失ったが、区間の数を変えて確かめ直していない" };
+  }
+  if (lostMovement(second)) {
     return { recorded: true, writable: false };
   }
-  if (result.reason === MODE_NOT_WRITABLE) {
+  if (keptMovement(second)) {
     return {
       recorded: false,
-      reason: `${MODE_NOT_WRITABLE} で書き込みの発行前に拒まれた。配置されている plugin が読む表が古い可能性がある`,
+      reason: `区間を増やして測り直すと移動を失わなかった（${describeWrite(second)}）。区間の数で結果が変わる性質を、名前の表には書けない`,
     };
   }
-  return { recorded: false, reason: `書き込みが ${result.reason} で失敗した` };
+  return { recorded: false, reason: `区間を増やした確かめ直しを測れなかった——${droppedReason(second)}` };
 }
 
 /**
@@ -378,13 +455,6 @@ class Item {
   }
 }
 
-/** 書き込みの結末を 1 行で述べる。 */
-function describeWrite(result) {
-  if (result.outcome === WRITE.notApplied) return `${NOT_APPLIED}: ${result.observed}`;
-  if (result.outcome === WRITE.failed) return String(result.reason);
-  return result.outcome;
-}
-
 /** オブジェクトを作れる効果の名前を列挙する。 */
 async function listSourceEffects(survey) {
   const names = [];
@@ -444,13 +514,58 @@ async function readMovementNames(item) {
   return known.map((entry) => entry.name);
 }
 
-/** 名前を 1 つ測る。土台を作れなければ、その名前を表に載せない。 */
-async function measure(item, name) {
-  const reset = await item.write(item.staticValue());
-  if (reset.outcome !== WRITE.accepted) {
-    return { recorded: false, reason: `測る前に移動を消せなかった（${describeWrite(reset)}）` };
+/**
+ * 名前を 1 つ測り、結末を返す。
+ *
+ * **測る前に移動を消して静的な値へ戻す。** 土台を名前ごとに変えないためである。
+ *
+ * **失敗を結末へ畳み、外へ投げない。** 1 件の測定が落ちても走査は次の名前へ
+ * 進む。落ちた対象は取り直しておく——追従が済んでいれば次の名前は測れる。
+ */
+async function attempt(item, name) {
+  try {
+    const reset = await item.write(item.staticValue());
+    if (reset.outcome !== WRITE.accepted) {
+      return { outcome: WRITE.unprepared, reason: describeWrite(reset) };
+    }
+    return await item.write(item.movingValue(name));
+  } catch (error) {
+    try {
+      await item.refresh();
+    } catch {
+      // 取り直せない対象は、次の名前の測定が同じ形で結末に畳む。
+    }
+    return { outcome: WRITE.raised, reason: error.message };
   }
-  return verdict(await item.write(item.movingValue(name)));
+}
+
+/**
+ * スクラッチへ中間点を 1 つ足し、区間を増やす。妨げがあればその説明を返す。
+ *
+ * **オブジェクトを増やさない。** 同時に timeline へ乗るスクラッチが 1 つである
+ * 限り、1 編集あたりの描画費用は走査の規模に依らない。
+ */
+async function addSection(survey, item) {
+  const object = await survey.getObject(item.objectSelector);
+  const [span] = object.sections;
+  if (!span) return "オブジェクトの区間を読めない";
+  const frame = Math.floor((span.start + span.end) / 2);
+  if (frame <= span.start) return "オブジェクトが短く、中間点を置けるフレームが無い";
+  const response = await survey.call("create_object_section", {
+    selector: object.summary.selector,
+    frame,
+  });
+  if (response.isError) {
+    return response.data?.details?.reason ?? response.data?.code ?? response.text;
+  }
+  await item.refresh();
+  return null;
+}
+
+/** 決まった載せ方を 1 行で述べる。 */
+function summarize(decision) {
+  if (!decision.recorded) return decision.reason;
+  return decision.writable ? "書ける" : "書けない";
 }
 
 async function main() {
@@ -484,21 +599,43 @@ async function main() {
 
     const measurements = [];
     for (const name of names) {
-      const decision = await measure(item, name);
-      measurements.push({ name, verdict: decision });
-      const summary = decision.recorded
-        ? decision.writable
-          ? "書ける"
-          : "書けない"
-        : decision.reason;
-      console.log(`${name}: ${summary}`);
+      const first = await attempt(item, name);
+      measurements.push({ name, first, second: null });
+      console.log(
+        `${name}: ${lostMovement(first) ? "移動を失った。区間の数を変えて確かめ直します" : summarize(verdict(first))}`,
+      );
     }
 
-    const table = buildDocument(measurements);
+    // 移動を失った名前だけを、区間の数を変えて測り直す。中間点を足すのは
+    // 走査を通して 1 度だけである。
+    const pending = measurements.filter((entry) => lostMovement(entry.first));
+    if (pending.length > 0) {
+      console.log(`\n移動を失った ${pending.length} 件を確かめ直します`);
+      let obstacle = null;
+      try {
+        obstacle = await addSection(survey, item);
+      } catch (error) {
+        obstacle = error.message;
+      }
+      if (obstacle) console.log(`中間点を追加できません: ${obstacle}`);
+      else console.log(`区間 ${item.sectionCount} 個。境界ごとに ${item.sectionCount + 1} 個の値を書きます`);
+      for (const entry of pending) {
+        entry.second = obstacle
+          ? { outcome: WRITE.unprepared, reason: obstacle }
+          : await attempt(item, entry.name);
+        console.log(`${entry.name}: ${summarize(verdict(entry.first, entry.second))}`);
+      }
+    }
+
+    const judged = measurements.map((entry) => ({
+      name: entry.name,
+      verdict: verdict(entry.first, entry.second),
+    }));
+    const table = buildDocument(judged);
     writeFileSync(options.output, `${JSON.stringify(table, null, 2)}\n`, "utf8");
     console.log(`\n${options.output} へ ${Object.keys(table.movements).length} 件を書き出しました`);
 
-    const unreached = measurements.filter((entry) => !entry.verdict.recorded);
+    const unreached = judged.filter((entry) => !entry.verdict.recorded);
     if (unreached.length > 0) {
       console.log(`表に載せなかった名前 ${unreached.length} 件:`);
       for (const entry of unreached) console.log(`  ${entry.name}: ${entry.verdict.reason}`);

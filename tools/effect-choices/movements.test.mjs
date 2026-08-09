@@ -6,7 +6,20 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { WRITE, buildDocument, observedHasMovement, tableIsEmpty, verdict } from "./movements.mjs";
+import {
+  WRITE,
+  buildDocument,
+  lostMovement,
+  observedHasMovement,
+  tableIsEmpty,
+  verdict,
+} from "./movements.mjs";
+
+/** 移動を失った観測。 */
+const LOST = { outcome: WRITE.notApplied, observed: "0.00" };
+
+/** 移動が残った観測。 */
+const KEPT = { outcome: WRITE.notApplied, observed: "0.00,100.00,直線移動,0|15" };
 
 describe("observedHasMovement", () => {
   it("reads a value without a separator as having lost its movement", () => {
@@ -31,21 +44,27 @@ describe("observedHasMovement", () => {
   });
 });
 
-describe("verdict", () => {
-  it("records an accepted write as writable", () => {
-    assert.deepEqual(verdict({ outcome: WRITE.accepted }), { recorded: true, writable: true });
+describe("lostMovement", () => {
+  it("counts only a write that came back without its movement", () => {
+    assert.equal(lostMovement(LOST), true);
+    assert.equal(lostMovement(KEPT), false);
+    assert.equal(lostMovement({ outcome: WRITE.accepted }), false);
+    assert.equal(lostMovement({ outcome: WRITE.failed, reason: "track_value_count" }), false);
+    assert.equal(lostMovement({ outcome: WRITE.unprepared, reason: "巻き戻せない" }), false);
+    assert.equal(lostMovement({ outcome: WRITE.raised, reason: "selector に追従できません" }), false);
   });
+});
 
-  it("records a lost movement as not writable", () => {
-    assert.deepEqual(verdict({ outcome: WRITE.notApplied, observed: "0.00" }), {
-      recorded: true,
-      writable: false,
-    });
+describe("verdict", () => {
+  it("records an accepted write as writable without a second look", () => {
+    // 書き戻し照合が値・移動方法・フラグの構造一致を要求するため、受理された
+    // 側は補強を要さない。
+    assert.deepEqual(verdict({ outcome: WRITE.accepted }), { recorded: true, writable: true });
   });
 
   it("leaves a surviving movement off the table", () => {
     // 違うのは値かパラメータであって移動の有無ではない。
-    const decision = verdict({ outcome: WRITE.notApplied, observed: "0.00,100.00,直線移動,0|15" });
+    const decision = verdict(KEPT);
     assert.equal(decision.recorded, false);
     assert.match(decision.reason, /0\.00,100\.00,直線移動,0\|15/);
   });
@@ -63,17 +82,79 @@ describe("verdict", () => {
     assert.equal(decision.recorded, false);
     assert.match(decision.reason, /track_value_count/);
   });
+
+  it("never spells a failure that named no reason as undefined", () => {
+    for (const result of [
+      { outcome: WRITE.failed },
+      { outcome: WRITE.failed, reason: "" },
+      { outcome: WRITE.unprepared },
+      { outcome: WRITE.raised },
+    ]) {
+      const decision = verdict(result);
+      assert.equal(decision.recorded, false);
+      assert.doesNotMatch(decision.reason, /undefined|null/);
+      assert.notEqual(decision.reason, "");
+    }
+  });
+
+  it("leaves a measurement that could not be set up off the table", () => {
+    const decision = verdict({ outcome: WRITE.unprepared, reason: "item_value_not_applied: 0.00" });
+    assert.equal(decision.recorded, false);
+    assert.match(decision.reason, /土台/);
+    assert.match(decision.reason, /item_value_not_applied: 0\.00/);
+  });
+
+  it("leaves a measurement that raised off the table", () => {
+    // 1 件の失敗で走査を止めないため、例外も結末として畳まれてここへ来る。
+    const decision = verdict({ outcome: WRITE.raised, reason: "selector に追従できません" });
+    assert.equal(decision.recorded, false);
+    assert.match(decision.reason, /例外/);
+    assert.match(decision.reason, /selector に追従できません/);
+  });
+
+  it("does not record a lost movement seen only once", () => {
+    // 焼き込まれた偽はその名前を全オブジェクトで拒む。1 回の観測では確定しない。
+    const decision = verdict(LOST);
+    assert.equal(decision.recorded, false);
+    assert.match(decision.reason, /確かめ直していない/);
+  });
+
+  it("records a movement lost at both section counts as not writable", () => {
+    assert.deepEqual(verdict(LOST, LOST), { recorded: true, writable: false });
+  });
+
+  it("leaves a name whose result changed with the section count off the table", () => {
+    // 区間の境界より多くの制御点を要する移動方法がここへ来る。名前について
+    // 全域で成り立つ性質ではないため、表に書けない。
+    for (const second of [{ outcome: WRITE.accepted }, KEPT]) {
+      const decision = verdict(LOST, second);
+      assert.equal(decision.recorded, false);
+      assert.match(decision.reason, /区間/);
+    }
+  });
+
+  it("leaves a name whose second look could not be measured off the table", () => {
+    for (const second of [
+      { outcome: WRITE.failed, reason: "track_value_count" },
+      { outcome: WRITE.unprepared, reason: "section_boundary_exists" },
+      { outcome: WRITE.raised, reason: "オブジェクトを読めません" },
+    ]) {
+      const decision = verdict(LOST, second);
+      assert.equal(decision.recorded, false);
+      assert.match(decision.reason, /確かめ直し/);
+    }
+  });
 });
 
 describe("buildDocument", () => {
   /** 走査 1 件分の測定結果を組み立てる。 */
-  const measured = (name, result) => ({ name, verdict: verdict(result) });
+  const measured = (name, first, second = null) => ({ name, verdict: verdict(first, second) });
 
   it("sorts the names it records", () => {
     const table = buildDocument([
       measured("直線移動", { outcome: WRITE.accepted }),
       measured("回転", { outcome: WRITE.accepted }),
-      measured("移動無し", { outcome: WRITE.notApplied, observed: "0.00" }),
+      measured("移動無し", LOST, LOST),
     ]);
     assert.deepEqual(Object.keys(table.movements), ["回転", "直線移動", "移動無し"]);
     assert.deepEqual(table.movements, {
@@ -88,18 +169,28 @@ describe("buildDocument", () => {
     const table = buildDocument([
       measured("直線移動", { outcome: WRITE.accepted }),
       measured("測れない移動", { outcome: WRITE.failed, reason: "track_mode_not_writable" }),
-      measured("値だけ違う移動", { outcome: WRITE.notApplied, observed: "0.00,100.00,回転,0" }),
+      measured("値だけ違う移動", KEPT),
+      measured("落ちた移動", { outcome: WRITE.raised, reason: "追従できません" }),
+      measured("区間で変わる移動", LOST, { outcome: WRITE.accepted }),
+      measured("1 度しか見ていない移動", LOST),
     ]);
     assert.deepEqual(Object.keys(table.movements), ["直線移動"]);
-    assert.equal(JSON.stringify(table).includes("測れない移動"), false);
-    assert.equal(JSON.stringify(table).includes("値だけ違う移動"), false);
+    for (const name of [
+      "測れない移動",
+      "値だけ違う移動",
+      "落ちた移動",
+      "区間で変わる移動",
+      "1 度しか見ていない移動",
+    ]) {
+      assert.equal(JSON.stringify(table).includes(name), false, name);
+    }
   });
 
   it("writes the verdict as a boolean", () => {
     // 読む側は真偽値以外を拒む。`null` も省略も受け付けない。
     const table = buildDocument([
       measured("直線移動", { outcome: WRITE.accepted }),
-      measured("移動無し", { outcome: WRITE.notApplied, observed: "0.00" }),
+      measured("移動無し", LOST, LOST),
     ]);
     for (const facet of Object.values(table.movements)) {
       assert.equal(typeof facet.writable, "boolean");
