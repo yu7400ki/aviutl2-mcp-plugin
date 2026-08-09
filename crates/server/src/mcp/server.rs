@@ -3653,7 +3653,8 @@ mod tests {
             to_skill: Some(
                 "書き込みを発行した後に落ちた失敗には details.mutation_issued が true で付く。\
                  付かない失敗は 1 バイトも書いていないため、対象を読み直さずに要求を直して\
-                 送り直せる",
+                 送り直せる。付く失敗が読み直しを要するかは details.retry_requires が名乗る\
+                 ——発行した変更が戻っていれば読み直す先は無い",
             ),
         },
         Relocation {

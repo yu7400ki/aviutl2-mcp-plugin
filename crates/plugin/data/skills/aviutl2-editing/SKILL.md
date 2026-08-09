@@ -63,7 +63,7 @@ selector は自分で組み立てない。読み取りの応答が返した値�
 
 対象が変化していた precondition_failed では details.current_object に対象の現在の姿が入り、そのまま次の要求の selector にできる。apply_batch だけは何番目で落ちたかを併せて示すため details.failed_object という別のキーで返す。
 
-書き込みを発行した後に落ちた失敗には details.mutation_issued が true で付く。付かない失敗は 1 バイトも書いていないため、対象を読み直さずに要求を直して送り直せる。
+書き込みを発行した後に落ちた失敗には details.mutation_issued が true で付く。付かない失敗は 1 バイトも書いていないため、対象を読み直さずに要求を直して送り直せる。付く失敗が読み直しを要するかは details.retry_requires が名乗る——発行した変更が戻っていれば読み直す先は無い。
 
 timeout は変更が無かったことを意味しない。details.change_applied が "no" なら未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
 
