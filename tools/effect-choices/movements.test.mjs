@@ -12,6 +12,7 @@ import {
   lostMovement,
   observedHasMovement,
   tableIsEmpty,
+  truncatedTotal,
   verdict,
 } from "./movements.mjs";
 
@@ -41,6 +42,34 @@ describe("observedHasMovement", () => {
     assert.equal(observedHasMovement(null), true);
     assert.equal(observedHasMovement(""), true);
     assert.equal(observedHasMovement("読めない表記"), true);
+  });
+});
+
+describe("truncatedTotal", () => {
+  it("reads the count the response named for that position", () => {
+    // 上限は server が決める。生成器はその数を知らずに、切られた事実と切る前の
+    // 件数を応答から読む。
+    assert.equal(truncatedTotal({ truncated: { known_movements: 40 } }, "known_movements"), 40);
+  });
+
+  it("reads no count from a response that named no truncation", () => {
+    assert.equal(truncatedTotal({ known_movements: [] }, "known_movements"), null);
+    assert.equal(truncatedTotal({ truncated: {} }, "known_movements"), null);
+    assert.equal(truncatedTotal(undefined, "known_movements"), null);
+  });
+
+  it("reads no count from a truncation named for another position", () => {
+    assert.equal(truncatedTotal({ truncated: { rows: 40 } }, "known_movements"), null);
+  });
+
+  it("reads no count from a value that is not one", () => {
+    for (const value of [0, -1, "40", 4.5, null, {}, []]) {
+      assert.equal(
+        truncatedTotal({ truncated: { known_movements: value } }, "known_movements"),
+        null,
+        JSON.stringify(value),
+      );
+    }
   });
 });
 

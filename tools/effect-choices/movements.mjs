@@ -48,9 +48,13 @@
 // # 一覧は失敗の応答から引く
 //
 // 移動方法の一覧を返す読み取りは無い。一覧に無い名前を書くと、失敗の
-// `details.known_movements` にその環境の全件が並ぶ。**この失敗は書き込みを
+// `details.known_movements` にその環境の移動方法が並ぶ。**この失敗は書き込みを
 // 発行しない。** 値の個数の検証が名前の検証より先に来るため、区間の数を読んで
 // から送る。
+//
+// **上限で切られたときは応答がそう名乗る。** 切る前の件数は `details.truncated`
+// が運ぶ（[`truncatedTotal`]）。届かなかった名前は測れないため、そのことを
+// 数で警告する。
 //
 // # 走らせ直すときの循環
 //
@@ -95,13 +99,11 @@ const BOUNDARY_VALUES = [0, 100];
  */
 const UNKNOWN_MODE = "[aviutl2-mcp]移動方法ではない名前";
 
-/**
- * 失敗の応答が配列として運ぶ要素の数の上限。
- *
- * 超えた分は黙って落ちる。一覧がちょうどこの件数で返ったときは、その先に名前が
- * 在っても届いていない可能性がある。
- */
-const DETAIL_ARRAY_LIMIT = 32;
+/** 失敗の応答が移動方法の一覧を運ぶ key。切り詰めを名乗る位置でもある。 */
+const KNOWN_MOVEMENTS_KEY = "known_movements";
+
+/** 失敗の応答が、上限で切った配列を名乗る key。 */
+const TRUNCATED_KEY = "truncated";
 
 /** 一覧に無い名前を書いたときの失敗の理由。 */
 const MODE_UNKNOWN = "track_mode_unknown";
@@ -128,6 +130,21 @@ export const WRITE = {
   /** 測定が例外で落ちた。文面が `reason` に入る。 */
   raised: "raised",
 };
+
+/**
+ * 応答が名乗った、切り詰める前の要素数。名乗っていなければ `null`。
+ *
+ * 上限で切った配列については、失敗の応答が切られた位置と切る前の件数を
+ * [`TRUNCATED_KEY`] の下へ並べる。**上限がいくつかを知らなくてよい**——切ったと
+ * いう事実も件数も応答が運ぶ。
+ *
+ * `path` は切られた配列の位置である。トップレベルの配列ではその key そのものに
+ * なる。
+ */
+export function truncatedTotal(details, path) {
+  const total = details?.[TRUNCATED_KEY]?.[path];
+  return Number.isInteger(total) && total > 0 ? total : null;
+}
 
 /**
  * 読み直した値が移動を持つか。
@@ -495,23 +512,29 @@ async function createScratch(survey, layer) {
 }
 
 /**
- * 移動方法の名前を全件引く。
+ * 移動方法の名前を引き、受け取った名前と、応答が名乗った全件数を返す。
  *
  * 一覧に無い名前を書いた失敗が一覧を運ぶ。**この失敗は書き込みを発行しない。**
+ *
+ * `total` は応答が切り詰めを名乗ったときだけ数を持つ。切られていなければ
+ * `null` であり、受け取った名前が全件である。
  */
 async function readMovementNames(item) {
   const result = await item.write(item.movingValue(UNKNOWN_MODE));
   if (result.outcome !== WRITE.failed || result.reason !== MODE_UNKNOWN) {
     throw new Error(`一覧を引く要求が ${MODE_UNKNOWN} で落ちませんでした: ${describeWrite(result)}`);
   }
-  const known = result.details?.known_movements;
+  const known = result.details?.[KNOWN_MOVEMENTS_KEY];
   if (!Array.isArray(known) || known.some((entry) => typeof entry?.name !== "string")) {
     throw new Error(`失敗の応答が移動方法の一覧を運んでいません: ${JSON.stringify(result.details)}`);
   }
   if (known.length === 0) {
     throw new Error("移動方法の一覧が空です。plugin が移動方法を 1 つも読めていません");
   }
-  return known.map((entry) => entry.name);
+  return {
+    names: known.map((entry) => entry.name),
+    total: truncatedTotal(result.details, KNOWN_MOVEMENTS_KEY),
+  };
 }
 
 /**
@@ -589,11 +612,11 @@ async function main() {
     await item.refresh();
     console.log(`区間 ${item.sectionCount} 個。境界ごとに ${item.sectionCount + 1} 個の値を書きます`);
 
-    const names = await readMovementNames(item);
+    const { names, total } = await readMovementNames(item);
     console.log(`移動方法 ${names.length} 件`);
-    if (names.length === DETAIL_ARRAY_LIMIT) {
+    if (total !== null) {
       console.log(
-        `一覧が ${DETAIL_ARRAY_LIMIT} 件ちょうどです。失敗の応答はこの件数で配列を切るため、この先の名前は届いていない可能性があります`,
+        `応答は ${total} 件のうち ${names.length} 件だけを運んでいます。届かなかった ${total - names.length} 件は測れません`,
       );
     }
 
