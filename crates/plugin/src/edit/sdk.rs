@@ -525,6 +525,22 @@ impl SceneEditor for SdkSceneEditor<'_> {
             .map_err(|error| mutation_failure("set_effect_enable", &error))
     }
 
+    fn move_effect(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        effect: &ResolvedEffect<'_>,
+        position: usize,
+    ) -> Result<usize, EditError> {
+        self.section
+            .move_effect(
+                self.object(object.slot())?,
+                self.effect(effect.slot())?,
+                position,
+            )
+            .map_err(|error| mutation_failure("move_effect", &error))
+    }
+
     fn set_effect_item(
         &self,
         _ticket: MutationTicket<'_>,

@@ -79,6 +79,12 @@ pub(crate) enum Fault {
     PrependEffect,
     /// effect の付与で 2 件が増える。
     AddTwoEffects,
+    /// effect の順序の移動を無言で無視する。
+    IgnoreEffectMove,
+    /// effect を要求した位置ではなく列の末尾へ動かす。
+    AppendMovedEffect,
+    /// effect は要求した位置へ動かすが、戻り値だけ別の数を名乗る。
+    MisreportEffectPosition,
     /// 変更 API が SDK へ届かずに失敗する。
     ///
     /// ラッパーは対象の存在確認を呼び出しの入口で行い、そこで落ちた要求は
@@ -1725,6 +1731,39 @@ impl SceneEditor for FakeSceneEditor<'_> {
             return Ok(());
         }
         self.with_effect(effect, |effect| effect.enabled = enabled)
+    }
+
+    fn move_effect(
+        &self,
+        _ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        effect: &ResolvedEffect<'_>,
+        position: usize,
+    ) -> Result<usize, EditError> {
+        self.mutation("move_effect")?;
+        let knobs = self.host.knobs();
+        if knobs.fault == Some(Fault::IgnoreEffectMove) {
+            return Ok(position);
+        }
+        let id = self.object_id(object.slot())?;
+        let (_, from) = self.effect_ref(effect.slot())?;
+        let mut scene = self.host.scene.lock().unwrap();
+        let object = scene.by_id_mut(id).ok_or(EditError::Sdk {
+            operation: "move_effect",
+        })?;
+        let moved = object.effects.remove(from);
+        // 抜いた後の列に対する挿し込みであり、末尾までを受け付ける。
+        let to = if knobs.fault == Some(Fault::AppendMovedEffect) {
+            object.effects.len()
+        } else {
+            position.min(object.effects.len())
+        };
+        object.effects.insert(to, moved);
+        renumber(&mut object.effects);
+        if knobs.fault == Some(Fault::MisreportEffectPosition) {
+            return Ok(to + 1);
+        }
+        Ok(to)
     }
 
     fn set_effect_item(

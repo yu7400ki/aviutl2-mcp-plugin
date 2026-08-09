@@ -952,6 +952,16 @@ impl SceneEditor for CachingEditor<'_> {
         self.inner.set_effect_enabled(ticket, effect, enabled)
     }
 
+    fn move_effect(
+        &self,
+        ticket: crate::edit::precondition::MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        effect: &ResolvedEffect<'_>,
+        position: usize,
+    ) -> Result<usize, EditError> {
+        self.inner.move_effect(ticket, object, effect, position)
+    }
+
     fn set_effect_item(
         &self,
         ticket: crate::edit::precondition::MutationTicket<'_>,

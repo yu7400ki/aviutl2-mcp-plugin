@@ -296,6 +296,19 @@ pub trait SceneEditor {
         enabled: bool,
     ) -> Result<(), EditError>;
 
+    /// effect を列の別の位置へ動かす。
+    ///
+    /// 戻り値はホストが名乗る移動後のインデックスである。**何を数えた値かを SDK は
+    /// 述べていない。** 移動が要求どおりに入ったかは、呼び出し側が列を読み直して
+    /// 決める。
+    fn move_effect(
+        &self,
+        ticket: MutationTicket<'_>,
+        object: &ResolvedObject<'_>,
+        effect: &ResolvedEffect<'_>,
+        position: usize,
+    ) -> Result<usize, EditError>;
+
     /// effect の設定項目へ値を書き込む。
     fn set_effect_item(
         &self,
