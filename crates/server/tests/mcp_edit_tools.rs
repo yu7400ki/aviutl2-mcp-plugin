@@ -14,7 +14,7 @@ use aviutl2_mcp_server::mcp::edit_input::{
     AddEffectInput, ApplyBatchInput, BatchOperationInput, CreateObjectInput,
     CreateObjectSectionInput, CursorPositionInput, DeleteEffectInput, DeleteObjectInput,
     DeleteObjectSectionInput, DestinationInput, DisplayStartInput, FocusChangeInput, GridBpmInput,
-    ItemValueInput, LayerNameChangeInput, MoveObjectInput, MoveObjectSectionInput,
+    ItemValueInput, LayerNameChangeInput, MoveEffectInput, MoveObjectInput, MoveObjectSectionInput,
     ObjectSourceInput, PlacementInput, RangeChangeInput, SceneSizeInput, SetEffectEnabledInput,
     SetGridBpmInput, SetLayerStateInput, SetObjectItemInput, SetObjectNameInput,
     SetSceneSettingsInput, SetSelectionInput,
@@ -655,6 +655,37 @@ async fn set_effect_enabled_tool_sends_set_effect_enabled_operation() {
         json!({
             "selector": effect_selector_json(),
             "enabled": false,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn move_effect_tool_sends_the_destination_position() {
+    // 移動先は selector の外の引数である。selector が運ぶ effect_index は同名
+    // effect の順序であり、列全体での位置とは別の値であるため、position を
+    // selector へ畳んだ実装も、別の名前で送る実装もここで落ちる。
+    let expected = effect_changed();
+    let harness = Harness::start(responses("move_effect", expected.clone()));
+
+    let result = harness
+        .server
+        .move_effect(Parameters(MoveEffectInput {
+            instance_id: harness.instance_id(),
+            selector: effect_selector_input(),
+            position: 2,
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
+    assert_eq!(structured(&result), expected);
+
+    let request = harness.only_request();
+    assert_eq!(request.operation, "move_effect");
+    assert_eq!(
+        request.params,
+        json!({
+            "selector": effect_selector_json(),
+            "position": 2,
         }),
     );
 }
