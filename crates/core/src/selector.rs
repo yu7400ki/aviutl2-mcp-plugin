@@ -185,6 +185,17 @@ mod tests {
     }
 
     #[test]
+    fn effect_selector_does_not_carry_the_column_position() {
+        // 列の位置は effect の増減で変わる。往復用トークンへ入れると、位置が
+        // ずれただけで再指定が前提条件の不一致になる。
+        let value = serde_json::to_value(sample_effect_selector()).unwrap();
+        assert!(
+            value.get("position").is_none(),
+            "{value} が列の位置を持っています"
+        );
+    }
+
+    #[test]
     fn effect_selector_allows_unknown_optional_fields() {
         let mut value = serde_json::to_value(sample_effect_selector()).unwrap();
         value

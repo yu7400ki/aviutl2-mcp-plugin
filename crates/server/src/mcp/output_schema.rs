@@ -509,6 +509,7 @@ fn effect_info() -> Value {
     object(&[
         ("name", string()),
         ("index", unsigned()),
+        ("position", unsigned()),
         ("enabled", boolean()),
         ("locked", boolean()),
         ("items", array(effect_item())),

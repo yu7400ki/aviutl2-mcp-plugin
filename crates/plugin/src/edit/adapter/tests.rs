@@ -3895,6 +3895,28 @@ fn an_added_effect_is_located_by_the_difference_in_the_name_list() {
 }
 
 #[test]
+fn an_added_effect_reports_where_it_landed_in_the_column() {
+    // 既定の対象は `動画ファイル` と `ぼかし` を持つ。末尾へ `ぼかし` が入ると
+    // 同名内の順序は 1、列の位置は 2 になり、2 つの数が食い違う。
+    let harness = Harness::new();
+    let outcome = harness
+        .edit
+        .add_effect(&AddEffectParams {
+            object: harness.selector(1, 100),
+            effect_name: "ぼかし".to_string(),
+        })
+        .expect("effect の付与に失敗しました");
+
+    let effect = outcome.effect.expect("付与された effect");
+    let scene = harness.host.scene();
+    let effects = &scene.layers[1].objects[0].effects;
+    assert_eq!(effect.position, effects.len() - 1);
+    assert_eq!(effects[effect.position].name, effect.name);
+    assert_eq!(effects[effect.position].index, effect.index);
+    assert_ne!(effect.position, effect.index);
+}
+
+#[test]
 fn moving_reports_the_placement_the_host_chose() {
     // ホストが宛先を調整しても移動そのものは成功している。要求値との一致を
     // 求めると、成功した移動が対象の不在として返る。
@@ -4674,6 +4696,8 @@ fn an_added_effect_is_located_even_when_the_host_does_not_append_it() {
     assert_eq!(effect.name, "ぼかし");
     // 先頭へ挿入されたため、同名内の順序は 0 になり既存の方が 1 へ繰り上がる。
     assert_eq!(effect.index, 0);
+    // 列の位置も先頭である。末尾を決め打つと、ここで別の要素を指す。
+    assert_eq!(effect.position, 0);
     let scene = harness.host.scene();
     let effects = &scene.layers[1].objects[0].effects;
     assert_eq!(effects[0].name, "ぼかし");

@@ -3062,6 +3062,30 @@ mod tests {
     }
 
     #[test]
+    fn get_object_gives_each_effect_its_position_in_the_column() {
+        // 3 件のうち 2 件を同名にする。同名内の順序と列の位置が食い違う要素が
+        // 無ければ、両者を取り違えた実装が通る。
+        let adapter = adapter_with(|_| {
+            host_with_effects(vec![
+                file_effect("動画ファイル", 0, r"C:\movie.mp4"),
+                file_effect("ぼかし", 0, r"C:\mask.png"),
+                file_effect("ぼかし", 1, r"C:\mask2.png"),
+            ])
+        });
+        let selector = listed_sample(&adapter).selector;
+        let detail = adapter.get_object(&selector).expect("対象の詳細");
+
+        let positions: Vec<usize> = detail
+            .effects
+            .iter()
+            .map(|effect| effect.position)
+            .collect();
+        assert_eq!(positions, vec![0, 1, 2]);
+        let indices: Vec<usize> = detail.effects.iter().map(|effect| effect.index).collect();
+        assert_eq!(indices, vec![0, 0, 1]);
+    }
+
+    #[test]
     fn get_object_returns_a_movement_as_a_movement() {
         // 移動を持つ項目は区間ごとの値と移動方法を運び、移動を持たない項目は
         // 1 つの数値のままである。同じ種別の中で分かれるため、応答の形を

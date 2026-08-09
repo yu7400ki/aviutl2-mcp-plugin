@@ -19,6 +19,12 @@ pub struct EffectInfo {
     pub name: String,
     /// 同名 effect のうち何番目か。0 始まり。
     pub index: usize,
+    /// effect 列全体での位置。0 始まり。
+    ///
+    /// `get_object` が返す `effects` 配列の添字と一致する。編集の応答は付与や
+    /// 変更を行った 1 件だけを返すため、その effect が列のどこに在るかを知る
+    /// 経路はこの値だけである。
+    pub position: usize,
     /// effect が有効か。
     pub enabled: bool,
     /// effect がロックされているか。
@@ -39,6 +45,7 @@ impl EffectInfo {
         Self {
             name: input.effect_name.to_string(),
             index: input.effect_index,
+            position: input.position,
             enabled: input.enabled,
             locked: input.locked,
             items: input.items.to_vec(),
@@ -948,6 +955,33 @@ mod tests {
         let info = sample_effect_info();
         assert_eq!(info.name, info.selector.effect_name);
         assert_eq!(info.index, info.selector.effect_index);
+    }
+
+    #[test]
+    fn effect_info_tells_the_column_position_apart_from_the_same_name_ordinal() {
+        // 同名 effect が 2 つ並ぶ列の後ろ側は、同名内では 1 番目・列では 3 番目に
+        // なる。2 つの数が一致する事例だけを置くと、取り違えた実装が通る。
+        let items = sample_effect_items();
+        let info = EffectInfo::new(
+            sample_object_selector(),
+            EffectFingerprintInput {
+                effect_name: "ぼかし",
+                effect_index: 1,
+                position: 2,
+                effect_count: 3,
+                enabled: true,
+                locked: false,
+                items: &items,
+            },
+        );
+        assert_eq!(info.index, 1);
+        assert_eq!(info.position, 2);
+        // 再指定の材料になるのは同名内の順序だけである。
+        assert_eq!(info.selector.effect_index, info.index);
+
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(value["index"], 1);
+        assert_eq!(value["position"], 2);
     }
 
     #[test]
