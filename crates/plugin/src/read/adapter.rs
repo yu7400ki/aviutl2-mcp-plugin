@@ -399,28 +399,31 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
                 not_found.push(name.clone());
                 continue;
             }
-            let items = guard(|| self.host.effect_items(name))?;
+            let listed = guard(|| self.host.effect_items(name))?;
             let help = catch(|| self.host.effect_help(name))?;
             let facets = catch(|| self.host.effect_facets(name))?;
+            let mut items = Vec::with_capacity(listed.len());
+            for item in listed {
+                // 説明も面も項目名で引く。ホストの列挙に無い項目は現れず、
+                // 持たない項目は null になる。
+                let item_facets = facets.items.get(&item.name);
+                // グループは項目ごとに 1 度引く。所属アイテム名から他の項目の
+                // グループを導くと、項目名が effect の中で一意であることを
+                // 前提に置くことになる。
+                let group = guard(|| self.host.effect_item_group(name, &item.name))?;
+                items.push(EffectItemDescription {
+                    description: help.items.get(&item.name).cloned(),
+                    choices: item_facets.and_then(|facets| facets.choices.clone()),
+                    range: item_facets.and_then(|facets| facets.range),
+                    group,
+                    name: item.name,
+                    item_type: item.item_type,
+                });
+            }
             effects.push(EffectDescription {
                 name: name.clone(),
                 description: help.description,
-                items: items
-                    .into_iter()
-                    .map(|item| {
-                        // 説明も面も項目名で引く。ホストの列挙に無い項目は
-                        // 現れず、持たない項目は null になる。
-                        let facets = facets.items.get(&item.name);
-                        EffectItemDescription {
-                            description: help.items.get(&item.name).cloned(),
-                            choices: facets.and_then(|facets| facets.choices.clone()),
-                            range: facets.and_then(|facets| facets.range),
-                            group: None,
-                            name: item.name,
-                            item_type: item.item_type,
-                        }
-                    })
-                    .collect(),
+                items,
             });
         }
         Ok(DescribeEffectsResult { effects, not_found })
@@ -1758,6 +1761,27 @@ mod tests {
                 source,
             }),
         }
+    }
+
+    /// 位置と所属アイテム名からグループを組み立てる。
+    fn item_group(index: usize, item_names: &[&str]) -> ItemGroup {
+        ItemGroup {
+            index,
+            item_names: item_names.iter().map(|name| (*name).to_string()).collect(),
+        }
+    }
+
+    /// 設定項目 1 件がグループに属するときのフェイクの答え。
+    fn member_group(
+        effect: &str,
+        item: &str,
+        index: usize,
+        item_names: &[&str],
+    ) -> ((String, String), FakeItemGroup) {
+        (
+            (effect.to_string(), item.to_string()),
+            FakeItemGroup::Member(item_group(index, item_names)),
+        )
     }
 
     /// フェイクの effect カタログ。
@@ -4161,6 +4185,171 @@ mod tests {
             .filter(|call| **call == "effect_help")
             .count();
         assert_eq!(asked, 2, "効果の数と説明を引いた回数が食い違っています");
+    }
+
+    #[test]
+    fn describe_effects_carries_the_group_of_each_item_as_the_host_returned_it() {
+        // 設定項目の一覧は平らな列で返る。どこが 1 つの組かを述べるのは
+        // グループだけであり、位置も所属アイテム名もホストが返した値のまま運ぶ。
+        //
+        // 同じグループに属する 2 件へ別々の位置を持たせてある。位置を取り違えた
+        // 実装は結果に現れる。
+        let members = ["グローの項目1", "グローの項目0"];
+        let adapter = adapter_with(|_| FakeHost {
+            groups: vec![
+                member_group("グロー", "グローの項目1", 0, &members),
+                member_group("グロー", "グローの項目0", 1, &members),
+            ],
+            ..FakeHost::new()
+        });
+        let result = adapter
+            .describe_effects(&describe_params(&["グロー"]))
+            .unwrap();
+
+        let items = &result.effects[0].items;
+        assert_eq!(items[0].name, "グローの項目1");
+        assert_eq!(items[0].group, Some(item_group(0, &members)));
+        assert_eq!(items[1].name, "グローの項目0");
+        assert_eq!(items[1].group, Some(item_group(1, &members)));
+    }
+
+    #[test]
+    fn describe_effects_reports_no_group_for_an_item_that_belongs_to_none() {
+        // 属さないことは null で表す。空のグループを作ると、所属アイテムが
+        // 1 件も無いグループに属していることになる。
+        let adapter = adapter();
+        let result = adapter
+            .describe_effects(&describe_params(&["グロー", "ぼかし"]))
+            .unwrap();
+
+        assert!(
+            result
+                .effects
+                .iter()
+                .flat_map(|effect| &effect.items)
+                .all(|item| item.group.is_none()),
+            "属さない項目にグループが付きました"
+        );
+    }
+
+    #[test]
+    fn describe_effects_fails_when_a_group_cannot_be_read() {
+        // 引けなかったことを null にすると、属さないことと同じ形で届く。要求元は
+        // 「この項目はグループに属さない」と読み、区別する手段を失う。
+        let adapter = adapter_with(|_| FakeHost {
+            groups: vec![(
+                ("グロー".to_string(), "グローの項目3".to_string()),
+                FakeItemGroup::Unavailable,
+            )],
+            ..FakeHost::new()
+        });
+
+        let error = adapter
+            .describe_effects(&describe_params(&["グロー"]))
+            .expect_err("引けなかった項目が失敗として返っていません");
+        assert!(
+            matches!(
+                error,
+                ReadError::Sdk {
+                    operation: "get_effect_item_group_names"
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn describe_effects_carries_a_group_that_does_not_name_the_item_it_was_asked_about() {
+        // 所属アイテム名の位置番目が問い合わせた項目名と一致することは
+        // 確かめない。一致しないときに採れる手は落とすことしか無く、落とせば
+        // 「グループに属さない」として届いて引けなかったことと同じ形になる。
+        let adapter = adapter_with(|_| FakeHost {
+            groups: vec![
+                member_group("グロー", "グローの項目1", 0, &["別の項目A", "別の項目B"]),
+                // 位置が所属アイテム名の外を指す。
+                member_group("グロー", "グローの項目0", 5, &["グローの項目0"]),
+            ],
+            ..FakeHost::new()
+        });
+        let result = adapter
+            .describe_effects(&describe_params(&["グロー"]))
+            .unwrap();
+
+        let items = &result.effects[0].items;
+        assert_eq!(
+            items[0].group,
+            Some(item_group(0, &["別の項目A", "別の項目B"])),
+            "問い合わせた項目名を含まないグループが落とされました"
+        );
+        assert_eq!(
+            items[1].group,
+            Some(item_group(5, &["グローの項目0"])),
+            "所属アイテム名の外を指す位置が落とされました"
+        );
+    }
+
+    #[test]
+    fn describe_effects_mixes_grouped_and_ungrouped_items_in_one_effect() {
+        // 1 つの effect の中で、別々のグループへ属する項目と属さない項目が
+        // 混ざる。グループが隣の項目や別の effect へ漏れないことを列全体で見る。
+        let axes = ["グローの項目1", "グローの項目0"];
+        let single = ["グローの項目3"];
+        let adapter = adapter_with(|_| FakeHost {
+            groups: vec![
+                member_group("グロー", "グローの項目1", 0, &axes),
+                member_group("グロー", "グローの項目0", 1, &axes),
+                member_group("グロー", "グローの項目3", 0, &single),
+            ],
+            ..FakeHost::new()
+        });
+        let result = adapter
+            .describe_effects(&describe_params(&["グロー", "ぼかし"]))
+            .unwrap();
+
+        let described: Vec<(&str, Option<ItemGroup>)> = result.effects[0]
+            .items
+            .iter()
+            .map(|item| (item.name.as_str(), item.group.clone()))
+            .collect();
+        assert_eq!(
+            described,
+            vec![
+                ("グローの項目1", Some(item_group(0, &axes))),
+                ("グローの項目0", Some(item_group(1, &axes))),
+                ("グローの項目3", Some(item_group(0, &single))),
+                ("グローの項目2", None),
+            ],
+            "グループが別の項目へ付いているか、属さない項目に現れています"
+        );
+        assert!(
+            result.effects[1]
+                .items
+                .iter()
+                .all(|item| item.group.is_none()),
+            "別の effect の項目へグループが漏れました"
+        );
+    }
+
+    #[test]
+    fn describe_effects_asks_for_the_group_once_per_item() {
+        // グループは項目ごとに引く。所属アイテム名から他の項目のグループを
+        // 導く形にすると、項目名が effect の中で一意であることを前提に置く。
+        let adapter = adapter();
+        let result = adapter
+            .describe_effects(&describe_params(&["グロー", "ぼかし"]))
+            .unwrap();
+
+        let items: usize = result.effects.iter().map(|effect| effect.items.len()).sum();
+        let asked = adapter
+            .host
+            .calls()
+            .iter()
+            .filter(|call| **call == "effect_item_group")
+            .count();
+        assert_eq!(
+            asked, items,
+            "設定項目の数とグループを引いた回数が食い違っています"
+        );
     }
 
     #[test]
