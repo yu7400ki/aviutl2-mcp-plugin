@@ -56,8 +56,8 @@ static LOG_RELOAD: OnceLock<Box<dyn Fn(EnvFilter) + Send + Sync>> = OnceLock::ne
 ///
 /// レベルは `RUST_LOG` 環境変数、設定の `log_level`、[`DEFAULT_LOG_FILTER`] の
 /// 順に採る。**環境変数を先に見るのは、設定ファイルごと読めない状況を診断する
-/// 経路を残すためである。** `LOG_FORMAT=json` で JSON 出力を選ぶ。いずれの
-/// 場合も [`EXTERNAL_LOG_CEILINGS`] は適用される。
+/// 経路を残すためである。** いずれの場合も [`EXTERNAL_LOG_CEILINGS`] は
+/// 適用される。
 ///
 /// **レベルは稼働中に差し替えられる。** filter を `reload::Layer` の下に置き、
 /// 設定が変わったら [`apply_log_level`] が差し替える。挟まるのは読み取りロック
@@ -71,16 +71,11 @@ pub fn init_logging(settings: &Settings) {
         }
     }));
 
-    let format = std::env::var("LOG_FORMAT").unwrap_or_default();
     let registry = tracing_subscriber::registry().with(layer);
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_ansi(false);
-    if format.eq_ignore_ascii_case("json") {
-        registry.with(fmt_layer.json()).init();
-    } else {
-        registry.with(fmt_layer).init();
-    }
+    registry.with(fmt_layer).init();
 
     report_rejected_log_level(rejected);
 }
