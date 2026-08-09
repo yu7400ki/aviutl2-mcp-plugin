@@ -787,7 +787,18 @@ impl EditError {
     fn retry_requires(&self) -> RetryRequires {
         match self {
             // 変更が入った可能性がある以上、そのまま再送してよい状況は無い。
-            EditError::AfterMutation { .. } => RetryRequires::Refetch,
+            // 戻せた場合も同じである——戻ったのは我々が戻したからであり、同じ
+            // 要求をもう一度送れば同じ書き込みがもう一度発行される。
+            //
+            // 読み直しを案内するかは復旧の結果が決める。戻せた対象は書き込み前の
+            // 値を持ち、読み直した先には要求の前と同じ値が在る。要求元が次に取る
+            // 行動（受け付けられる値を選び直す・別の位置を指す）はそこからは得ら
+            // れない。戻せなかった場合とこの層で巻き戻していない場合は、次の要求を
+            // 組む材料が読み直しにしか無い。
+            EditError::AfterMutation { restore, .. } => match restore {
+                ItemRestore::Restored => RetryRequires::None,
+                ItemRestore::Failed | ItemRestore::NotAttempted => RetryRequires::Refetch,
+            },
             // 一括適用の案内は失敗そのものが決める。巻き戻せなかった場合は
             // 内側が発行後の失敗になっているため、読み直しへ倒れる。
             EditError::Batch { source, .. } => source.retry_requires(),
@@ -1840,6 +1851,67 @@ pub(crate) mod tests {
         assert_eq!(details["current_project_revision"], json!(44));
         assert_eq!(details["retry_requires"], json!("refetch"));
         assert_eq!(details["sdk_operation"], json!("get_effect_list"));
+    }
+
+    #[test]
+    fn a_failure_whose_target_was_restored_needs_no_refetch() {
+        // 対象は書き込み前の値を持つ。読み直した先には要求の前と同じ値が在り、
+        // 要求元が次に取る行動（受け付けられる値を選び直す）はそこからは得られ
+        // ない。
+        let error = EditError::ItemValueNotApplied {
+            observed: "ffffff".to_string(),
+        }
+        .after_mutation(44)
+        .with_item_restore(ItemRestore::Restored);
+        let details = error.details();
+        assert_eq!(details["restored"], json!(true));
+        assert_eq!(details["retry_requires"], json!("none"));
+    }
+
+    #[test]
+    fn a_failure_whose_target_could_not_be_restored_asks_for_a_refetch() {
+        // 戻せていない以上、要求元は読み直す必要が現にある。復旧の結果を分ける
+        // 値がここで意味を持つ。
+        let error = EditError::ItemValueNotApplied {
+            observed: "ffffff".to_string(),
+        }
+        .after_mutation(44)
+        .with_item_restore(ItemRestore::Failed);
+        let details = error.details();
+        assert_eq!(details["restored"], json!(false));
+        assert_eq!(details["retry_requires"], json!("refetch"));
+    }
+
+    #[test]
+    fn no_restored_failure_asks_for_a_refetch() {
+        // 個別の検査だけでは、後から足した variant が抜ける。
+        for error in all_errors() {
+            let details = error.details();
+            if details.get("restored") != Some(&json!(true)) {
+                continue;
+            }
+            assert_ne!(
+                details["retry_requires"],
+                json!("refetch"),
+                "{error} が戻っている対象の読み直しを促しました"
+            );
+        }
+    }
+
+    #[test]
+    fn every_failure_that_leaves_the_state_unknown_asks_for_a_refetch() {
+        // 中途半端な状態が残っていれば、次の編集の前に読み直すほかない。
+        for error in all_errors() {
+            let details = error.details();
+            if details.get("consistency_unknown").is_none() {
+                continue;
+            }
+            assert_eq!(
+                details["retry_requires"],
+                json!("refetch"),
+                "{error} が読み直さずに済むと名乗りました"
+            );
+        }
     }
 
     #[test]

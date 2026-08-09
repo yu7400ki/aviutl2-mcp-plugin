@@ -1552,8 +1552,11 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 // 列が移動前と 1 件ずつ一致すれば、ホストは何も動かしておらず
                 // 戻すものが無い。同じ設定の effect が並ぶ列では、ずれ込んだ
                 // 1 件が移動前の位置に座るため、その 1 件だけでは判定できない。
+                //
+                // 戻す移動は発行しないが、列は書き込み前の並びを持つ。要求元から
+                // 見た状態は戻した場合と区別がつかない。
                 if is_same_effect_column(&before, &effects) {
-                    return Err(not_applied());
+                    return Err(not_applied().with_item_restore(ItemRestore::Restored));
                 }
                 // 要求と違う位置へ動いている。列を動かしたまま失敗を返すと、
                 // 要求元の selector も一緒に無効になる。

@@ -6843,11 +6843,10 @@ fn a_column_that_did_not_move_keeps_the_selector_it_was_asked_with() {
     assert_eq!(error.details()["reason"], json!("change_not_applied"));
     // 発行の後に落ちた失敗である。
     assert_eq!(error.details()["mutation_issued"], json!(true));
-    assert!(
-        error.details().get("restored").is_none(),
-        "戻すものが無い枝が巻き戻しを名乗りました: {}",
-        error.details()
-    );
+    // 列は書き込み前の並びを持つ。要求元から見た状態は戻した場合と区別がつかず、
+    // 読み直した先には要求の前と同じ列が在る。
+    assert_eq!(error.details()["restored"], json!(true));
+    assert_eq!(error.details()["retry_requires"], json!("none"));
     // fingerprint の材料が 1 つも変わっていないため、同じ selector がそのまま
     // 通る。前提条件の食い違いにはならない。
     let again = harness
@@ -7009,11 +7008,8 @@ fn a_move_the_host_ignored_is_not_followed_by_a_restore() {
         .expect_err("動かなかった移動が成功として返りました");
 
     assert_eq!(error.details()["reason"], json!("change_not_applied"));
-    assert!(
-        error.details().get("restored").is_none(),
-        "戻すものが無い枝が巻き戻しを名乗りました: {}",
-        error.details()
-    );
+    // 戻す移動を発行していないことと、列が書き込み前の並びを持つことは両立する。
+    assert_eq!(error.details()["restored"], json!(true));
     assert_eq!(move_calls(&harness), 1, "戻す移動が発行されました");
     assert_eq!(effect_column(&harness), column_before_the_move());
 }
