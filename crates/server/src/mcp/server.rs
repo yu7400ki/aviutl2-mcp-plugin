@@ -1161,7 +1161,9 @@ impl AviUtl2McpServer {
     /// invalid_argument（alias_without_effect）で拒否される。
     /// source が object_alias のとき、移動行は設定項目へ書くときと同じ検証を通り、通らない行は
     /// invalid_argument（track_flags_not_representable / track_mode_unknown / track_mode_not_writable / track_value_count）で拒否される。
-    /// 移動行の拒否は details.item に項目名を載せ、節に属する行では details.heading に節の見出しを載せる。
+    /// source が object_alias のとき、テキスト種別（text / string）の設定項目の行は `\` の綴りを検査され、
+    /// `\` の次が `n` でも `\` でもない行は invalid_argument（unescaped_backslash）で拒否される。
+    /// 行の拒否は details.item に項目名を載せ、節に属する行では details.heading に節の見出しを載せる。
     /// これらの拒否はいずれも作成より前に起き、オブジェクトは 1 つも作られない。
     /// 複数オブジェクトを含む alias は全てが作成され、created に全件、object に
     /// その先頭が入る。応答の effect は常に null である。
@@ -4173,9 +4175,11 @@ mod tests {
 
     #[test]
     fn create_object_states_how_a_raw_alias_is_refused_before_anything_is_created() {
-        // 生テキストの移動行も書き込みの検証を通る。述べなければ、要求元は通らない
-        // 行を含むエイリアスを送り続け、返った名前から直す先を引けない。行の在処と、
-        // 1 つも作られていないことは、失敗から立ち直るのに要る。
+        // 生テキストの移動行もテキストの行も書き込みの検証を通る。述べなければ、
+        // 要求元は通らない行を含むエイリアスを送り続け、返った名前から直す先を
+        // 引けない。行の在処と、1 つも作られていないことは、失敗から立ち直るのに
+        // 要る。**在処の名乗りは行の種類で分かれない**——移動行だけの性質として
+        // 述べれば、テキストの拒否から details を読む要求元が現れなくなる。
         let description = description_of("create_object");
         for phrase in [
             "表として読めないエイリアスは、source が alias_name でも object_alias でも",
@@ -4184,7 +4188,9 @@ mod tests {
             "track_mode_unknown",
             "track_mode_not_writable",
             "track_value_count",
-            "details.item に項目名を載せ、節に属する行では details.heading に節の見出しを載せる",
+            r"テキスト種別（text / string）の設定項目の行は `\` の綴りを検査され",
+            r"`\` の次が `n` でも `\` でもない行は invalid_argument（unescaped_backslash）で拒否される",
+            "行の拒否は details.item に項目名を載せ、節に属する行では details.heading に節の見出しを載せる",
             "これらの拒否はいずれも作成より前に起き、オブジェクトは 1 つも作られない",
         ] {
             assert!(
