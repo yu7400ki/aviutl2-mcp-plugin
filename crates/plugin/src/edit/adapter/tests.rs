@@ -7014,9 +7014,9 @@ fn a_move_that_landed_elsewhere_puts_the_column_back() {
 }
 
 #[test]
-fn a_move_the_host_ignored_is_not_followed_by_a_restore() {
+fn a_move_the_host_ignored_reports_the_column_restored_without_issuing_a_restore() {
     // ホストが動かさなかった列に戻すものは無い。戻す移動を発行すると、要らない
-    // 書き込みが 1 つプロジェクトへ届く。
+    // 書き込みが 1 つプロジェクトへ届く。それでも列は書き込み前の並びを持つ。
     let harness = harness_with_faulty_move(Fault::IgnoreEffectMove);
     let error = harness
         .edit
