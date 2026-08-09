@@ -1207,6 +1207,12 @@ pub(crate) mod tests {
                 }
                 .into(),
             },
+            // テキスト種別の行。移動行と同じ運びで応答へ載る。
+            EditError::AliasRowRejected {
+                heading: Some("Object.0".to_string()),
+                item: "テキスト".to_string(),
+                source: TextSyntaxError::UnescapedBackslash.into(),
+            },
             EditError::NotIssued {
                 reason: NotIssuedReason::TargetMissing,
             },
@@ -1483,8 +1489,9 @@ pub(crate) mod tests {
                 // 条件がコードを決めるため、不在と構造の欠陥で別の値になる。
                 ErrorCode::NotFound,
                 ErrorCode::InvalidArgument,
-                // 生テキストの移動行が検証を通らなかった。要求内容の誤りであり、
-                // 対象を読み直しても解消しない。
+                // 生テキストの行が検証を通らなかった。要求内容の誤りであり、
+                // 対象を読み直しても解消しない。移動行 2 つとテキスト行 1 つ。
+                ErrorCode::InvalidArgument,
                 ErrorCode::InvalidArgument,
                 ErrorCode::InvalidArgument,
                 // 対象が失われていた。要求の対象が無いのだから見つからない。

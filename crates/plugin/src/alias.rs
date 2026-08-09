@@ -12,16 +12,18 @@
 //!
 //! 生テキストとして渡されたエイリアスの行も、ここで書式を読む
 //! （[`admit_rows`]）。書式を知っているのはこのモジュールであり、行の値の
-//! 規則を知っているのは [`aviutl2_mcp_core::validate_track_value`] である。
+//! 規則を知っているのは [`aviutl2_mcp_core::validate_track_value`] と
+//! [`aviutl2_mcp_core::validate_alias_text_escapes`] である。
 
 use aviutl2::alias::Table;
 use aviutl2_mcp_core::{
-    ErrorCode, ItemWriteError, ListObjectAliasesResult, MAX_ALIAS_BYTES, Movement,
-    ObjectAliasSummary, PageWindow, TextSyntaxError, TrackDecodeError, TrackWriteTarget,
-    decode_track_value, take_window, validate_alias, validate_object_alias_name,
-    validate_track_value,
+    AvailableEffectItem, EffectItemType, ErrorCode, ItemWriteError, ListObjectAliasesResult,
+    MAX_ALIAS_BYTES, Movement, ObjectAliasSummary, PageWindow, TextSyntaxError, TrackDecodeError,
+    TrackWriteTarget, decode_track_value, take_window, validate_alias, validate_alias_text_escapes,
+    validate_object_alias_name, validate_track_value,
 };
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -460,51 +462,157 @@ fn collect_effects(root: &Table) -> Vec<String> {
     effects
 }
 
-/// 生テキストが含む移動行を、書き込みの検証へ通す。
+/// 走査が 1 つの節へ持ち込む文脈。
+///
+/// 区間の数と効果は、節が自分で述べなければ親のものを継ぐ。
+struct Visit<'a> {
+    /// 節の見出し。どの節にも属さない行を持つ根では `None`。
+    heading: Option<String>,
+    /// 節そのもの。
+    node: &'a Table,
+    /// 親から継ぐ区間の数。
+    sections: Option<usize>,
+    /// 親から継ぐ効果名。
+    effect: Option<String>,
+}
+
+/// 生テキストが含む行を、書き込みの検証へ通す。
+///
+/// 掛ける検証は 2 つである。**移動行はすべての行が値の綴りで見分けられ**、
+/// **テキスト種別と分かった行は `\` の綴りを見られる。**
 ///
 /// トラックバーの値がホストへ届く経路は 2 本あり、どちらも
 /// [`validate_track_value`] を通る。生テキストはホストのパーサへ直接渡るため、
 /// 不正な移動行はプロセスを落とさない代わりに**その行ごと黙って捨てられる。**
 /// 止められる場所は要求を受け付ける側しか無い。
 ///
-/// **表として読めない入力は拒否する。** 読めなければ移動行を 1 行も見られず、
+/// テキスト種別の値では、ホストが `\` をエスケープとして解く。書いたとおりの
+/// 意味で保たれる綴りだけを通す規則は [`validate_alias_text_escapes`] が持つ。
+///
+/// **表として読めない入力は拒否する。** 読めなければ行を 1 行も見られず、
 /// 検証を掛けられないまま通すことになる。判定は名前で指定されたエイリアスと
 /// 同じ [`AliasRejection::NotParsable`] であり、[`parse_table`] を通す
 /// ——深さの上限を先に確かめる形はそこに在る。
 ///
-/// **辿りは明示的なスタックで行う。** 節の入れ子は入力の側でいくらでも深くでき、
-/// 再帰で辿るとその深さがそのままスタックの消費になる。
+/// **辿りは明示的なスタックで行い、1 本に保つ。** 節の入れ子は入力の側で
+/// いくらでも深くでき、再帰で辿るとその深さがそのままスタックの消費になる。
+/// 検証ごとに辿ると、同じ入れ子を 2 度歩き、深さの上限の扱いが 2 か所に要る。
 ///
 /// `movements` はホストが受け付ける移動方法である。要求元へ並べる一覧と同じ
-/// 値であり、書けない名前もここから決まる。
-pub fn admit_rows(raw: &str, movements: &[Movement]) -> Result<(), AliasRowRejection> {
+/// 値であり、書けない名前もここから決まる。`effect_items` は効果名から設定
+/// 項目の一覧を引く口であり、引けなければ `None` を返す。
+pub fn admit_rows(
+    raw: &str,
+    movements: &[Movement],
+    effect_items: impl Fn(&str) -> Option<Vec<AvailableEffectItem>>,
+) -> Result<(), AliasRowRejection> {
     let table = parse_table(raw).ok_or(AliasRejection::NotParsable)?;
-    let mut stack: Vec<(Option<String>, &Table, Option<usize>)> = vec![(None, &table, None)];
-    while let Some((heading, node, inherited)) = stack.pop() {
-        // 区間の数は節が述べ、その中の行と子の節が同じ数を見る。
-        let sections = section_count(node).or(inherited);
-        for (item, value) in node.values() {
-            admit_track_row(value, sections, movements).map_err(|source| {
-                AliasRowRejection::Row {
-                    heading: heading.clone(),
+    let mut types = ItemTypes::new(effect_items);
+    let mut stack: Vec<Visit<'_>> = vec![Visit {
+        heading: None,
+        node: &table,
+        sections: None,
+        effect: None,
+    }];
+    while let Some(visit) = stack.pop() {
+        // 区間の数と効果は節が述べ、その中の行と子の節が同じものを見る。
+        let sections = section_count(visit.node).or(visit.sections);
+        let effect = visit
+            .node
+            .get_value(EFFECT_NAME_KEY)
+            .cloned()
+            .or(visit.effect);
+        for (item, value) in visit.node.values() {
+            admit_track_row(value, sections, movements)
+                .and_then(|()| admit_text_row(value, effect.as_deref(), item, &mut types))
+                .map_err(|source| AliasRowRejection::Row {
+                    heading: visit.heading.clone(),
                     item: item.clone(),
                     source,
-                }
-            })?;
+                })?;
         }
-        let children: Vec<(Option<String>, &Table, Option<usize>)> = node
+        let children: Vec<Visit<'_>> = visit
+            .node
             .subtables()
-            .map(|(name, child)| {
-                (
-                    Some(child_heading(heading.as_deref(), name)),
-                    child,
-                    sections,
-                )
+            .map(|(name, child)| Visit {
+                heading: Some(child_heading(visit.heading.as_deref(), name)),
+                node: child,
+                sections,
+                effect: effect.clone(),
             })
             .collect();
         stack.extend(children.into_iter().rev());
     }
     Ok(())
+}
+
+/// 効果名から設定項目の種別を引く表。
+///
+/// **同じ効果名は 1 度しか引かない。** 1 つのエイリアスは同じ効果を何度も
+/// 並べ得るため、走査の中で名前ごとに覚える。引けなかったことも覚える。
+struct ItemTypes<F> {
+    /// 効果名から設定項目の一覧を引く口。
+    lookup: F,
+    /// 引いた結果。引けなかった名前は `None` を持つ。
+    known: HashMap<String, Option<HashMap<String, EffectItemType>>>,
+}
+
+impl<F: Fn(&str) -> Option<Vec<AvailableEffectItem>>> ItemTypes<F> {
+    fn new(lookup: F) -> Self {
+        Self {
+            lookup,
+            known: HashMap::new(),
+        }
+    }
+
+    /// 効果の設定項目の種別を引く。引けなければ `None`。
+    fn of(&mut self, effect: &str, item: &str) -> Option<EffectItemType> {
+        let lookup = &self.lookup;
+        self.known
+            .entry(effect.to_string())
+            .or_insert_with(|| {
+                lookup(effect).map(|items| {
+                    items
+                        .into_iter()
+                        .map(|item| (item.name, item.item_type))
+                        .collect()
+                })
+            })
+            .as_ref()?
+            .get(item)
+            .cloned()
+    }
+}
+
+/// 値 1 つを、テキスト種別と分かった行であれば綴りの検証へ通す。
+///
+/// **種別を引けなかった行は通す。** 効果を名乗らない節の行・登録されていない
+/// 効果・一覧に無い項目名・引き当てそのものの失敗、のいずれでも判定を掛けない。
+///
+/// **落とせないことと、落とす理由が無いことは違う。** 引けない名前は作成
+/// そのものが別の失敗で落ちるか、ホストがその節を無視する。ここで落とすと、
+/// **我々が種別を引けなかったことを要求元の綴りの誤りとして名乗る**ことに
+/// なる。区間の数が決まらない対象で個数の条件だけを外している
+/// [`admit_track_row`] と同じ態度である。
+///
+/// 文字列を取る種別は 2 つあり、どちらも同じ扱いにする。読み取りが同じ復号へ
+/// 落としており、片方だけを守ると種別が入れ替わったときに守りが消える。
+fn admit_text_row(
+    value: &str,
+    effect: Option<&str>,
+    item: &str,
+    types: &mut ItemTypes<impl Fn(&str) -> Option<Vec<AvailableEffectItem>>>,
+) -> Result<(), ItemWriteError> {
+    let Some(effect) = effect else {
+        return Ok(());
+    };
+    if !matches!(
+        types.of(effect, item),
+        Some(EffectItemType::Text | EffectItemType::String)
+    ) {
+        return Ok(());
+    }
+    Ok(validate_alias_text_escapes(value)?)
 }
 
 /// 子の節の見出しを綴る。ルート直下の節は接頭辞を持たない。
@@ -1567,9 +1675,48 @@ pub(crate) mod tests {
         ]
     }
 
-    /// 移動行の検証を通した結果の理由。通ったときは `None`。
-    fn track_reason(alias: &str) -> Option<&'static str> {
-        match admit_rows(alias, &movements()) {
+    /// 検査で使う効果ごとの設定項目。
+    ///
+    /// 種別は実機の観測を写す。**テキストを取る種別とパスを取る種別の双方を
+    /// 持つ。** 片方だけでは、綴りの規則が種別を見ているかを確かめられない。
+    fn effect_items(effect: &str) -> Option<Vec<AvailableEffectItem>> {
+        let items: &[(&str, EffectItemType)] = match effect {
+            "テキスト" => &[
+                ("テキスト", EffectItemType::Text),
+                ("フォント", EffectItemType::Font),
+                ("サイズ", EffectItemType::Number),
+            ],
+            "画像ファイル" => &[("ファイル", EffectItemType::File)],
+            "図形" => &[
+                ("図形の種類", EffectItemType::Combo),
+                ("名札", EffectItemType::String),
+            ],
+            "標準描画" => &[
+                ("X", EffectItemType::Number),
+                ("中心Z", EffectItemType::Number),
+            ],
+            // 登録されていない効果の一覧は引けない。
+            _ => return None,
+        };
+        Some(
+            items
+                .iter()
+                .map(|(name, item_type)| AvailableEffectItem {
+                    name: name.to_string(),
+                    item_type: item_type.clone(),
+                })
+                .collect(),
+        )
+    }
+
+    /// 行の検証を通した結果の理由。通ったときは `None`。
+    fn row_reason(alias: &str) -> Option<&'static str> {
+        reason_of(admit_rows(alias, &movements(), effect_items))
+    }
+
+    /// 検証の結果から理由の名前を取り出す。
+    fn reason_of(result: Result<(), AliasRowRejection>) -> Option<&'static str> {
+        match result {
             Ok(()) => None,
             Err(AliasRowRejection::Rejected(rejection)) => rejection.reason(),
             Err(AliasRowRejection::Row { source, .. }) => source.reason(),
@@ -1591,7 +1738,7 @@ pub(crate) mod tests {
             "X=0.00,50.00,100.00,直線移動,8|30",
         ] {
             assert_eq!(
-                track_reason(&with_row(row)),
+                row_reason(&with_row(row)),
                 Some("track_flags_not_representable"),
                 "{row}"
             );
@@ -1604,7 +1751,7 @@ pub(crate) mod tests {
         // 消える。一覧を出す側と拒む側が同じ表を読むため、書けないと名乗った
         // 名前はここでも通らない。
         assert_eq!(
-            track_reason(&with_row("中心Z=0.00,10.00,90.00,移動無し,0")),
+            row_reason(&with_row("中心Z=0.00,10.00,90.00,移動無し,0")),
             Some("track_mode_not_writable")
         );
     }
@@ -1625,7 +1772,7 @@ pub(crate) mod tests {
             // 決まらない対象でも同じ名前を名乗る。
             ("X=600.00,直線移動,0", "track_value_count"),
         ] {
-            assert_eq!(track_reason(&with_row(row)), Some(reason), "{row}");
+            assert_eq!(row_reason(&with_row(row)), Some(reason), "{row}");
         }
     }
 
@@ -1649,11 +1796,11 @@ pub(crate) mod tests {
             // 移動方法の位置が数値として読める。
             "テキスト=-600.00,0.00,600.00,12,0",
         ] {
-            assert_eq!(track_reason(&with_row(row)), None, "{row}");
+            assert_eq!(row_reason(&with_row(row)), None, "{row}");
         }
         // 移動を持つ正しい行も通る。拒否が広がっていれば、ここで落ちる。
         assert_eq!(
-            track_reason(&with_row("X=-600.00,0.00,600.00,直線移動,7")),
+            row_reason(&with_row("X=-600.00,0.00,600.00,直線移動,7")),
             None
         );
     }
@@ -1667,14 +1814,14 @@ pub(crate) mod tests {
             "[Object]\r\nframe=0\r\n[Object.0]\r\neffect.name=標準描画\r\nX=-600.00,600.00,直線移動,8\r\n",
         ] {
             assert_eq!(
-                track_reason(alias),
+                row_reason(alias),
                 Some("track_flags_not_representable"),
                 "{alias}"
             );
         }
         // 外れるのは値の個数の条件だけである。個数の違う行が通る。
         assert_eq!(
-            track_reason(
+            row_reason(
                 "[Object]\r\n[Object.0]\r\neffect.name=標準描画\r\nX=-600.00,0.00,600.00,直線移動,0\r\n"
             ),
             None
@@ -1692,7 +1839,7 @@ pub(crate) mod tests {
             heading,
             item,
             source,
-        }) = admit_rows(alias, &movements())
+        }) = admit_rows(alias, &movements(), effect_items)
         else {
             panic!("拒否されませんでした");
         };
@@ -1705,9 +1852,11 @@ pub(crate) mod tests {
     fn a_row_that_belongs_to_no_section_names_only_its_item() {
         // 節の見出しより前に置かれた行はどの節にも属さない。空の見出しを名乗る
         // と、要求元は名前の無い節を探すことになる。
-        let Err(AliasRowRejection::Row { heading, item, .. }) =
-            admit_rows("X=-600.00,600.00,直線移動,8\r\n", &movements())
-        else {
+        let Err(AliasRowRejection::Row { heading, item, .. }) = admit_rows(
+            "X=-600.00,600.00,直線移動,8\r\n",
+            &movements(),
+            effect_items,
+        ) else {
             panic!("拒否されませんでした");
         };
         assert_eq!(heading, None);
@@ -1725,7 +1874,7 @@ pub(crate) mod tests {
             "[Object\r\n",
         ] {
             assert_eq!(
-                track_reason(alias),
+                row_reason(alias),
                 Some(REASON_ALIAS_NOT_PARSABLE),
                 "{alias}"
             );
@@ -1736,7 +1885,7 @@ pub(crate) mod tests {
             "[{}]\r\nX=0.0\r\n",
             vec!["a"; MAX_SECTION_DEPTH + 1].join(".")
         );
-        assert_eq!(track_reason(&deep), Some(REASON_ALIAS_NOT_PARSABLE));
+        assert_eq!(row_reason(&deep), Some(REASON_ALIAS_NOT_PARSABLE));
     }
 
     #[test]
@@ -1757,12 +1906,191 @@ pub(crate) mod tests {
         assert!(!accepted.is_empty());
         for admitted in accepted {
             assert_eq!(
-                track_reason(&admitted.raw),
+                row_reason(&admitted.raw),
                 None,
                 "{} が生テキストとして拒否されました",
                 admitted.name
             );
         }
+    }
+
+    /// 効果 1 つ分の節へ項目の行を並べたエイリアスを組み立てる。
+    fn with_effect(effect: &str, rows: &[&str]) -> String {
+        format!(
+            "[Object]\r\nframe=0,80\r\n[Object.0]\r\neffect.name={effect}\r\n{}\r\n",
+            rows.join("\r\n")
+        )
+    }
+
+    #[test]
+    fn a_backslash_that_stands_alone_is_refused_in_a_text_row() {
+        // テキスト種別の値では `\` がエスケープを組む。組まない `\` は 2 つに
+        // 綴れば同じ値になり、書き換えようがない行にはならない。
+        for row in [
+            r"テキスト=A\tB",
+            r"テキスト=C:\temp\note",
+            // 末尾の単独 `\`。値としては保たれるが、1 文字後ろへ動けば別の意味に
+            // なるため、位置に依らない規則で落とす。
+            r"テキスト=A\",
+        ] {
+            assert_eq!(
+                row_reason(&with_effect("テキスト", &[row])),
+                Some("unescaped_backslash"),
+                "{row}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_spellings_the_host_writes_pass_in_a_text_row() {
+        // `\n` と `\\` は AviUtl2 自身が値を書き出すときに使う。落とせば、
+        // 読み取った alias を書き戻せない。
+        for row in [
+            r"テキスト=1 行目\n2 行目",
+            r"テキスト=C:\\temp\\note",
+            "テキスト=こんにちは",
+            "テキスト=",
+        ] {
+            assert_eq!(row_reason(&with_effect("テキスト", &[row])), None, "{row}");
+        }
+    }
+
+    #[test]
+    fn a_raw_backslash_passes_in_a_path_row() {
+        // **ホストが `\` を解くのはテキスト種別だけである。** パス種別と選択肢
+        // 種別は 1 つも解かず、書いた綴りがそのまま保存される。綴りだけを材料に
+        // した一律の規則は、正しく、しかも書き換えようのないこの行を落とす。
+        assert_eq!(
+            row_reason(&with_effect(
+                "画像ファイル",
+                &[r"ファイル=C:\temp\note.png"]
+            )),
+            None
+        );
+        assert_eq!(
+            row_reason(&with_effect("図形", &[r"図形の種類=C:\temp\shape.svg"])),
+            None
+        );
+    }
+
+    #[test]
+    fn the_other_kind_of_string_row_is_held_to_the_same_spelling() {
+        // 文字列を取る種別は 2 つあり、読み取りは同じ復号へ落としている。片方
+        // だけを守ると、種別が入れ替わったときに守りが消える。
+        assert_eq!(
+            row_reason(&with_effect("図形", &[r"名札=A\tB"])),
+            Some("unescaped_backslash")
+        );
+        assert_eq!(row_reason(&with_effect("図形", &[r"名札=A\\B"])), None);
+    }
+
+    #[test]
+    fn a_row_whose_type_cannot_be_looked_up_passes() {
+        // 落とせないことと、落とす理由が無いことは違う。引けない名前は作成
+        // そのものが別の失敗で落ちるか、ホストがその節を無視する。
+        for alias in [
+            // 登録されていない効果。
+            with_effect("未登録の効果", &[r"テキスト=A\tB"]),
+            // 一覧に無い項目名。
+            with_effect("テキスト", &[r"未知の項目=A\tB"]),
+            // 効果を名乗らない節。
+            "[Object]\r\nframe=0,80\r\n[Object.0]\r\nテキスト=A\\tB\r\n".to_string(),
+        ] {
+            assert_eq!(row_reason(&alias), None, "{alias}");
+        }
+        // 引き当てそのものが落ちても同じである。
+        assert_eq!(
+            reason_of(admit_rows(
+                &with_effect("テキスト", &[r"テキスト=A\tB"]),
+                &movements(),
+                |_| None
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn the_alias_the_host_wrote_is_admitted_as_it_stands() {
+        // ホストが書き出す alias は、テキスト行を `\\` で包み、パス行の `\` を
+        // そのまま置く。**一律の規則ではここが落ちる。**
+        let alias = "[Object]\r\nframe=0,80\r\n\
+[Object.0]\r\neffect.name=テキスト\r\nテキスト=C:\\\\temp\\\\note\\nを開く\r\nサイズ=77\r\n\
+[Object.1]\r\neffect.name=画像ファイル\r\nファイル=C:\\temp\\note.png\r\n\
+[Object.2]\r\neffect.name=標準描画\r\nX=-600.00,600.00,直線移動,0\r\n";
+        assert_eq!(row_reason(alias), None);
+    }
+
+    #[test]
+    fn a_text_row_is_still_checked_as_a_movement_row_by_its_spelling() {
+        // 見分けを種別へ寄せない。寄せれば、種別を引けなかった行で移動行の検査
+        // まで外れる。**守りが 1 つ増える代わりに、既に在る守りが引けなさに
+        // 巻き込まれる。**
+        assert_eq!(
+            row_reason(&with_effect(
+                "テキスト",
+                &["テキスト=-600.00,0.00,600.00,直線移動,8"]
+            )),
+            Some("track_flags_not_representable")
+        );
+        // 移動行として読めないテキストは、綴りの規則だけを見られる。
+        assert_eq!(
+            row_reason(&with_effect("テキスト", &["テキスト=あ,い,う"])),
+            None
+        );
+    }
+
+    #[test]
+    fn the_rejection_of_a_text_row_names_the_section_and_the_item() {
+        let alias = "[0]\r\n[0.0]\r\neffect.name=テキスト\r\nサイズ=77\r\n\
+[1]\r\n[1.0]\r\neffect.name=テキスト\r\nテキスト=A\\tB\r\n";
+        let Err(AliasRowRejection::Row {
+            heading,
+            item,
+            source,
+        }) = admit_rows(alias, &movements(), effect_items)
+        else {
+            panic!("拒否されませんでした");
+        };
+        assert_eq!(heading.as_deref(), Some("1.0"));
+        assert_eq!(item, "テキスト");
+        assert_eq!(source.reason(), Some("unescaped_backslash"));
+    }
+
+    #[test]
+    fn a_child_section_that_names_no_effect_inherits_its_parents() {
+        // 効果の継承は区間の数と同じ形である。継がなければ、子の節の行は種別を
+        // 引けないまま通る。
+        let alias = "[Object]\r\n[Object.0]\r\neffect.name=テキスト\r\n\
+[Object.0.0]\r\nテキスト=A\\tB\r\n";
+        assert_eq!(row_reason(alias), Some("unescaped_backslash"));
+        // 自分で名乗る子は親を継がない。
+        let alias = "[Object]\r\n[Object.0]\r\neffect.name=テキスト\r\n\
+[Object.0.0]\r\neffect.name=画像ファイル\r\nテキスト=A\\tB\r\n";
+        assert_eq!(row_reason(alias), None);
+    }
+
+    #[test]
+    fn the_same_effect_is_looked_up_only_once() {
+        // 1 つのエイリアスは同じ効果を何度も並べ得る。名前ごとに覚えなければ、
+        // 引き当ての回数が行の数に比例する。
+        let alias = format!(
+            "[Object]\r\n{}{}",
+            (0..3)
+                .map(|index| format!(
+                    "[Object.{index}]\r\neffect.name=テキスト\r\nテキスト=あ\r\nサイズ=1\r\n"
+                ))
+                .collect::<String>(),
+            "[Object.9]\r\neffect.name=図形\r\n名札=あ\r\n"
+        );
+        let looked_up = Cell::new(Vec::new());
+        let result = admit_rows(&alias, &movements(), |effect| {
+            let mut names = looked_up.take();
+            names.push(effect.to_string());
+            looked_up.set(names);
+            effect_items(effect)
+        });
+        assert_eq!(reason_of(result), None);
+        assert_eq!(looked_up.take(), vec!["テキスト", "図形"]);
     }
 
     #[test]
