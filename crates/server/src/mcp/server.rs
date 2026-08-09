@@ -3552,9 +3552,9 @@ mod tests {
             }),
             to_skill: Some(
                 "プロジェクト境界の照合材料は selector が運ぶ project_epoch である。\
-                 selector を持たない tool（create_object・set_layer_state・set_selection・\
-                 set_grid_bpm・set_scene_settings）だけが expected_project_epoch を要求し、\
-                 そちらは省略できない",
+                 要求が selector を 1 つも運ばないことがある tool（create_object・\
+                 set_layer_state・set_selection・set_grid_bpm・set_scene_settings）だけが\
+                 expected_project_epoch を要求し、そちらは省略できない",
             ),
         },
         Relocation {

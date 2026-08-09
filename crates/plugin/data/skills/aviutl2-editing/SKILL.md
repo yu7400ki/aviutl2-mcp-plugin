@@ -29,7 +29,7 @@ AviUtl2 の UI はレイヤーとフレームを 1 始まりで表示する。to
 
 selector は自分で組み立てない。読み取りの応答が返した値をそのまま編集へ渡し、編集の応答が返した値をそのまま次の編集へ渡す。
 
-プロジェクト境界の照合材料は selector が運ぶ project_epoch である。selector を持たない tool（create_object・set_layer_state・set_selection・set_grid_bpm・set_scene_settings）だけが expected_project_epoch を要求し、そちらは省略できない。
+プロジェクト境界の照合材料は selector が運ぶ project_epoch である。要求が selector を 1 つも運ばないことがある tool（create_object・set_layer_state・set_selection・set_grid_bpm・set_scene_settings）だけが expected_project_epoch を要求し、そちらは省略できない。
 
 要求は project_revision を運ばない。読み取りから編集までに revision が進んでいても拒否されない。拒否を避けるために revision を取り直す必要は無い。
 
