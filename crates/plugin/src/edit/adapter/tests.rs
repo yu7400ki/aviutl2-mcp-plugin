@@ -3919,8 +3919,9 @@ fn an_added_effect_reports_where_it_landed_in_the_column() {
 #[test]
 fn every_effect_changing_response_reports_the_column_position() {
     // 既定の対象は `動画ファイル` と `ぼかし` を持つ。先頭の `ぼかし` は同名内で
-    // 0 番目・列では 1 番目であり、2 つの数が食い違う。応答が返す位置は、その
-    // 時点の列を読み直した添字である。
+    // 0 番目・列では 1 番目であり、2 つの数が食い違う。位置は対象を解決した時点の
+    // 列から求め、変更後に読み直した列へ当てる。どちらの operation も列の構成を
+    // 変えないため、2 つの列で同じ effect を指す。
     let harness = Harness::new();
     let outcomes = [
         (
