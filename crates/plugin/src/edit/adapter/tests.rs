@@ -247,7 +247,7 @@ fn playback_blocks_the_edit_before_the_section_is_entered() {
 }
 
 #[test]
-fn a_section_failure_is_reclassified_by_rereading_the_edit_state() {
+fn a_section_failure_is_reclassified_as_an_edit_that_was_blocked() {
     let harness = Harness::with(|host| {
         host.arm(|knobs| {
             knobs.fault = Some(Fault::Section);
@@ -261,6 +261,11 @@ fn a_section_failure_is_reclassified_by_rereading_the_edit_state() {
         .expect_err("区間の失敗が成功として返りました");
 
     assert_eq!(error.error_code(), ErrorCode::EditBlocked);
+    // 落ちたのは編集である。受付判定を通った後に再生や出力が始まった競合でも、
+    // 名乗る文言は受付判定で拒んだ場合と同じでなければならない。
+    assert_eq!(error.to_string(), "ファイル出力中のため編集できません");
+    assert_eq!(error.details()["edit_state"], json!("save"));
+    assert_eq!(error.details()["retry_requires"], json!("resend"));
     harness.assert_untouched();
 }
 

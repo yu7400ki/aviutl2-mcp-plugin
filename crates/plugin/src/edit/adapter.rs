@@ -140,11 +140,15 @@ impl<H: EditHost> HostEditAdapter<H> {
     /// 区別できない。編集状態を読み直して再生・出力中であれば、時間を置けば
     /// 解消する失敗として返す。読み直しにも失敗した場合は元の分類を保つ。
     ///
+    /// 落ちたのは編集であり、[`Self::ensure_editable`] が同じ状態で拒む失敗と
+    /// 同じものを名乗る。両者の違いは、受付判定と確保の間に再生や出力が始まった
+    /// 競合かどうかだけである。
+    ///
     /// 区間へ入れなかった以上プロジェクトは変更されておらず、部分適用は生じない。
     fn classify_section_failure(&self, error: EditError) -> EditError {
         match self.edit_state() {
             Ok(EditState::Edit) | Err(_) => error,
-            Ok(state) => ReadError::EditBlocked { state }.into(),
+            Ok(state) => EditError::EditBlocked { state },
         }
     }
 
