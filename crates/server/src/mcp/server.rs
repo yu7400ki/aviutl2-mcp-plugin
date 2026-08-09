@@ -1447,6 +1447,11 @@ impl AviUtl2McpServer {
     /// unsupported_operation（effect_not_movable）となる。
     /// position が effect の件数以上の場合は precondition_failed
     /// （effect_position_out_of_range）となり、変更は発行されない。
+    /// 下限は振る舞いが違う。フィルタ効果は先頭に並ぶ入力 item・出力 item より
+    /// 前へは動けず、そこを指した position は発行されたうえでホストが切り詰める。
+    /// 結果は unsupported_operation（change_not_applied）となり、動いた列は
+    /// 元の並びへ戻す——details.restored が真なら列は要求の前と同じである。
+    /// 戻せなかった場合は details.consistency_unknown が立つ。
     /// 応答の effect には移動後に読み直した effect が入る。
     /// 成功すると、要求に使った selector は使えなくなる——列の位置が変われば
     /// fingerprint が変わり、同名 effect があれば effect_index も入れ替わる。
@@ -4912,6 +4917,18 @@ mod tests {
                 &[
                     "effect_not_movable",
                     "effect_position_out_of_range",
+                    // **上限と下限は振る舞いが違う。** 上限は発行される前に
+                    // 落ち、下限は発行されたうえで切り詰められる。同じ
+                    // 「範囲外」として読まれると、要求元は先頭への移動が
+                    // 列を動かさないものと信じる。
+                    "変更は発行されない",
+                    "入力 item・出力 item より",
+                    "切り詰める",
+                    // 失敗が状態を残さないことを述べなければ、要求元は失敗の
+                    // たびに列を読み直す。戻せなかった場合だけは読み直しが要る。
+                    "元の並びへ戻す",
+                    "details.restored",
+                    "details.consistency_unknown",
                     // **移動は effect の内容を 1 つも変えないまま、要求に
                     // 使った selector を無効にする。** 名前も enabled も
                     // 設定項目も動かないため、変わらないと読める。述べ
