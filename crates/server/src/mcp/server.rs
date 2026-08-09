@@ -4880,6 +4880,24 @@ mod tests {
                 ],
             ),
             ("set_effect_enabled", &["出力 item", "読み直した effect"]),
+            (
+                "move_effect",
+                &[
+                    "effect_not_movable",
+                    "effect_position_out_of_range",
+                    // **移動は effect の内容を 1 つも変えないまま、要求に
+                    // 使った selector を無効にする。** 名前も enabled も
+                    // 設定項目も動かないため、変わらないと読める。述べ
+                    // なければ、要求元は成功の直後に古い selector を送って
+                    // precondition_failed を踏む。
+                    "要求に使った selector は使えなくなる",
+                    "fingerprint が変わり",
+                    "effect_index も入れ替わる",
+                    // 無効になった selector の代わりが応答に在ることを示さ
+                    // なければ、対象を読み直す経路しか残らない。
+                    "応答の effect.selector を使う",
+                ],
+            ),
             ("delete_effect", &["not_found", "兄弟 effect"]),
             ("delete_object", &["not_found"]),
             (
