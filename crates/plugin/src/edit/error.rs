@@ -468,8 +468,8 @@ pub enum EditError {
     /// 添えない。**
     #[error("エイリアスの移動行を書き込めません: {source}")]
     AliasTrackRejected {
-        /// 行が属する節の見出し。
-        heading: String,
+        /// 行が属する節の見出し。どの節にも属さない行では `None`。
+        heading: Option<String>,
         /// 行の項目名。
         item: String,
         /// 落ちた書き込みの検証。
@@ -816,7 +816,9 @@ impl EditError {
                 source,
             } => {
                 fill_item_write_details(details, source);
-                details.insert("heading".to_string(), json!(truncate(heading)));
+                if let Some(heading) = heading {
+                    details.insert("heading".to_string(), json!(truncate(heading)));
+                }
                 details.insert("item".to_string(), json!(truncate(item)));
             }
             EditError::SectionPrecondition { reason } => {
@@ -1103,12 +1105,12 @@ pub(crate) mod tests {
             // 生テキストの移動行。**一覧を運ぶ検証と運ばない検証の双方を置く**
             // ——片方だけでは、補助情報のキーの検査が一覧の側を素通りする。
             EditError::AliasTrackRejected {
-                heading: "Object.1".to_string(),
+                heading: Some("Object.1".to_string()),
                 item: "X".to_string(),
                 source: TrackValueError::FlagsNotRepresentable.into(),
             },
             EditError::AliasTrackRejected {
-                heading: "Object.1".to_string(),
+                heading: Some("Object.1".to_string()),
                 item: "中心Z".to_string(),
                 source: TrackValueError::UnknownMode {
                     known: sample_movements(),
@@ -1745,6 +1747,12 @@ pub(crate) mod tests {
         // `expected_value_count` はホストの状態（対象の区間数）から決まる数で
         // ある。[`ItemValue::kind`] が種別名を載せてよい理由（値そのものを
         // 含まない）と同じ理由で、どちらも足してよい。
+        //
+        // **例外が 1 つある。** 生テキストのエイリアスで拒否された行を指す
+        // `heading` と `item` は、要求元が送った本文の部分文字列である。1 つの
+        // エイリアスは複数のオブジェクトと複数の effect を持ち得るため、行を
+        // 特定できなければ直せない。**運ぶのは名前だけであり、行が持っていた値は
+        // 運ばない。**
         const ALLOWED: &[&str] = &[
             "frame_start",
             "frame_end",

@@ -239,8 +239,8 @@ pub enum AliasTrackRejection {
     /// 移動行が書き込みの検証を通らない。
     #[error("エイリアスの移動行を書き込めません: {source}")]
     Row {
-        /// 行が属する節の見出し。
-        heading: String,
+        /// 行が属する節の見出し。どの節にも属さない行では `None`。
+        heading: Option<String>,
         /// 行の項目名。
         item: String,
         /// 落ちた検証。
@@ -480,7 +480,7 @@ fn collect_effects(root: &Table) -> Vec<String> {
 /// 値であり、書けない名前もここから決まる。
 pub fn admit_track_rows(raw: &str, movements: &[Movement]) -> Result<(), AliasTrackRejection> {
     let table = parse_table(raw).ok_or(AliasRejection::NotParsable)?;
-    let mut stack: Vec<(String, &Table, Option<usize>)> = vec![(String::new(), &table, None)];
+    let mut stack: Vec<(Option<String>, &Table, Option<usize>)> = vec![(None, &table, None)];
     while let Some((heading, node, inherited)) = stack.pop() {
         // 区間の数は節が述べ、その中の行と子の節が同じ数を見る。
         let sections = section_count(node).or(inherited);
@@ -493,9 +493,15 @@ pub fn admit_track_rows(raw: &str, movements: &[Movement]) -> Result<(), AliasTr
                 }
             })?;
         }
-        let children: Vec<(String, &Table, Option<usize>)> = node
+        let children: Vec<(Option<String>, &Table, Option<usize>)> = node
             .subtables()
-            .map(|(name, child)| (child_heading(&heading, name), child, sections))
+            .map(|(name, child)| {
+                (
+                    Some(child_heading(heading.as_deref(), name)),
+                    child,
+                    sections,
+                )
+            })
             .collect();
         stack.extend(children.into_iter().rev());
     }
@@ -503,10 +509,10 @@ pub fn admit_track_rows(raw: &str, movements: &[Movement]) -> Result<(), AliasTr
 }
 
 /// 子の節の見出しを綴る。ルート直下の節は接頭辞を持たない。
-fn child_heading(parent: &str, name: &str) -> String {
-    match parent.is_empty() {
-        true => name.to_string(),
-        false => format!("{parent}.{name}"),
+fn child_heading(parent: Option<&str>, name: &str) -> String {
+    match parent {
+        Some(parent) => format!("{parent}.{name}"),
+        None => name.to_string(),
     }
 }
 
@@ -750,7 +756,7 @@ pub(crate) mod tests {
     }
 
     /// 単一オブジェクト形式のエイリアス。
-    pub(crate) const SINGLE: &str = "[Object]\r\nframe=0,80\r\n[Object.0]\r\neffect.name=テキスト\r\nテキスト=こんにちは\r\n未知=1\r\n[Object.1]\r\neffect.name=標準描画\r\nX=0.0\r\n";
+    pub(crate) const SINGLE: &str = "[Object]\r\nframe=0,80\r\n[Object.0]\r\neffect.name=テキスト\r\nテキスト=こんにちは\r\n未知=1\r\n[Object.1]\r\neffect.name=標準描画\r\nX=-600.00,600.00,直線移動,0\r\nY=0.0\r\n";
 
     /// 複数オブジェクト形式のエイリアス。
     const MULTIPLE: &str = "[0]\r\nlayer=0\r\nframe=0,80\r\n[0.0]\r\neffect.name=テキスト\r\nテキスト=ひとつめ\r\n[1]\r\nlayer=1\r\nframe=0,80\r\n[1.0]\r\neffect.name=図形\r\n";
@@ -1691,9 +1697,22 @@ pub(crate) mod tests {
         else {
             panic!("拒否されませんでした");
         };
-        assert_eq!(heading, "1.1");
+        assert_eq!(heading.as_deref(), Some("1.1"));
         assert_eq!(item, "中心Z");
         assert_eq!(source.reason(), Some("track_flags_not_representable"));
+    }
+
+    #[test]
+    fn a_row_that_belongs_to_no_section_names_only_its_item() {
+        // 節の見出しより前に置かれた行はどの節にも属さない。空の見出しを名乗る
+        // と、要求元は名前の無い節を探すことになる。
+        let Err(AliasTrackRejection::Row { heading, item, .. }) =
+            admit_track_rows("X=-600.00,600.00,直線移動,8\r\n", &movements())
+        else {
+            panic!("拒否されませんでした");
+        };
+        assert_eq!(heading, None);
+        assert_eq!(item, "X");
     }
 
     #[test]
