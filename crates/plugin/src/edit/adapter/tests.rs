@@ -6828,8 +6828,8 @@ fn moving_an_effect_to_where_it_already_is_still_reaches_the_host() {
     assert_eq!(outcome.effect.expect("移動後の effect").position, 1);
 }
 
-/// 移動先を切り詰めるホストと、そのうえ戻す移動も効かないホストを作る。
-fn harness_with_displacing_host(fault: Fault) -> Harness {
+/// [`harness_with_effect_column`] と同じ列を、失敗を仕込んだホストで用意する。
+fn harness_with_faulty_move(fault: Fault) -> Harness {
     Harness::with(|host| {
         host.arm(|knobs| knobs.fault = Some(fault));
         host.scene.get_mut().unwrap().layers[1].objects[0].effects =
@@ -6861,7 +6861,7 @@ fn move_calls(harness: &Harness) -> usize {
 fn a_move_that_landed_elsewhere_puts_the_column_back() {
     // 失敗が状態を変える経路を残さない。列が動いたままだと、要求元が要求に
     // 使った selector も一緒に無効になる。
-    let harness = harness_with_displacing_host(Fault::AppendMovedEffect);
+    let harness = harness_with_faulty_move(Fault::AppendMovedEffect);
     let error = harness
         .edit
         .move_effect(&move_blur(&harness, 0, 2))
@@ -6882,7 +6882,7 @@ fn a_move_that_landed_elsewhere_puts_the_column_back() {
 fn a_move_the_host_ignored_is_not_followed_by_a_restore() {
     // ホストが動かさなかった列に戻すものは無い。戻す移動を発行すると、要らない
     // 書き込みが 1 つプロジェクトへ届く。
-    let harness = harness_with_displacing_host(Fault::IgnoreEffectMove);
+    let harness = harness_with_faulty_move(Fault::IgnoreEffectMove);
     let error = harness
         .edit
         .move_effect(&move_blur(&harness, 0, 2))
@@ -6902,7 +6902,7 @@ fn a_move_the_host_ignored_is_not_followed_by_a_restore() {
 fn a_restore_that_does_not_take_names_the_state_unknown() {
     // ホストは移動の成否を返さない。戻す移動が通ったことは、列を読み直して
     // 移動前の並びと比べるまで確かめられない。
-    let harness = harness_with_displacing_host(Fault::IgnoreEffectMoveRestore);
+    let harness = harness_with_faulty_move(Fault::IgnoreEffectMoveRestore);
     let error = harness
         .edit
         .move_effect(&move_blur(&harness, 0, 2))
@@ -6930,7 +6930,7 @@ fn a_restore_that_does_not_take_names_the_state_unknown() {
 fn a_restored_move_advances_the_revision_at_most_once() {
     // 巻き戻しは同じ許可で発行する。許可は最初の発行で確定した revision を
     // 保つため、移動が 2 回でも revision は 1 つしか進まない。
-    let harness = harness_with_displacing_host(Fault::AppendMovedEffect);
+    let harness = harness_with_faulty_move(Fault::AppendMovedEffect);
     let error = harness
         .edit
         .move_effect(&move_blur(&harness, 0, 2))
