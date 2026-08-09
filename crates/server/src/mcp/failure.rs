@@ -328,7 +328,7 @@ fn sanitize(error: ErrorObject) -> ErrorObject {
 /// 名乗る先はトップレベルの object である。
 ///
 /// 二度通しても結果は変わらない。1 度目の記録はそのまま通る。
-pub fn sanitize_details(value: &Value) -> Value {
+fn sanitize_details(value: &Value) -> Value {
     let mut truncated = Map::new();
     let sanitized = sanitize_value(value, 0, &mut Vec::new(), &mut truncated);
     match sanitized {
