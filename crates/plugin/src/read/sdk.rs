@@ -669,12 +669,20 @@ pub(crate) fn host_edit_info(info: &aviutl2::generic::EditInfo) -> Result<HostEd
         cursor_layer: non_negative(info.layer),
         frame_max: non_negative(info.frame_max),
         layer_max: non_negative(info.layer_max),
-        display_frame_start: non_negative(info.display_frame_start),
-        display_layer_start: non_negative(info.display_layer_start),
-        display_frame_num: non_negative(info.display_frame_num),
-        display_layer_num: non_negative(info.display_layer_num),
-        select_range_start: info.select_range_start.map(non_negative),
-        select_range_end: info.select_range_end.map(non_negative),
+        display_frame_start: non_negative(info.display_frame.start),
+        display_layer_start: non_negative(info.display_layer.start),
+        // 件数は `len()` から取る。終了フレーム・終了レイヤーは厳密な値ではなく、
+        // 差を自分で取ると終端の意味が変わったときに黙ってずれる。
+        display_frame_num: non_negative(info.display_frame.len()),
+        display_layer_num: non_negative(info.display_layer.len()),
+        select_range_start: info
+            .select_range
+            .as_ref()
+            .map(|range| non_negative(*range.start())),
+        select_range_end: info
+            .select_range
+            .as_ref()
+            .map(|range| non_negative(*range.end())),
     })
 }
 
@@ -1239,6 +1247,66 @@ mod tests {
             assert_eq!(details["sdk_operation"], "get_edit_info");
             assert_eq!(details["reason"], "edit_info_out_of_range");
         }
+    }
+
+    #[test]
+    fn the_display_range_folds_a_negative_start_and_a_negative_count() {
+        // 開始番号と件数は独立に壊れる。開始が負なら畳まれた巨大値が
+        // そのまま開始になり、件数が負なら終端が巨大値へ回って件数が
+        // 巨大になる。守りを片側だけに掛けると、もう片側が応答へ出る。
+        let info = mapped(&raw_edit_info()).expect("正常な編集情報です");
+        assert_eq!(info.display_frame_start, 0);
+        assert_eq!(info.display_frame_num, 100);
+        assert_eq!(info.display_layer_start, 0);
+        assert_eq!(info.display_layer_num, 2);
+
+        for raw in [
+            aviutl2::sys::plugin2::EDIT_INFO {
+                display_frame_start: -1,
+                ..raw_edit_info()
+            },
+            aviutl2::sys::plugin2::EDIT_INFO {
+                display_frame_num: -1,
+                ..raw_edit_info()
+            },
+        ] {
+            let info = mapped(&raw).expect("大きさは正当です");
+            assert_eq!(info.display_frame_start, 0);
+            assert_eq!(info.display_frame_num, 0);
+        }
+
+        for raw in [
+            aviutl2::sys::plugin2::EDIT_INFO {
+                display_layer_start: -1,
+                ..raw_edit_info()
+            },
+            aviutl2::sys::plugin2::EDIT_INFO {
+                display_layer_num: -1,
+                ..raw_edit_info()
+            },
+        ] {
+            let info = mapped(&raw).expect("大きさは正当です");
+            assert_eq!(info.display_layer_start, 0);
+            assert_eq!(info.display_layer_num, 0);
+        }
+    }
+
+    #[test]
+    fn the_selected_range_keeps_both_ends() {
+        // 未選択は両端を -1 で表す。両端を含む範囲として写すため、
+        // 選択された区間は同じ 2 つの番号のまま届く。
+        let unselected = mapped(&raw_edit_info()).expect("正常な編集情報です");
+        assert_eq!(unselected.select_range_start, None);
+        assert_eq!(unselected.select_range_end, None);
+
+        let info = mapped(&aviutl2::sys::plugin2::EDIT_INFO {
+            select_range_start: 10,
+            select_range_end: 20,
+            ..raw_edit_info()
+        })
+        .expect("正常な編集情報です");
+        assert_eq!(info.select_range_start, Some(10));
+        assert_eq!(info.select_range_end, Some(20));
     }
 
     #[test]

@@ -28,7 +28,7 @@ proptest = "1.6.0"
 # SDK ラッパーと Win32 API は Windows でのみ解決する。
 # 実装は全て `#[cfg(windows)]` 配下にあり、他プラットフォームでは参照されない。
 [target.'cfg(windows)'.dependencies]
-aviutl2 = "0.41.0"
+aviutl2 = "0.43.0"
 aviutl2-mcp-win = { workspace = true }
 win32-ui = { git = "https://github.com/yu7400ki/win32-ui.git", rev = "bf52be16ee16977b5b3bf6c5587f5827f67dc778" }
 windows = { workspace = true, features = [
