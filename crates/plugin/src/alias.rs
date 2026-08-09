@@ -463,8 +463,6 @@ fn collect_effects(root: &Table) -> Vec<String> {
 }
 
 /// 走査が 1 つの節へ持ち込む文脈。
-///
-/// 区間の数と効果は、節が自分で述べなければ親のものを継ぐ。
 struct Visit<'a> {
     /// 節の見出し。どの節にも属さない行を持つ根では `None`。
     heading: Option<String>,
@@ -472,8 +470,6 @@ struct Visit<'a> {
     node: &'a Table,
     /// 親から継ぐ区間の数。
     sections: Option<usize>,
-    /// 親から継ぐ効果名。
-    effect: Option<String>,
 }
 
 /// 生テキストが含む行を、書き込みの検証へ通す。
@@ -512,19 +508,15 @@ pub fn admit_rows(
         heading: None,
         node: &table,
         sections: None,
-        effect: None,
     }];
     while let Some(visit) = stack.pop() {
-        // 区間の数と効果は節が述べ、その中の行と子の節が同じものを見る。
+        // 区間の数は節が述べ、その中の行と子の節が同じ数を見る。
         let sections = section_count(visit.node).or(visit.sections);
-        let effect = visit
-            .node
-            .get_value(EFFECT_NAME_KEY)
-            .cloned()
-            .or(visit.effect);
+        // 効果は節が述べ、その節の行だけが種別を持つ。
+        let effect = visit.node.get_value(EFFECT_NAME_KEY);
         for (item, value) in visit.node.values() {
             admit_track_row(value, sections, movements)
-                .and_then(|()| admit_text_row(value, effect.as_deref(), item, &mut types))
+                .and_then(|()| admit_text_row(value, effect.map(String::as_str), item, &mut types))
                 .map_err(|source| AliasRowRejection::Row {
                     heading: visit.heading.clone(),
                     item: item.clone(),
@@ -538,7 +530,6 @@ pub fn admit_rows(
                 heading: Some(child_heading(visit.heading.as_deref(), name)),
                 node: child,
                 sections,
-                effect: effect.clone(),
             })
             .collect();
         stack.extend(children.into_iter().rev());
@@ -2057,16 +2048,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_child_section_that_names_no_effect_inherits_its_parents() {
-        // 効果の継承は区間の数と同じ形である。継がなければ、子の節の行は種別を
-        // 引けないまま通る。
+    fn a_child_section_that_names_no_effect_lets_its_rows_through() {
+        // 効果名と、その効果の設定項目の行は同じ節に在る。効果を名乗らない節の
+        // 行では種別が決まらず、判定を掛けない。
         let alias = "[Object]\r\n[Object.0]\r\neffect.name=テキスト\r\n\
 [Object.0.0]\r\nテキスト=A\\tB\r\n";
-        assert_eq!(row_reason(alias), Some("unescaped_backslash"));
-        // 自分で名乗る子は親を継がない。
-        let alias = "[Object]\r\n[Object.0]\r\neffect.name=テキスト\r\n\
-[Object.0.0]\r\neffect.name=画像ファイル\r\nテキスト=A\\tB\r\n";
         assert_eq!(row_reason(alias), None);
+        // 同じ行を、効果を名乗る節へ置けば種別が決まる。差は行の在処だけである。
+        let alias = "[Object]\r\n[Object.0]\r\neffect.name=テキスト\r\nテキスト=A\\tB\r\n";
+        assert_eq!(row_reason(alias), Some("unescaped_backslash"));
     }
 
     #[test]
