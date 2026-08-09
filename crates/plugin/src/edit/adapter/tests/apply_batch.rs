@@ -749,6 +749,9 @@ fn a_choice_value_the_host_ignores_fails_the_batch_and_rolls_it_back() {
     assert_eq!(error.details()["failed_index"], json!(1));
     assert_eq!(error.details()["rolled_back"], json!(true));
     assert_eq!(error.details()["rolled_back_count"], json!(2));
+    // 全て戻ったのだから、案内を決めるのは止めた失敗そのものである。値を選び
+    // 直すほかなく、読み直しでは通る値は得られない。
+    assert_eq!(error.details()["retry_requires"], json!("none"));
 
     // 先行 sub-operation も、落ちた sub-operation 自身も元へ戻っている。
     assert_eq!(

@@ -723,6 +723,19 @@ impl EditError {
         }
     }
 
+    /// 発行の包みを 1 枚剥がし、失敗そのものを返す。
+    ///
+    /// 一括適用の sub-operation は変更を発行し終えてから落ちるため
+    /// [`EditError::AfterMutation`] に包まれる。包みが名乗る復旧の結果は常に
+    /// [`ItemRestore::NotAttempted`] であり——結末は要求全体の巻き戻しが持つ
+    /// ——包んだまま読むと、戻っている失敗まで読み直しへ倒れる。
+    fn stopped_by(&self) -> &EditError {
+        match self {
+            EditError::AfterMutation { source, .. } => source,
+            other => other,
+        }
+    }
+
     /// 応答へ載せるエラーコードを返す。
     pub fn error_code(&self) -> ErrorCode {
         match self {
@@ -799,9 +812,20 @@ impl EditError {
                 ItemRestore::Restored => RetryRequires::None,
                 ItemRestore::Failed | ItemRestore::NotAttempted => RetryRequires::Refetch,
             },
-            // 一括適用の案内は失敗そのものが決める。巻き戻せなかった場合は
-            // 内側が発行後の失敗になっているため、読み直しへ倒れる。
-            EditError::Batch { source, .. } => source.retry_requires(),
+            // 一括適用では、戻っているかだけが分かれ目である。全て戻った場合と
+            // 1 つも発行していない場合は、プロジェクトが要求の前と同じであり、
+            // 案内は止めた失敗そのものが決める。戻せなかった場合は中途半端な
+            // 状態が残っており、次の編集の前に読み直すほかない。
+            EditError::Batch {
+                source, rollback, ..
+            } => match rollback {
+                RollbackOutcome::NotAttempted | RollbackOutcome::Complete { .. } => {
+                    source.stopped_by().retry_requires()
+                }
+                RollbackOutcome::Incomplete { .. } | RollbackOutcome::Impossible => {
+                    RetryRequires::Refetch
+                }
+            },
             EditError::Read(ReadError::NotReady)
             | EditError::Read(ReadError::EditBlocked { .. }) => RetryRequires::Resend,
             // 読み直せば宛先の空きが分かる。
@@ -1795,6 +1819,44 @@ pub(crate) mod tests {
         assert_eq!(details["retry_requires"], json!("refetch"));
         // 元へ戻ったのだから、中途半端な状態は残っていない。
         assert!(details.get("consistency_unknown").is_none());
+    }
+
+    #[test]
+    fn a_rolled_back_batch_lets_the_failure_that_stopped_it_choose_the_retry() {
+        // 全て戻ったのだから、プロジェクトは要求の前と同じである。要求元が次に
+        // 取る行動は、変更が 1 つも入らなかった場合と変わらない——受け付けられる
+        // 値を選び直すのであって、対象を読み直すのではない。
+        let error = EditError::Batch {
+            source: Box::new(
+                EditError::ItemValueNotApplied {
+                    observed: "ffffff".to_string(),
+                }
+                .after_mutation(44),
+            ),
+            failed_index: Some(1),
+            rollback: RollbackOutcome::Complete { count: 2 },
+        };
+        let details = error.details();
+        assert_eq!(details["rolled_back"], json!(true));
+        assert_eq!(details["reason"], json!("item_value_not_applied"));
+        assert_eq!(details["retry_requires"], json!("none"));
+    }
+
+    #[test]
+    fn no_failure_after_a_change_allows_a_plain_resend() {
+        // 剥がす形は内側の失敗に案内を決めさせる。後から足した失敗が再送を
+        // 持ち込む余地はここにだけ残る。
+        for error in all_errors() {
+            let details = error.details();
+            if details.get("mutation_issued").is_none() && details.get("rolled_back").is_none() {
+                continue;
+            }
+            assert_ne!(
+                details["retry_requires"],
+                json!("resend"),
+                "{error} が変更の後にそのままの再送を促しました"
+            );
+        }
     }
 
     #[test]
