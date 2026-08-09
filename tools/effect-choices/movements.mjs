@@ -381,7 +381,8 @@ class Item {
 /** 書き込みの結末を 1 行で述べる。 */
 function describeWrite(result) {
   if (result.outcome === WRITE.notApplied) return `${NOT_APPLIED}: ${result.observed}`;
-  return String(result.reason);
+  if (result.outcome === WRITE.failed) return String(result.reason);
+  return result.outcome;
 }
 
 /** オブジェクトを作れる効果の名前を列挙する。 */
