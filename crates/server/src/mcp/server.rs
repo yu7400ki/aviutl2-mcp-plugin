@@ -1312,6 +1312,7 @@ impl AviUtl2McpServer {
     /// 戻せたかは details.restored が名乗り、
     /// 戻せなかった場合だけ details.consistency_unknown が true になる。
     /// 戻せていれば selector はそのまま使え、対象を読み直す必要は無い。
+    /// このとき details.retry_requires は none になる。
     /// observed_value は応答が返る時点の現在値ではなく、要求の代わりに送り直す値でもない。
     /// 要求した値がホストに受け付けられなかったと解し、受け付けられる値を選び直す。
     /// 選択肢から選ぶ種別（select・combo・mask・figure）で選択肢に無い値、登録されていない
@@ -1454,8 +1455,9 @@ impl AviUtl2McpServer {
     /// 結果は unsupported_operation（change_not_applied）であり、
     /// details.reported_position にホストが名乗った位置が入る。
     /// 切り詰めで列が動いた場合は元の並びへ戻す。details.restored が真なら列は
-    /// 要求の前と同じであり、偽なら戻せておらず details.consistency_unknown が立つ。
-    /// 対象が既に下限に居る場合は列が動かないため details.restored は付かない。
+    /// 要求の前と同じであり、このとき details.retry_requires は none になる。
+    /// 偽なら戻せておらず details.consistency_unknown が立つ。
+    /// 対象が既に下限に居て列が 1 件も動かなかった場合も details.restored は真になる。
     /// 列が動いていない失敗では要求に使った selector がそのまま通る。
     /// 応答の effect には移動後に読み直した effect が入る。
     /// 成功すると、要求に使った selector は使えなくなる——列の位置が変われば
@@ -1970,6 +1972,8 @@ impl AviUtl2McpServer {
     /// 同じ対象の同じ状態を 2 回変更する要求は受け付けない。同じオブジェクトの
     /// 2 回の移動と、同じ設定項目への 2 回の書き込みがこれに当たる。
     /// 途中で失敗した場合はそれまでに適用した変更を自動で巻き戻す。
+    /// 全て戻せた場合はプロジェクトが要求の前と同じであり、
+    /// details.retry_requires は止めた失敗そのものが決める。
     /// 失敗したときは details.failed_index が何番目で落ちたかを返す。
     /// オブジェクトの fingerprint が食い違った場合は details.failed_object が
     /// その対象の現在の状態も返すので、100 件を読み直さずにその 1 件だけを
@@ -4905,8 +4909,11 @@ mod tests {
                     "item_value_not_applied",
                     "details.observed_value に書き込んだ直後に読み直した値が入る",
                     // 巻き戻すことを述べなければ、要求元は失敗のたびに対象を
-                    // 読み直す。
+                    // 読み直す。**戻した先を機械可読な値でも名乗る**——文章が
+                    // 「読み直す必要は無い」と述べる隣で details.retry_requires が
+                    // refetch を名乗っていれば、要求元は値のほうに従う。
                     "設定項目は書き込み前の値へ戻す",
+                    "details.retry_requires は none になる",
                     "選択肢に無い値",
                     // クランプと丸めも失敗になることを予期できなければ、要求元は
                     // 成功するはずの要求が落ちたと読む。
@@ -4938,9 +4945,12 @@ mod tests {
                     "元の並びへ戻す",
                     "details.restored",
                     "details.consistency_unknown",
+                    "details.retry_requires は none になる",
                     // 切り詰めは列を動かすとは限らない。既に下限に居る対象へ
-                    // 同じ要求を送ると列は動かず、selector も生き残る。
-                    "既に下限に居る場合は列が動かない",
+                    // 同じ要求を送ると列は動かず、selector も生き残る。**その
+                    // 失敗も戻った側として名乗る**——動かさなかったことと動かして
+                    // から戻したことは、要求元から見て区別が付かない。
+                    "列が 1 件も動かなかった場合も details.restored は真になる",
                     "selector がそのまま通る",
                     // **移動は effect の内容を 1 つも変えないまま、要求に
                     // 使った selector を無効にする。** 名前も enabled も
@@ -5158,6 +5168,9 @@ mod tests {
             // 拒否と失敗の読み方。
             "2 回変更する要求は受け付けない",
             "自動で巻き戻す",
+            // 全て戻った先は要求の前と同じである。巻き戻したこと自体が案内を
+            // 決めると読まれると、要求元は解消しない失敗にも読み直しを重ねる。
+            "止めた失敗そのものが決める",
             "details.failed_index",
             "details.failed_object",
             "details.consistency_unknown",
