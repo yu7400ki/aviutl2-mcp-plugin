@@ -743,6 +743,32 @@ mod tests {
     }
 
     #[test]
+    fn a_truncation_record_replaces_the_one_the_instance_sent() {
+        // 切ったのはこちらであり、記録もこちらが持つ。接続先の申告を残すと、
+        // 要求元は我々が落とした件数を読めない。
+        let items: Vec<Value> = (0..MAX_DETAIL_ARRAY_ITEMS + 1)
+            .map(|index| serde_json::json!(index))
+            .collect();
+        let details = sanitize_details(&serde_json::json!({
+            "items": items,
+            "truncated": { "somewhere": 9 },
+        }));
+        assert_eq!(
+            details[TRUNCATED_KEY],
+            serde_json::json!({ "items": MAX_DETAIL_ARRAY_ITEMS + 1 })
+        );
+
+        // 1 つも切らなければ、名乗る事実が無い。他の key と同じに通る。
+        let untouched = sanitize_details(&serde_json::json!({
+            "truncated": { "somewhere": 9 },
+        }));
+        assert_eq!(
+            untouched[TRUNCATED_KEY],
+            serde_json::json!({ "somewhere": 9 })
+        );
+    }
+
+    #[test]
     fn the_truncation_key_is_not_a_sensitive_fragment() {
         // 断片と重なれば名乗りは黙って落ち、切り詰めが名乗られていた事実ごと
         // 消える。
