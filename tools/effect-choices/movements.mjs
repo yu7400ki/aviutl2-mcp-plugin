@@ -407,8 +407,9 @@ async function listSourceEffects(survey) {
  * 確かめ、対象の効果が付いてこなかったオブジェクトはその場で消す。
  */
 async function createScratch(survey, layer) {
+  let target = layer;
   for (const name of await listSourceEffects(survey)) {
-    const selector = await survey.createObject(name, layer);
+    const selector = await survey.createObject(name, target);
     if (!selector) continue;
     const object = await survey.getObject(selector);
     const effect = object.effects.find((entry) => entry.name === TARGET_EFFECT);
@@ -416,7 +417,9 @@ async function createScratch(survey, layer) {
       console.log(`${name} から作ったオブジェクトで測ります`);
       return selector;
     }
-    await survey.destroyObject(selector);
+    // 消せなかったオブジェクトのレイヤーは占有されたままである。次の試行は
+    // その先へ置く。
+    if (!(await survey.destroyObject(selector))) target += 1;
   }
   throw new Error(`${TARGET_EFFECT} / ${TARGET_ITEM} を載せたオブジェクトを作れません`);
 }
