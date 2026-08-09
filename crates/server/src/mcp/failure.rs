@@ -821,12 +821,17 @@ mod tests {
         )
         .with_details(serde_json::json!({
             "reason": "track_mode_unknown",
-            "known_movements": ["直線移動", "曲線移動", "瞬間移動"],
+            "known_movements": [
+                { "name": "直線移動", "writable": true },
+                { "name": "移動無し", "writable": false },
+            ],
             "observed_value": 4000,
         }));
         let text = text(&error);
         assert!(
-            text.contains(r#"details.known_movements=["直線移動","曲線移動","瞬間移動"]"#),
+            text.contains(
+                r#"details.known_movements=[{"name":"直線移動","writable":true},{"name":"移動無し","writable":false}]"#
+            ),
             "{text}"
         );
         assert!(text.contains("details.observed_value=4000"), "{text}");
