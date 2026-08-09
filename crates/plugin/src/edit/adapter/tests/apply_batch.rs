@@ -59,6 +59,19 @@ fn item_of(harness: &Harness, id: usize, effect: usize, item: &str) -> ItemValue
         .clone()
 }
 
+/// 識別子と effect 列の位置で、その位置に居る effect の名前と同名内の順序を引く。
+fn effect_at(harness: &Harness, id: usize, position: usize) -> (String, usize) {
+    let scene = harness.host.scene();
+    let object = scene
+        .layers
+        .iter()
+        .flat_map(|layer| layer.objects.iter())
+        .find(|object| object.id == id)
+        .unwrap_or_else(|| panic!("識別子 {id} の対象がありません"));
+    let effect = &object.effects[position];
+    (effect.name.clone(), effect.index)
+}
+
 // -------------------------------------------------------------- 相の分離
 
 #[test]
@@ -1100,6 +1113,14 @@ fn the_results_are_read_back_after_every_change_has_been_applied() {
     assert!(outcome.results[0].effect.is_none());
     let effect = outcome.results[1].effect.as_ref().expect("変更後の effect");
     assert_eq!(effect.name, "ぼかし");
+    // 対象は `動画ファイル` と `ぼかし` を持つ。`ぼかし` は同名内で 0 番目・
+    // 列では 1 番目であり、2 つの数が食い違う。位置は列の添字として引ける。
+    assert_eq!(effect.index, 0);
+    assert_eq!(effect.position, 1);
+    assert_eq!(
+        effect_at(&harness, 2, effect.position),
+        (effect.name.clone(), effect.index)
+    );
 
     // 返したセレクターでそのまま次の要求を組み立てられる。
     harness
