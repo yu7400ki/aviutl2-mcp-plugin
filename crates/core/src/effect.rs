@@ -18,12 +18,18 @@ pub struct EffectInfo {
     /// effect 名。
     pub name: String,
     /// 同名 effect のうち何番目か。0 始まり。
+    ///
+    /// [`EffectSelector::effect_index`] と等しく、再指定の材料になる。
     pub index: usize,
     /// effect 列全体での位置。0 始まり。
     ///
     /// `get_object` が返す `effects` 配列の添字と一致する。編集の応答は付与や
     /// 変更を行った 1 件だけを返すため、その effect が列のどこに在るかを知る
     /// 経路はこの値だけである。
+    ///
+    /// **再指定の材料にはならない。** 列の位置は effect の増減で変わり、
+    /// [`Self::index`] と違ってセレクターが運ばない。ここに在るのは、その応答を
+    /// 組み立てた時点での位置である。
     pub position: usize,
     /// effect が有効か。
     pub enabled: bool,
