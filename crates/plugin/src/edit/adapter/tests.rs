@@ -18,12 +18,12 @@ use crate::edit::fake::{
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::{default_page_request, default_page_window, with_silent_panic_hook};
 use aviutl2_mcp_core::{
-    ApplyBatchParams, BatchOperation, CreateObjectSectionParams, CursorPosition,
-    DeleteObjectSectionParams, Destination, EditOperation, EffectFlags, EffectItem, EffectItemType,
-    EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemChoices,
-    ItemFacets, ItemRange, ItemValue, LayerNameChange, MAX_GRID_BPM_ENTRIES, MoveEffectParams,
-    MoveObjectSectionParams, Movement, ObjectSectionsOutcome, ObjectSelector, Placement, SceneSize,
-    TableSource,
+    ApplyBatchParams, AvailableEffectItem, BatchOperation, CreateObjectSectionParams,
+    CursorPosition, DeleteObjectSectionParams, Destination, EditOperation, EffectFlags, EffectItem,
+    EffectItemType, EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm,
+    ItemChoices, ItemFacets, ItemRange, ItemValue, LayerNameChange, MAX_GRID_BPM_ENTRIES,
+    MoveEffectParams, MoveObjectSectionParams, Movement, ObjectSectionsOutcome, ObjectSelector,
+    Placement, SceneSize, TableSource,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -1551,6 +1551,134 @@ fn a_creation_by_name_is_not_held_to_the_movement_rows_the_raw_text_is() {
         .create_object(&create_from_raw_alias_params(
             &harness,
             ALIAS_WITH_A_DEAD_MOVEMENT,
+        ))
+        .expect_err("生テキストの経路が拒否しませんでした");
+}
+
+/// テキスト種別の設定項目を持つ効果をカタログへ載せる形。
+fn text_catalog_entry() -> FakeCatalogEntry {
+    FakeCatalogEntry {
+        name: "テキスト".to_string(),
+        effect_type: EffectType::Filter,
+        flags: EffectFlags::from_raw(1),
+        items: vec![AvailableEffectItem {
+            name: "テキスト".to_string(),
+            item_type: EffectItemType::Text,
+        }],
+        facets: HashMap::new(),
+    }
+}
+
+/// パス種別の設定項目を持つ効果をカタログへ載せる形。
+fn image_file_catalog_entry() -> FakeCatalogEntry {
+    FakeCatalogEntry {
+        name: "画像ファイル".to_string(),
+        effect_type: EffectType::Input,
+        flags: EffectFlags::from_raw(1),
+        items: vec![AvailableEffectItem {
+            name: "ファイル".to_string(),
+            item_type: EffectItemType::File,
+        }],
+        facets: HashMap::new(),
+    }
+}
+
+/// テキスト種別とパス種別の双方を公開する効果を載せた一式を組む。
+///
+/// 既定のカタログはどちらの種別も持たない。**同じ綴りが種別で分かれること
+/// は、双方を載せて初めて 1 つの一式の上で見える。**
+fn alias_row_harness() -> Harness {
+    Harness::with(|host| {
+        host.catalog.push(text_catalog_entry());
+        host.catalog.push(image_file_catalog_entry());
+    })
+}
+
+/// テキスト種別の行が、エスケープを組まない `\` を綴る生テキスト。
+const ALIAS_WITH_A_LOOSE_BACKSLASH: &str =
+    "[Object]\r\nframe=0,80\r\n[Object.0]\r\neffect.name=テキスト\r\nテキスト=C:\\temp\\note\r\n";
+
+/// パス種別の行が、生の `\` を綴る生テキスト。
+///
+/// **ホストが書き出すのはこの形である。** パス種別の値は `\` を 1 つも解かない。
+const ALIAS_WITH_A_PATH_ROW: &str = "[Object]\r\nframe=0,80\r\n[Object.0]\r\neffect.name=画像ファイル\r\nファイル=C:\\temp\\note.png\r\n";
+
+#[test]
+fn a_raw_alias_whose_text_row_spells_a_backslash_loosely_is_refused_before_the_edit_section() {
+    // テキスト種別の値では `\` がエスケープを組む。組まない綴りはホストの解釈と
+    // 食い違う値になるため、区間へ入る前に落とす。
+    let harness = alias_row_harness();
+    harness.host.clear_calls();
+    let before = harness.object_count();
+    let error = harness
+        .edit
+        .create_object(&create_from_raw_alias_params(
+            &harness,
+            ALIAS_WITH_A_LOOSE_BACKSLASH,
+        ))
+        .expect_err("緩い綴りのテキスト行から作成できました");
+
+    assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+    let details = error.details();
+    assert_eq!(details["reason"], json!("unescaped_backslash"));
+    // どの節のどの項目かが分からなければ、要求元は直す行を選べない。
+    assert_eq!(details["heading"], json!("Object.0"));
+    assert_eq!(details["item"], json!("テキスト"));
+    assert_eq!(harness.object_count(), before);
+    assert!(harness.host.enter_calls() == 0, "編集区間へ入りました");
+    harness.assert_untouched();
+    // 落ちた行の値は運ばない。
+    let document = format!("{} {}", error, error.details());
+    assert!(!document.contains("C:"), "値が応答に含まれます: {document}");
+}
+
+#[test]
+fn a_raw_alias_whose_path_row_carries_a_raw_backslash_reaches_the_sdk() {
+    // **綴りだけを材料にした一律の規則はここで落ちる。** パス種別の値は解かれず、
+    // 書いた綴りがそのまま保存される。書き換えようもない——`\` を 2 つにすれば
+    // `\` が 2 つ並んだパスになる。
+    let harness = alias_row_harness();
+    harness.host.clear_calls();
+    harness
+        .edit
+        .create_object(&create_from_raw_alias_params(
+            &harness,
+            ALIAS_WITH_A_PATH_ROW,
+        ))
+        .expect("パス種別の行を持つエイリアスが拒否されました");
+
+    assert!(
+        harness.host.calls().contains(&"create_object_from_alias"),
+        "エイリアスが SDK へ届いていません"
+    );
+}
+
+#[test]
+fn a_creation_by_name_is_not_held_to_the_text_rows_the_raw_text_is() {
+    // 一覧は本文の行を 1 つも見ていない。作成にだけ条件を足せば「一覧に出た
+    // 名前は必ず作成できる」が崩れる。
+    let (dir, _) = alias_fixture();
+    dir.write_alias("緩い綴り", ALIAS_WITH_A_LOOSE_BACKSLASH.as_bytes());
+    let harness = alias_row_harness();
+    harness
+        .host
+        .set_alias_data_directory(Some(dir.path().to_path_buf()));
+    assert!(
+        listed_alias_names(&dir).contains(&"緩い綴り".to_string()),
+        "fixture が一覧に載っていません"
+    );
+
+    harness
+        .edit
+        .create_object(&create_from_alias_name(&harness, "緩い綴り", 1, 600))
+        .expect("一覧に載る名前から作成できませんでした");
+    // 生テキストとして同じバイト列を渡す経路は拒否する。
+    let harness = alias_row_harness();
+    harness
+        .edit
+        .create_object(&create_from_raw_alias_params(
+            &harness,
+            ALIAS_WITH_A_LOOSE_BACKSLASH,
         ))
         .expect_err("生テキストの経路が拒否しませんでした");
 }
