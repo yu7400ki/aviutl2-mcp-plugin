@@ -85,8 +85,11 @@ pub(crate) enum Fault {
     AppendMovedEffect,
     /// effect は要求した位置へ動かすが、戻り値だけ別の数を名乗る。
     MisreportEffectPosition,
-    /// effect の順序の移動が、動かした 1 件を列から落とす。
-    DropMovedEffect,
+    /// effect の順序の移動が、動かした 1 件とは別の 1 件を列から落とす。
+    ///
+    /// 動かした 1 件は要求どおりの位置へ入る。移動先にも元の位置にも食い違いが
+    /// 現れないため、**列の長さだけが変化を示す。**
+    DropAnotherEffect,
     /// 変更 API が SDK へ届かずに失敗する。
     ///
     /// ラッパーは対象の存在確認を呼び出しの入口で行い、そこで落ちた要求は
@@ -1755,10 +1758,6 @@ impl SceneEditor for FakeSceneEditor<'_> {
             operation: "move_effect",
         })?;
         let moved = object.effects.remove(from);
-        if knobs.fault == Some(Fault::DropMovedEffect) {
-            renumber(&mut object.effects);
-            return Ok(position);
-        }
         // 抜いた後の列に対する挿し込みであり、末尾までを受け付ける。
         let to = if knobs.fault == Some(Fault::AppendMovedEffect) {
             object.effects.len()
@@ -1766,6 +1765,14 @@ impl SceneEditor for FakeSceneEditor<'_> {
             position.min(object.effects.len())
         };
         object.effects.insert(to, moved);
+        if knobs.fault == Some(Fault::DropAnotherEffect) {
+            // 落とすのは移動先より後ろの 1 件を優先する。前を落とすと動かした
+            // 1 件まで前へずれ、移動が要求どおりに入った状態にならない。
+            let victim = (to + 1..object.effects.len()).next().or(to.checked_sub(1));
+            if let Some(victim) = victim {
+                object.effects.remove(victim);
+            }
+        }
         renumber(&mut object.effects);
         if knobs.fault == Some(Fault::MisreportEffectPosition) {
             return Ok(to + 1);

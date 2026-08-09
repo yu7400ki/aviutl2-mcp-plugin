@@ -6732,10 +6732,11 @@ fn a_host_that_ignores_the_move_and_one_that_moves_it_elsewhere_name_different_r
 
 #[test]
 fn a_column_that_changed_length_is_not_a_move() {
-    // 移動は effect を増やしも減らしもしない。長さが変われば、移動先に何が
-    // 居るかを見るより先に失敗である。
+    // 移動は effect を増やしも減らしもしない。**動かした 1 件は要求どおりの
+    // 位置に居り、消えたのは別の 1 件である**——移動先を見ても元の位置を見ても
+    // 食い違いは現れず、長さだけが変化を示す。
     let harness = Harness::with(|host| {
-        host.arm(|knobs| knobs.fault = Some(Fault::DropMovedEffect));
+        host.arm(|knobs| knobs.fault = Some(Fault::DropAnotherEffect));
         host.scene.get_mut().unwrap().layers[1].objects[0].effects =
             vec![video_effect(), blur(0, 10), blur(1, 20), blur(2, 30)];
     });
@@ -6744,8 +6745,13 @@ fn a_column_that_changed_length_is_not_a_move() {
         .move_effect(&move_blur(&harness, 0, 2))
         .expect_err("列が短くなった移動が成功として返りました");
 
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
     assert_eq!(error.details()["reason"], json!("change_not_applied"));
-    assert_eq!(effect_column(&harness).len(), 3);
+    // 移動そのものは要求どおりに入っている。列の末尾の 1 件だけが消えた。
+    assert_eq!(
+        effect_column(&harness),
+        vec![video_entry(), blur_entry(20), blur_entry(10)]
+    );
 }
 
 #[test]
