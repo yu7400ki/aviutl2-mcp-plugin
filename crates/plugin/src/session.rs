@@ -3503,9 +3503,9 @@ mod edit_tests {
     use crate::edit::error::RollbackOutcome;
     use aviutl2_mcp_core::{
         EditOutcome, FiniteF64, GridBpmOutcome, LayerInfo, LayerStateOutcome, MAX_GRID_BPM_ENTRIES,
-        MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, ObjectFingerprintInput, ObjectSectionsOutcome,
-        ObjectSummary, RequestBudgetKind, SceneInfo, SceneSettingsOutcome, SectionRange,
-        SelectionField, SelectionState, SetLayerStateParams,
+        MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MAX_POSITION, ObjectFingerprintInput,
+        ObjectSectionsOutcome, ObjectSummary, RequestBudgetKind, SceneInfo, SceneSettingsOutcome,
+        SectionRange, SelectionField, SelectionState, SetLayerStateParams,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -4161,6 +4161,44 @@ mod edit_tests {
         )
         .expect("区間番号 1 が編集口へ届きませんでした");
         assert_eq!(adapter.calls(), vec!["delete_object_section"]);
+    }
+
+    #[test]
+    fn an_unrepresentable_effect_position_never_reaches_the_edit_adapter() {
+        // 受け渡せない値は対象の状態に依らず常に誤りである。列の長さとの比較は
+        // ここでは見ず、編集口が対象を解決してから行う。
+        let adapter = FakeEditAdapter::new();
+        let error = execute_edit(
+            &adapter,
+            &InstanceState::Ready,
+            EditOperation::MoveEffect,
+            &json!({
+                "selector": fake_effect_selector(),
+                "position": MAX_POSITION as u64 + 1,
+            }),
+            within(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(error.message.contains("position"), "{}", error.message);
+        assert!(adapter.calls().is_empty(), "編集口へ届きました");
+    }
+
+    #[test]
+    fn a_move_effect_request_reaches_the_edit_adapter() {
+        // 列の長さとの比較は対象の現在の状態を要する。要求内容だけの検証は
+        // そこまで見ず、受け渡せる位置はそのまま編集口へ届く。
+        let adapter = FakeEditAdapter::new();
+        execute_edit(
+            &adapter,
+            &InstanceState::Ready,
+            EditOperation::MoveEffect,
+            &json!({ "selector": fake_effect_selector(), "position": 3 }),
+            within(),
+        )
+        .expect("移動先 3 が編集口へ届きませんでした");
+        assert_eq!(adapter.calls(), vec!["move_effect"]);
     }
 
     /// BPM 情報 1 件を要求の形で組み立てる。

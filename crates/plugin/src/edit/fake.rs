@@ -85,6 +85,8 @@ pub(crate) enum Fault {
     AppendMovedEffect,
     /// effect は要求した位置へ動かすが、戻り値だけ別の数を名乗る。
     MisreportEffectPosition,
+    /// effect の順序の移動が、動かした 1 件を列から落とす。
+    DropMovedEffect,
     /// 変更 API が SDK へ届かずに失敗する。
     ///
     /// ラッパーは対象の存在確認を呼び出しの入口で行い、そこで落ちた要求は
@@ -1753,6 +1755,10 @@ impl SceneEditor for FakeSceneEditor<'_> {
             operation: "move_effect",
         })?;
         let moved = object.effects.remove(from);
+        if knobs.fault == Some(Fault::DropMovedEffect) {
+            renumber(&mut object.effects);
+            return Ok(position);
+        }
         // 抜いた後の列に対する挿し込みであり、末尾までを受け付ける。
         let to = if knobs.fault == Some(Fault::AppendMovedEffect) {
             object.effects.len()

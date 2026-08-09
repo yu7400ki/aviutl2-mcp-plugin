@@ -307,6 +307,15 @@ mod tests {
     }
 
     #[test]
+    fn effect_ordering_names_belong_to_the_shared_value_set() {
+        // 一覧はワイヤ契約であり、名前を足すことは契約の変更である。挿入位置を
+        // 取り違えると `reason_values_are_sorted_and_unique` が落ちる。
+        for reason in ["effect_not_movable", "effect_position_out_of_range"] {
+            assert!(REASON_VALUES.contains(&reason), "{reason} がありません");
+        }
+    }
+
+    #[test]
     fn reason_values_are_machine_readable_names() {
         // 応答で分岐に使う値であり、表示用の文言ではない。
         for reason in REASON_VALUES {

@@ -12,7 +12,7 @@ use crate::edit::fake::{
     ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX, MAX_FRAME, MAX_ITEM_VALUE,
     MAX_LAYER, MAX_SCENE_HEIGHT, MAX_SCENE_SAMPLE_RATE, MAX_SCENE_WIDTH, MOVE_FRAME_SHIFT,
     MOVING_ITEM, MUTATIONS, OBSERVED_SCENE, PanicPoint, READ_SECTION, RENAMED_SCENE_NAME, SCENE_ID,
-    SCENE_NAME, SECTION_RANGES, SHAPE, STATIC_ITEM, TRACK_MODES, coordinate,
+    SCENE_NAME, SECTION_RANGES, SHAPE, STATIC_ITEM, TRACK_MODES, blur, coordinate,
     coordinate_catalog_entry, raw_item_value, shape, shape_catalog_entry,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
@@ -6419,6 +6419,397 @@ pub(crate) fn produced_effect_precondition_failures() -> Vec<EditError> {
     // 事前確認は変更を 1 つも発行しない。
     harness.assert_untouched();
     produced
+}
+
+#[test]
+fn the_effect_precondition_asks_for_a_refetch() {
+    for error in produced_effect_precondition_failures() {
+        let reason = error.details()["reason"].clone();
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::PreconditionFailed,
+            "{reason} が前提条件の不整合になっていません"
+        );
+        assert_eq!(error.details()["retry_requires"], json!("refetch"));
+    }
+}
+
+// -------------------------------------------------------- effect の順序の移動
+
+/// 同名 effect を 3 つ並べた対象を持つフェイクを組む。
+///
+/// 3 件は名前・有効・ロックが等しく、設定項目の値だけが違う。列の先頭には
+/// 別名の effect が居るため、列全体での位置と同名内の順序が 1 つずれる。
+///
+/// **3 件並べるのは、移動先を列の末尾でも現在位置でもない位置に採るためである。**
+/// 末尾を指すと「末尾へ動かす」ホストと、現在位置を指すと「動かさない」ホストと、
+/// 正しい移動が区別できない。
+fn harness_with_effect_column() -> Harness {
+    Harness::with(|host| {
+        host.scene.get_mut().unwrap().layers[1].objects[0].effects =
+            vec![video_effect(), blur(0, 10), blur(1, 20), blur(2, 30)];
+    })
+}
+
+/// 列の先頭に置く別名の effect。
+fn video_effect() -> HostEffect {
+    HostEffect {
+        name: "動画ファイル".to_string(),
+        index: 0,
+        enabled: true,
+        locked: false,
+        items: Vec::new(),
+    }
+}
+
+/// 対象の effect を、名前と設定項目の値の組として読み出す。
+fn effect_column(harness: &Harness) -> Vec<(String, ItemValue)> {
+    let selector = harness.selector(1, 100);
+    harness
+        .healthy(|| harness.read.get_object(&selector))
+        .expect("対象の詳細")
+        .effects
+        .into_iter()
+        .map(|effect| {
+            let value = effect
+                .items
+                .first()
+                .map(|item| item.value.clone())
+                .unwrap_or(ItemValue::Unknown { raw: String::new() });
+            (effect.name, value)
+        })
+        .collect()
+}
+
+/// 設定項目 `範囲` の値を持つ組を作る。[`effect_column`] の期待値に使う。
+fn blur_entry(range: i64) -> (String, ItemValue) {
+    ("ぼかし".to_string(), ItemValue::Integer { value: range })
+}
+
+/// [`video_effect`] を [`effect_column`] の期待値として書く形。
+fn video_entry() -> (String, ItemValue) {
+    (
+        "動画ファイル".to_string(),
+        ItemValue::Unknown { raw: String::new() },
+    )
+}
+
+/// 同名 effect のうち `effect_index` 番目を移動する要求を組み立てる。
+fn move_blur(harness: &Harness, effect_index: usize, position: usize) -> MoveEffectParams {
+    MoveEffectParams {
+        selector: harness.effect_selector(1, 100, "ぼかし", effect_index),
+        position,
+    }
+}
+
+#[test]
+fn moving_an_effect_backwards_puts_the_column_in_that_order() {
+    // 列は [動画ファイル, ぼかし10, ぼかし20, ぼかし30]。位置 1 の 1 件を
+    // 位置 2 へ動かす。**移動先は末尾ではない**——末尾を指すと、末尾へ動かす
+    // ホストと正しい移動が区別できない。
+    let harness = harness_with_effect_column();
+    let outcome = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 2))
+        .expect("後方への移動に失敗しました");
+
+    assert_eq!(
+        effect_column(&harness),
+        vec![
+            video_entry(),
+            blur_entry(20),
+            blur_entry(10),
+            blur_entry(30)
+        ]
+    );
+    assert_eq!(
+        changed_item(&outcome, "範囲"),
+        ItemValue::Integer { value: 10 }
+    );
+    let effect = outcome.effect.expect("移動後の effect");
+    assert_eq!(effect.position, 2);
+    assert_eq!(effect.name, "ぼかし");
+}
+
+#[test]
+fn moving_an_effect_forwards_puts_the_column_in_that_order() {
+    // 抜いてから挿す順序を取り違えると、後方への移動だけが 1 つずれる。前方を
+    // 試さなければ、その取り違えは片側でしか現れない。
+    let harness = harness_with_effect_column();
+    let outcome = harness
+        .edit
+        .move_effect(&move_blur(&harness, 2, 1))
+        .expect("前方への移動に失敗しました");
+
+    assert_eq!(
+        effect_column(&harness),
+        vec![
+            video_entry(),
+            blur_entry(30),
+            blur_entry(10),
+            blur_entry(20)
+        ]
+    );
+    assert_eq!(
+        changed_item(&outcome, "範囲"),
+        ItemValue::Integer { value: 30 }
+    );
+    let effect = outcome.effect.expect("移動後の effect");
+    assert_eq!(effect.position, 1);
+}
+
+#[test]
+fn moving_one_of_two_effects_with_the_same_name_swaps_their_effect_index() {
+    // 列全体の位置と同名内の順序は別の数である。移動先に前者を渡すべきところへ
+    // 後者を渡すと、この列では移動先が 2 ではなく 0 になる。
+    let harness = harness_with_effect_column();
+    let outcome = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 2))
+        .expect("同名 effect の移動に失敗しました");
+
+    let effect = outcome.effect.expect("移動後の effect");
+    assert_eq!(effect.position, 2);
+    assert_eq!(effect.index, 1, "同名内の順序が入れ替わっていません");
+    assert_eq!(effect.selector.effect_index, 1);
+
+    // 追い越された側は前へ出て、同名内の順序を受け取る。
+    let selector = harness.selector(1, 100);
+    let detail = harness
+        .healthy(|| harness.read.get_object(&selector))
+        .expect("対象の詳細");
+    let overtaken = detail
+        .effects
+        .iter()
+        .find(|effect| effect.position == 1)
+        .expect("位置 1 の effect");
+    assert_eq!(overtaken.index, 0);
+    assert_eq!(
+        overtaken.items[0].value,
+        ItemValue::Integer { value: 20 },
+        "追い越された側が入れ替わっていません"
+    );
+}
+
+#[test]
+fn a_different_effect_at_the_destination_is_not_taken_for_the_moved_one() {
+    // 移動先へ来たのは名前も有効もロックも等しく、設定項目の値だけが違う別の
+    // 1 件である。名前だけを比べる照合は、これを移動の成功として通す。
+    let harness = Harness::with(|host| {
+        host.arm(|knobs| knobs.fault = Some(Fault::AppendMovedEffect));
+        host.scene.get_mut().unwrap().layers[1].objects[0].effects =
+            vec![video_effect(), blur(0, 10), blur(1, 20), blur(2, 30)];
+    });
+    let error = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 2))
+        .expect_err("別の effect が移動先に居る状態が成功として返りました");
+
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(error.details()["reason"], json!("change_not_applied"));
+    // 移動先に居るのは同名・同状態の別の 1 件である。
+    assert_eq!(
+        effect_column(&harness),
+        vec![
+            video_entry(),
+            blur_entry(20),
+            blur_entry(30),
+            blur_entry(10)
+        ]
+    );
+}
+
+#[test]
+fn an_effect_whose_type_is_not_a_filter_is_refused_before_the_section() {
+    // 種別はカタログが述べている。入力 item を動かせないと分かるのは呼ぶ前で
+    // あり、呼んでしまえば届いた以上は変更が入った側へ倒すほかない。
+    let harness = Harness::new();
+    let error = harness
+        .edit
+        .move_effect(&MoveEffectParams {
+            selector: harness.effect_selector(1, 100, "動画ファイル", 0),
+            position: 1,
+        })
+        .expect_err("フィルタでない effect を動かせました");
+
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(error.details()["reason"], json!("effect_not_movable"));
+    assert_eq!(harness.host.enter_calls(), 0, "編集区間へ入りました");
+    harness.assert_untouched();
+}
+
+#[test]
+fn an_effect_the_catalog_does_not_describe_is_let_through() {
+    // カタログに無い effect と、種別が未知の effect は事前確認を通す。我々が
+    // モデル化していない種別を我々の都合で拒むと、上流が種別を足すたびに
+    // 動かせない対象が増える。
+    let unlisted = |name: &str| HostEffect {
+        name: name.to_string(),
+        index: 0,
+        enabled: true,
+        locked: false,
+        items: Vec::new(),
+    };
+    for name in ["カタログに無い効果", "未知種別の効果"] {
+        let harness = Harness::with(|host| {
+            host.catalog.push(FakeCatalogEntry {
+                name: "未知種別の効果".to_string(),
+                effect_type: EffectType::Unknown(99),
+                flags: EffectFlags::from_raw(1),
+                items: Vec::new(),
+                facets: HashMap::new(),
+            });
+            host.scene.get_mut().unwrap().layers[1].objects[0].effects =
+                vec![blur(0, 10), unlisted(name)];
+        });
+        let outcome = harness
+            .edit
+            .move_effect(&MoveEffectParams {
+                selector: harness.effect_selector(1, 100, name, 0),
+                position: 0,
+            })
+            .unwrap_or_else(|error| panic!("{name} の移動が拒否されました: {error}"));
+
+        let effect = outcome.effect.expect("移動後の effect");
+        assert_eq!(effect.name, name);
+        assert_eq!(effect.position, 0);
+    }
+}
+
+#[test]
+fn a_destination_past_the_end_of_the_column_is_refused_before_the_write() {
+    // 列の長さは対象を解決した時点で手元に在る。ホストが切り詰めるかどうかを
+    // 問わずに落とす。
+    let harness = harness_with_effect_column();
+    let error = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 4))
+        .expect_err("列の長さちょうどの移動先が受理されました");
+
+    assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+    assert_eq!(
+        error.details()["reason"],
+        json!("effect_position_out_of_range")
+    );
+    assert_eq!(error.details()["retry_requires"], json!("refetch"));
+    harness.assert_untouched();
+}
+
+#[test]
+fn a_host_that_ignores_the_move_and_one_that_moves_it_elsewhere_name_different_reasons() {
+    // 「動かなかった」と「別の場所へ動いた」は要求元にとって別の事実である。
+    // 前者はその effect の種別で永久に通らず、後者は列の解釈が我々とホストで
+    // 食い違っている。
+    //
+    // 移動先は現在位置（1）でも末尾（3）でもない 2 を指す。現在位置を指せば
+    // 無視するホストが、末尾を指せば末尾へ動かすホストが、それぞれ正しい移動と
+    // 区別できなくなる。
+    let cases = [
+        (Fault::IgnoreEffectMove, "effect_not_movable"),
+        (Fault::AppendMovedEffect, "change_not_applied"),
+    ];
+    for (fault, expected) in cases {
+        let harness = Harness::with(|host| {
+            host.arm(|knobs| knobs.fault = Some(fault));
+            host.scene.get_mut().unwrap().layers[1].objects[0].effects =
+                vec![video_effect(), blur(0, 10), blur(1, 20), blur(2, 30)];
+        });
+        let error = harness
+            .edit
+            .move_effect(&move_blur(&harness, 0, 2))
+            .expect_err("要求どおりに動かなかった移動が成功として返りました");
+
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::UnsupportedOperation,
+            "{fault:?}"
+        );
+        assert_eq!(error.details()["reason"], json!(expected), "{fault:?}");
+        // 発行の後に落ちた失敗である。
+        assert_eq!(error.details()["mutation_issued"], json!(true), "{fault:?}");
+    }
+}
+
+#[test]
+fn a_column_that_changed_length_is_not_a_move() {
+    // 移動は effect を増やしも減らしもしない。長さが変われば、移動先に何が
+    // 居るかを見るより先に失敗である。
+    let harness = Harness::with(|host| {
+        host.arm(|knobs| knobs.fault = Some(Fault::DropMovedEffect));
+        host.scene.get_mut().unwrap().layers[1].objects[0].effects =
+            vec![video_effect(), blur(0, 10), blur(1, 20), blur(2, 30)];
+    });
+    let error = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 2))
+        .expect_err("列が短くなった移動が成功として返りました");
+
+    assert_eq!(error.details()["reason"], json!("change_not_applied"));
+    assert_eq!(effect_column(&harness).len(), 3);
+}
+
+#[test]
+fn the_position_the_host_reports_does_not_decide_the_outcome() {
+    // 戻り値が何を数えているかを SDK は述べていない。列全体の位置なのか、
+    // フィルタ効果だけを数えた位置なのかが書かれておらず、後者なら正しく動いた
+    // 移動を我々が失敗と判定する。可否は読み直した列だけが決める。
+    let harness = Harness::with(|host| {
+        host.arm(|knobs| knobs.fault = Some(Fault::MisreportEffectPosition));
+        host.scene.get_mut().unwrap().layers[1].objects[0].effects =
+            vec![video_effect(), blur(0, 10), blur(1, 20), blur(2, 30)];
+    });
+    let outcome = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 2))
+        .expect("戻り値だけが違う移動が失敗として返りました");
+
+    assert_eq!(outcome.effect.expect("移動後の effect").position, 2);
+    assert_eq!(
+        effect_column(&harness),
+        vec![
+            video_entry(),
+            blur_entry(20),
+            blur_entry(10),
+            blur_entry(30)
+        ]
+    );
+}
+
+#[test]
+fn a_failed_move_reports_the_position_the_host_named() {
+    // 照合が食い違ったとき、どちらの解釈だったかを応答から読めるようにする。
+    let harness = Harness::with(|host| {
+        host.arm(|knobs| knobs.fault = Some(Fault::AppendMovedEffect));
+        host.scene.get_mut().unwrap().layers[1].objects[0].effects =
+            vec![video_effect(), blur(0, 10), blur(1, 20), blur(2, 30)];
+    });
+    let error = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 2))
+        .expect_err("別の位置へ動いた移動が成功として返りました");
+
+    // 要求した位置は 2、ホストが動かした先は末尾の 3 である。
+    assert_eq!(error.details()["reported_position"], json!(3));
+}
+
+#[test]
+fn moving_an_effect_to_where_it_already_is_still_reaches_the_host() {
+    // 短絡すると、ホストが同意していない成功が 1 つできる。他の編集と性質が
+    // 変わるため、同じ位置でも発行する。
+    let harness = harness_with_effect_column();
+    let before = effect_column(&harness);
+    let outcome = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 1))
+        .expect("現在位置への移動が拒否されました");
+
+    assert!(
+        harness.host.calls().contains(&"move_effect"),
+        "移動 API を呼んでいません: {:?}",
+        harness.host.calls()
+    );
+    assert_eq!(effect_column(&harness), before, "列が動きました");
+    assert_eq!(outcome.effect.expect("移動後の effect").position, 1);
 }
 
 #[test]
