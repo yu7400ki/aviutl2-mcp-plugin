@@ -3617,14 +3617,14 @@ mod tests {
             ),
         },
         Relocation {
-            statement: "編集 tool の呼び出し 1 回が 1 つの取り消し単位になる。\
+            statement: "変更が起きた編集 tool の呼び出し 1 回が、1 つの取り消し単位になる。\
                         まとめて 1 単位にしたいときは apply_batch を選ぶ",
             was_stated_by: 12,
             applies_to: 16,
             dropped: &["この呼び出し 1 回が 1 つの取り消し単位になる"],
             to_input_schema: None,
             to_skill: Some(
-                "編集 tool の呼び出し 1 回が 1 つの取り消し単位になる。\
+                "変更が起きた編集 tool の呼び出し 1 回が、1 つの取り消し単位になる。\
                  まとめて 1 単位にしたいときは apply_batch を選ぶ",
             ),
         },
