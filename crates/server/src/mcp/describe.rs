@@ -220,10 +220,10 @@ pub fn available_effects(result: &ListAvailableEffectsResult) -> String {
 
 /// `describe_effects` の text content。
 ///
-/// **設定項目の説明は載せない。** 1 件あたりの長さが定まらず、行の数も項目の
-/// 数で決まるため、text が説明文の量で決まってしまう。行に並べるのは名前の
-/// 顔ぶれであり、名前の似た effect の使い分けはそれで足りる。完全な機械可読値は
-/// `structuredContent` が運ぶ。
+/// **設定項目の説明は載せない。** 1 件あたりの長さが定まらないため、text の量が
+/// 説明文の量で決まってしまう。行に並べるのは名前の顔ぶれであり、名前の似た
+/// effect の使い分けはそれで足りる。完全な機械可読値は `structuredContent` が
+/// 運ぶ。
 pub fn effect_descriptions(result: &DescribeEffectsResult) -> String {
     let mut text = TextBuilder::new();
     text.push_line(format!(

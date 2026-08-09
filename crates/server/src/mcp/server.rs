@@ -861,7 +861,7 @@ impl AviUtl2McpServer {
 
     /// 名前で指定した effect の中身を取得する。
     /// effect_names には list_available_effects が返す名前を 1〜10 件指定する。
-    /// 1 件につき name・description・items（name / item_type / description / choices / range）を返す。
+    /// 1 件につき name・description・items（name / item_type / description / choices / range / group）を返す。
     /// 設定項目の一覧はホストの列挙から得るため、必ず実際の effect と一致する。
     /// description はホストが同梱する説明であり、持たない effect と持たない項目は null になる。
     /// 説明を持たない effect は多く、とくにフィルタ効果はほとんどが null である。
@@ -873,6 +873,11 @@ impl AviUtl2McpServer {
     /// どちらもヒントであってゲートではない。候補に無い値でも書き込みは通り、
     /// 値域を外れる値でも書き込みは通る。候補に在る値が必ず通るとも限らない。
     /// 可否を決めるのはホストである。
+    /// group は設定項目が属するグループ（index と item_names）であり、座標の X / Y / Z の
+    /// ように 1 つの組を成す項目を示す。属さない項目は null になる。
+    /// このグループは名前を持たない。get_effect_item_values の text が示す group=<名前> は
+    /// トラックバーのグループ名であり、別のものである。
+    /// グループを引けなかった場合は要求全体が失敗する。null が返るのは属さない項目だけである。
     /// 登録されていない名前は not_found に並び、その名前だけが落ちる。
     /// 要求全体は失敗しないため、effects に無い名前は not_found を必ず確認すること。
     /// not_found に出た名前は綴りが違うだけであり、設定項目を持たない effect ではない。
@@ -3312,6 +3317,28 @@ mod tests {
             "range",
             "値域を外れる値でも書き込みは通る",
             "可否を決めるのはホストである",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "describe_effects の説明が {phrase} に触れていません: {description}"
+            );
+        }
+    }
+
+    #[test]
+    fn describe_effects_states_what_a_group_is_and_what_a_null_group_means() {
+        // 設定項目の一覧は平らな列で返るため、グループが無ければどこが 1 つの組
+        // かは読めない。そして「グループ」という語は get_effect_item_values でも
+        // 使われており、あちらは名前を持つ。同じ語が別のものを指すことを述べて
+        // おかなければ、名前の在るものとして読まれる。
+        let description = description_of("describe_effects");
+        for phrase in [
+            "group",
+            "item_names",
+            "属さない項目は null",
+            "名前を持たない",
+            "get_effect_item_values",
+            "要求全体が失敗する",
         ] {
             assert!(
                 description.contains(phrase),
