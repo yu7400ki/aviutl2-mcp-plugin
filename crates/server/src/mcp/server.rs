@@ -1460,7 +1460,7 @@ impl AviUtl2McpServer {
     /// 対象が既に下限に居て列が 1 件も動かなかった場合も details.restored は真になる。
     /// 列が動いていない失敗では要求に使った selector がそのまま通る。
     /// 応答の effect には移動後に読み直した effect が入る。
-    /// 成功すると、要求に使った selector は使えなくなる——列の位置が変われば
+    /// 成功して列の位置が変われば、要求に使った selector は使えなくなる——
     /// fingerprint が変わり、同名 effect があれば effect_index も入れ替わる。
     /// 続けて同じ effect を編集する場合は応答の effect.selector を使う。
     /// 移動は間にある effect の位置もずらすため、兄弟 effect を編集するには
@@ -4954,11 +4954,13 @@ mod tests {
                     "列が 1 件も動かなかった場合も details.restored は真になる",
                     "selector がそのまま通る",
                     // **移動は effect の内容を 1 つも変えないまま、要求に
-                    // 使った selector を無効にする。** 名前も enabled も
+                    // 使った selector を無効にし得る。** 名前も enabled も
                     // 設定項目も動かないため、変わらないと読める。述べ
                     // なければ、要求元は成功の直後に古い selector を送って
-                    // precondition_failed を踏む。
-                    "要求に使った selector は使えなくなる",
+                    // precondition_failed を踏む。どの条件で無効になるかは
+                    // [`the_move_effect_description_never_voids_the_selector_unconditionally`]
+                    // が見る。
+                    "selector は使えなくなる",
                     "fingerprint が変わり",
                     "effect_index も入れ替わる",
                     // 無効になった selector の代わりが応答に在ることを示さ
@@ -5007,6 +5009,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_move_effect_description_never_voids_the_selector_unconditionally() {
+        // 列の位置が変わらなかった移動は、成功しても selector を無効にしない。
+        // **握るのは言い回しではなく、断定の手前に条件が在ることである。**
+        // 後続の句が条件を述べていても、断定が先に立てば要約として読まれ、
+        // 要求元は動かなかった列に対しても対象を読み直す。
+        let description = description_of("move_effect");
+        let (before, _) = description
+            .split_once("selector は使えなくなる")
+            .expect("move_effect の説明が selector の無効化を述べていません");
+        let clause = before.rsplit('。').next().expect("句を切り出せません");
+        assert!(
+            ["れば", "場合", "とき", "なら"]
+                .iter()
+                .any(|mark| clause.contains(mark)),
+            "move_effect の説明が selector の無効化を無条件で述べています: {clause}"
+        );
     }
 
     /// tool の説明がレイヤーのロックについて述べる内容。
