@@ -12,11 +12,11 @@ use crate::mcp::render::RenderFrameOutput;
 use crate::mcp::summary::{TextBuilder, clamp_chars};
 use aviutl2_mcp_core::{
     BatchOutcome, BatchStepOutcome, DescribeEffectsResult, EditInfo, EditOutcome, EffectItemValues,
-    EvaluatedItem, GetCurrentSceneResult, GridBpmOutcome, InstanceInfo, LayerStateOutcome,
-    ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
-    ListObjectAliasesResult, ListObjectsResult, ListPalettesResult, ObjectDetail,
-    ObjectSectionsOutcome, ObjectSummary, PageMeta, SceneSettingsOutcome, SelectionField,
-    SelectionSnapshot, SelectionState,
+    EvaluatedItem, GetCurrentSceneResult, GridBpmOutcome, InstanceInfo, ItemGroup,
+    LayerStateOutcome, ListAvailableEffectsResult, ListFontsResult, ListLayersResult,
+    ListModulesResult, ListObjectAliasesResult, ListObjectsResult, ListPalettesResult,
+    ObjectDetail, ObjectSectionsOutcome, ObjectSummary, PageMeta, SceneSettingsOutcome,
+    SelectionField, SelectionSnapshot, SelectionState,
 };
 
 /// 名前をそのまま行に載せるときの最大文字数。
@@ -252,6 +252,13 @@ pub fn effect_descriptions(result: &DescribeEffectsResult) -> String {
         if let Some(description) = &effect.description {
             text.push_line(format!("  desc={description}"));
         }
+        // グループに属する項目だけが行を持つ。行に現れないことが属さないことを
+        // 表し、`structuredContent` の側が null として明示する。
+        for item in &effect.items {
+            if let Some(group) = &item.group {
+                text.push_line(item_group_line(&item.name, group));
+            }
+        }
     }
     if !result.not_found.is_empty() {
         text.push_line(format!(
@@ -272,6 +279,25 @@ pub fn effect_descriptions(result: &DescribeEffectsResult) -> String {
         "説明はホストが同梱するものだけで、無い effect と無い項目は null になります。設定項目の説明と種別は structuredContent を参照してください",
     );
     text.finish()
+}
+
+/// グループに属する設定項目 1 件を示す行。
+///
+/// **グループは名前を持たない。** 顔ぶれを並べることだけが、平らな列のどこが
+/// 1 つの組かを行の上で示す手段である。所属アイテム名は空白を含み得るため、
+/// 他の項と同じ `key=value` の形で境界を示したうえで行の末尾に置く。
+fn item_group_line(name: &str, group: &ItemGroup) -> String {
+    format!(
+        "  {} group index={} item_names={}",
+        clamp_chars(name, MAX_NAME_CHARS),
+        group.index,
+        group
+            .item_names
+            .iter()
+            .map(|name| clamp_chars(name, MAX_NAME_CHARS))
+            .collect::<Vec<String>>()
+            .join(" / "),
+    )
 }
 
 /// `list_fonts` の text content。
@@ -1193,10 +1219,78 @@ mod tests {
         );
     }
 
+    /// グループに属する項目と属さない項目を 1 つの effect へ並べた応答。
+    fn grouped_effect_descriptions() -> DescribeEffectsResult {
+        let axes = vec!["X".to_string(), "Y".to_string()];
+        DescribeEffectsResult {
+            effects: vec![EffectDescription {
+                name: "座標".to_string(),
+                description: None,
+                items: vec![
+                    EffectItemDescription {
+                        name: "X".to_string(),
+                        item_type: EffectItemType::Number,
+                        description: None,
+                        choices: None,
+                        range: None,
+                        group: Some(ItemGroup {
+                            index: 0,
+                            item_names: axes.clone(),
+                        }),
+                    },
+                    EffectItemDescription {
+                        name: "Y".to_string(),
+                        item_type: EffectItemType::Number,
+                        description: None,
+                        choices: None,
+                        range: None,
+                        group: Some(ItemGroup {
+                            index: 1,
+                            item_names: axes,
+                        }),
+                    },
+                    EffectItemDescription {
+                        name: "拡大率".to_string(),
+                        item_type: EffectItemType::Number,
+                        description: None,
+                        choices: None,
+                        range: None,
+                        group: None,
+                    },
+                ],
+            }],
+            not_found: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn effect_descriptions_text_states_the_group_an_item_belongs_to() {
+        // 設定項目は平らな列として並ぶ。どの項目が 1 つの組を成すかは、位置と
+        // 顔ぶれを並べることでしか行の上に現れない。
+        let text = effect_descriptions(&grouped_effect_descriptions());
+        assert!(
+            text.contains("\n  X group index=0 item_names=X / Y"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n  Y group index=1 item_names=X / Y"),
+            "{text}"
+        );
+
+        // 属さない項目には何も足さない。行に現れないことがそれを表し、
+        // structuredContent の側が null として明示する。
+        assert_eq!(
+            text.matches(" group index=").count(),
+            2,
+            "属さない項目に行が付いています: {text}"
+        );
+        assert!(!text.contains("拡大率 group"), "{text}");
+    }
+
     #[test]
     fn effect_descriptions_text_is_bounded_for_oversized_results() {
-        // 1 件あたりの項目数は要求では抑えられない。件数と項目数の双方が上限を
-        // 超えても、text は打ち切られる。
+        // 1 件あたりの項目数は要求では抑えられない。件数と項目数、そして
+        // 所属アイテム名の顔ぶれが上限を超えても、text は打ち切られる。
         let effects: Vec<EffectDescription> = (0..OVERSIZED_COUNT)
             .map(|_| EffectDescription {
                 name: long_name(),
@@ -1208,7 +1302,10 @@ mod tests {
                         description: Some(long_name()),
                         choices: None,
                         range: None,
-                        group: None,
+                        group: Some(ItemGroup {
+                            index: 0,
+                            item_names: (0..8).map(|_| long_name()).collect(),
+                        }),
                     })
                     .collect(),
             })
