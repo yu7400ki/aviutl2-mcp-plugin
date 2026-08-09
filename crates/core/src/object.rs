@@ -32,7 +32,9 @@ pub struct ObjectSummary {
     pub layer: usize,
     /// 0 始まりの開始フレーム番号。
     pub frame_start: usize,
-    /// 0 始まりの終了フレーム番号。
+    /// 0 始まりの終了フレーム番号。**このフレームを含む**——オブジェクトが占めるのは
+    /// `frame_start` から `frame_end` までであり、次のオブジェクトは `frame_end + 1`
+    /// から始まる。
     pub frame_end: usize,
     /// オブジェクト名。標準名のままなら null。
     pub name: Option<String>,
