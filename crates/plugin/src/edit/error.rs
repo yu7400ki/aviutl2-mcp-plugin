@@ -1138,6 +1138,16 @@ pub(crate) mod tests {
         ]
     }
 
+    /// 代表値の一覧を掃いた検査が、実際に対象へ当たったことを確かめる。
+    ///
+    /// 掃きが守る性質（後から足した variant が抜けない）は、掃く対象が一覧に
+    /// 在ることの上に乗っている。当たった件数を表明しなければ、代表値の側を
+    /// 書き換えて 0 件掃きにしても全て緑のまま通る。**件数そのものは表明しない**
+    /// ——代表値を足すたびに動く数であり、固定すると足すほうが直される。
+    fn assert_swept(matched: usize, subject: &str) {
+        assert!(matched > 0, "{subject}の代表値が一覧にありません");
+    }
+
     /// 全 variant の代表値。新しい variant を足したらここへも足す。
     pub(crate) fn all_errors() -> Vec<EditError> {
         vec![
@@ -1354,6 +1364,22 @@ pub(crate) mod tests {
                 source: Box::new(EditError::Panicked.after_mutation(44)),
                 failed_index: None,
                 rollback: RollbackOutcome::Impossible,
+            },
+            // 適用相の 1 件目が発行の前に落ちた一括適用。巻き戻しの対象が 0 件で
+            // あるため結末は「全て戻した」になり、内側は発行の包みを持たない。
+            // **剥がすものが無い側の代表値である**——包みを持つ標本だけでは、
+            // 剥がしを素通りする経路を掃きが 1 つも通らない。
+            EditError::Batch {
+                source: Box::new(EditError::DestinationOccupied {
+                    layer: 1,
+                    frame: 100,
+                    occupied_by: OccupiedRange {
+                        frame_start: 100,
+                        frame_end: 200,
+                    },
+                }),
+                failed_index: Some(0),
+                rollback: RollbackOutcome::Complete { count: 0 },
             },
         ]
     }
@@ -1587,6 +1613,8 @@ pub(crate) mod tests {
                 // 戻せなかった変更が残っている場合だけ書き換える。
                 ErrorCode::SdkError,
                 ErrorCode::InternalError,
+                // 発行の前に落ちた 1 件目。理由をそのまま保つ。
+                ErrorCode::PreconditionFailed,
             ]
         );
     }
@@ -1901,17 +1929,20 @@ pub(crate) mod tests {
     fn no_failure_after_a_change_allows_a_plain_resend() {
         // 剥がす形は内側の失敗に案内を決めさせる。後から足した失敗が再送を
         // 持ち込む余地はここにだけ残る。
+        let mut matched = 0;
         for error in all_errors() {
             let details = error.details();
             if details.get("mutation_issued").is_none() && details.get("rolled_back").is_none() {
                 continue;
             }
+            matched += 1;
             assert_ne!(
                 details["retry_requires"],
                 json!("resend"),
                 "{error} が変更の後にそのままの再送を促しました"
             );
         }
+        assert_swept(matched, "変更の後に落ちた失敗");
     }
 
     #[test]
@@ -2002,33 +2033,39 @@ pub(crate) mod tests {
     #[test]
     fn no_restored_failure_asks_for_a_refetch() {
         // 個別の検査だけでは、後から足した variant が抜ける。
+        let mut matched = 0;
         for error in all_errors() {
             let details = error.details();
             if details.get("restored") != Some(&json!(true)) {
                 continue;
             }
+            matched += 1;
             assert_ne!(
                 details["retry_requires"],
                 json!("refetch"),
                 "{error} が戻っている対象の読み直しを促しました"
             );
         }
+        assert_swept(matched, "戻せた対象を持つ失敗");
     }
 
     #[test]
     fn every_failure_that_leaves_the_state_unknown_asks_for_a_refetch() {
         // 中途半端な状態が残っていれば、次の編集の前に読み直すほかない。
+        let mut matched = 0;
         for error in all_errors() {
             let details = error.details();
             if details.get("consistency_unknown").is_none() {
                 continue;
             }
+            matched += 1;
             assert_eq!(
                 details["retry_requires"],
                 json!("refetch"),
                 "{error} が読み直さずに済むと名乗りました"
             );
         }
+        assert_swept(matched, "中途半端な状態を名乗る失敗");
     }
 
     #[test]
