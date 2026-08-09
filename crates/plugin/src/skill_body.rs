@@ -160,7 +160,8 @@ fn track_flags(line: &str) -> Vec<u64> {
         .step_by(2)
         .filter_map(|span| {
             let (_, tail) = span.rsplit_once(',')?;
-            tail.split('|').next().unwrap_or(tail).parse::<u64>().ok()
+            let flags = tail.split_once('|').map_or(tail, |(flags, _)| flags);
+            flags.parse::<u64>().ok()
         })
         .collect()
 }
