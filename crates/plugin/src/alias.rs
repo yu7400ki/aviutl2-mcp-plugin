@@ -9,11 +9,18 @@
 //!
 //! ディレクトリの解決と、解決した先を使う経路は分ける。解決は plugin の
 //! 生存期間中に 1 度だけ行い、受け入れ規則と一覧はディレクトリを引数で受け取る。
+//!
+//! 生テキストとして渡されたエイリアスの移動行も、ここで書式を読む
+//! （[`admit_track_rows`]）。書式を知っているのはこのモジュールであり、
+//! 移動行の規則を知っているのは
+//! [`aviutl2_mcp_core::validate_track_value`] である。
 
 use aviutl2::alias::Table;
 use aviutl2_mcp_core::{
-    ErrorCode, ListObjectAliasesResult, MAX_ALIAS_BYTES, ObjectAliasSummary, PageWindow,
-    TextSyntaxError, take_window, validate_alias, validate_object_alias_name,
+    ErrorCode, ItemWriteError, ListObjectAliasesResult, MAX_ALIAS_BYTES, Movement,
+    ObjectAliasSummary, PageWindow, TextSyntaxError, TrackDecodeError, TrackValueError,
+    TrackWriteTarget, decode_track_value, take_window, validate_alias, validate_object_alias_name,
+    validate_track_value,
 };
 use serde_json::{Value, json};
 use std::fs::File;
@@ -43,6 +50,11 @@ const LABEL_KEY: &str = "label";
 ///
 /// `.` を含むが節の入れ子ではなく 1 つの値キーである。
 const EFFECT_NAME_KEY: &str = "effect.name";
+
+/// 区間の境界を並べるキーの名前。
+///
+/// `<開始>,<中間点…>,<終了>` であり、要素数は移動を持つ値の個数と一致する。
+const FRAME_KEY: &str = "frame";
 
 /// UI 状態ファイルとして読み込む最大バイト数。
 ///
@@ -216,6 +228,25 @@ pub enum AliasAdmissionError {
     /// 受け入れ規則で落ちた。
     #[error(transparent)]
     Rejected(#[from] AliasRejection),
+}
+
+/// 生テキストのエイリアスが含む移動行を受け入れられない理由。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AliasTrackRejection {
+    /// 名前で指定されたエイリアスと同じ受け入れ条件で落ちた。
+    #[error(transparent)]
+    Rejected(#[from] AliasRejection),
+    /// 移動行が書き込みの検証を通らない。
+    #[error("エイリアスの移動行を書き込めません: {source}")]
+    Row {
+        /// 行が属する節の見出し。
+        heading: String,
+        /// 行の項目名。
+        item: String,
+        /// 落ちた検証。
+        #[source]
+        source: ItemWriteError,
+    },
 }
 
 /// エイリアスを収めたディレクトリ。
@@ -428,6 +459,96 @@ fn collect_effects(root: &Table) -> Vec<String> {
         stack.extend(children.into_iter().rev());
     }
     effects
+}
+
+/// 生テキストが含む移動行を、書き込みの検証へ通す。
+///
+/// トラックバーの値がホストへ届く経路は 2 本あり、どちらも
+/// [`validate_track_value`] を通る。生テキストはホストのパーサへ直接渡るため、
+/// 不正な移動行はプロセスを落とさない代わりに**その行ごと黙って捨てられる。**
+/// 止められる場所は要求を受け付ける側しか無い。
+///
+/// **表として読めない入力は拒否する。** 読めなければ移動行を 1 行も見られず、
+/// 検証を掛けられないまま通すことになる。判定は名前で指定されたエイリアスと
+/// 同じ [`AliasRejection::NotParsable`] であり、[`parse_table`] を通す
+/// ——深さの上限を先に確かめる形はそこに在る。
+///
+/// **辿りは明示的なスタックで行う。** 節の入れ子は入力の側でいくらでも深くでき、
+/// 再帰で辿るとその深さがそのままスタックの消費になる。
+///
+/// `movements` はホストが受け付ける移動方法である。要求元へ並べる一覧と同じ
+/// 値であり、書けない名前もここから決まる。
+pub fn admit_track_rows(raw: &str, movements: &[Movement]) -> Result<(), AliasTrackRejection> {
+    let table = parse_table(raw).ok_or(AliasRejection::NotParsable)?;
+    let mut stack: Vec<(String, &Table, Option<usize>)> = vec![(String::new(), &table, None)];
+    while let Some((heading, node, inherited)) = stack.pop() {
+        // 区間の数は節が述べ、その中の行と子の節が同じ数を見る。
+        let sections = section_count(node).or(inherited);
+        for (item, value) in node.values() {
+            admit_track_row(value, sections, movements).map_err(|source| {
+                AliasTrackRejection::Row {
+                    heading: heading.clone(),
+                    item: item.clone(),
+                    source,
+                }
+            })?;
+        }
+        let children: Vec<(String, &Table, Option<usize>)> = node
+            .subtables()
+            .map(|(name, child)| (child_heading(&heading, name), child, sections))
+            .collect();
+        stack.extend(children.into_iter().rev());
+    }
+    Ok(())
+}
+
+/// 子の節の見出しを綴る。ルート直下の節は接頭辞を持たない。
+fn child_heading(parent: &str, name: &str) -> String {
+    match parent.is_empty() {
+        true => name.to_string(),
+        false => format!("{parent}.{name}"),
+    }
+}
+
+/// 節が述べる区間の数。述べていなければ `None`。
+///
+/// 区間の境界は [`FRAME_KEY`] が並べる。境界が 2 つ未満の行は区間を 1 つも
+/// 表しておらず、そこから数は決まらない。
+fn section_count(table: &Table) -> Option<usize> {
+    let boundaries = table.get_value(FRAME_KEY)?.split(',').count();
+    (boundaries > 1).then(|| boundaries - 1)
+}
+
+/// 値 1 つを、移動行であれば書き込みの検証へ通す。
+///
+/// **見分けと復号は同じ関数が行う。** 項目名は効果ごとに自由であり、名前からは
+/// 移動行かどうかを知れない。`,` を含むかでも決まらない——テキストも色も
+/// `,` を含み得る。判定を別に書けば、片方だけが取りこぼす形ができる。
+///
+/// 移動行として読み始められたうえで表せなかった行は、ホストが評価できない値で
+/// ある。書けるふりをせず拒否する。
+///
+/// **区間の数が決まらない対象では、値の個数の条件だけを外す。** 個数は対象を
+/// 見なければ判定できず、フラグと移動方法の名前は対象を見ずに決まる。
+fn admit_track_row(
+    value: &str,
+    section_count: Option<usize>,
+    movements: &[Movement],
+) -> Result<(), ItemWriteError> {
+    let track = match decode_track_value(value) {
+        Ok(track) => track,
+        Err(TrackDecodeError::NotAMovement) => return Ok(()),
+        Err(TrackDecodeError::NotRepresentable) => {
+            return Err(TrackValueError::FlagsNotRepresentable.into());
+        }
+    };
+    validate_track_value(
+        &track,
+        TrackWriteTarget {
+            section_count: section_count.unwrap_or(track.values.len().saturating_sub(1)),
+            movements,
+        },
+    )
 }
 
 /// UI 状態ファイルから label を引く表。

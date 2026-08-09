@@ -180,6 +180,23 @@ impl<H: EditHost> HostEditAdapter<H> {
         Ok(crate::alias::admit_alias_in(data_dir.as_deref(), name)?)
     }
 
+    /// 生テキストで指定されたエイリアスの移動行を、編集区間へ入る前に検証する。
+    ///
+    /// パースも移動方法の一覧の解決も、ホストのメインスレッドを保持したまま
+    /// 行ってよい仕事ではない。区間へ持ち込むのは受け取った文字列だけである。
+    ///
+    /// **名前で指定されたエイリアスには掛けない。** 一覧は移動行を見ておらず、
+    /// 作成にだけ条件を足せば「一覧に出た名前は必ず作成できる」が崩れる。
+    ///
+    /// 移動方法の一覧は要求元へ並べるものと同じ表から引く。一覧を出す側と
+    /// 拒む側が別々に可否を決めれば、片方にだけ条件を足せる形ができる。
+    fn admit_alias_track_rows(&self, alias: &str) -> Result<(), EditError> {
+        Ok(crate::alias::admit_track_rows(
+            alias,
+            crate::movement::movements(),
+        )?)
+    }
+
     /// 有効・無効を変更できないと分かる対象を、編集区間へ入る前に弾く。
     ///
     /// 種別による判定は「早く分かる場合に早く返す」ためだけに用いる。ホストが
@@ -893,7 +910,10 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
         let admitted;
         let source = match &params.source {
             ObjectSource::MediaFile { path } => ResolvedSource::MediaFile(path),
-            ObjectSource::ObjectAlias { alias } => ResolvedSource::Alias(alias),
+            ObjectSource::ObjectAlias { alias } => {
+                self.admit_alias_track_rows(alias)?;
+                ResolvedSource::Alias(alias)
+            }
             ObjectSource::Effect { name } => ResolvedSource::Effect(name),
             ObjectSource::AliasName { name } => {
                 admitted = self.admit_alias(name)?;

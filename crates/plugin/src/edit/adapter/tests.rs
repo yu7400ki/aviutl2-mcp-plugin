@@ -1386,32 +1386,64 @@ fn the_response_of_a_creation_by_name_carries_neither_the_alias_text_nor_a_path(
 }
 
 #[test]
-fn the_raw_alias_source_still_accepts_what_the_admission_rule_refuses() {
-    // 生テキストの経路には構造の条件を掛けない。掛けると既存の受理範囲を狭め、
-    // 一覧と作成の一致に寄与しないまま互換を壊す。
-    for alias in ["\u{feff}[Object]\r\n", "[Object]\r\nX=0.0\r\n"] {
-        let harness = Harness::new();
-        harness.host.clear_calls();
-        harness
-            .edit
-            .create_object(&CreateObjectParams {
-                source: ObjectSource::ObjectAlias {
-                    alias: alias.to_string(),
-                },
-                placement: Placement {
-                    scene_id: SCENE_ID,
-                    layer: 1,
-                    frame: 600,
-                },
-                expected_project_epoch: harness.epoch(),
-            })
-            .unwrap_or_else(|error| panic!("{alias:?} が拒否されました: {error}"));
+fn the_raw_alias_source_does_not_require_the_structure_the_admission_rule_requires() {
+    // 生テキストの経路には構造の条件を掛けない。effect を 1 つも持たない
+    // エイリアスは、名前で指定すれば拒否されるが生テキストでは通る。掛けると
+    // 既存の受理範囲を狭め、一覧と作成の一致に寄与しないまま互換を壊す。
+    let alias = "[Object]\r\nX=0.0\r\n";
+    let harness = Harness::new();
+    harness.host.clear_calls();
+    harness
+        .edit
+        .create_object(&CreateObjectParams {
+            source: ObjectSource::ObjectAlias {
+                alias: alias.to_string(),
+            },
+            placement: Placement {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame: 600,
+            },
+            expected_project_epoch: harness.epoch(),
+        })
+        .unwrap_or_else(|error| panic!("{alias:?} が拒否されました: {error}"));
 
-        assert!(
-            harness.host.calls().contains(&"create_object_from_alias"),
-            "{alias:?} が SDK へ届いていません"
-        );
-    }
+    assert!(
+        harness.host.calls().contains(&"create_object_from_alias"),
+        "{alias:?} が SDK へ届いていません"
+    );
+}
+
+#[test]
+fn a_raw_alias_that_is_not_a_table_is_refused_under_the_same_name_as_a_named_one() {
+    // 表として読めなければ移動行を 1 行も見られない。検証を掛けられない入力を
+    // 黙って通すと、塞いだはずの口がその形の入力に対してだけ開いたままになる。
+    let harness = Harness::new();
+    harness.host.clear_calls();
+    let error = harness
+        .edit
+        .create_object(&CreateObjectParams {
+            source: ObjectSource::ObjectAlias {
+                alias: "\u{feff}[Object]\r\n".to_string(),
+            },
+            placement: Placement {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame: 600,
+            },
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect_err("受理されました");
+
+    assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+    assert_eq!(
+        error.details()["reason"],
+        json!(crate::alias::REASON_ALIAS_NOT_PARSABLE)
+    );
+    assert!(
+        !harness.host.calls().contains(&"create_object_from_alias"),
+        "拒否した要求が SDK へ届いています"
+    );
 }
 
 // -------------------------------------------------------------- 作成の応答

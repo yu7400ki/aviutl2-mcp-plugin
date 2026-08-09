@@ -1,6 +1,6 @@
 //! 編集の失敗を表す型と、応答へ載せる安全な補助情報。
 
-use crate::alias::{AliasAdmissionError, AliasRejection};
+use crate::alias::{AliasAdmissionError, AliasRejection, AliasTrackRejection};
 use crate::read::ReadError;
 use aviutl2_mcp_core::{ErrorCode, ItemValue, ItemWriteError, TrackValueError};
 use serde_json::{Map, Value, json};
@@ -458,6 +458,24 @@ pub enum EditError {
     /// 一覧が除外に使う規則と作成が拒否に使う規則が別々の答えを持つ。
     #[error(transparent)]
     AliasRejected(#[from] AliasRejection),
+    /// 生テキストのエイリアスが含む移動行を書き込めない。
+    ///
+    /// ホストは不正な移動行を失敗として返さず、その行ごと捨てて既定値へ倒す。
+    /// 設定項目を書く経路と同じ検証を通し、通らない行を持つ要求を拒む。
+    ///
+    /// **どの節のどの項目かを添える。** 1 つのエイリアスは複数のオブジェクトと
+    /// 複数の effect を持ち得るため、行を特定できなければ直せない。**値そのものは
+    /// 添えない。**
+    #[error("エイリアスの移動行を書き込めません: {source}")]
+    AliasTrackRejected {
+        /// 行が属する節の見出し。
+        heading: String,
+        /// 行の項目名。
+        item: String,
+        /// 落ちた書き込みの検証。
+        #[source]
+        source: ItemWriteError,
+    },
     /// 読み直した区間の実態が要求と食い違う。
     #[error("{reason}")]
     SectionPrecondition {
@@ -556,6 +574,27 @@ impl From<AliasAdmissionError> for EditError {
     }
 }
 
+/// 生テキストの移動行の失敗を、編集の失敗へ振り分ける。
+///
+/// 表として解釈できない生テキストは、名前で指定されたエイリアスが同じ条件で
+/// 落ちたときと同じ失敗になる。エラーコードも種別の名前も落ちた条件が決める。
+impl From<AliasTrackRejection> for EditError {
+    fn from(error: AliasTrackRejection) -> Self {
+        match error {
+            AliasTrackRejection::Rejected(rejection) => EditError::AliasRejected(rejection),
+            AliasTrackRejection::Row {
+                heading,
+                item,
+                source,
+            } => EditError::AliasTrackRejected {
+                heading,
+                item,
+                source,
+            },
+        }
+    }
+}
+
 impl EditError {
     /// 変更 API を発行した後の失敗として包み直す。
     ///
@@ -622,6 +661,7 @@ impl EditError {
             EditError::MovementWouldBeLost { .. } => ErrorCode::UnsupportedOperation,
             EditError::UnsupportedTarget { .. } => ErrorCode::UnsupportedOperation,
             EditError::AliasRejected(rejection) => rejection.error_code(),
+            EditError::AliasTrackRejected { source, .. } => source.error_code(),
             EditError::SectionChangeRejected { .. } | EditError::Sdk { .. } => ErrorCode::SdkError,
             EditError::NotIssued { reason } => match reason {
                 NotIssuedReason::TargetMissing => ErrorCode::NotFound,
@@ -768,6 +808,17 @@ impl EditError {
             // 落ちた条件が組み立てた補助情報をそのまま取り込む。名前もファイルの
             // 内容も含まないことは、組み立てる側が保証している。
             EditError::AliasRejected(rejection) => merge(details, rejection.details()),
+            // 落ちた検証が組み立てた手掛かりへ、行の在処を添える。名前だけで
+            // あり、行が持っていた値は運ばない。
+            EditError::AliasTrackRejected {
+                heading,
+                item,
+                source,
+            } => {
+                fill_item_write_details(details, source);
+                details.insert("heading".to_string(), json!(truncate(heading)));
+                details.insert("item".to_string(), json!(truncate(item)));
+            }
             EditError::SectionPrecondition { reason } => {
                 details.insert("reason".to_string(), json!(reason.as_str()));
             }
@@ -1049,6 +1100,21 @@ pub(crate) mod tests {
             // 受け入れ規則の 4 条件は、名前を持つものと持たないものの双方を通す。
             EditError::AliasRejected(AliasRejection::NotFound),
             EditError::AliasRejected(AliasRejection::WithoutEffect),
+            // 生テキストの移動行。**一覧を運ぶ検証と運ばない検証の双方を置く**
+            // ——片方だけでは、補助情報のキーの検査が一覧の側を素通りする。
+            EditError::AliasTrackRejected {
+                heading: "Object.1".to_string(),
+                item: "X".to_string(),
+                source: TrackValueError::FlagsNotRepresentable.into(),
+            },
+            EditError::AliasTrackRejected {
+                heading: "Object.1".to_string(),
+                item: "中心Z".to_string(),
+                source: TrackValueError::UnknownMode {
+                    known: sample_movements(),
+                }
+                .into(),
+            },
             EditError::NotIssued {
                 reason: NotIssuedReason::TargetMissing,
             },
@@ -1145,6 +1211,7 @@ pub(crate) mod tests {
             EditError::MovementWouldBeLost { .. } => "MovementWouldBeLost",
             EditError::UnsupportedTarget { .. } => "UnsupportedTarget",
             EditError::AliasRejected(_) => "AliasRejected",
+            EditError::AliasTrackRejected { .. } => "AliasTrackRejected",
             EditError::SectionPrecondition { .. } => "SectionPrecondition",
             EditError::SectionChangeRejected { .. } => "SectionChangeRejected",
             EditError::Sdk { .. } => "Sdk",
@@ -1173,6 +1240,7 @@ pub(crate) mod tests {
             "MovementWouldBeLost",
             "UnsupportedTarget",
             "AliasRejected",
+            "AliasTrackRejected",
             "SectionPrecondition",
             "SectionChangeRejected",
             "Sdk",
@@ -1308,6 +1376,10 @@ pub(crate) mod tests {
                 // 名前で指定されたエイリアスが受け入れ規則を通らなかった。落ちた
                 // 条件がコードを決めるため、不在と構造の欠陥で別の値になる。
                 ErrorCode::NotFound,
+                ErrorCode::InvalidArgument,
+                // 生テキストの移動行が検証を通らなかった。要求内容の誤りであり、
+                // 対象を読み直しても解消しない。
+                ErrorCode::InvalidArgument,
                 ErrorCode::InvalidArgument,
                 // 対象が失われていた。要求の対象が無いのだから見つからない。
                 ErrorCode::NotFound,
@@ -1703,6 +1775,9 @@ pub(crate) mod tests {
             // 一覧の要素が名乗る、その名前で移動を書けるか。ホストの状態から
             // 決まる真偽値であり、設定値そのものではない。
             "writable",
+            // 生テキストのエイリアスで、拒否された行が属する節の見出し。要求元が
+            // どの行を直すかを決めるのに要る名前であり、行が持っていた値ではない。
+            "heading",
             "sdk_operation",
             "retry_requires",
             "mutation_issued",
