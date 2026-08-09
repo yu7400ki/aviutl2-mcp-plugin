@@ -380,6 +380,45 @@ mod tests {
     }
 
     #[test]
+    fn what_the_list_calls_unwritable_is_what_a_raw_alias_refuses() {
+        // **一覧と拒否が同じ表を読む。** 移動を書く経路は 2 本あり、どちらも
+        // 同じ 1 つの表を見る。片方にだけ条件を足せば、生テキストで作れる
+        // オブジェクトと設定項目として書ける値が食い違う。
+        let facets = facets(
+            r#"{"movements":{"移動無し":{"writable":false},"書けない移動":{"writable":false}}}"#,
+        );
+        let movements = resolve(
+            names(&["直線移動", "移動無し", "曲線移動", "書けない移動"]),
+            &facets,
+        );
+        for movement in &movements {
+            let alias = format!(
+                "[Object]\r\nframe=0,80\r\n[Object.0]\r\neffect.name=標準描画\r\nX=0.00,100.00,{},0\r\n",
+                movement.name
+            );
+            let reason = match crate::alias::admit_track_rows(&alias, &movements) {
+                Ok(()) => None,
+                Err(crate::alias::AliasTrackRejection::Row { source, .. }) => source.reason(),
+                Err(rejection) => panic!("{} が表として読めません: {rejection}", movement.name),
+            };
+            if movement.writable {
+                assert_eq!(
+                    reason, None,
+                    "{} が書けると名乗ったのに拒まれました",
+                    movement.name
+                );
+            } else {
+                assert_eq!(
+                    reason,
+                    Some("track_mode_not_writable"),
+                    "{} が書けないと名乗ったのに拒まれません",
+                    movement.name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn what_the_list_calls_unwritable_is_what_the_write_refuses() {
         // **一覧と拒否が同じ表を読む。** 一覧が返した 1 件ずつについて、書けない
         // と名乗ったものは検証が拒み、書けると名乗ったものは名前を理由に拒まれ

@@ -1545,6 +1545,194 @@ pub(crate) mod tests {
         }
     }
 
+    /// 検査で使う移動方法の一覧。書けるものと書けないものを混ぜて持つ。
+    fn movements() -> Vec<Movement> {
+        vec![
+            Movement {
+                name: "直線移動".to_string(),
+                writable: true,
+            },
+            Movement {
+                name: "移動無し".to_string(),
+                writable: false,
+            },
+        ]
+    }
+
+    /// 移動行の検証を通した結果の理由。通ったときは `None`。
+    fn track_reason(alias: &str) -> Option<&'static str> {
+        match admit_track_rows(alias, &movements()) {
+            Ok(()) => None,
+            Err(AliasTrackRejection::Rejected(rejection)) => rejection.reason(),
+            Err(AliasTrackRejection::Row { source, .. }) => source.reason(),
+        }
+    }
+
+    /// 単一オブジェクト形式の中へ、項目 1 行を置いたエイリアスを組み立てる。
+    fn with_row(row: &str) -> String {
+        format!("[Object]\r\nframe=0,40,80\r\n[Object.0]\r\neffect.name=標準描画\r\n{row}\r\n")
+    }
+
+    #[test]
+    fn a_movement_row_the_host_cannot_evaluate_is_refused() {
+        // 実測: 末尾フラグに 4 つ目のビットを立てた項目は 1 フレームも動かない。
+        // ホストは受理し、読み取りは移動が在ると答え続ける。
+        for row in [
+            "X=-600.00,0.00,600.00,直線移動,8",
+            "X=-600.00,0.00,600.00,直線移動,8|",
+            "X=0.00,50.00,100.00,直線移動,8|30",
+        ] {
+            assert_eq!(
+                track_reason(&with_row(row)),
+                Some("track_flags_not_representable"),
+                "{row}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mode_the_list_marks_as_unwritable_is_refused_in_a_raw_alias() {
+        // 実測: `移動無し` を含むエイリアスから作ると、2 つ目以降の値が無言で
+        // 消える。一覧を出す側と拒む側が同じ表を読むため、書けないと名乗った
+        // 名前はここでも通らない。
+        assert_eq!(
+            track_reason(&with_row("中心Z=0.00,10.00,90.00,移動無し,0")),
+            Some("track_mode_not_writable")
+        );
+    }
+
+    #[test]
+    fn what_the_write_already_refuses_is_refused_in_a_raw_alias_too() {
+        // 実測: 不正な移動方法の名前を含む行は、その行ごと黙って捨てられて
+        // 既定値になる。値の個数が区間の数と合わない行は、余った値が保存される
+        // だけで評価に使われない。
+        for (row, reason) in [
+            (
+                "X=-600.00,0.00,600.00,存在しない移動,0",
+                "track_mode_unknown",
+            ),
+            // 区間 2 つに対して値が 2 つしかない。
+            ("X=-600.00,600.00,直線移動,0", "track_value_count"),
+        ] {
+            assert_eq!(track_reason(&with_row(row)), Some(reason), "{row}");
+        }
+    }
+
+    #[test]
+    fn what_cannot_be_read_as_a_movement_row_passes_through() {
+        // 項目名からは移動行かどうかを知れない。`,` を含むかでも決まらない
+        // ——テキストも色もパスも `,` を含み得る。**見分けを下すのは復号であり、
+        // 境界はそちらが持つ。**
+        for row in [
+            "色=ffffff",
+            r"ファイル=C:\assets\bgm.wav",
+            "テキスト=あ,い,う",
+            "サイズ=600",
+            "縦横比=-12.5",
+            // 末尾がフラグの整数として読めない。
+            "テキスト=-600.00,600.00,直線移動",
+            // 移動方法の位置が数値として読める。
+            "テキスト=-600.00,0.00,600.00,12,0",
+        ] {
+            assert_eq!(track_reason(&with_row(row)), None, "{row}");
+        }
+        // 移動を持つ正しい行も通る。拒否が広がっていれば、ここで落ちる。
+        assert_eq!(
+            track_reason(&with_row("X=-600.00,0.00,600.00,直線移動,7")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_row_in_an_object_without_a_frame_line_is_still_checked_for_what_it_can_be() {
+        // 区間の数は `frame=` の要素数から決まる。読めない対象では値の個数を
+        // 判定できないが、フラグと移動方法の名前は対象を見ずに決まる。
+        for alias in [
+            "[Object]\r\n[Object.0]\r\neffect.name=標準描画\r\nX=-600.00,600.00,直線移動,8\r\n",
+            "[Object]\r\nframe=0\r\n[Object.0]\r\neffect.name=標準描画\r\nX=-600.00,600.00,直線移動,8\r\n",
+        ] {
+            assert_eq!(
+                track_reason(alias),
+                Some("track_flags_not_representable"),
+                "{alias}"
+            );
+        }
+        // 外れるのは値の個数の条件だけである。個数の違う行が通る。
+        assert_eq!(
+            track_reason(
+                "[Object]\r\n[Object.0]\r\neffect.name=標準描画\r\nX=-600.00,0.00,600.00,直線移動,0\r\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_rejection_names_the_section_and_the_item_without_the_value() {
+        // 1 つのエイリアスは複数のオブジェクトと複数の effect を持ち得る。
+        // 行を特定できなければ直せない。
+        let alias = "[0]\r\nlayer=0\r\nframe=0,80\r\n[0.0]\r\neffect.name=図形\r\nサイズ=600\r\n\
+[1]\r\nlayer=1\r\nframe=0,80\r\n[1.0]\r\neffect.name=標準描画\r\n\
+[1.1]\r\neffect.name=標準描画\r\n中心Z=0.00,10.00,直線移動,8\r\n";
+        let Err(AliasTrackRejection::Row {
+            heading,
+            item,
+            source,
+        }) = admit_track_rows(alias, &movements())
+        else {
+            panic!("拒否されませんでした");
+        };
+        assert_eq!(heading, "1.1");
+        assert_eq!(item, "中心Z");
+        assert_eq!(source.reason(), Some("track_flags_not_representable"));
+    }
+
+    #[test]
+    fn a_raw_alias_that_is_not_a_table_is_refused_by_the_same_condition_as_a_named_one() {
+        // 表として読めなければ移動行を 1 行も見られない。素通しにすれば、
+        // その形の入力に対してだけ口が開いたままになる。
+        for alias in [
+            // 節にも `キー=値` にも当たらない行がある。
+            "\u{feff}[Object]\r\nframe=0,80\r\n",
+            "こんにちは\r\n",
+            "[Object\r\n",
+        ] {
+            assert_eq!(
+                track_reason(alias),
+                Some(REASON_ALIAS_NOT_PARSABLE),
+                "{alias}"
+            );
+        }
+        // 深すぎる入れ子は表を作る前に落とす。受け取ってしまえば解放でスタックが
+        // 尽きる。
+        let deep = format!(
+            "[{}]\r\nX=0.0\r\n",
+            vec!["a"; MAX_SECTION_DEPTH + 1].join(".")
+        );
+        assert_eq!(track_reason(&deep), Some(REASON_ALIAS_NOT_PARSABLE));
+    }
+
+    #[test]
+    fn every_alias_the_admission_rule_accepts_carries_writable_movement_rows() {
+        // 一覧に載るエイリアスは名前で作成できる。生テキストとして同じバイト列を
+        // 渡したときにだけ拒否されると、同じものが経路で違う答えを返す。
+        let dir = TempDir::new();
+        let names = write_fixture(&dir);
+        let alias_dir = AliasDirectory::resolve(dir.path()).unwrap();
+        let accepted: Vec<AdmittedAlias> = names
+            .into_iter()
+            .filter_map(|name| admit_alias(&alias_dir, &name).ok())
+            .collect();
+        assert!(!accepted.is_empty());
+        for admitted in accepted {
+            assert_eq!(
+                track_reason(&admitted.raw),
+                None,
+                "{} が生テキストとして拒否されました",
+                admitted.name
+            );
+        }
+    }
+
     #[test]
     fn the_listing_reports_the_label_it_found() {
         let dir = TempDir::new();

@@ -111,6 +111,18 @@ impl Harness {
             .unwrap_or_else(|| panic!("レイヤー {layer} フレーム {frame} の対象がありません"))
     }
 
+    /// 読み取り経路が数えるシーンのオブジェクト数を得る。
+    fn object_count(&self) -> usize {
+        self.healthy(|| {
+            self.read
+                .list_objects(SCENE_ID, None, &default_page_request())
+        })
+        .expect("列挙に失敗しました")
+        .expect("ページ要求が拒否されました")
+        .items
+        .len()
+    }
+
     /// 読み取り経路が返すオブジェクトのセレクターを得る。
     fn selector(&self, layer: usize, frame: usize) -> ObjectSelector {
         self.summary(layer, frame).selector
@@ -1444,6 +1456,103 @@ fn a_raw_alias_that_is_not_a_table_is_refused_under_the_same_name_as_a_named_one
         !harness.host.calls().contains(&"create_object_from_alias"),
         "拒否した要求が SDK へ届いています"
     );
+}
+
+/// 生テキストを作成元とする要求を組み立てる。
+fn create_from_raw_alias_params(harness: &Harness, alias: &str) -> CreateObjectParams {
+    CreateObjectParams {
+        source: ObjectSource::ObjectAlias {
+            alias: alias.to_string(),
+        },
+        placement: Placement {
+            scene_id: SCENE_ID,
+            layer: 1,
+            frame: 600,
+        },
+        expected_project_epoch: harness.epoch(),
+    }
+}
+
+/// 評価の死んだ移動行を 1 行だけ持つ生テキスト。
+const ALIAS_WITH_A_DEAD_MOVEMENT: &str = "[Object]\r\nframe=0,80\r\n[Object.0]\r\neffect.name=標準描画\r\nX=-600.00,600.00,直線移動,8\r\n";
+
+#[test]
+fn a_raw_alias_whose_movement_row_cannot_be_written_is_refused_before_the_edit_section() {
+    // ホストは不正な移動行を失敗として返さず、その行ごと捨てる。区間へ入る前に
+    // 落ちるため、オブジェクトは 1 つも作られない。
+    let harness = Harness::new();
+    harness.host.clear_calls();
+    let before = harness.object_count();
+    let error = harness
+        .edit
+        .create_object(&create_from_raw_alias_params(
+            &harness,
+            ALIAS_WITH_A_DEAD_MOVEMENT,
+        ))
+        .expect_err("評価の死んだ移動行から作成できました");
+
+    assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+    let details = error.details();
+    assert_eq!(details["reason"], json!("track_flags_not_representable"));
+    // どの節のどの項目かが分からなければ、要求元は直す行を選べない。
+    assert_eq!(details["heading"], json!("Object.0"));
+    assert_eq!(details["item"], json!("X"));
+    assert_eq!(harness.object_count(), before);
+    assert!(harness.host.enter_calls() == 0, "編集区間へ入りました");
+    harness.assert_untouched();
+}
+
+#[test]
+fn the_rejection_of_a_raw_alias_carries_neither_its_text_nor_the_value_of_the_row() {
+    let harness = Harness::new();
+    let error = harness
+        .edit
+        .create_object(&create_from_raw_alias_params(
+            &harness,
+            ALIAS_WITH_A_DEAD_MOVEMENT,
+        ))
+        .expect_err("評価の死んだ移動行から作成できました");
+
+    let document = format!("{} {}", error, error.details());
+    for forbidden in [
+        "-600.00",
+        "直線移動",
+        "frame=0,80",
+        "effect.name",
+        "[Object]",
+    ] {
+        assert!(
+            !document.contains(forbidden),
+            "{forbidden} が応答に含まれます: {document}"
+        );
+    }
+}
+
+#[test]
+fn a_creation_by_name_is_not_held_to_the_movement_rows_the_raw_text_is() {
+    // 一覧は移動行を見ていない。作成にだけ条件を足せば「一覧に出た名前は必ず
+    // 作成できる」が崩れ、一覧に載る名前が作れなくなる。
+    let (dir, _) = alias_fixture();
+    dir.write_alias("死んだ移動", ALIAS_WITH_A_DEAD_MOVEMENT.as_bytes());
+    let harness = alias_harness(&dir);
+    assert!(
+        listed_alias_names(&dir).contains(&"死んだ移動".to_string()),
+        "fixture が一覧に載っていません"
+    );
+
+    harness
+        .edit
+        .create_object(&create_from_alias_name(&harness, "死んだ移動", 1, 600))
+        .expect("一覧に載る名前から作成できませんでした");
+    // 生テキストとして同じバイト列を渡す経路は拒否する。
+    let harness = Harness::new();
+    harness
+        .edit
+        .create_object(&create_from_raw_alias_params(
+            &harness,
+            ALIAS_WITH_A_DEAD_MOVEMENT,
+        ))
+        .expect_err("生テキストの経路が拒否しませんでした");
 }
 
 // -------------------------------------------------------------- 作成の応答
