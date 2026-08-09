@@ -6696,48 +6696,37 @@ fn a_destination_past_the_end_of_the_column_is_refused_before_the_write() {
 }
 
 #[test]
-fn a_host_that_ignores_the_move_and_one_that_moves_it_elsewhere_name_different_reasons() {
-    // 「動かなかった」と「別の場所へ動いた」は要求元にとって別の事実である。
-    // 前者はその effect の種別で永久に通らず、後者は列の解釈が我々とホストで
-    // 食い違っている。
+fn a_column_that_did_not_move_keeps_the_selector_it_was_asked_with() {
+    // 発行の後に「ホストが拒んだ」と「別の位置へ倒した」を我々の側から区別
+    // できない。名乗る名前は 1 つであり、列が動いたかどうかは巻き戻しの結末が
+    // 運ぶ。
     //
     // 移動先は現在位置（1）でも末尾（3）でもない 2 を指す。現在位置を指せば
     // 無視するホストが、末尾を指せば末尾へ動かすホストが、それぞれ正しい移動と
     // 区別できなくなる。
-    // 巻き戻しの有無も分かれる。動いた列だけが戻り、動かなかった列には戻すもの
-    // が無い。
-    let cases = [
-        (Fault::IgnoreEffectMove, "effect_not_movable", false),
-        (Fault::AppendMovedEffect, "change_not_applied", true),
-    ];
-    for (fault, expected, restores) in cases {
-        let harness = Harness::with(|host| {
-            host.arm(|knobs| knobs.fault = Some(fault));
-            host.scene.get_mut().unwrap().layers[1].objects[0].effects =
-                vec![video_effect(), blur(0, 10), blur(1, 20), blur(2, 30)];
-        });
-        let error = harness
-            .edit
-            .move_effect(&move_blur(&harness, 0, 2))
-            .expect_err("要求どおりに動かなかった移動が成功として返りました");
+    let harness = harness_with_faulty_move(Fault::IgnoreEffectMove);
+    let request = move_blur(&harness, 0, 2);
+    let error = harness
+        .edit
+        .move_effect(&request)
+        .expect_err("動かなかった移動が成功として返りました");
 
-        assert_eq!(
-            error.error_code(),
-            ErrorCode::UnsupportedOperation,
-            "{fault:?}"
-        );
-        assert_eq!(error.details()["reason"], json!(expected), "{fault:?}");
-        // 発行の後に落ちた失敗である。
-        assert_eq!(error.details()["mutation_issued"], json!(true), "{fault:?}");
-        let details = error.details();
-        match restores {
-            true => assert_eq!(details["restored"], json!(true), "{fault:?}"),
-            false => assert!(
-                details.get("restored").is_none(),
-                "戻すものが無い枝が巻き戻しを名乗りました: {details}"
-            ),
-        }
-    }
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(error.details()["reason"], json!("change_not_applied"));
+    // 発行の後に落ちた失敗である。
+    assert_eq!(error.details()["mutation_issued"], json!(true));
+    assert!(
+        error.details().get("restored").is_none(),
+        "戻すものが無い枝が巻き戻しを名乗りました: {}",
+        error.details()
+    );
+    // fingerprint の材料が 1 つも変わっていないため、同じ selector がそのまま
+    // 通る。前提条件の食い違いにはならない。
+    let again = harness
+        .edit
+        .move_effect(&request)
+        .expect_err("動かなかった移動が成功として返りました");
+    assert_eq!(again.details()["reason"], json!("change_not_applied"));
 }
 
 #[test]
@@ -6757,6 +6746,9 @@ fn a_column_that_changed_length_is_not_a_move() {
 
     assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
     assert_eq!(error.details()["reason"], json!("change_not_applied"));
+    // 1 度の移動では移動前の並びへ戻せない。戻せていないことを名乗る。
+    assert_eq!(error.details()["restored"], json!(false));
+    assert_eq!(error.details()["consistency_unknown"], json!(true));
     // 移動そのものは要求どおりに入っている。列の末尾の 1 件だけが消えた。
     assert_eq!(
         effect_column(&harness),
@@ -6888,7 +6880,7 @@ fn a_move_the_host_ignored_is_not_followed_by_a_restore() {
         .move_effect(&move_blur(&harness, 0, 2))
         .expect_err("動かなかった移動が成功として返りました");
 
-    assert_eq!(error.details()["reason"], json!("effect_not_movable"));
+    assert_eq!(error.details()["reason"], json!("change_not_applied"));
     assert!(
         error.details().get("restored").is_none(),
         "戻すものが無い枝が巻き戻しを名乗りました: {}",
@@ -6939,6 +6931,76 @@ fn a_restored_move_advances_the_revision_at_most_once() {
     assert_eq!(move_calls(&harness), 2, "戻す移動が発行されていません");
     assert_eq!(harness.project.revision(), 1, "revision が 2 つ進みました");
     assert_eq!(error.details()["current_project_revision"], json!(1));
+}
+
+/// 名前・有効・ロック・設定項目の値がすべて等しい effect を並べた列を作る。
+fn harness_with_twin_effects(effects: Vec<HostEffect>) -> Harness {
+    Harness::with(|host| {
+        host.arm(|knobs| knobs.fault = Some(Fault::AppendMovedEffect));
+        host.scene.get_mut().unwrap().layers[1].objects[0].effects = effects;
+    })
+}
+
+#[test]
+fn a_twin_sliding_into_the_old_position_is_not_read_as_a_column_that_did_not_move() {
+    // 列は [動画ファイル, ぼかし10, ぼかし10, ぼかし10 の双子, ぼかし30] ではなく
+    // 双子 2 件である。先頭のぼかしを動かすと、もう 1 件が移動前の位置へずれ
+    // 込む。同一性の材料は双子を区別しないため、その 1 件だけを見る判定は
+    // 「ホストは何も動かしていない」を真にする——列は現に動いている。
+    let harness =
+        harness_with_twin_effects(vec![video_effect(), blur(0, 10), blur(1, 10), blur(2, 30)]);
+    let error = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 2))
+        .expect_err("別の位置へ動いた移動が成功として返りました");
+
+    assert_eq!(error.details()["reason"], json!("change_not_applied"));
+    assert_eq!(error.details()["restored"], json!(true));
+    assert_eq!(
+        effect_column(&harness),
+        vec![
+            video_entry(),
+            blur_entry(10),
+            blur_entry(10),
+            blur_entry(30)
+        ]
+    );
+}
+
+#[test]
+fn the_restore_moves_the_effect_that_puts_the_column_back() {
+    // 列は [動画ファイル, ぼかし10, ぼかし20, ぼかし10, ぼかし30]。先頭の
+    // ぼかし10 を 3 へ動かすと、ホストは末尾へ倒す。読み直した列を先頭から
+    // 探すと、動いていない方のぼかし10 を掴む——戻せたはずの列が戻らない。
+    let harness = harness_with_twin_effects(vec![
+        video_effect(),
+        blur(0, 10),
+        blur(1, 20),
+        blur(2, 10),
+        blur(3, 30),
+    ]);
+    let error = harness
+        .edit
+        .move_effect(&move_blur(&harness, 0, 3))
+        .expect_err("別の位置へ動いた移動が成功として返りました");
+
+    assert_eq!(error.details()["reason"], json!("change_not_applied"));
+    assert_eq!(error.details()["restored"], json!(true));
+    assert!(
+        error.details().get("consistency_unknown").is_none(),
+        "戻せているのに中途半端な状態を名乗りました: {}",
+        error.details()
+    );
+    assert_eq!(
+        effect_column(&harness),
+        vec![
+            video_entry(),
+            blur_entry(10),
+            blur_entry(20),
+            blur_entry(10),
+            blur_entry(30)
+        ]
+    );
 }
 
 #[test]
@@ -7876,12 +7938,9 @@ fn unsupported_target_case(reason: &UnsupportedReason) -> Vec<EditError> {
             ]
         }
         UnsupportedReason::EffectNotMovable => {
-            // 種別が既知でフィルタでない対象は発行の前に落ち、種別から判断
-            // できない対象はホストが動かさなかったときに落ちる。**どちらも
-            // 同じ事実を述べるため、同じ名前を名乗る。**
+            // 名乗るのは発行の前だけである。カタログの種別を読んで判定して
+            // おり、名前が主張する内容を確かめている。
             let refused_by_type = Harness::new();
-            let ignored_by_host =
-                Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::IgnoreEffectMove)));
             vec![
                 refused_by_type
                     .edit
@@ -7890,13 +7949,6 @@ fn unsupported_target_case(reason: &UnsupportedReason) -> Vec<EditError> {
                         position: 1,
                     })
                     .expect_err("フィルタでない effect を動かせました"),
-                ignored_by_host
-                    .edit
-                    .move_effect(&MoveEffectParams {
-                        selector: ignored_by_host.effect_selector(1, 100, "ぼかし", 0),
-                        position: 0,
-                    })
-                    .expect_err("無言で無視された移動が成功として返りました"),
             ]
         }
         UnsupportedReason::MediaNotSupported => {

@@ -542,15 +542,13 @@ pub enum EditError {
     /// フィルタ効果だけを数えたものかを SDK は述べていない。可否を決めるのは
     /// 列の読み直しだけであり、**ホストが返した値は判定に使わない。**
     ///
-    /// **理由が 2 つに分かれる。** 元の位置に対象が残っていれば、ホストはその
-    /// effect を動かさなかった（[`UnsupportedReason::EffectNotMovable`]）。
-    /// 残っていなければ、動いた先が要求した位置ではない
-    /// （[`UnsupportedReason::ChangeNotApplied`]）。要求元にとって前者はその
-    /// effect の種別で永久に通らず、後者は列の解釈が食い違っている。
-    #[error("{reason}")]
+    /// **理由は 1 つである。** ホストが拒んだのか別の位置へ倒したのかを、発行の
+    /// 後に我々の側から区別できない。どちらも
+    /// [`UnsupportedReason::ChangeNotApplied`] を名乗り、**列が動いたかどうかは
+    /// 巻き戻しの結末が運ぶ。** 要求元が次に採れる位置は
+    /// [`Self::EffectMoveNotApplied::reported_position`] が示す。
+    #[error("{}", UnsupportedReason::ChangeNotApplied)]
     EffectMoveNotApplied {
-        /// 食い違いの内容。
-        reason: UnsupportedReason,
         /// ホストが名乗った移動後のインデックス。
         ///
         /// **可否の判定には使っていない。** 食い違いが起きたときに、どちらの
@@ -907,11 +905,11 @@ impl EditError {
             }
             // ホストが名乗った位置を添える。判定には使っていないため、応答に
             // 現れるのは照合が食い違ったときだけである。
-            EditError::EffectMoveNotApplied {
-                reason,
-                reported_position,
-            } => {
-                details.insert("reason".to_string(), json!(reason.as_str()));
+            EditError::EffectMoveNotApplied { reported_position } => {
+                details.insert(
+                    "reason".to_string(),
+                    json!(UnsupportedReason::ChangeNotApplied.as_str()),
+                );
                 details.insert("reported_position".to_string(), json!(reported_position));
             }
             EditError::SectionChangeRejected { operation } => {
@@ -1220,14 +1218,7 @@ pub(crate) mod tests {
             EditError::EffectPrecondition {
                 reason: EffectPreconditionReason::PositionOutOfRange,
             },
-            // 照合が分ける 2 つの理由を両方置く。ホストが名乗った位置は判定に
-            // 使わないため、どちらの理由でも同じ形で応答へ載る。
             EditError::EffectMoveNotApplied {
-                reason: UnsupportedReason::EffectNotMovable,
-                reported_position: 1,
-            },
-            EditError::EffectMoveNotApplied {
-                reason: UnsupportedReason::ChangeNotApplied,
                 reported_position: 2,
             },
             EditError::SectionChangeRejected {
@@ -1503,9 +1494,7 @@ pub(crate) mod tests {
                 ErrorCode::PreconditionFailed,
                 // 移動先が effect の列の長さを超えていた。同じく読み直しである。
                 ErrorCode::PreconditionFailed,
-                // 発行した移動が列に現れなかった。動かなかった場合と別の位置へ
-                // 動いた場合の 2 つ。
-                ErrorCode::UnsupportedOperation,
+                // 発行した移動が列に現れなかった。
                 ErrorCode::UnsupportedOperation,
                 // 事前確認を通したのに SDK が拒んだ。要求元に直せることが無い。
                 ErrorCode::SdkError,

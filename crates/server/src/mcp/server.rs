@@ -1449,9 +1449,12 @@ impl AviUtl2McpServer {
     /// （effect_position_out_of_range）となり、変更は発行されない。
     /// 下限は振る舞いが違う。フィルタ効果は先頭に並ぶ入力 item・出力 item より
     /// 前へは動けず、そこを指した position は発行されたうえでホストが切り詰める。
-    /// 結果は unsupported_operation（change_not_applied）となり、動いた列は
-    /// 元の並びへ戻す——details.restored が真なら列は要求の前と同じである。
+    /// 結果は unsupported_operation（change_not_applied）であり、
+    /// details.reported_position にホストが名乗った位置が入る。
+    /// 切り詰めで列が動いた場合は元の並びへ戻す。details.restored が真になり、
     /// 戻せなかった場合は details.consistency_unknown が立つ。
+    /// 対象が既に下限に居る場合は列が動かないため details.restored は付かない。
+    /// 列が動いていない失敗では要求に使った selector がそのまま通る。
     /// 応答の effect には移動後に読み直した effect が入る。
     /// 成功すると、要求に使った selector は使えなくなる——列の位置が変われば
     /// fingerprint が変わり、同名 effect があれば effect_index も入れ替わる。
@@ -4929,6 +4932,10 @@ mod tests {
                     "元の並びへ戻す",
                     "details.restored",
                     "details.consistency_unknown",
+                    // 切り詰めは列を動かすとは限らない。既に下限に居る対象へ
+                    // 同じ要求を送ると列は動かず、selector も生き残る。
+                    "既に下限に居る場合は列が動かない",
+                    "selector がそのまま通る",
                     // **移動は effect の内容を 1 つも変えないまま、要求に
                     // 使った selector を無効にする。** 名前も enabled も
                     // 設定項目も動かないため、変わらないと読める。述べ
