@@ -2426,6 +2426,7 @@ mod tests {
                     description: Some("光の強さを指定します".to_string()),
                     choices: None,
                     range: None,
+                    group: None,
                 }],
             }],
             not_found: vec!["ぐろー".to_string()],

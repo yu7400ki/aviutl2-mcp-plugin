@@ -2041,6 +2041,7 @@ mod tests {
                     description: described.then(|| format!("{}の項目{index} の説明", effect.name)),
                     choices: None,
                     range: None,
+                    group: None,
                 })
                 .collect(),
         }

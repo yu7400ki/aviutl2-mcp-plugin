@@ -190,6 +190,8 @@ pub struct EffectItemDescription {
     /// の項目でも値域が付く。種別で絞ると、表が書いた記述を我々の判断で黙って
     /// 落とすことになる。
     pub range: Option<ItemRange>,
+    /// 所属するグループ。属さない項目は null。
+    pub group: Option<ItemGroup>,
 }
 
 /// 設定項目が取り得る値の候補。
@@ -229,6 +231,19 @@ pub struct ItemRange {
     pub decimals: Option<u32>,
     /// 値域の由来。
     pub source: TableSource,
+}
+
+/// 設定項目が属するグループ。
+///
+/// **ホストが返した値をそのまま運ぶ。** [`item_names`](Self::item_names) の
+/// [`index`](Self::index) 番目が、このグループを引いた設定項目の名前と一致する
+/// とは限らない。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemGroup {
+    /// グループ内での 0 始まりの位置。
+    pub index: usize,
+    /// グループの所属アイテム名。ホストが返した順。
+    pub item_names: Vec<String>,
 }
 
 /// 設定項目 1 件について表が述べたことの組。
@@ -1076,6 +1091,7 @@ mod tests {
                         source: TableSource::BuiltinTable,
                     }),
                     range: None,
+                    group: None,
                 },
                 EffectItemDescription {
                     name: "ライン幅".to_string(),
@@ -1087,6 +1103,10 @@ mod tests {
                         max: FiniteF64::try_new(4000.0),
                         decimals: Some(0),
                         source: TableSource::BuiltinTable,
+                    }),
+                    group: Some(ItemGroup {
+                        index: 1,
+                        item_names: vec!["ライン幅".to_string(), "縁の幅".to_string()],
                     }),
                 },
             ],
@@ -1151,6 +1171,26 @@ mod tests {
     }
 
     #[test]
+    fn an_item_carries_the_group_it_belongs_to() {
+        // グループ内での位置と所属アイテム名を組で運ぶ。**件数の欄は持たない**
+        // ——所属アイテム名の長さがそれである。
+        let description = sample_effect_description();
+        let value = serde_json::to_value(&description).unwrap();
+        let group = value["items"][1]["group"]
+            .as_object()
+            .expect("グループがある");
+        assert_eq!(group["index"], 1);
+        assert_eq!(group["item_names"][0], "ライン幅");
+        assert_eq!(group["item_names"][1], "縁の幅");
+        assert!(group.get("count").is_none(), "{value}");
+        // グループに属さない項目は null である。
+        assert!(value["items"][0]["group"].is_null(), "{value}");
+
+        let restored: EffectDescription = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, description);
+    }
+
+    #[test]
     fn the_parts_of_a_range_are_null_one_by_one() {
         // **測れた側だけを載せる。** 探りの値が範囲の内側へ収まった項目では、
         // その側を記録できない。**値域そのものが null であることと、上限だけが
@@ -1167,6 +1207,7 @@ mod tests {
                 decimals: None,
                 source: TableSource::Sidecar,
             }),
+            group: None,
         };
         // 測れなかった側は欄ごと消さずに null で名乗る。欄が消えると、要求元は
         // 「上限を測れなかった」と「上限という概念が無い」を見分けられない。

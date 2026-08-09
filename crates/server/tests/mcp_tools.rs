@@ -584,6 +584,7 @@ fn sample_effect_descriptions() -> DescribeEffectsResult {
                         source: TableSource::BuiltinTable,
                     }),
                     range: None,
+                    group: None,
                 }],
             },
             EffectDescription {
@@ -600,6 +601,7 @@ fn sample_effect_descriptions() -> DescribeEffectsResult {
                         decimals: Some(0),
                         source: TableSource::BuiltinTable,
                     }),
+                    group: None,
                 }],
             },
         ],

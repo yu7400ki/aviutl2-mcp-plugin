@@ -576,7 +576,15 @@ fn effect_item_description() -> Value {
         ("description", nullable_string()),
         ("choices", nullable(item_choices())),
         ("range", nullable(item_range())),
+        ("group", nullable(item_group())),
     ])
+}
+
+/// 設定項目が属するグループ。
+///
+/// **件数の欄を持たない。** 所属アイテム名の件数がそれである。
+fn item_group() -> Value {
+    object(&[("index", unsigned()), ("item_names", array(string()))])
 }
 
 /// 設定項目の選択肢の候補。
@@ -804,7 +812,7 @@ mod tests {
         EffectDescription, EffectFingerprintInput, EffectFlags, EffectInfo, EffectItem,
         EffectItemDescription, EffectItemType, EffectItemValues, EffectType, EvaluatedItem, Extent,
         FiniteF64, FrameRange, GetCurrentSceneResult, GridBpm, InstanceId, InstanceInfo,
-        InstanceProject, InstanceState, ItemChoices, ItemRange, ItemValue, LayerInfo,
+        InstanceProject, InstanceState, ItemChoices, ItemGroup, ItemRange, ItemValue, LayerInfo,
         ListAvailableEffectsResult, ListFontsResult, ListLayersResult, ListModulesResult,
         ListObjectAliasesResult, ListObjectsResult, ListPalettesResult, ModuleEntry, ModuleType,
         ObjectAliasSummary, ObjectDetail, ObjectFingerprintInput, ObjectSummary, ObservedSelection,
@@ -1246,6 +1254,10 @@ mod tests {
                                 source: TableSource::BuiltinTable,
                             }),
                             range: None,
+                            group: Some(ItemGroup {
+                                index: 0,
+                                item_names: vec!["図形の種類".to_string(), "サイズ".to_string()],
+                            }),
                         },
                         EffectItemDescription {
                             name: "合成モード".to_string(),
@@ -1256,6 +1268,7 @@ mod tests {
                                 source: TableSource::Sidecar,
                             }),
                             range: None,
+                            group: None,
                         },
                         EffectItemDescription {
                             name: "サイズ".to_string(),
@@ -1267,6 +1280,10 @@ mod tests {
                                 max: FiniteF64::try_new(4000.0),
                                 decimals: Some(0),
                                 source: TableSource::BuiltinTable,
+                            }),
+                            group: Some(ItemGroup {
+                                index: 1,
+                                item_names: vec!["図形の種類".to_string(), "サイズ".to_string()],
                             }),
                         },
                         EffectItemDescription {
@@ -1280,6 +1297,7 @@ mod tests {
                                 decimals: None,
                                 source: TableSource::Sidecar,
                             }),
+                            group: None,
                         },
                         EffectItemDescription {
                             name: "未知".to_string(),
@@ -1287,6 +1305,7 @@ mod tests {
                             description: None,
                             choices: None,
                             range: None,
+                            group: None,
                         },
                     ],
                 },

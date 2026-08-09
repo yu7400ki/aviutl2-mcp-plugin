@@ -415,6 +415,7 @@ impl<H: ReadHost> ReadAdapter for HostReadAdapter<H> {
                             description: help.items.get(&item.name).cloned(),
                             choices: facets.and_then(|facets| facets.choices.clone()),
                             range: facets.and_then(|facets| facets.range),
+                            group: None,
                             name: item.name,
                             item_type: item.item_type,
                         }

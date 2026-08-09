@@ -1127,6 +1127,7 @@ mod tests {
                             ),
                             choices: None,
                             range: None,
+                            group: None,
                         },
                         EffectItemDescription {
                             name: "ライン幅".to_string(),
@@ -1134,6 +1135,7 @@ mod tests {
                             description: None,
                             choices: None,
                             range: None,
+                            group: None,
                         },
                     ],
                 },
@@ -1206,6 +1208,7 @@ mod tests {
                         description: Some(long_name()),
                         choices: None,
                         range: None,
+                        group: None,
                     })
                     .collect(),
             })
