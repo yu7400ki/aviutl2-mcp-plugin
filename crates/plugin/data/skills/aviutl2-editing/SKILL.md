@@ -67,7 +67,7 @@ selector は自分で組み立てない。読み取りの応答が返した値�
 
 timeout は変更が無かったことを意味しない。details.change_applied が "no" なら未適用のため再送してよく、"unknown" なら読み直して確認してから再送する。
 
-**プレビュー再生中とファイル出力中は、読み取りも編集も通らない。** edit_blocked が返り、details.edit_state がどちらであるかを名乗る。**render_frame だけは出力中に edit_blocked となり、プレビュー再生中は成功し得る。**
+**プレビュー再生中とファイル出力中は、読み取りも編集も通らない。** edit_blocked が返り、details.edit_state がどちらであるかを名乗る。**フレームの描画はこれと別の系統であり、どちらで止まるかは render_frame の説明が述べる。**
 
 **起動処理中・終了処理中と、編集ハンドルの準備待ちでは host_busy が返る。** AviUtl2 を起動した直後に踏みやすい。
 
