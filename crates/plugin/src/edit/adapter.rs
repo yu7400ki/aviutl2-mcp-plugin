@@ -880,6 +880,66 @@ fn restore_item_value(
     ItemRestore::Failed
 }
 
+/// 要求と違う位置へ動いた effect を、移動前の位置へ戻す。
+///
+/// **発行は同じ [`MutationPermit`] で行う。** 最初の発行で確定した revision が
+/// そのまま応答へ載るため、巻き戻しを挟んでも 1 要求が進める revision は高々 1
+/// である。
+///
+/// 戻す先は移動前の位置である。その effect が現に居た位置であり、受け付けられる
+/// 移動先であることを、居たという事実が示している。
+///
+/// **戻す対象は読み直した列の中から探す。** 移動先にも移動前の位置にも居ない
+/// 以上、どこへ動いたかは列を走査しなければ分からない。材料は
+/// [`is_same_effect`] と同じである。
+///
+/// **戻せたことの根拠は列全体の一致である。** 移動は 1 件を抜いて別の位置へ
+/// 挿し込むため、間に在った effect もすべてずれる。移動前の位置に居ることだけ
+/// では並びが戻ったことを示さない。
+fn restore_moved_effect<'sec>(
+    editor: &'sec dyn SceneEditor,
+    permit: &MutationPermit<'_>,
+    boundary: &Boundary,
+    object: &ResolvedObject<'sec>,
+    before: &[HostEffect],
+    observed: &[HostEffect],
+    from: usize,
+) -> ItemRestore {
+    let selector = &object.summary().selector;
+    let outcome = effect_info_at(selector, before, from)
+        .and_then(|moved| {
+            (0..observed.len())
+                .filter_map(|position| effect_info_at(selector, observed, position))
+                .find(|info| is_same_effect(&moved, info))
+        })
+        .ok_or(EditError::UnsupportedTarget {
+            reason: UnsupportedReason::ChangeNotApplied,
+        })
+        .and_then(|info| resolve_effect_of(editor, object, observed, &info.selector))
+        .and_then(|target| {
+            permit.issue(boundary, |ticket| {
+                editor.move_effect(ticket, object, &target, from)
+            })
+        })
+        .and_then(|_| reread_with_effects(editor, boundary, object.layer(), object.frame_start()))
+        .and_then(|(_, restored)| match restored == before {
+            true => Ok(()),
+            // 戻す移動が効かなかった場合も、動いたのに並びが揃わない場合も
+            // ここへ来る。
+            false => Err(EditError::UnsupportedTarget {
+                reason: UnsupportedReason::ChangeNotApplied,
+            }),
+        });
+    let Err(error) = outcome else {
+        return ItemRestore::Restored;
+    };
+    tracing::warn!(
+        code = %error.error_code().as_snake_case(),
+        "要求と違う位置へ動いた effect を移動前の位置へ戻せませんでした"
+    );
+    ItemRestore::Failed
+}
+
 /// 列挙に現れない設定項目名を、値が読めるかどうかで分ける。
 ///
 /// 設定項目の列挙は未知種別の項目を落とす。落ちた項目への書き込みを「項目が
@@ -1419,16 +1479,16 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 &[],
                 &[&params.selector.object],
             )?;
-            // 移動先が列に収まるかを見るため、対象と一緒に列の長さを得る。
-            let (object, effects) =
+            // 移動先が列に収まるかを見るため、対象と一緒に列の長さを得る。列は
+            // 巻き戻しの照合にも使う。
+            let (object, before) =
                 resolve_object_with_effects(editor, &boundary, &params.selector.object)?;
-            let effect = resolve_effect_of(editor, &object, &effects, &params.selector)?;
-            ensure_effect_position_in_range(effects.len(), params.position)?;
+            let effect = resolve_effect_of(editor, &object, &before, &params.selector)?;
+            ensure_effect_position_in_range(before.len(), params.position)?;
             // 移動で変わらない材料を控える。列の位置も同名内の順序も動くため、
             // fingerprint は同一性の材料にならない。
             let moved = effect.info().clone();
             let from = effect.position();
-            let count_before = effects.len();
 
             let permit = boundary.issue_permit(project)?;
             // 移動先が現在位置と同じでも短絡しない。成功を我々が決めることに
@@ -1451,20 +1511,27 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                     },
                 )
             };
-            // 移動は effect を増やしも減らしもしない。
-            if effects.len() != count_before {
-                return Err(not_applied(UnsupportedReason::ChangeNotApplied));
+            // 移動は effect を増やしも減らしもしない。長さが変わった列は 1 度の
+            // 移動では移動前の並びへ戻せない。
+            if effects.len() != before.len() {
+                return Err(not_applied(UnsupportedReason::ChangeNotApplied)
+                    .with_item_restore(ItemRestore::Failed));
             }
             let at = |position| effect_info_at(&summary.selector, &effects, position);
             let Some(info) = at(params.position).filter(|info| is_same_effect(&moved, info)) else {
                 // 移動先に居るのが動かした effect でなければ、元の位置を見る。
-                // 残っていればホストが動かさず、居なければ要求と違う位置へ
-                // 動いている。
-                let reason = match at(from).is_some_and(|info| is_same_effect(&moved, &info)) {
-                    true => UnsupportedReason::EffectNotMovable,
-                    false => UnsupportedReason::ChangeNotApplied,
-                };
-                return Err(not_applied(reason));
+                // 残っていればホストが動かしておらず、戻すものが無い。
+                if at(from).is_some_and(|info| is_same_effect(&moved, &info)) {
+                    return Err(not_applied(UnsupportedReason::EffectNotMovable));
+                }
+                // 要求と違う位置へ動いている。列を動かしたまま失敗を返すと、
+                // 要求元の selector も一緒に無効になる。
+                let restore = restore_moved_effect(
+                    editor, &permit, &boundary, &object, &before, &effects, from,
+                );
+                return Err(
+                    not_applied(UnsupportedReason::ChangeNotApplied).with_item_restore(restore)
+                );
             };
             Ok(EditOutcome::effect_changed(
                 boundary.epoch(),
