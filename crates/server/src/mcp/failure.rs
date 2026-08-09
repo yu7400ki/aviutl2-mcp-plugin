@@ -319,17 +319,15 @@ fn sanitize(error: ErrorObject) -> ErrorObject {
 /// `details` から秘匿され得る値と過大な値を取り除く。
 ///
 /// [`MAX_DETAIL_ARRAY_ITEMS`] で切った配列は、切ったことを [`TRUNCATED_KEY`] の
-/// 下へ記録する。黙って切ると、要求元は落とした要素を「無い」と読む。
+/// 下へ記録する。
 ///
 /// 記録の key は切られた配列の位置であり、object の key と配列の添字を同じ区切りで
 /// 並べたドット綴りである（`known_movements` / `outer.inner` / `rows.0`）。値は切る
 /// 前の要素数である。
 ///
-/// 名乗る先はトップレベルの object である。`details` は object か `null` であり、
-/// 他の形の値には記録を足さない。
+/// 名乗る先はトップレベルの object である。
 ///
-/// 二度通しても結果は変わらない。切り詰め済みの配列は再び上限に掛からず、1 度目の
-/// 記録はそのまま通る。
+/// 二度通しても結果は変わらない。1 度目の記録はそのまま通る。
 pub fn sanitize_details(value: &Value) -> Value {
     let mut truncated = Map::new();
     let sanitized = sanitize_value(value, 0, &mut Vec::new(), &mut truncated);
@@ -690,8 +688,8 @@ mod tests {
 
     #[test]
     fn a_truncated_array_names_its_position_and_how_many_items_it_had() {
-        // 黙って切ると、要求元は落とした要素を「無い」と読む。残った件数は
-        // 上限そのものであり、元が何件だったかは切った側にしか分からない。
+        // 残った件数は上限そのものであり、元が何件だったかは切った側にしか
+        // 分からない。
         const ITEMS: usize = 47;
         let items: Vec<Value> = (0..ITEMS).map(|index| serde_json::json!(index)).collect();
         let details = sanitize_details(&serde_json::json!({ "known_movements": items }));
@@ -744,8 +742,7 @@ mod tests {
 
     #[test]
     fn a_truncation_record_replaces_the_one_the_instance_sent() {
-        // 切ったのはこちらであり、記録もこちらが持つ。接続先の申告を残すと、
-        // 要求元は我々が落とした件数を読めない。
+        // 切ったのはこちらであり、記録もこちらが持つ。
         let items: Vec<Value> = (0..MAX_DETAIL_ARRAY_ITEMS + 1)
             .map(|index| serde_json::json!(index))
             .collect();
@@ -758,7 +755,7 @@ mod tests {
             serde_json::json!({ "items": MAX_DETAIL_ARRAY_ITEMS + 1 })
         );
 
-        // 1 つも切らなければ、名乗る事実が無い。他の key と同じに通る。
+        // 1 つも切らなければ、他の key と同じに通る。
         let untouched = sanitize_details(&serde_json::json!({
             "truncated": { "somewhere": 9 },
         }));
