@@ -1775,10 +1775,9 @@ impl SceneEditor for FakeSceneEditor<'_> {
         };
         object.effects.insert(to, moved);
         if knobs.fault == Some(Fault::DropAnotherEffect) {
-            // 落とすのは移動先より後ろの 1 件を優先する。前を落とすと動かした
-            // 1 件まで前へずれ、移動が要求どおりに入った状態にならない。
-            let victim = (to + 1..object.effects.len()).next().or(to.checked_sub(1));
-            if let Some(victim) = victim {
+            // 落とすのは移動先より後ろの 1 件である。
+            let victim = to + 1;
+            if victim < object.effects.len() {
                 object.effects.remove(victim);
             }
         }
