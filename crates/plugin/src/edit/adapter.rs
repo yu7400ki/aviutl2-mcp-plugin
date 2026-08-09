@@ -192,11 +192,8 @@ impl<H: EditHost> HostEditAdapter<H> {
     ///
     /// 移動方法の一覧は設定項目を書く経路と同じ口から引く
     /// （[`EditHost::movements`]）。
-    fn admit_alias_track_rows(&self, alias: &str) -> Result<(), EditError> {
-        Ok(crate::alias::admit_track_rows(
-            alias,
-            &self.host.movements(),
-        )?)
+    fn admit_alias_rows(&self, alias: &str) -> Result<(), EditError> {
+        Ok(crate::alias::admit_rows(alias, &self.host.movements())?)
     }
 
     /// 有効・無効を変更できないと分かる対象を、編集区間へ入る前に弾く。
@@ -1057,7 +1054,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
         let source = match &params.source {
             ObjectSource::MediaFile { path } => ResolvedSource::MediaFile(path),
             ObjectSource::ObjectAlias { alias } => {
-                self.admit_alias_track_rows(alias)?;
+                self.admit_alias_rows(alias)?;
                 ResolvedSource::Alias(alias)
             }
             ObjectSource::Effect { name } => ResolvedSource::Effect(name),

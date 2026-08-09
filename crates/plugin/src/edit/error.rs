@@ -1,6 +1,6 @@
 //! 編集の失敗を表す型と、応答へ載せる安全な補助情報。
 
-use crate::alias::{AliasAdmissionError, AliasRejection, AliasTrackRejection};
+use crate::alias::{AliasAdmissionError, AliasRejection, AliasRowRejection};
 use crate::read::ReadError;
 use aviutl2_mcp_core::{ErrorCode, ItemValue, ItemWriteError, TrackValueError};
 use serde_json::{Map, Value, json};
@@ -507,7 +507,7 @@ pub enum EditError {
     /// 一覧が除外に使う規則と作成が拒否に使う規則が別々の答えを持つ。
     #[error(transparent)]
     AliasRejected(#[from] AliasRejection),
-    /// 生テキストのエイリアスが含む移動行を書き込めない。
+    /// 生テキストのエイリアスが含む行を書き込めない。
     ///
     /// ホストは不正な移動行を失敗として返さず、その行ごと捨てて既定値へ倒す。
     /// 設定項目を書く経路と同じ検証を通し、通らない行を持つ要求を拒む。
@@ -515,8 +515,8 @@ pub enum EditError {
     /// **どの節のどの項目かを添える。** 1 つのエイリアスは複数のオブジェクトと
     /// 複数の effect を持ち得るため、行を特定できなければ直せない。**値そのものは
     /// 添えない。**
-    #[error("エイリアスの移動行を書き込めません: {source}")]
-    AliasTrackRejected {
+    #[error("エイリアスの行を書き込めません: {source}")]
+    AliasRowRejected {
         /// 行が属する節の見出し。どの節にも属さない行では `None`。
         heading: Option<String>,
         /// 行の項目名。
@@ -648,19 +648,19 @@ impl From<AliasAdmissionError> for EditError {
     }
 }
 
-/// 生テキストの移動行の失敗を、編集の失敗へ振り分ける。
+/// 生テキストの行の失敗を、編集の失敗へ振り分ける。
 ///
 /// 表として解釈できない生テキストは、名前で指定されたエイリアスが同じ条件で
 /// 落ちたときと同じ失敗になる。エラーコードも種別の名前も落ちた条件が決める。
-impl From<AliasTrackRejection> for EditError {
-    fn from(error: AliasTrackRejection) -> Self {
+impl From<AliasRowRejection> for EditError {
+    fn from(error: AliasRowRejection) -> Self {
         match error {
-            AliasTrackRejection::Rejected(rejection) => EditError::AliasRejected(rejection),
-            AliasTrackRejection::Row {
+            AliasRowRejection::Rejected(rejection) => EditError::AliasRejected(rejection),
+            AliasRowRejection::Row {
                 heading,
                 item,
                 source,
-            } => EditError::AliasTrackRejected {
+            } => EditError::AliasRowRejected {
                 heading,
                 item,
                 source,
@@ -738,7 +738,7 @@ impl EditError {
                 ErrorCode::UnsupportedOperation
             }
             EditError::AliasRejected(rejection) => rejection.error_code(),
-            EditError::AliasTrackRejected { source, .. } => source.error_code(),
+            EditError::AliasRowRejected { source, .. } => source.error_code(),
             EditError::SectionChangeRejected { .. } | EditError::Sdk { .. } => ErrorCode::SdkError,
             EditError::NotIssued { reason } => match reason {
                 NotIssuedReason::TargetMissing => ErrorCode::NotFound,
@@ -887,7 +887,7 @@ impl EditError {
             EditError::AliasRejected(rejection) => merge(details, rejection.details()),
             // 落ちた検証が組み立てた手掛かりへ、行の在処を添える。名前だけで
             // あり、行が持っていた値は運ばない。
-            EditError::AliasTrackRejected {
+            EditError::AliasRowRejected {
                 heading,
                 item,
                 source,
@@ -1192,14 +1192,14 @@ pub(crate) mod tests {
             // 受け入れ規則の 4 条件は、名前を持つものと持たないものの双方を通す。
             EditError::AliasRejected(AliasRejection::NotFound),
             EditError::AliasRejected(AliasRejection::WithoutEffect),
-            // 生テキストの移動行。**一覧を運ぶ検証と運ばない検証の双方を置く**
+            // 生テキストの行。**一覧を運ぶ検証と運ばない検証の双方を置く**
             // ——片方だけでは、補助情報のキーの検査が一覧の側を素通りする。
-            EditError::AliasTrackRejected {
+            EditError::AliasRowRejected {
                 heading: Some("Object.1".to_string()),
                 item: "X".to_string(),
                 source: TrackValueError::FlagsNotRepresentable.into(),
             },
-            EditError::AliasTrackRejected {
+            EditError::AliasRowRejected {
                 heading: Some("Object.1".to_string()),
                 item: "中心Z".to_string(),
                 source: TrackValueError::UnknownMode {
@@ -1309,7 +1309,7 @@ pub(crate) mod tests {
             EditError::MovementWouldBeLost { .. } => "MovementWouldBeLost",
             EditError::UnsupportedTarget { .. } => "UnsupportedTarget",
             EditError::AliasRejected(_) => "AliasRejected",
-            EditError::AliasTrackRejected { .. } => "AliasTrackRejected",
+            EditError::AliasRowRejected { .. } => "AliasRowRejected",
             EditError::SectionPrecondition { .. } => "SectionPrecondition",
             EditError::EffectPrecondition { .. } => "EffectPrecondition",
             EditError::EffectMoveNotApplied { .. } => "EffectMoveNotApplied",
@@ -1340,7 +1340,7 @@ pub(crate) mod tests {
             "MovementWouldBeLost",
             "UnsupportedTarget",
             "AliasRejected",
-            "AliasTrackRejected",
+            "AliasRowRejected",
             "SectionPrecondition",
             "EffectPrecondition",
             "EffectMoveNotApplied",

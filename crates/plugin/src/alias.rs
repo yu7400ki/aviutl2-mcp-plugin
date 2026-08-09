@@ -10,10 +10,9 @@
 //! ディレクトリの解決と、解決した先を使う経路は分ける。解決は plugin の
 //! 生存期間中に 1 度だけ行い、受け入れ規則と一覧はディレクトリを引数で受け取る。
 //!
-//! 生テキストとして渡されたエイリアスの移動行も、ここで書式を読む
-//! （[`admit_track_rows`]）。書式を知っているのはこのモジュールであり、
-//! 移動行の規則を知っているのは
-//! [`aviutl2_mcp_core::validate_track_value`] である。
+//! 生テキストとして渡されたエイリアスの行も、ここで書式を読む
+//! （[`admit_rows`]）。書式を知っているのはこのモジュールであり、行の値の
+//! 規則を知っているのは [`aviutl2_mcp_core::validate_track_value`] である。
 
 use aviutl2::alias::Table;
 use aviutl2_mcp_core::{
@@ -230,14 +229,14 @@ pub enum AliasAdmissionError {
     Rejected(#[from] AliasRejection),
 }
 
-/// 生テキストのエイリアスが含む移動行を受け入れられない理由。
+/// 生テキストのエイリアスが含む行を受け入れられない理由。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum AliasTrackRejection {
+pub enum AliasRowRejection {
     /// 名前で指定されたエイリアスと同じ受け入れ条件で落ちた。
     #[error(transparent)]
     Rejected(#[from] AliasRejection),
-    /// 移動行が書き込みの検証を通らない。
-    #[error("エイリアスの移動行を書き込めません: {source}")]
+    /// 行が書き込みの検証を通らない。
+    #[error("エイリアスの行を書き込めません: {source}")]
     Row {
         /// 行が属する節の見出し。どの節にも属さない行では `None`。
         heading: Option<String>,
@@ -478,7 +477,7 @@ fn collect_effects(root: &Table) -> Vec<String> {
 ///
 /// `movements` はホストが受け付ける移動方法である。要求元へ並べる一覧と同じ
 /// 値であり、書けない名前もここから決まる。
-pub fn admit_track_rows(raw: &str, movements: &[Movement]) -> Result<(), AliasTrackRejection> {
+pub fn admit_rows(raw: &str, movements: &[Movement]) -> Result<(), AliasRowRejection> {
     let table = parse_table(raw).ok_or(AliasRejection::NotParsable)?;
     let mut stack: Vec<(Option<String>, &Table, Option<usize>)> = vec![(None, &table, None)];
     while let Some((heading, node, inherited)) = stack.pop() {
@@ -486,7 +485,7 @@ pub fn admit_track_rows(raw: &str, movements: &[Movement]) -> Result<(), AliasTr
         let sections = section_count(node).or(inherited);
         for (item, value) in node.values() {
             admit_track_row(value, sections, movements).map_err(|source| {
-                AliasTrackRejection::Row {
+                AliasRowRejection::Row {
                     heading: heading.clone(),
                     item: item.clone(),
                     source,
@@ -1570,10 +1569,10 @@ pub(crate) mod tests {
 
     /// 移動行の検証を通した結果の理由。通ったときは `None`。
     fn track_reason(alias: &str) -> Option<&'static str> {
-        match admit_track_rows(alias, &movements()) {
+        match admit_rows(alias, &movements()) {
             Ok(()) => None,
-            Err(AliasTrackRejection::Rejected(rejection)) => rejection.reason(),
-            Err(AliasTrackRejection::Row { source, .. }) => source.reason(),
+            Err(AliasRowRejection::Rejected(rejection)) => rejection.reason(),
+            Err(AliasRowRejection::Row { source, .. }) => source.reason(),
         }
     }
 
@@ -1689,11 +1688,11 @@ pub(crate) mod tests {
         let alias = "[0]\r\nlayer=0\r\nframe=0,80\r\n[0.0]\r\neffect.name=図形\r\nサイズ=600\r\n\
 [1]\r\nlayer=1\r\nframe=0,80\r\n[1.0]\r\neffect.name=標準描画\r\n\
 [1.1]\r\neffect.name=標準描画\r\n中心Z=0.00,10.00,直線移動,8\r\n";
-        let Err(AliasTrackRejection::Row {
+        let Err(AliasRowRejection::Row {
             heading,
             item,
             source,
-        }) = admit_track_rows(alias, &movements())
+        }) = admit_rows(alias, &movements())
         else {
             panic!("拒否されませんでした");
         };
@@ -1706,8 +1705,8 @@ pub(crate) mod tests {
     fn a_row_that_belongs_to_no_section_names_only_its_item() {
         // 節の見出しより前に置かれた行はどの節にも属さない。空の見出しを名乗る
         // と、要求元は名前の無い節を探すことになる。
-        let Err(AliasTrackRejection::Row { heading, item, .. }) =
-            admit_track_rows("X=-600.00,600.00,直線移動,8\r\n", &movements())
+        let Err(AliasRowRejection::Row { heading, item, .. }) =
+            admit_rows("X=-600.00,600.00,直線移動,8\r\n", &movements())
         else {
             panic!("拒否されませんでした");
         };
@@ -1747,7 +1746,7 @@ pub(crate) mod tests {
         //
         // 測るのは標本の分だけであり、受け入れ規則が通す全てについての言明では
         // ない。移動行を見るのは生テキストの経路だけであって、名前で指定する
-        // 経路との差は `admit_alias_track_rows` の doc が持つ。
+        // 経路との差は `admit_alias_rows` の doc が持つ。
         let dir = TempDir::new();
         let names = write_fixture(&dir);
         let alias_dir = AliasDirectory::resolve(dir.path()).unwrap();
