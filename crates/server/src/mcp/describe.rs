@@ -175,9 +175,10 @@ pub fn object_detail(detail: &ObjectDetail) -> String {
     ));
     for effect in &detail.effects {
         text.push_line(format!(
-            "- effect {}:{} enabled={} locked={} items={}",
+            "- effect {} index={} position={} enabled={} locked={} items={}",
             clamp_chars(&effect.name, MAX_NAME_CHARS),
             effect.index,
+            effect.position,
             effect.enabled,
             effect.locked,
             effect.items.len(),
@@ -507,9 +508,10 @@ pub fn apply_batch(outcome: &BatchOutcome) -> String {
 fn batch_step_line(index: usize, step: &BatchStepOutcome) -> String {
     let action = match &step.effect {
         Some(effect) => format!(
-            "設定項目を変更 effect={}:{}",
+            "設定項目を変更 effect={} index={} position={}",
             clamp_chars(&effect.name, MAX_NAME_CHARS),
             effect.index,
+            effect.position,
         ),
         None => "移動".to_string(),
     };
@@ -668,9 +670,10 @@ fn changed_effect(action: &str, outcome: &EditOutcome) -> String {
     text.push_line(target_line(action, outcome.object.as_ref()));
     if let Some(effect) = &outcome.effect {
         text.push_line(format!(
-            "effect {}:{} enabled={} locked={} items={}",
+            "effect {} index={} position={} enabled={} locked={} items={}",
             clamp_chars(&effect.name, MAX_NAME_CHARS),
             effect.index,
+            effect.position,
             effect.enabled,
             effect.locked,
             effect.items.len(),
@@ -1345,6 +1348,9 @@ mod tests {
     }
 
     /// 秘匿すべき内容を全て含む effect。
+    ///
+    /// 同名内の順序と列の位置を別の値にしてある。2 つが一致する effect だけで
+    /// 行を組み立てると、片方をもう片方として書いた実装が緑のまま通る。
     fn secretive_effect(summary: &ObjectSummary) -> EffectInfo {
         let items = vec![
             EffectItem {
@@ -1368,9 +1374,9 @@ mod tests {
             summary.selector.clone(),
             EffectFingerprintInput {
                 effect_name: "テキスト",
-                effect_index: 0,
-                position: 0,
-                effect_count: 1,
+                effect_index: 1,
+                position: 2,
+                effect_count: 3,
                 enabled: true,
                 locked: false,
                 items: &items,
@@ -1783,6 +1789,56 @@ mod tests {
             set_effect_enabled(&outcome),
         ] {
             assert!(text.contains("fingerprint"), "{text}");
+        }
+    }
+
+    #[test]
+    fn effect_lines_tell_the_column_position_apart_from_the_same_name_ordinal() {
+        // 行に数が 2 つ並ぶ。どちらが何かが行から読めなければ、位置を探した
+        // 読み手が同名内の順序を位置として読む。
+        let summary = sample_summary();
+        let effect = secretive_effect(&summary);
+        let sites = [
+            (
+                "get_object",
+                object_detail(&ObjectDetail {
+                    summary: summary.clone(),
+                    alias: "alias".to_string(),
+                    sections: Vec::new(),
+                    effects: vec![effect.clone()],
+                    project_revision: 42,
+                }),
+            ),
+            (
+                "add_effect",
+                add_effect(&EditOutcome::effect_changed(
+                    "78be92d1-c8c9-44c6-ae52-387548971468",
+                    43,
+                    summary.clone(),
+                    effect.clone(),
+                )),
+            ),
+            (
+                "apply_batch",
+                apply_batch(&BatchOutcome {
+                    project_epoch: "78be92d1-c8c9-44c6-ae52-387548971468".to_string(),
+                    project_revision: 43,
+                    results: vec![BatchStepOutcome {
+                        object: summary,
+                        effect: Some(effect),
+                    }],
+                }),
+            ),
+        ];
+        for (site, text) in sites {
+            assert!(
+                text.contains("index=1"),
+                "{site} が同名内の順序を示していません: {text}"
+            );
+            assert!(
+                text.contains("position=2"),
+                "{site} が列の位置を示していません: {text}"
+            );
         }
     }
 
