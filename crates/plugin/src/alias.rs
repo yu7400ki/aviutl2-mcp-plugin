@@ -1741,9 +1741,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn every_alias_the_admission_rule_accepts_carries_writable_movement_rows() {
-        // 一覧に載るエイリアスは名前で作成できる。生テキストとして同じバイト列を
-        // 渡したときにだけ拒否されると、同じものが経路で違う答えを返す。
+    fn the_fixture_aliases_the_admission_rule_accepts_pass_as_raw_text_too() {
+        // 標本が持つ移動行はどれも書ける。それが生テキストの経路で拒否される
+        // なら、移動行の検証が普通のエイリアスまで巻き込んでいる。
+        //
+        // 測るのは標本の分だけであり、受け入れ規則が通す全てについての言明では
+        // ない。移動行を見るのは生テキストの経路だけであって、名前で指定する
+        // 経路との差は `admit_alias_track_rows` の doc が持つ。
         let dir = TempDir::new();
         let names = write_fixture(&dir);
         let alias_dir = AliasDirectory::resolve(dir.path()).unwrap();
