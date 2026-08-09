@@ -409,10 +409,8 @@ fn the_alias_reference_grounds_its_flag_bits_in_a_value_it_allows() {
 
 #[test]
 fn the_skill_names_every_failure_that_carries_a_wait() {
-    // **待ち時間を運ぶ失敗を 1 つしか名乗らないと、残りへ一般則が当たる。**
-    // 一般則は「同じ要求をそのまま送り直さない」であり、正しい要求を作り直す
-    // という最も無駄な一手を選ばせる。名指しは同じ節で行う——別の節に置けば、
-    // 失敗を読んでいる読み手のところに届かない。
+    // **名指しは同じ節で行う。** 別の節に置けば、失敗を読んでいる読み手の
+    // ところに届かない。
     let body = skill_body();
     let section = body
         .split("\n## ")
