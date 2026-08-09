@@ -1451,8 +1451,8 @@ impl AviUtl2McpServer {
     /// 前へは動けず、そこを指した position は発行されたうえでホストが切り詰める。
     /// 結果は unsupported_operation（change_not_applied）であり、
     /// details.reported_position にホストが名乗った位置が入る。
-    /// 切り詰めで列が動いた場合は元の並びへ戻す。details.restored が真になり、
-    /// 戻せなかった場合は details.consistency_unknown が立つ。
+    /// 切り詰めで列が動いた場合は元の並びへ戻す。details.restored が真なら列は
+    /// 要求の前と同じであり、偽なら戻せておらず details.consistency_unknown が立つ。
     /// 対象が既に下限に居る場合は列が動かないため details.restored は付かない。
     /// 列が動いていない失敗では要求に使った selector がそのまま通る。
     /// 応答の effect には移動後に読み直した effect が入る。
