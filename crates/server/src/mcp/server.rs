@@ -1304,6 +1304,8 @@ impl AviUtl2McpServer {
     /// となり details.reason は track_movement_present になる。書けば移動もその
     /// パラメータも消えるためであり、消したい場合は mode を null にした track を送る。
     /// details.current_value にホストが現在保持している値が入り、書き込みは発行されない。
+    /// current_value はそのまま送り返せる形ではない。移動を書き戻すには、読み取った
+    /// 値ではなく get_object が返す track の形で組み直す。
     /// 移動を持たないトラックバーへ track を書く要求は通り、新しく移動が付く。
     /// 書き込みは全ての種別で、書いた直後に読み直して要求した値が入ったかを照合する。
     /// 入っていなければ unsupported_operation となり details.reason は
@@ -4926,6 +4928,11 @@ mod tests {
                     // それが「現在値の再現」にもなる。**
                     "要求の代わりに送り直す値でもない",
                     "受け付けられる値を選び直す",
+                    // current_value も送り直す値ではない。**中身は alias の生の
+                    // 綴りであり、入力に生文字列の形が無い。** 断りが片側だけに
+                    // 在ると、断りの無いほうは送り返せると読まれる。
+                    "そのまま送り返せる形ではない",
+                    "get_object が返す track の形で組み直す",
                 ],
             ),
             ("set_effect_enabled", &["出力 item", "読み直した effect"]),
