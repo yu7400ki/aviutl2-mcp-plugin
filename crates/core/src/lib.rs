@@ -150,8 +150,8 @@ pub use state::InstanceState;
 pub use text_codec::{decode_host_text, encode_host_text};
 pub use tool::{ALWAYS_ENABLED_TOOL, ToolFamily, all_tool_names, togglable_tool_names};
 pub use track_value::{
-    Movement, TrackDecodeError, TrackValue, TrackValueError, TrackWriteTarget, decode_track_value,
-    encode_track_value, validate_track_value,
+    Movement, TrackDecodeError, TrackValue, TrackValueError, TrackWriteTarget,
+    UnrepresentableMovement, decode_track_value, encode_track_value, validate_track_value,
 };
 pub use validation::{
     MAX_ALIAS_BYTES, MAX_ITEM_VALUE_BYTES, MAX_NAME_UTF16_UNITS, MAX_PATH_UTF16_UNITS,

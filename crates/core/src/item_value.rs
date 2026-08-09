@@ -287,7 +287,7 @@ pub fn write_drops_existing_movement(
     movement_check_reads_current_value(item_type, value)
         && match decode_track_value(current) {
             Ok(track) => track.mode.is_some(),
-            Err(TrackDecodeError::NotRepresentable) => true,
+            Err(TrackDecodeError::NotRepresentable(_)) => true,
             Err(TrackDecodeError::NotAMovement) => false,
         }
 }

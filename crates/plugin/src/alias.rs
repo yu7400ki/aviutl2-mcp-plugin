@@ -18,8 +18,8 @@
 use aviutl2::alias::Table;
 use aviutl2_mcp_core::{
     ErrorCode, ItemWriteError, ListObjectAliasesResult, MAX_ALIAS_BYTES, Movement,
-    ObjectAliasSummary, PageWindow, TextSyntaxError, TrackDecodeError, TrackValueError,
-    TrackWriteTarget, decode_track_value, take_window, validate_alias, validate_object_alias_name,
+    ObjectAliasSummary, PageWindow, TextSyntaxError, TrackDecodeError, TrackWriteTarget,
+    decode_track_value, take_window, validate_alias, validate_object_alias_name,
     validate_track_value,
 };
 use serde_json::{Value, json};
@@ -530,6 +530,9 @@ fn section_count(table: &Table) -> Option<usize> {
 ///
 /// **区間の数が決まらない対象では、値の個数の条件だけを外す。** 個数は対象を
 /// 見なければ判定できず、フラグと移動方法の名前は対象を見ずに決まる。
+///
+/// 表せなかった行の失敗は、設定項目を書く経路が同じ事実に与えている名前を
+/// そのまま名乗る。要求元が直す先は経路で変わらない。
 fn admit_track_row(
     value: &str,
     section_count: Option<usize>,
@@ -538,8 +541,8 @@ fn admit_track_row(
     let track = match decode_track_value(value) {
         Ok(track) => track,
         Err(TrackDecodeError::NotAMovement) => return Ok(()),
-        Err(TrackDecodeError::NotRepresentable) => {
-            return Err(TrackValueError::FlagsNotRepresentable.into());
+        Err(TrackDecodeError::NotRepresentable(cause)) => {
+            return Err(cause.as_write_error().into());
         }
     };
     validate_track_value(
@@ -1613,6 +1616,9 @@ pub(crate) mod tests {
             ),
             // 区間 2 つに対して値が 2 つしかない。
             ("X=-600.00,600.00,直線移動,0", "track_value_count"),
+            // 区間を 1 つも表していない。個数を理由に落ちる行は、区間の数が
+            // 決まらない対象でも同じ名前を名乗る。
+            ("X=600.00,直線移動,0", "track_value_count"),
         ] {
             assert_eq!(track_reason(&with_row(row)), Some(reason), "{row}");
         }
@@ -1629,6 +1635,10 @@ pub(crate) mod tests {
             "テキスト=あ,い,う",
             "サイズ=600",
             "縦横比=-12.5",
+            // 末尾が整数で、その手前が数値として読めないだけのテキスト。
+            "テキスト=こんにちは,さようなら,0",
+            "テキスト=第1章,序,0",
+            "名前=A,B,1",
             // 末尾がフラグの整数として読めない。
             "テキスト=-600.00,600.00,直線移動",
             // 移動方法の位置が数値として読める。

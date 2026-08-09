@@ -2140,7 +2140,7 @@ fn host_write(item_type: &EffectItemType, value: &str, fonts: &[String]) -> Opti
             // 移動を表しているが我々が表せない行は、渡された文字列のまま保つ。
             // ホストは壊れた行も保存して読み取りへ返す。数値へ倒すと、既に
             // 壊れている項目を読む場面をこの上に作れない。
-            Err(TrackDecodeError::NotRepresentable) => {
+            Err(TrackDecodeError::NotRepresentable(_)) => {
                 return Some(ItemValue::Unknown {
                     raw: value.to_string(),
                 });

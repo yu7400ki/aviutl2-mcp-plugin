@@ -212,8 +212,45 @@ pub enum TrackDecodeError {
     ///
     /// 壊れた移動行である。読めたふりをすると、書き戻したときに我々が捏造した
     /// 移動がホストへ渡る。
-    #[error("移動を表していますが、値として表せません")]
-    NotRepresentable,
+    #[error("移動を表していますが、値として表せません: {0}")]
+    NotRepresentable(#[from] UnrepresentableMovement),
+}
+
+/// 移動行として読み始められた値が、表せなかった原因。
+///
+/// **原因ごとに分ける。** 要求元が直す先が違う——フラグは整数を書き直し、
+/// 境界の数は値を足す。**「表せたか」だけを見る呼び出し元は
+/// [`TrackDecodeError::NotRepresentable`] のままで足り、原因まで見るのは
+/// 失敗の名前を要求元へ返す側だけである。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum UnrepresentableMovement {
+    /// フラグに、この型が表せないビットが立っている。
+    #[error("移動のフラグに、この形では表せないビットが含まれています")]
+    Flags,
+    /// 移動を持つ値の境界が足りない。
+    #[error("移動の値は区間の境界の数だけ必要です")]
+    ValueCount,
+}
+
+impl UnrepresentableMovement {
+    /// 同じ事実に、書き込みの検証が与える失敗。
+    ///
+    /// **要求元が直す先は経路で変わらない。** フラグは整数を書き直すことでしか
+    /// 直らず、境界は値を足すことでしか直らない。
+    ///
+    /// 境界が足りない行は必ず値を 1 つだけ持つ——読み始めるには値の欄が
+    /// 1 つ以上要り（[`MIN_MOVING_FIELDS`]）、2 つ以上あれば表せる
+    /// （[`MIN_MOVING_VALUES`]）。比べる相手は書式が要求する最小値であり、
+    /// 対象の区間の数は復号が見ない。
+    pub fn as_write_error(self) -> TrackValueError {
+        match self {
+            UnrepresentableMovement::Flags => TrackValueError::FlagsNotRepresentable,
+            UnrepresentableMovement::ValueCount => TrackValueError::ValueCount {
+                expected: MIN_MOVING_VALUES,
+                actual: 1,
+            },
+        }
+    }
 }
 
 /// 移動を書き込む対象の性質。
@@ -438,11 +475,19 @@ pub fn encode_track_value(
 /// - フラグに [`PARAM_SECTION_BIT`] が立った行は表せない。ホストはその行を
 ///   「パラメータ節が続く」と読んで評価で値を解けなくなり、項目は動かない。
 ///   フラグとして運べば符号化がその行を書き戻せてしまう
+/// - 値と、`|` より後ろのパラメータを有限な数値として読む。**読めない欄が
+///   あれば移動行ではない**——`こんにちは,さようなら,0` のように、末尾が
+///   整数でその手前が数値として読めないだけのテキストがこの形になる。`|` の
+///   後ろが空のときはパラメータ無しとする。ホストはパラメータを持たない
+///   移動方法を `直線移動,0|` の形で返す
 /// - 値が 1 つしかない移動は表せない。区間は必ず 1 つ以上あるため、移動を持つ
 ///   値の境界は 2 つ以上になる
-/// - 値と、`|` より後ろのパラメータを有限な数値として読む。`|` の後ろが空の
-///   ときはパラメータ無しとする。ホストはパラメータを持たない移動方法を
-///   `直線移動,0|` の形で返す
+///
+/// **フラグの判定は値を読むより先に置く。** その行をホストがパラメータ節の印と
+/// 読むかはフラグの整数だけで決まり、値が数として読めるかに依らない。
+///
+/// **境界の数の判定は値を読んだ後に置く。** 先に置くと、値の欄が数として読めない
+/// テキストが境界の数を理由に拒否される。
 ///
 /// 読み始められたうえで表せなかった行は
 /// [`TrackDecodeError::NotRepresentable`] になる。**この境界は移動行かどうかの
@@ -492,25 +537,25 @@ pub fn decode_track_value(raw: &str) -> Result<TrackValue, TrackDecodeError> {
         return Err(TrackDecodeError::NotAMovement);
     }
     if flags & PARAM_SECTION_BIT != 0 {
-        return Err(TrackDecodeError::NotRepresentable);
+        return Err(UnrepresentableMovement::Flags.into());
     }
     let fields = &fields[..fields.len() - 2];
-    if fields.len() < MIN_MOVING_VALUES {
-        return Err(TrackDecodeError::NotRepresentable);
-    }
     let values = fields
         .iter()
         .copied()
         .map(parse_finite)
         .collect::<Option<Vec<FiniteF64>>>()
-        .ok_or(TrackDecodeError::NotRepresentable)?;
+        .ok_or(TrackDecodeError::NotAMovement)?;
+    if values.len() < MIN_MOVING_VALUES {
+        return Err(UnrepresentableMovement::ValueCount.into());
+    }
     let params = match tail {
         None | Some("") => Vec::new(),
         Some(tail) => tail
             .split(FIELD_SEPARATOR)
             .map(parse_finite)
             .collect::<Option<Vec<FiniteF64>>>()
-            .ok_or(TrackDecodeError::NotRepresentable)?,
+            .ok_or(TrackDecodeError::NotAMovement)?,
     };
     Ok(TrackValue {
         values,
@@ -725,14 +770,16 @@ mod tests {
             "-600,600,直線移動,8",
             "-600,600,直線移動,8|",
             "0,100,ランダム移動,8|30",
-            // 値の個数が書けない形であっても、先にこのビットで落ちる。読み始め
-            // の判定を値の個数まで広げると、この 2 つが移動行でない値へ落ちる。
+            // 値の個数が書けない形であっても、先にこのビットで落ちる。
             "100,直線移動,8",
             "100,直線移動,8|",
+            // 値が数値として読めなくても落ちる。その行をホストがパラメータ節の
+            // 印と読むかは、フラグの整数だけで決まる。
+            "あ,い,直線移動,8",
         ] {
             assert_eq!(
                 decode_track_value(raw),
-                Err(TrackDecodeError::NotRepresentable),
+                Err(UnrepresentableMovement::Flags.into()),
                 "{raw}"
             );
         }
@@ -864,6 +911,16 @@ mod tests {
             r"C:\a.png",
             // 空文字列。
             "",
+            // 値の欄が数値として読めない。**末尾が整数でその手前が数値として
+            // 読めないだけのテキストがこの形になる**——移動行として扱うと、
+            // フラグの問題でもない値がフラグを理由に拒否される。
+            "こんにちは,さようなら,0",
+            "第1章,序,0",
+            "A,B,1",
+            "0,あ,直線移動,0",
+            ",直線移動,0",
+            // パラメータの欄が数値として読めない。
+            "0,100,直線移動,0|x",
         ] {
             assert_eq!(
                 decode_track_value(raw),
@@ -874,25 +931,41 @@ mod tests {
     }
 
     #[test]
-    fn a_movement_row_that_cannot_be_represented_is_refused_as_a_movement_row() {
-        // 移動行として読み始められたうえで、表せる値にならなかったものである。
-        // 移動行ではない値と同じ理由に畳むと、壊れた行を素通しする判定を書ける。
-        for raw in [
-            // 値が数値でない。
-            "0,あ,直線移動,0",
-            // パラメータが数値でない。
-            "0,100,直線移動,0|x",
-            // 値が 1 つしかない。符号化が書けない形は読まないが、移動行では
-            // ある——移動行でない値へ落とすと、この行の検証を素通しできる。
-            "100,直線移動,0",
-            ",直線移動,0",
-        ] {
+    fn a_movement_row_whose_boundaries_do_not_reach_a_section_is_refused_as_a_movement_row() {
+        // 移動行として読み始められ、値も読めたうえで、区間を 1 つも表していない
+        // ものである。移動行ではない値と同じ理由に畳むと、壊れた行を素通しする
+        // 判定を書ける。
+        for raw in ["100,直線移動,0", "100,直線移動,0|15"] {
             assert_eq!(
                 decode_track_value(raw),
-                Err(TrackDecodeError::NotRepresentable),
+                Err(UnrepresentableMovement::ValueCount.into()),
                 "{raw} が解析されました"
             );
         }
+    }
+
+    #[test]
+    fn the_cause_of_an_unrepresentable_row_names_what_the_write_would_name() {
+        // 要求元が直す先は経路で変わらない。ホストが返した文字列として読んでも、
+        // 要求として受け取っても、同じ事実には同じ名前が付く。
+        assert_eq!(
+            UnrepresentableMovement::Flags.as_write_error().reason(),
+            "track_flags_not_representable"
+        );
+        assert_eq!(
+            UnrepresentableMovement::ValueCount
+                .as_write_error()
+                .reason(),
+            "track_value_count"
+        );
+        // 境界が足りない行は必ず値を 1 つだけ持つ。
+        assert_eq!(
+            UnrepresentableMovement::ValueCount.as_write_error(),
+            TrackValueError::ValueCount {
+                expected: MIN_MOVING_VALUES,
+                actual: 1,
+            }
+        );
     }
 
     #[test]
