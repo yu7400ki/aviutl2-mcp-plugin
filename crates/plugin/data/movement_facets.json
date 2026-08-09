@@ -1,3 +1,43 @@
 {
-  "movements": {}
+  "movements": {
+    "ランダム移動": {
+      "writable": true
+    },
+    "再生範囲": {
+      "writable": true
+    },
+    "反復移動": {
+      "writable": true
+    },
+    "回転": {
+      "writable": true
+    },
+    "直線移動": {
+      "writable": true
+    },
+    "直線移動(回転)": {
+      "writable": true
+    },
+    "直線移動(時間制御)": {
+      "writable": true
+    },
+    "瞬間移動": {
+      "writable": true
+    },
+    "移動無し": {
+      "writable": false
+    },
+    "移動量指定": {
+      "writable": true
+    },
+    "補間移動": {
+      "writable": true
+    },
+    "補間移動(回転)": {
+      "writable": true
+    },
+    "補間移動(時間制御)": {
+      "writable": true
+    }
+  }
 }
