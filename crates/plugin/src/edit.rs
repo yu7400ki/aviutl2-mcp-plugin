@@ -20,15 +20,17 @@ use crate::project::ProjectState;
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, BatchOutcome, CreateObjectParams, CreateObjectSectionParams,
     DeleteEffectParams, DeleteObjectParams, DeleteObjectSectionParams, EditOutcome, GridBpmOutcome,
-    LayerStateOutcome, MoveObjectParams, MoveObjectSectionParams, ObjectSectionsOutcome,
-    SceneSettingsOutcome, SelectionState, SetEffectEnabledParams, SetGridBpmParams,
-    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSceneSettingsParams,
-    SetSelectionParams,
+    LayerStateOutcome, MoveEffectParams, MoveObjectParams, MoveObjectSectionParams,
+    ObjectSectionsOutcome, SceneSettingsOutcome, SelectionState, SetEffectEnabledParams,
+    SetGridBpmParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
+    SetSceneSettingsParams, SetSelectionParams,
 };
 use std::sync::Arc;
 
 pub use adapter::HostEditAdapter;
-pub use error::{EditError, SectionPreconditionReason, UnsupportedReason};
+pub use error::{
+    EditError, EffectPreconditionReason, SectionPreconditionReason, UnsupportedReason,
+};
 
 /// 編集 operation の実行口。
 ///
@@ -62,6 +64,16 @@ pub trait EditAdapter: Send + Sync {
     /// effect の有効・無効を変更する。
     fn set_effect_enabled(&self, params: &SetEffectEnabledParams)
     -> Result<EditOutcome, EditError>;
+
+    /// effect を列の別の位置へ動かす。
+    ///
+    /// 動かせるのはフィルタ効果だけである。順序を動かせない対象は
+    /// [`UnsupportedReason::EffectNotMovable`] になる。
+    ///
+    /// **成功すると、要求に使ったセレクターは古くなる。** 列の位置が変われば
+    /// fingerprint が変わり、同名 effect が在れば同名内の順序も変わる。応答が
+    /// 読み直した effect を運ぶため、次の要求はそこから組み立てる。
+    fn move_effect(&self, params: &MoveEffectParams) -> Result<EditOutcome, EditError>;
 
     /// オブジェクトへ中間点を追加する。
     ///

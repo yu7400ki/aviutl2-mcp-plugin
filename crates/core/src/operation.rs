@@ -78,6 +78,9 @@ pub const OPERATION_DELETE_EFFECT: &str = "delete_effect";
 /// effect の有効・無効を変更する operation 名。
 pub const OPERATION_SET_EFFECT_ENABLED: &str = "set_effect_enabled";
 
+/// effect を列の別の位置へ動かす operation 名。
+pub const OPERATION_MOVE_EFFECT: &str = "move_effect";
+
 /// レイヤーの名前・表示・ロックを変更する operation 名。
 pub const OPERATION_SET_LAYER_STATE: &str = "set_layer_state";
 
@@ -218,6 +221,8 @@ pub enum EditOperation {
     DeleteEffect,
     /// [`OPERATION_SET_EFFECT_ENABLED`]。
     SetEffectEnabled,
+    /// [`OPERATION_MOVE_EFFECT`]。
+    MoveEffect,
     /// [`OPERATION_SET_LAYER_STATE`]。
     SetLayerState,
     /// [`OPERATION_SET_SELECTION`]。
@@ -248,7 +253,7 @@ impl EditOperation {
     /// 全 variant。
     ///
     /// 要素数と内容は `edit_operation_all_is_exhaustive` テストで固定する。
-    pub const ALL: [EditOperation; 16] = [
+    pub const ALL: [EditOperation; 17] = [
         EditOperation::CreateObject,
         EditOperation::MoveObject,
         EditOperation::DeleteObject,
@@ -257,6 +262,7 @@ impl EditOperation {
         EditOperation::AddEffect,
         EditOperation::DeleteEffect,
         EditOperation::SetEffectEnabled,
+        EditOperation::MoveEffect,
         EditOperation::SetLayerState,
         EditOperation::SetSelection,
         EditOperation::CreateObjectSection,
@@ -278,6 +284,7 @@ impl EditOperation {
             EditOperation::AddEffect => OPERATION_ADD_EFFECT,
             EditOperation::DeleteEffect => OPERATION_DELETE_EFFECT,
             EditOperation::SetEffectEnabled => OPERATION_SET_EFFECT_ENABLED,
+            EditOperation::MoveEffect => OPERATION_MOVE_EFFECT,
             EditOperation::SetLayerState => OPERATION_SET_LAYER_STATE,
             EditOperation::SetSelection => OPERATION_SET_SELECTION,
             EditOperation::CreateObjectSection => OPERATION_CREATE_OBJECT_SECTION,
@@ -408,6 +415,7 @@ impl KnownOperation {
                 | EditOperation::AddEffect
                 | EditOperation::DeleteEffect
                 | EditOperation::SetEffectEnabled
+                | EditOperation::MoveEffect
                 | EditOperation::SetLayerState
                 | EditOperation::SetSelection
                 | EditOperation::CreateObjectSection
@@ -1069,6 +1077,7 @@ mod tests {
         assert_eq!(OPERATION_ADD_EFFECT, "add_effect");
         assert_eq!(OPERATION_DELETE_EFFECT, "delete_effect");
         assert_eq!(OPERATION_SET_EFFECT_ENABLED, "set_effect_enabled");
+        assert_eq!(OPERATION_MOVE_EFFECT, "move_effect");
         assert_eq!(OPERATION_SET_LAYER_STATE, "set_layer_state");
         assert_eq!(OPERATION_SET_SELECTION, "set_selection");
         assert_eq!(OPERATION_CREATE_OBJECT_SECTION, "create_object_section");
@@ -1106,6 +1115,7 @@ mod tests {
             EditOperation::SetEffectEnabled.as_str(),
             OPERATION_SET_EFFECT_ENABLED
         );
+        assert_eq!(EditOperation::MoveEffect.as_str(), OPERATION_MOVE_EFFECT);
         assert_eq!(
             EditOperation::SetLayerState.as_str(),
             OPERATION_SET_LAYER_STATE
@@ -1219,6 +1229,7 @@ mod tests {
                 | EditOperation::AddEffect
                 | EditOperation::DeleteEffect
                 | EditOperation::SetEffectEnabled
+                | EditOperation::MoveEffect
                 | EditOperation::SetLayerState
                 | EditOperation::SetSelection
                 | EditOperation::CreateObjectSection
@@ -1242,6 +1253,7 @@ mod tests {
         assert_listed(EditOperation::AddEffect);
         assert_listed(EditOperation::DeleteEffect);
         assert_listed(EditOperation::SetEffectEnabled);
+        assert_listed(EditOperation::MoveEffect);
         assert_listed(EditOperation::SetLayerState);
         assert_listed(EditOperation::SetSelection);
         assert_listed(EditOperation::CreateObjectSection);
@@ -1250,7 +1262,7 @@ mod tests {
         assert_listed(EditOperation::SetGridBpm);
         assert_listed(EditOperation::SetSceneSettings);
         assert_listed(EditOperation::ApplyBatch);
-        assert_eq!(EditOperation::ALL.len(), 16);
+        assert_eq!(EditOperation::ALL.len(), 17);
     }
 
     /// [`ReadOperation::ALL`] が全 variant を含むことを固定する。
@@ -1380,6 +1392,7 @@ mod tests {
                 | EditOperation::AddEffect
                 | EditOperation::DeleteEffect
                 | EditOperation::SetEffectEnabled
+                | EditOperation::MoveEffect
                 | EditOperation::SetLayerState
                 | EditOperation::SetSelection
                 | EditOperation::CreateObjectSection

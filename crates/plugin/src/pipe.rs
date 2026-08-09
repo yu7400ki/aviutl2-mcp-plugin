@@ -2327,6 +2327,13 @@ mod tests {
             Err(Self::unavailable())
         }
 
+        fn move_effect(
+            &self,
+            _: &aviutl2_mcp_core::MoveEffectParams,
+        ) -> Result<aviutl2_mcp_core::EditOutcome, crate::edit::EditError> {
+            Err(Self::unavailable())
+        }
+
         fn set_layer_state(
             &self,
             _: &aviutl2_mcp_core::SetLayerStateParams,

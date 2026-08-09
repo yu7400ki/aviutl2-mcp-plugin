@@ -695,6 +695,7 @@ pub(crate) const MUTATIONS: &[&str] = &[
     "create_effect",
     "delete_effect",
     "set_effect_enable",
+    "move_effect",
     "set_effect_item_value",
     "set_layer_name",
     "set_layer_enable",

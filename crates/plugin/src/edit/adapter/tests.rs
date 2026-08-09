@@ -21,7 +21,7 @@ use aviutl2_mcp_core::{
     ApplyBatchParams, BatchOperation, CreateObjectSectionParams, CursorPosition,
     DeleteObjectSectionParams, Destination, EditOperation, EffectFlags, EffectItem, EffectItemType,
     EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm, ItemChoices,
-    ItemFacets, ItemRange, ItemValue, LayerNameChange, MAX_GRID_BPM_ENTRIES,
+    ItemFacets, ItemRange, ItemValue, LayerNameChange, MAX_GRID_BPM_ENTRIES, MoveEffectParams,
     MoveObjectSectionParams, Movement, ObjectSectionsOutcome, ObjectSelector, Placement, SceneSize,
     TableSource,
 };
@@ -4562,6 +4562,18 @@ fn each_operation_fills_the_outcome_it_is_defined_to_fill() {
     assert!(outcome.object.is_some());
     assert!(outcome.effect.is_some());
     assert!(outcome.created.is_empty());
+
+    let harness = Harness::new();
+    let outcome = harness
+        .edit
+        .move_effect(&MoveEffectParams {
+            selector: harness.effect_selector(1, 100, "ぼかし", 0),
+            position: 0,
+        })
+        .expect("move_effect");
+    assert!(outcome.object.is_some());
+    assert!(outcome.effect.is_some());
+    assert!(outcome.created.is_empty());
 }
 
 // -------------------------------------------------------------- panic の境界
@@ -5564,6 +5576,15 @@ fn content_edit(operation: EditOperation) -> Option<ContentEdit> {
                 })
                 .map(revision_of)
         },
+        EditOperation::MoveEffect => |harness: &Harness, target| {
+            harness
+                .edit
+                .move_effect(&MoveEffectParams {
+                    selector: harness.effect_selector_of(target, "ぼかし", 0),
+                    position: 0,
+                })
+                .map(revision_of)
+        },
         EditOperation::SetLayerState => |harness: &Harness, target: ObjectSelector| {
             let ObjectSelector {
                 project_epoch,
@@ -5769,6 +5790,7 @@ fn locked_layer(operation: EditOperation) -> Option<LockedLayer> {
         | EditOperation::AddEffect
         | EditOperation::DeleteEffect
         | EditOperation::SetEffectEnabled
+        | EditOperation::MoveEffect
         // ロックを外す手段そのものをロックで止めると、行き止まりが解けなくなる。
         | EditOperation::SetLayerState
         // BPM グリッドとシーン設定はシーンに属し、どのレイヤーの対象にも触れない。
@@ -6343,6 +6365,60 @@ fn section_precondition_failures(harness: &Harness) -> Vec<EditError> {
 /// 中間点を 3 つ持つ一式を組み、事前確認が実際に返した失敗を集める。
 pub(crate) fn produced_section_precondition_failures() -> Vec<EditError> {
     section_precondition_failures(&harness_with_sections())
+}
+
+/// 理由を実際に起こす要求を、編集手順へ通した結果として並べる。
+///
+/// [`EffectPreconditionReason`] に対する網羅 `match` であり `_` を使わない。
+/// 理由を足すとここが落ち、それを起こす要求を書くまでコンパイルできない。
+fn effect_precondition_case(
+    harness: &Harness,
+    reason: &EffectPreconditionReason,
+) -> Vec<EditError> {
+    match reason {
+        EffectPreconditionReason::PositionOutOfRange => {
+            // 既定の対象は effect を 2 つ持つ。列の長さちょうどと、それより
+            // 先の位置の双方を落とす。
+            [2, 7]
+                .into_iter()
+                .map(|position| {
+                    harness
+                        .edit
+                        .move_effect(&MoveEffectParams {
+                            selector: harness.effect_selector(1, 100, "ぼかし", 0),
+                            position,
+                        })
+                        .expect_err("列の長さ以上の移動先が受理されました")
+                })
+                .collect()
+        }
+    }
+}
+
+/// 編集手順が実際に返した effect の前提条件の失敗を集める。
+pub(crate) fn produced_effect_precondition_failures() -> Vec<EditError> {
+    let harness = Harness::new();
+    let mut produced = Vec::new();
+    for reason in EffectPreconditionReason::ALL {
+        let failures = effect_precondition_case(&harness, reason);
+        assert!(
+            !failures.is_empty(),
+            "{} を起こす要求がありません",
+            reason.as_str()
+        );
+        for failure in &failures {
+            assert_eq!(
+                failure.details()["reason"],
+                json!(reason.as_str()),
+                "{} を起こすはずの要求が別の失敗を返しました",
+                reason.as_str()
+            );
+        }
+        produced.extend(failures);
+    }
+    // 事前確認は変更を 1 つも発行しない。
+    harness.assert_untouched();
+    produced
 }
 
 #[test]
@@ -7277,6 +7353,30 @@ fn unsupported_target_case(reason: &UnsupportedReason) -> Vec<EditError> {
                         enabled: false,
                     })
                     .expect_err("無言で無視された変更が成功として返りました"),
+            ]
+        }
+        UnsupportedReason::EffectNotMovable => {
+            // 種別が既知でフィルタでない対象は発行の前に落ち、種別から判断
+            // できない対象はホストが動かさなかったときに落ちる。**どちらも
+            // 同じ事実を述べるため、同じ名前を名乗る。**
+            let refused_by_type = Harness::new();
+            let ignored_by_host =
+                Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::IgnoreEffectMove)));
+            vec![
+                refused_by_type
+                    .edit
+                    .move_effect(&MoveEffectParams {
+                        selector: refused_by_type.effect_selector(1, 100, "動画ファイル", 0),
+                        position: 1,
+                    })
+                    .expect_err("フィルタでない effect を動かせました"),
+                ignored_by_host
+                    .edit
+                    .move_effect(&MoveEffectParams {
+                        selector: ignored_by_host.effect_selector(1, 100, "ぼかし", 0),
+                        position: 0,
+                    })
+                    .expect_err("無言で無視された移動が成功として返りました"),
             ]
         }
         UnsupportedReason::MediaNotSupported => {

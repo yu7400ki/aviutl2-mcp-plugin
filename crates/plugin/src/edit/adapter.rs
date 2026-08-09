@@ -16,14 +16,16 @@ use crate::alias::AdmittedAlias;
 use crate::edit::EditAdapter;
 use crate::edit::batch;
 use crate::edit::error::{
-    EditError, ItemRestore, OccupiedRange, SectionPreconditionReason, UnsupportedReason,
+    EditError, EffectPreconditionReason, ItemRestore, OccupiedRange, SectionPreconditionReason,
+    UnsupportedReason,
 };
 use crate::edit::host::{EditHost, HostSelection, SceneEditor};
 use crate::edit::precondition::{
     Boundary, EditKind, ExpectedEpoch, MutationPermit, MutationTicket, verify_boundary,
 };
 use crate::edit::resolve::{
-    ResolvedEffect, ResolvedObject, resolve_effect, resolve_object, resolve_object_with_effects,
+    ResolvedEffect, ResolvedObject, resolve_effect, resolve_effect_of, resolve_object,
+    resolve_object_with_effects,
 };
 use crate::project::ProjectState;
 use crate::read::ReadError;
@@ -34,11 +36,11 @@ use aviutl2_mcp_core::{
     CreateObjectParams, CreateObjectSectionParams, Cursor, DeleteEffectParams, DeleteObjectParams,
     DeleteObjectSectionParams, DisplayRange, DisplayStart, EditOutcome, EffectInfo, EffectType,
     FocusChange, FrameRange, GridBpmOutcome, ItemValue, ItemWrite, ItemWriteError, LayerInfo,
-    LayerStateOutcome, MoveObjectParams, MoveObjectSectionParams, Movement, ObjectSectionsOutcome,
-    ObjectSelector, ObjectSource, ObjectSummary, ObservedSelection, RangeChange, ReadBackCheck,
-    SceneSettingsOutcome, SectionRange, SelectionField, SelectionState, SetEffectEnabledParams,
-    SetGridBpmParams, SetLayerStateParams, SetObjectItemParams, SetObjectNameParams,
-    SetSceneSettingsParams, SetSelectionParams, TrackWriteTarget,
+    LayerStateOutcome, MoveEffectParams, MoveObjectParams, MoveObjectSectionParams, Movement,
+    ObjectSectionsOutcome, ObjectSelector, ObjectSource, ObjectSummary, ObservedSelection,
+    RangeChange, ReadBackCheck, SceneSettingsOutcome, SectionRange, SelectionField, SelectionState,
+    SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
+    SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams, TrackWriteTarget,
     movement_check_reads_current_value, prepare_item_write, write_drops_existing_movement,
 };
 use std::ops::RangeInclusive;
@@ -216,6 +218,34 @@ impl<H: EditHost> HostEditAdapter<H> {
         if effect.effect_type == EffectType::Output {
             return Err(EditError::UnsupportedTarget {
                 reason: UnsupportedReason::EffectStateImmutable,
+            });
+        }
+        Ok(())
+    }
+
+    /// 順序を動かせないと分かる対象を、編集区間へ入る前に弾く。
+    ///
+    /// 判定の位置づけは [`Self::ensure_effect_enabled_writable`] と同じである。
+    /// 順序を動かせるのはフィルタ効果だけであり、**カタログの種別が既知で
+    /// フィルタでない対象**をここで落とす。
+    ///
+    /// **カタログに無い effect と、種別が未知の effect は通す。** 我々がモデル化
+    /// していない種別を我々の都合で拒まない。判定は発行後の読み直しが引き受ける。
+    fn ensure_effect_movable(&self, effect_name: &str) -> Result<(), EditError> {
+        let catalog = guard(|| self.host.effect_catalog())?;
+        let Some(effect) = catalog.iter().find(|effect| effect.name == effect_name) else {
+            return Ok(());
+        };
+        let known_non_filter = match effect.effect_type {
+            EffectType::Filter | EffectType::Unknown(_) => false,
+            EffectType::Input
+            | EffectType::Transition
+            | EffectType::Control
+            | EffectType::Output => true,
+        };
+        if known_non_filter {
+            return Err(EditError::UnsupportedTarget {
+                reason: UnsupportedReason::EffectNotMovable,
             });
         }
         Ok(())
@@ -403,6 +433,37 @@ fn ensure_section_exists(sections: &[SectionRange], section: usize) -> Result<()
     Err(EditError::SectionPrecondition {
         reason: SectionPreconditionReason::SectionIndexOutOfRange,
     })
+}
+
+/// 移動先が、いま読み直した effect の列を指していることを確かめる。
+///
+/// 位置の値域は要求内容だけの検証で済んでいるため、ここで見るのは列の長さとの
+/// 比較だけである。列の長さは対象の現在の状態であり、要求元の手元では確定しない。
+///
+/// ホストが範囲外の移動先を切り詰めるかどうかは問わない。切り詰めるなら要求と
+/// 違う位置で成功を返すことになり、切り詰めないなら理由の読めない失敗になる。
+fn ensure_effect_position_in_range(count: usize, position: usize) -> Result<(), EditError> {
+    if position < count {
+        return Ok(());
+    }
+    Err(EditError::EffectPrecondition {
+        reason: EffectPreconditionReason::PositionOutOfRange,
+    })
+}
+
+/// 移動の前後で同じ effect を指しているかを判定する。
+///
+/// 比べるのは名前・有効・ロック・設定項目の値である。fingerprint は材料に列の
+/// 位置と effect の総数を含むため、移動が成功すれば必ず変わる。同名 effect の
+/// 順序も、同名の 1 件を動かせば入れ替わる。
+///
+/// **同じ材料を持つ effect が 2 つ並んでいる場合は区別できない。** 区別する必要
+/// が無い——観測できる状態が同じであれば、要求した状態は達成されている。
+fn is_same_effect(before: &EffectInfo, after: &EffectInfo) -> bool {
+    before.name == after.name
+        && before.enabled == after.enabled
+        && before.locked == after.locked
+        && before.items == after.items
 }
 
 /// 中間点の移動先が隣の中間点を越えないことを確かめる。
@@ -1335,6 +1396,76 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                     },
                 ));
             }
+            Ok(EditOutcome::effect_changed(
+                boundary.epoch(),
+                permit.project_revision(&boundary),
+                summary,
+                info,
+            ))
+        })
+    }
+
+    fn move_effect(&self, params: &MoveEffectParams) -> Result<EditOutcome, EditError> {
+        self.ensure_editable()?;
+        self.ensure_effect_movable(&params.selector.effect_name)?;
+        let project = self.project.as_ref();
+
+        self.edit_section(move |editor| {
+            let boundary = verify_boundary(
+                project,
+                editor.entry_edit_info(),
+                ExpectedEpoch::Absent,
+                EditKind::Content,
+                &[],
+                &[&params.selector.object],
+            )?;
+            // 移動先が列に収まるかを見るため、対象と一緒に列の長さを得る。
+            let (object, effects) =
+                resolve_object_with_effects(editor, &boundary, &params.selector.object)?;
+            let effect = resolve_effect_of(editor, &object, &effects, &params.selector)?;
+            ensure_effect_position_in_range(effects.len(), params.position)?;
+            // 移動で変わらない材料を控える。列の位置も同名内の順序も動くため、
+            // fingerprint は同一性の材料にならない。
+            let moved = effect.info().clone();
+            let from = effect.position();
+            let count_before = effects.len();
+
+            let permit = boundary.issue_permit(project)?;
+            // 移動先が現在位置と同じでも短絡しない。成功を我々が決めることに
+            // なり、他の編集と性質が変わる。
+            let reported_position = permit.issue(&boundary, |ticket| {
+                editor.move_effect(ticket, &object, &effect, params.position)
+            })?;
+
+            let (summary, effects) = attribute(
+                &permit,
+                &boundary,
+                reread_with_effects(editor, &boundary, object.layer(), object.frame_start()),
+            )?;
+            let not_applied = |reason| {
+                permit.attribute(
+                    &boundary,
+                    EditError::EffectMoveNotApplied {
+                        reason,
+                        reported_position,
+                    },
+                )
+            };
+            // 移動は effect を増やしも減らしもしない。
+            if effects.len() != count_before {
+                return Err(not_applied(UnsupportedReason::ChangeNotApplied));
+            }
+            let at = |position| effect_info_at(&summary.selector, &effects, position);
+            let Some(info) = at(params.position).filter(|info| is_same_effect(&moved, info)) else {
+                // 移動先に居るのが動かした effect でなければ、元の位置を見る。
+                // 残っていればホストが動かさず、居なければ要求と違う位置へ
+                // 動いている。
+                let reason = match at(from).is_some_and(|info| is_same_effect(&moved, &info)) {
+                    true => UnsupportedReason::EffectNotMovable,
+                    false => UnsupportedReason::ChangeNotApplied,
+                };
+                return Err(not_applied(reason));
+            };
             Ok(EditOutcome::effect_changed(
                 boundary.epoch(),
                 permit.project_revision(&boundary),

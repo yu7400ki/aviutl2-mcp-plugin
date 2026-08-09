@@ -178,6 +178,7 @@ fn edit_failures() -> Vec<EditError> {
         .chain(crate::edit::adapter::tests::produced_movement_loss_failures())
         .chain(crate::edit::sdk::tests::failures_that_never_reached_the_sdk())
         .chain(crate::edit::adapter::tests::produced_section_precondition_failures())
+        .chain(crate::edit::adapter::tests::produced_effect_precondition_failures())
         .chain(syntax_failures().into_iter().map(EditError::ItemWrite))
         .chain(ItemWriteError::all().into_iter().map(EditError::ItemWrite))
         // 受け入れ規則の失敗は一覧では捨てられ、作成でだけ応答へ載る。載る側の

@@ -10,9 +10,10 @@ use crate::artifact::{Artifact, ArtifactStore, ArtifactStoreError, base_dir_for_
 use crate::discovery::{DiscoveryConfig, list_registered_instances, resolve_instance};
 use crate::mcp::edit_input::{
     AddEffectInput, ApplyBatchInput, CreateObjectInput, CreateObjectSectionInput,
-    DeleteEffectInput, DeleteObjectInput, DeleteObjectSectionInput, MoveObjectInput,
-    MoveObjectSectionInput, SetEffectEnabledInput, SetGridBpmInput, SetLayerStateInput,
-    SetObjectItemInput, SetObjectNameInput, SetSceneSettingsInput, SetSelectionInput,
+    DeleteEffectInput, DeleteObjectInput, DeleteObjectSectionInput, MoveEffectInput,
+    MoveObjectInput, MoveObjectSectionInput, SetEffectEnabledInput, SetGridBpmInput,
+    SetLayerStateInput, SetObjectItemInput, SetObjectNameInput, SetSceneSettingsInput,
+    SetSelectionInput,
 };
 use crate::mcp::input::{
     DescribeEffectsInput, GetEffectItemValuesInput, GetObjectInput, GetSelectionInput,
@@ -37,7 +38,7 @@ use aviutl2_mcp_core::{
     OPERATION_GET_EDIT_INFO, OPERATION_GET_EFFECT_ITEM_VALUES, OPERATION_GET_OBJECT,
     OPERATION_GET_SELECTION, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_FONTS,
     OPERATION_LIST_LAYERS, OPERATION_LIST_MODULES, OPERATION_LIST_OBJECT_ALIASES,
-    OPERATION_LIST_OBJECTS, OPERATION_LIST_PALETTES, OPERATION_MOVE_OBJECT,
+    OPERATION_LIST_OBJECTS, OPERATION_LIST_PALETTES, OPERATION_MOVE_EFFECT, OPERATION_MOVE_OBJECT,
     OPERATION_MOVE_OBJECT_SECTION, OPERATION_RENDER_FRAME, OPERATION_SET_EFFECT_ENABLED,
     OPERATION_SET_GRID_BPM, OPERATION_SET_LAYER_STATE, OPERATION_SET_OBJECT_ITEM,
     OPERATION_SET_OBJECT_NAME, OPERATION_SET_SCENE_SETTINGS, OPERATION_SET_SELECTION, ObjectDetail,
@@ -1434,6 +1435,56 @@ impl AviUtl2McpServer {
         .await
     }
 
+    /// effect を effect 列の別の位置へ動かす。
+    /// position は列全体での 0 始まりの位置であり、get_object の effects 配列の
+    /// 添字と同じ数え方である。同名 effect の順序を表す effect_index とは別の値である。
+    /// 順序を動かせるのはフィルタ効果だけであり、入力 item・出力 item は
+    /// unsupported_operation（effect_not_movable）となる。
+    /// position が effect の件数以上の場合は precondition_failed
+    /// （effect_position_out_of_range）となり、変更は発行されない。
+    /// 応答の effect には移動後に読み直した effect が入る。
+    /// 成功すると、要求に使った selector は使えなくなる——列の位置が変われば
+    /// fingerprint が変わり、同名 effect があれば effect_index も入れ替わる。
+    /// 続けて同じ effect を編集する場合は応答の effect.selector を使う。
+    /// 移動は間にある effect の位置もずらすため、兄弟 effect を編集するには
+    /// get_object を引き直す。
+    #[tool(
+        name = "move_effect",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        output_schema = crate::mcp::output_schema::as_tool_schema(
+            crate::mcp::output_schema::move_effect()
+        )
+    )]
+    pub async fn move_effect(
+        &self,
+        Parameters(input): Parameters<MoveEffectInput>,
+    ) -> CallToolResult {
+        let registry_dir = self.registry_dir();
+        let CallBudgets { limits, discovery } = self.call_budgets();
+        self.run("move_effect", move || {
+            let instance_id = parse_instance_id(&input.instance_id)?;
+            let params = input.to_params()?;
+            let result: EditOutcome = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                discovery,
+                OPERATION_MOVE_EFFECT,
+                &params,
+            )?;
+            Ok(ToolSuccess {
+                text: describe::move_effect(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
     /// オブジェクトから effect を削除する。
     /// 対象が既に失われている場合は not_found となり、追加の変更は起きない。
     /// 応答は effect を返さない（常に null）。
@@ -2687,6 +2738,7 @@ mod tests {
             | "set_object_item"
             | "add_effect"
             | "set_effect_enabled"
+            | "move_effect"
             | "delete_effect"
             | "delete_object"
             | "create_object_section"
@@ -2780,6 +2832,8 @@ mod tests {
         ("set_object_item", false, true),
         ("add_effect", false, false),
         ("set_effect_enabled", false, true),
+        // 同じ位置へ 2 度動かしても列は同じ状態になる。
+        ("move_effect", false, true),
         ("delete_effect", true, true),
         ("delete_object", true, true),
         // 中間点の作成は作成系だが冪等と名乗る。あるフレームは境界であるか
@@ -2852,6 +2906,7 @@ mod tests {
             | "set_object_item"
             | "add_effect"
             | "set_effect_enabled"
+            | "move_effect"
             | "delete_effect"
             | "delete_object"
             | "create_object_section"
@@ -2936,7 +2991,7 @@ mod tests {
         assert_eq!(names, expected);
         // 件数そのものも固定する。router と表の両方から同じ tool を落とすと、
         // 集合の一致だけでは検出できない。
-        assert_eq!(names.len(), 31, "公開する tool の数が変わりました");
+        assert_eq!(names.len(), 32, "公開する tool の数が変わりました");
     }
 
     /// 共有設定を与えたサーバー。
@@ -3134,6 +3189,7 @@ mod tests {
             "set_object_item" => schema::set_object_item(),
             "add_effect" => schema::add_effect(),
             "set_effect_enabled" => schema::set_effect_enabled(),
+            "move_effect" => schema::move_effect(),
             "delete_effect" => schema::delete_effect(),
             "delete_object" => schema::delete_object(),
             "create_object_section" => schema::create_object_section(),
@@ -3914,28 +3970,38 @@ mod tests {
         );
     }
 
-    /// effect の増減が兄弟 effect の selector も無効にすることを述べる tool。
+    /// effect の列の変化が兄弟 effect の selector も無効にすることを述べる tool。
     ///
-    /// **述べる場所は層 1 である。** 起こすのはこの 2 tool だけであり、
-    /// 反復句にならない。加えて、応答が返すのは足した／消した effect の selector
-    /// だけであるため、共有の selector 型が述べる「応答が返した新しい selector へ
-    /// 持ち替える」では兄弟を回復できない——回復の手段（get_object を引き直す）を
-    /// 名指しできるのは、増減を起こす tool の説明だけである。
-    const TOOLS_THAT_INVALIDATE_SIBLING_EFFECTS: &[&str] = &["add_effect", "delete_effect"];
+    /// **述べる場所は層 1 である。** 起こすのはこの 3 tool だけであり、
+    /// 反復句にならない。加えて、応答が返すのは足した／消した／動かした effect の
+    /// selector だけであるため、共有の selector 型が述べる「応答が返した新しい
+    /// selector へ持ち替える」では兄弟を回復できない——回復の手段（get_object を
+    /// 引き直す）を名指しできるのは、列を変える tool の説明だけである。
+    ///
+    /// 第 2 要素は、その tool が兄弟を巻き込む理由を述べる語句である。増減と
+    /// 移動では巻き込み方が違うため、同じ 1 文にはならない。
+    const TOOLS_THAT_INVALIDATE_SIBLING_EFFECTS: &[(&str, &str)] = &[
+        (
+            "add_effect",
+            "effect の増減は、同じオブジェクトが持つ他の effect の selector も無効にする",
+        ),
+        (
+            "delete_effect",
+            "effect の増減は、同じオブジェクトが持つ他の effect の selector も無効にする",
+        ),
+        ("move_effect", "移動は間にある effect の位置もずらす"),
+    ];
 
     #[test]
-    fn the_tools_that_add_or_remove_an_effect_say_the_siblings_go_stale() {
+    fn the_tools_that_change_the_effect_column_say_the_siblings_go_stale() {
         // 実測では、effect を足して消すとオブジェクトと兄弟 effect の fingerprint が
         // いずれも足す前の値へ完全に戻った。fingerprint は純粋な内容ハッシュで
-        // あり、増減は兄弟まで巻き込む。述べなければ、要求元は手元の兄弟 selector を
-        // 使い続けて precondition_failed を踏み、対象を読み直すことになる。
-        for name in TOOLS_THAT_INVALIDATE_SIBLING_EFFECTS {
+        // あり、列の変化は兄弟まで巻き込む。述べなければ、要求元は手元の兄弟
+        // selector を使い続けて precondition_failed を踏み、対象を読み直すことに
+        // なる。
+        for (name, cause) in TOOLS_THAT_INVALIDATE_SIBLING_EFFECTS {
             let description = description_of(name);
-            for phrase in [
-                "effect の増減は、同じオブジェクトが持つ他の effect の selector も無効にする",
-                "兄弟 effect",
-                "get_object を引き直す",
-            ] {
+            for phrase in [*cause, "兄弟 effect", "get_object を引き直す"] {
                 assert!(
                     description.contains(phrase),
                     "{name} の説明が {phrase} に触れていません: {description}"
@@ -3944,7 +4010,10 @@ mod tests {
         }
         // 起こさない tool が述べると、掛からない制約として読まれる。
         for name in edit_like_tools() {
-            if TOOLS_THAT_INVALIDATE_SIBLING_EFFECTS.contains(&name) {
+            if TOOLS_THAT_INVALIDATE_SIBLING_EFFECTS
+                .iter()
+                .any(|(listed, _)| *listed == name)
+            {
                 continue;
             }
             assert!(
@@ -4227,6 +4296,7 @@ mod tests {
             | "set_object_item"
             | "add_effect"
             | "set_effect_enabled"
+            | "move_effect"
             | "delete_effect"
             | "delete_object"
             | "set_selection"
@@ -4480,6 +4550,7 @@ mod tests {
             | "set_object_item"
             | "add_effect"
             | "set_effect_enabled"
+            | "move_effect"
             | "delete_effect"
             | "delete_object"
             | "set_layer_state"
@@ -4883,6 +4954,7 @@ mod tests {
             | "set_object_item"
             | "add_effect"
             | "set_effect_enabled"
+            | "move_effect"
             | "delete_effect"
             | "set_selection"
             // BPM グリッドとシーン設定はシーンに属し、どのレイヤーの対象にも
@@ -4937,6 +5009,7 @@ mod tests {
             | "set_object_item"
             | "add_effect"
             | "set_effect_enabled"
+            | "move_effect"
             | "delete_effect"
             | "delete_object"
             | "set_selection"
@@ -4984,7 +5057,7 @@ mod tests {
             .collect();
         assert_eq!(
             returning.len(),
-            11,
+            12,
             "現在の姿を返す tool の数が変わりました: {returning:?}"
         );
     }
@@ -6091,6 +6164,7 @@ mod tests {
                 | Edit::AddEffect
                 | Edit::DeleteEffect
                 | Edit::SetEffectEnabled
+                | Edit::MoveEffect
                 | Edit::SetLayerState
                 | Edit::SetSelection
                 | Edit::CreateObjectSection

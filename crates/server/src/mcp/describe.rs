@@ -459,6 +459,11 @@ pub fn set_effect_enabled(outcome: &EditOutcome) -> String {
     changed_effect("effect の有効・無効を変更しました", outcome)
 }
 
+/// `move_effect` の text content。
+pub fn move_effect(outcome: &EditOutcome) -> String {
+    changed_effect("effect の順序を変更しました", outcome)
+}
+
 /// `delete_effect` の text content。
 pub fn delete_effect(outcome: &EditOutcome) -> String {
     changed_object("effect を削除しました", outcome)
@@ -1450,6 +1455,7 @@ mod tests {
             ("set_object_item", set_object_item(&effect_changed)),
             ("add_effect", add_effect(&effect_changed)),
             ("set_effect_enabled", set_effect_enabled(&effect_changed)),
+            ("move_effect", move_effect(&effect_changed)),
             ("delete_effect", delete_effect(&object_changed)),
             ("delete_object", delete_object(&deleted)),
             (

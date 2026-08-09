@@ -291,6 +291,7 @@ fn expected_annotations(name: &str) -> (bool, bool, bool) {
         | "set_object_name"
         | "set_object_item"
         | "set_effect_enabled"
+        | "move_effect"
         | "set_layer_state"
         | "set_selection"
         | "create_object_section"
@@ -1915,7 +1916,7 @@ fn a_corrupt_settings_file_leaves_every_tool_listed() {
     requests.push(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let session = run_session(&registry_dir, &requests);
 
-    assert_eq!(listed_tool_names(&session.response(2)).len(), 31);
+    assert_eq!(listed_tool_names(&session.response(2)).len(), 32);
     assert!(
         session.stderr.contains("設定を読み込めませんでした"),
         "破損が記録されていません: {}",
@@ -2138,7 +2139,7 @@ fn tools_list_changed_arrives_only_when_the_enabled_set_changes() {
     let session = server.finish();
     let before = listed_tool_names(&session.response(2));
     let after = listed_tool_names(&session.response(3));
-    assert_eq!(before.len(), 31, "{before:?}");
+    assert_eq!(before.len(), 32, "{before:?}");
     assert!(!after.contains(&"delete_object".to_string()), "{after:?}");
     assert_eq!(
         tool_list_changed_count(&session),

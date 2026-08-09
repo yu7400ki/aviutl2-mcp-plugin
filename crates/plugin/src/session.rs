@@ -24,7 +24,7 @@ use aviutl2_mcp_core::{
     GetSelectionParams, InstanceId, InstanceState, KnownOperation, LimitOutOfRange,
     ListAvailableEffectsParams, ListFontsParams, ListFontsResult, ListLayersParams,
     ListLayersResult, ListModulesParams, ListModulesResult, ListObjectAliasesParams,
-    ListObjectsParams, ListObjectsResult, ListPalettesParams, MoveObjectParams,
+    ListObjectsParams, ListObjectsResult, ListPalettesParams, MoveEffectParams, MoveObjectParams,
     MoveObjectSectionParams, Nonce, ObjectFilterError, PageWindow, PongProject, PongResult,
     ProtocolVersion, ReadOperation, RenderFrameParams, RenderFrameResult, RenderInputError,
     RenderOperation, RequestEnvelope, RequestId, ResponseEnvelope, ResponseKind, ResponseResult,
@@ -1080,6 +1080,7 @@ enum EditRequest {
     AddEffect(Box<AddEffectParams>),
     DeleteEffect(Box<DeleteEffectParams>),
     SetEffectEnabled(Box<SetEffectEnabledParams>),
+    MoveEffect(Box<MoveEffectParams>),
     SetLayerState(Box<SetLayerStateParams>),
     SetSelection(Box<SetSelectionParams>),
     CreateObjectSection(Box<CreateObjectSectionParams>),
@@ -1128,6 +1129,7 @@ fn decode_edit_request(
         EditOperation::SetEffectEnabled => {
             decoded!(SetEffectEnabledParams, EditRequest::SetEffectEnabled)
         }
+        EditOperation::MoveEffect => decoded!(MoveEffectParams, EditRequest::MoveEffect),
         EditOperation::SetLayerState => {
             decoded!(SetLayerStateParams, EditRequest::SetLayerState)
         }
@@ -1207,6 +1209,9 @@ fn dispatch_edit(adapter: &dyn EditAdapter, request: EditRequest) -> Result<Valu
         }
         EditRequest::SetEffectEnabled(params) => {
             to_result(&adapter.set_effect_enabled(&params).map_err(edit_error)?)
+        }
+        EditRequest::MoveEffect(params) => {
+            to_result(&adapter.move_effect(&params).map_err(edit_error)?)
         }
         EditRequest::SetLayerState(params) => {
             to_result(&adapter.set_layer_state(&params).map_err(edit_error)?)
@@ -3633,6 +3638,10 @@ mod edit_tests {
             Ok(self.enter("set_effect_enabled"))
         }
 
+        fn move_effect(&self, _: &MoveEffectParams) -> Result<EditOutcome, EditError> {
+            Ok(self.enter("move_effect"))
+        }
+
         fn set_scene_settings(
             &self,
             _: &SetSceneSettingsParams,
@@ -3750,6 +3759,10 @@ mod edit_tests {
                 "selector": fake_effect_selector(),
                 "enabled": true,
             }),
+            EditOperation::MoveEffect => json!({
+                "selector": fake_effect_selector(),
+                "position": 1,
+            }),
             EditOperation::SetLayerState => json!({
                 "expected_scene_id": SCENE_ID,
                 "layer": 1,
@@ -3809,6 +3822,7 @@ mod edit_tests {
             EditRequest::AddEffect(params) => serde_json::to_value(params),
             EditRequest::DeleteEffect(params) => serde_json::to_value(params),
             EditRequest::SetEffectEnabled(params) => serde_json::to_value(params),
+            EditRequest::MoveEffect(params) => serde_json::to_value(params),
             EditRequest::SetLayerState(params) => serde_json::to_value(params),
             EditRequest::SetSelection(params) => serde_json::to_value(params),
             EditRequest::CreateObjectSection(params) => serde_json::to_value(params),

@@ -574,7 +574,7 @@ mod tests {
     /// 一致しているかを誰も確かめない。`discriminator` は網羅 match であり、
     /// variant を足すとコンパイルが落ちる。
     ///
-    /// 併せて編集 operation の総数を見る。**編集 operation は 16 あるが、
+    /// 併せて編集 operation の総数を見る。**編集 operation は 17 あるが、
     /// 一括適用へ入るのは 2 つだけである**という関係が、拒否リストではなく
     /// 列挙の不在によって成り立っていることを、この 2 つの数が示す。
     #[test]
@@ -597,7 +597,7 @@ mod tests {
             discriminators,
             BTreeSet::from(["move_object".to_string(), "set_object_item".to_string()])
         );
-        assert_eq!(crate::operation::EditOperation::ALL.len(), 16);
+        assert_eq!(crate::operation::EditOperation::ALL.len(), 17);
     }
 
     /// sub-operation になれない編集 operation が復号の段で落ちることを固定する。
@@ -607,7 +607,10 @@ mod tests {
     /// 一覧の更新を促す。
     #[test]
     fn operation_types_that_cannot_be_sub_operations_are_rejected_by_the_decoder() {
-        // 一括適用の対象から外した 13 種。
+        // 一括適用の対象から外した 14 種。
+        //
+        // effect の順序の移動は、effect を対象とする operation が 1 つも
+        // 一括適用へ入っていない現状の境界に従う。
         //
         // 中間点の 3 つは戻り値から成否を知れるが、削除した中間点の移動
         // パラメータを復元する手段が無く、`delete_object_section` の逆操作を
@@ -626,6 +629,7 @@ mod tests {
             crate::operation::OPERATION_ADD_EFFECT,
             crate::operation::OPERATION_DELETE_EFFECT,
             crate::operation::OPERATION_SET_EFFECT_ENABLED,
+            crate::operation::OPERATION_MOVE_EFFECT,
             crate::operation::OPERATION_SET_LAYER_STATE,
             crate::operation::OPERATION_SET_SELECTION,
             crate::operation::OPERATION_CREATE_OBJECT_SECTION,

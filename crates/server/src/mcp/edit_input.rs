@@ -36,9 +36,10 @@ use aviutl2_mcp_core::{
     DeleteObjectSectionParams, Destination, DisplayStart, EditInputError, ErrorObject, FiniteF64,
     FocusChange, GridBpm, ItemValue, LayerNameChange, MAX_ALIAS_BYTES, MAX_BATCH_OPERATIONS,
     MAX_GRID_BPM_ENTRIES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MAX_POSITION,
-    MoveObjectParams, MoveObjectSectionParams, ObjectSource, Placement, RangeChange, SceneSize,
-    SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
-    SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams, TrackValue,
+    MoveEffectParams, MoveObjectParams, MoveObjectSectionParams, ObjectSource, Placement,
+    RangeChange, SceneSize, SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams,
+    SetObjectItemParams, SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams,
+    TrackValue,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -630,6 +631,33 @@ impl SetEffectEnabledInput {
         let params = SetEffectEnabledParams {
             selector: self.selector.to_selector()?,
             enabled: self.enabled,
+        };
+        params.validate().map_err(from_input_error)?;
+        Ok(params)
+    }
+}
+
+/// `move_effect` の入力。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MoveEffectInput {
+    /// 対象インスタンスの ID。
+    #[schemars(length(min = 36, max = 36), pattern(UUID_PATTERN))]
+    pub instance_id: String,
+    /// 動かす effect のセレクター。
+    pub selector: EffectSelectorInput,
+    /// 移動先の、effect 列全体での位置。0 始まり。
+    /// get_object の effects 配列の添字と同じ数え方であり、同名 effect の順序を表す effect_index とは別の値である。
+    #[schemars(range(max = MAX_POSITION))]
+    pub position: usize,
+}
+
+impl MoveEffectInput {
+    /// IPC の params へ変換する。
+    pub fn to_params(&self) -> Result<MoveEffectParams, ErrorObject> {
+        let params = MoveEffectParams {
+            selector: self.selector.to_selector()?,
+            position: self.position,
         };
         params.validate().map_err(from_input_error)?;
         Ok(params)
@@ -1232,6 +1260,11 @@ mod tests {
                 "selector": effect_selector_json(),
                 "enabled": true,
             }),
+            EditOperation::MoveEffect => json!({
+                "instance_id": SAMPLE_ID,
+                "selector": effect_selector_json(),
+                "position": 1,
+            }),
             EditOperation::SetLayerState => json!({
                 "instance_id": SAMPLE_ID,
                 "expected_scene_id": 3,
@@ -1312,6 +1345,7 @@ mod tests {
             EditOperation::AddEffect => decoded!(AddEffectInput),
             EditOperation::DeleteEffect => decoded!(DeleteEffectInput),
             EditOperation::SetEffectEnabled => decoded!(SetEffectEnabledInput),
+            EditOperation::MoveEffect => decoded!(MoveEffectInput),
             EditOperation::SetLayerState => decoded!(SetLayerStateInput),
             EditOperation::SetSelection => decoded!(SetSelectionInput),
             EditOperation::CreateObjectSection => decoded!(CreateObjectSectionInput),

@@ -209,6 +209,13 @@ pub fn set_effect_enabled() -> Value {
     edit_outcome(object_summary(), effect_info(), nothing_created())
 }
 
+/// `move_effect` の出力。
+///
+/// `effect` には移動後に読み直した値が入る。`position` が移動先である。
+pub fn move_effect() -> Value {
+    edit_outcome(object_summary(), effect_info(), nothing_created())
+}
+
 /// `delete_effect` の出力。
 ///
 /// effect は消えているため `effect` は必ず null になる。
@@ -1537,7 +1544,12 @@ mod tests {
             sample_effect_info(),
         );
         let value = to_value(&outcome);
-        for schema in [set_object_item(), add_effect(), set_effect_enabled()] {
+        for schema in [
+            set_object_item(),
+            add_effect(),
+            set_effect_enabled(),
+            move_effect(),
+        ] {
             assert_conforms(schema, &value);
         }
     }
@@ -1697,6 +1709,7 @@ mod tests {
             ("set_object_item", set_object_item()),
             ("add_effect", add_effect()),
             ("set_effect_enabled", set_effect_enabled()),
+            ("move_effect", move_effect()),
             ("set_selection", set_selection()),
         ] {
             if name == "set_selection" {
@@ -1732,7 +1745,12 @@ mod tests {
             sample_object_summary(),
         );
         let value = to_value(&outcome);
-        for schema in [set_object_item(), add_effect(), set_effect_enabled()] {
+        for schema in [
+            set_object_item(),
+            add_effect(),
+            set_effect_enabled(),
+            move_effect(),
+        ] {
             assert!(
                 check(&schema, &value, "$").is_err(),
                 "effect の欠落を検出できていません"

@@ -52,6 +52,12 @@ pub enum UnsupportedReason {
     EffectNotCreatable,
     /// 出力項目で有効・無効を変更できない。
     EffectStateImmutable,
+    /// その effect は列の中で順序を動かせない。
+    ///
+    /// 順序を動かせるのはフィルタ効果だけである。カタログの種別が既知で
+    /// フィルタでない対象は発行の前に落ち、種別から判断できない対象は発行後の
+    /// 読み直しがここへ落とす。
+    EffectNotMovable,
     /// SDK が対応しないメディアファイル。
     MediaNotSupported,
     /// 設定項目は存在するが、その種別への書き込みを公開していない。
@@ -82,6 +88,7 @@ impl UnsupportedReason {
         UnsupportedReason::EffectNotRegistered,
         UnsupportedReason::EffectNotCreatable,
         UnsupportedReason::EffectStateImmutable,
+        UnsupportedReason::EffectNotMovable,
         UnsupportedReason::MediaNotSupported,
         UnsupportedReason::ItemTypeNotWritable,
         UnsupportedReason::ChangeNotApplied,
@@ -94,6 +101,7 @@ impl UnsupportedReason {
             UnsupportedReason::EffectNotRegistered => "effect_not_registered",
             UnsupportedReason::EffectNotCreatable => "effect_not_creatable",
             UnsupportedReason::EffectStateImmutable => "effect_state_immutable",
+            UnsupportedReason::EffectNotMovable => "effect_not_movable",
             UnsupportedReason::MediaNotSupported => "media_not_supported",
             UnsupportedReason::ItemTypeNotWritable => "item_type_not_writable",
             UnsupportedReason::ChangeNotApplied => "change_not_applied",
@@ -110,6 +118,7 @@ impl std::fmt::Display for UnsupportedReason {
                 "指定された effect からはオブジェクトを作成できません"
             }
             UnsupportedReason::EffectStateImmutable => "対象 effect の有効・無効は変更できません",
+            UnsupportedReason::EffectNotMovable => "対象 effect は列の中で順序を動かせません",
             UnsupportedReason::MediaNotSupported => "対応していないメディアファイルです",
             UnsupportedReason::ItemTypeNotWritable => {
                 "この種別の設定項目への書き込みには対応していません"
@@ -222,6 +231,45 @@ impl std::fmt::Display for SectionPreconditionReason {
             }
             SectionPreconditionReason::SectionMoveCrossesBoundary => {
                 "移動先が隣の中間点を越えています"
+            }
+        };
+        f.write_str(text)
+    }
+}
+
+/// effect の変更が、読み直した effect の列の実態と食い違う理由。
+///
+/// 判定に使う値は対象の現在の状態であり、要求元が持っているのは読み取った時点の
+/// 複製である。その間に UI で effect が増減すれば、正しい手続きを踏んだ要求が
+/// 落ちる。復帰の手段は対象の読み直しであるため、要求の誤りではなく前提条件の
+/// 不整合として扱う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectPreconditionReason {
+    /// 移動先の位置が effect の列の長さ以上である。
+    PositionOutOfRange,
+}
+
+impl EffectPreconditionReason {
+    /// 全 variant。
+    ///
+    /// [`EffectPreconditionReason::as_str`] が返し得る名前を数え上げるために
+    /// 用いる。
+    pub const ALL: &'static [EffectPreconditionReason] =
+        &[EffectPreconditionReason::PositionOutOfRange];
+
+    /// 応答へ載せる機械可読な名前。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EffectPreconditionReason::PositionOutOfRange => "effect_position_out_of_range",
+        }
+    }
+}
+
+impl std::fmt::Display for EffectPreconditionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            EffectPreconditionReason::PositionOutOfRange => {
+                "指定された移動先は effect の列の長さを超えています"
             }
         };
         f.write_str(text)
@@ -482,6 +530,33 @@ pub enum EditError {
         /// 食い違いの内容。
         reason: SectionPreconditionReason,
     },
+    /// 読み直した effect の列の実態が要求と食い違う。
+    #[error("{reason}")]
+    EffectPrecondition {
+        /// 食い違いの内容。
+        reason: EffectPreconditionReason,
+    },
+    /// 発行した effect の移動が、読み直した列に現れていない。
+    ///
+    /// 移動 API は移動後のインデックスを返すが、その数が列全体を数えたものか
+    /// フィルタ効果だけを数えたものかを SDK は述べていない。可否を決めるのは
+    /// 列の読み直しだけであり、**ホストが返した値は判定に使わない。**
+    ///
+    /// **理由が 2 つに分かれる。** 元の位置に対象が残っていれば、ホストはその
+    /// effect を動かさなかった（[`UnsupportedReason::EffectNotMovable`]）。
+    /// 残っていなければ、動いた先が要求した位置ではない
+    /// （[`UnsupportedReason::ChangeNotApplied`]）。要求元にとって前者はその
+    /// effect の種別で永久に通らず、後者は列の解釈が食い違っている。
+    #[error("{reason}")]
+    EffectMoveNotApplied {
+        /// 食い違いの内容。
+        reason: UnsupportedReason,
+        /// ホストが名乗った移動後のインデックス。
+        ///
+        /// **可否の判定には使っていない。** 食い違いが起きたときに、どちらの
+        /// 解釈だったかを応答から読めるようにするために載せる。
+        reported_position: usize,
+    },
     /// 事前確認を通した中間点の変更を SDK が拒んだ。
     ///
     /// 食い違っているのは要求元ではなく我々と SDK である。要求元に直せることは
@@ -653,13 +728,16 @@ impl EditError {
             | EditError::LayerLocked { .. }
             | EditError::EpochMismatch { .. }
             | EditError::SectionPrecondition { .. }
+            | EditError::EffectPrecondition { .. }
             | EditError::EffectFingerprintMismatch => ErrorCode::PreconditionFailed,
             EditError::EffectNotFound { .. } => ErrorCode::NotFound,
             EditError::DuplicateTarget => ErrorCode::InvalidArgument,
             EditError::ItemWrite(error) => error.error_code(),
             EditError::ItemValueNotApplied { .. } => ErrorCode::UnsupportedOperation,
             EditError::MovementWouldBeLost { .. } => ErrorCode::UnsupportedOperation,
-            EditError::UnsupportedTarget { .. } => ErrorCode::UnsupportedOperation,
+            EditError::UnsupportedTarget { .. } | EditError::EffectMoveNotApplied { .. } => {
+                ErrorCode::UnsupportedOperation
+            }
             EditError::AliasRejected(rejection) => rejection.error_code(),
             EditError::AliasTrackRejected { source, .. } => source.error_code(),
             EditError::SectionChangeRejected { .. } | EditError::Sdk { .. } => ErrorCode::SdkError,
@@ -823,6 +901,18 @@ impl EditError {
             }
             EditError::SectionPrecondition { reason } => {
                 details.insert("reason".to_string(), json!(reason.as_str()));
+            }
+            EditError::EffectPrecondition { reason } => {
+                details.insert("reason".to_string(), json!(reason.as_str()));
+            }
+            // ホストが名乗った位置を添える。判定には使っていないため、応答に
+            // 現れるのは照合が食い違ったときだけである。
+            EditError::EffectMoveNotApplied {
+                reason,
+                reported_position,
+            } => {
+                details.insert("reason".to_string(), json!(reason.as_str()));
+                details.insert("reported_position".to_string(), json!(reported_position));
             }
             EditError::SectionChangeRejected { operation } => {
                 details.insert("reason".to_string(), json!("section_change_rejected"));
@@ -1073,6 +1163,9 @@ pub(crate) mod tests {
                 reason: UnsupportedReason::EffectStateImmutable,
             },
             EditError::UnsupportedTarget {
+                reason: UnsupportedReason::EffectNotMovable,
+            },
+            EditError::UnsupportedTarget {
                 reason: UnsupportedReason::MediaNotSupported,
             },
             EditError::UnsupportedTarget {
@@ -1123,6 +1216,19 @@ pub(crate) mod tests {
             },
             EditError::SectionPrecondition {
                 reason: SectionPreconditionReason::FrameOutsideObject,
+            },
+            EditError::EffectPrecondition {
+                reason: EffectPreconditionReason::PositionOutOfRange,
+            },
+            // 照合が分ける 2 つの理由を両方置く。ホストが名乗った位置は判定に
+            // 使わないため、どちらの理由でも同じ形で応答へ載る。
+            EditError::EffectMoveNotApplied {
+                reason: UnsupportedReason::EffectNotMovable,
+                reported_position: 1,
+            },
+            EditError::EffectMoveNotApplied {
+                reason: UnsupportedReason::ChangeNotApplied,
+                reported_position: 2,
             },
             EditError::SectionChangeRejected {
                 operation: "create_object_section",
@@ -1213,6 +1319,8 @@ pub(crate) mod tests {
             EditError::AliasRejected(_) => "AliasRejected",
             EditError::AliasTrackRejected { .. } => "AliasTrackRejected",
             EditError::SectionPrecondition { .. } => "SectionPrecondition",
+            EditError::EffectPrecondition { .. } => "EffectPrecondition",
+            EditError::EffectMoveNotApplied { .. } => "EffectMoveNotApplied",
             EditError::SectionChangeRejected { .. } => "SectionChangeRejected",
             EditError::Sdk { .. } => "Sdk",
             EditError::NotIssued { .. } => "NotIssued",
@@ -1242,6 +1350,8 @@ pub(crate) mod tests {
             "AliasRejected",
             "AliasTrackRejected",
             "SectionPrecondition",
+            "EffectPrecondition",
+            "EffectMoveNotApplied",
             "SectionChangeRejected",
             "Sdk",
             "NotIssued",
@@ -1275,6 +1385,7 @@ pub(crate) mod tests {
             UnsupportedReason::EffectNotRegistered,
             UnsupportedReason::EffectNotCreatable,
             UnsupportedReason::EffectStateImmutable,
+            UnsupportedReason::EffectNotMovable,
             UnsupportedReason::MediaNotSupported,
             UnsupportedReason::ItemTypeNotWritable,
             UnsupportedReason::ChangeNotApplied,
@@ -1285,6 +1396,7 @@ pub(crate) mod tests {
                 UnsupportedReason::EffectNotRegistered
                 | UnsupportedReason::EffectNotCreatable
                 | UnsupportedReason::EffectStateImmutable
+                | UnsupportedReason::EffectNotMovable
                 | UnsupportedReason::MediaNotSupported
                 | UnsupportedReason::ItemTypeNotWritable
                 | UnsupportedReason::ChangeNotApplied
@@ -1362,6 +1474,8 @@ pub(crate) mod tests {
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
+                // 順序を動かせない effect である。
+                ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
                 ErrorCode::UnsupportedOperation,
@@ -1387,6 +1501,12 @@ pub(crate) mod tests {
                 ErrorCode::InvalidArgument,
                 // 読み直した区間の実態と食い違った。復帰の手段は読み直しである。
                 ErrorCode::PreconditionFailed,
+                // 移動先が effect の列の長さを超えていた。同じく読み直しである。
+                ErrorCode::PreconditionFailed,
+                // 発行した移動が列に現れなかった。動かなかった場合と別の位置へ
+                // 動いた場合の 2 つ。
+                ErrorCode::UnsupportedOperation,
+                ErrorCode::UnsupportedOperation,
                 // 事前確認を通したのに SDK が拒んだ。要求元に直せることが無い。
                 ErrorCode::SdkError,
                 ErrorCode::SdkError,
@@ -1808,6 +1928,9 @@ pub(crate) mod tests {
             // である。後者は真偽値だけであり、値も元値も漏らさない。
             "observed_value",
             "restored",
+            // ホストが名乗った移動後のインデックス。要求元が与えた値ではなく、
+            // 可否の判定にも使っていない測定である。
+            "reported_position",
             "name",
             "selector",
             "fingerprint",
