@@ -9,22 +9,23 @@
 use std::io;
 use std::time::Instant;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING,
-    ERROR_NO_DATA, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, ERROR_PIPE_NOT_CONNECTED, HANDLE,
-    WAIT_ABANDONED_0, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_NO_DATA,
+    ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, ERROR_PIPE_NOT_CONNECTED, HANDLE, WAIT_ABANDONED_0,
+    WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Threading::{
     CreateEventW, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
 };
+use windows::core::Owned;
 
 /// 無期限待機を表すミリ秒値。
 pub(crate) const WAIT_INFINITE: u32 = windows::Win32::System::Threading::INFINITE;
 
 /// 手動リセットイベントの所有ハンドル。
 pub(crate) struct EventHandle {
-    handle: HANDLE,
+    handle: Owned<HANDLE>,
 }
 
 // イベントオブジェクトはスレッド間で共有しても安全であり、`EventHandle` は
@@ -36,37 +37,29 @@ impl EventHandle {
     /// 非シグナル状態の手動リセットイベントを作成する。
     pub(crate) fn new() -> io::Result<Self> {
         // SAFETY: 名前なし・既定のセキュリティ属性でイベントを作成する呼び出しで、
-        // ポインタ引数はすべて None を渡している。
-        let handle = unsafe { CreateEventW(None, true, false, None) }.map_err(to_io_error)?;
+        // ポインタ引数はすべて None を渡している。返るハンドルは成功時のみ得られ、
+        // その所有権はこの値だけが持つ。
+        let handle =
+            unsafe { Owned::new(CreateEventW(None, true, false, None).map_err(to_io_error)?) };
         Ok(Self { handle })
     }
 
     /// 生ハンドルを取得する。所有権は移動しない。
     pub(crate) fn raw(&self) -> HANDLE {
-        self.handle
+        *self.handle
     }
 
     /// イベントをシグナル状態にする。
     pub(crate) fn signal(&self) -> io::Result<()> {
         // SAFETY: `self.handle` は本型が所有する有効なイベントハンドル。
-        unsafe { SetEvent(self.handle) }.map_err(to_io_error)
+        unsafe { SetEvent(*self.handle) }.map_err(to_io_error)
     }
 
     /// 指定ミリ秒だけシグナルを待つ。
     pub(crate) fn wait(&self, timeout_ms: u32) -> WaitOutcome {
         // SAFETY: `self.handle` は本型が所有する有効なイベントハンドル。
-        let result = unsafe { WaitForSingleObject(self.handle, timeout_ms) };
+        let result = unsafe { WaitForSingleObject(*self.handle, timeout_ms) };
         classify_wait(result.0, 1)
-    }
-}
-
-impl Drop for EventHandle {
-    fn drop(&mut self) {
-        // SAFETY: `self.handle` は本型が所有する有効なハンドルであり、
-        // Drop 以降に参照されることはない。
-        unsafe {
-            let _ = CloseHandle(self.handle);
-        }
     }
 }
 
@@ -498,7 +491,7 @@ mod tests {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use std::time::Duration;
-    use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
     };
