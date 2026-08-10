@@ -3311,7 +3311,7 @@ fn a_choice_value_the_host_ignores_is_reported_as_a_failure() {
             json!("item_value_not_applied"),
             "{item}"
         );
-        // 書き込んだ直後に読み直した値が載る。この階級では変更前の値そのもの
+        // 書き込みの後に読み直した値が載る。この階級では変更前の値そのもの
         // であり、ホストは何も倒していない。
         assert_eq!(
             error.details()["observed_value"],
@@ -3691,7 +3691,7 @@ fn a_read_back_that_fails_restores_and_names_the_state_as_unknown() {
 
 #[test]
 fn the_observed_value_and_the_current_value_are_not_interchanged() {
-    // **2 つのキーは別の時点を指す。** `observed_value` は書き込んだ直後に
+    // **2 つのキーは別の時点を指す。** `observed_value` は書き込みの後に
     // 読み直した値であり、応答が返る時点の現在値ではない——巻き戻しが済んで
     // いる。`current_value` は書き込みを発行する前に落ちた失敗が運ぶ値であり、
     // 文字どおり現在値である。取り違えれば、要求元は戻したはずの状態を自分で
