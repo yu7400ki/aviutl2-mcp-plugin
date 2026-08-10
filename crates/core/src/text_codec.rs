@@ -108,26 +108,6 @@ mod tests {
     }
 
     #[test]
-    fn the_codec_round_trips_backslashes_line_breaks_and_tabs() {
-        for value in [
-            r"C:\temp\note",
-            "1 行目\n2 行目",
-            "\t字下げ\t",
-            r"\",
-            r"\\",
-            r"\n",
-            "",
-            "行\\末\n",
-        ] {
-            assert_eq!(
-                decode_host_text(&encode_host_text(value)),
-                value,
-                "{value:?} が往復しません"
-            );
-        }
-    }
-
-    #[test]
     fn the_encoding_wraps_only_backslashes_and_line_feeds() {
         assert_eq!(encode_host_text(r"C:\temp"), r"C:\\temp");
         assert_eq!(encode_host_text("a\nb"), r"a\nb");

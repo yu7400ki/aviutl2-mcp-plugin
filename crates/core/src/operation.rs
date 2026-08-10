@@ -1770,21 +1770,6 @@ mod tests {
     }
 
     #[test]
-    fn list_layers_params_roundtrip() {
-        let params = ListLayersParams {
-            expected_scene_id: 0,
-            page: PageRequest {
-                offset: 10,
-                limit: 20,
-                snapshot_revision: Some(42),
-            },
-        };
-        let s = serde_json::to_string(&params).unwrap();
-        let restored: ListLayersParams = serde_json::from_str(&s).unwrap();
-        assert_eq!(restored, params);
-    }
-
-    #[test]
     fn list_layers_params_wire_form_is_flat() {
         // ページ指定は入れ子にせず、他の一覧系 params と同じく #[serde(flatten)] で平坦に並べる。
         let params = ListLayersParams {
@@ -1816,11 +1801,14 @@ mod tests {
 
     #[test]
     fn list_layers_params_accept_flat_page_fields() {
-        let params: ListLayersParams =
-            serde_json::from_str(r#"{"expected_scene_id":3,"offset":5,"limit":10}"#).unwrap();
+        let params: ListLayersParams = serde_json::from_str(
+            r#"{"expected_scene_id":3,"offset":5,"limit":10,"snapshot_revision":42}"#,
+        )
+        .unwrap();
         assert_eq!(params.expected_scene_id, 3);
         assert_eq!(params.page.offset, 5);
         assert_eq!(params.page.limit, 10);
+        assert_eq!(params.page.snapshot_revision, Some(42));
     }
 
     #[test]

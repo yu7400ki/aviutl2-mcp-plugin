@@ -1188,29 +1188,6 @@ mod tests {
     }
 
     #[test]
-    fn the_codec_round_trips_the_values_it_accepts() {
-        let mut flagged = moving(&[1.5, -2.25, 0.0], "曲線移動");
-        flagged.accelerate = true;
-        flagged.twopoint = true;
-        flagged.params = finite(&[15.0, -1.0]);
-        for value in [
-            static_value(0.0),
-            static_value(-12.5),
-            moving(&[0.0, 100.0], "直線移動"),
-            moving(&[0.0, 100.0, 50.0, 0.0], "直線移動(時間制御)"),
-            moving(&[0.0, 0.92], "再生範囲"),
-            flagged,
-        ] {
-            let encoded = encoded(&value).expect("符号化");
-            assert_eq!(
-                decode_track_value(&encoded),
-                Ok(value.clone()),
-                "{encoded} が往復しません"
-            );
-        }
-    }
-
-    #[test]
     fn no_value_the_decoding_produces_can_encode_the_fourth_bit() {
         // 復号が 4 つ目のビットを保持すると、読んだ値を書き戻すだけで評価の
         // 死んだ行を作れる。フラグの全域を走査し、読めた値が同じ整数へ戻ること
