@@ -14,6 +14,7 @@
 //! - 描画成果物の引き渡し: ディレクトリ名・拡張子・media type・識別子の構文と
 //!   パスの組み立て
 //! - IPC 1 往復の期限配分
+//! - ログへ出す識別子とファイル名の匿名化
 //!
 //! SDK や Windows API には依存しない。所有型のみを定義し、SDK からの変換は
 //! plugin 側が行う。
@@ -41,6 +42,7 @@ pub mod object;
 pub mod operation;
 pub mod page;
 pub mod palette;
+pub mod redact;
 pub mod render;
 pub mod selector;
 pub mod settings;
@@ -135,6 +137,7 @@ pub use page::{
     SnapshotRevisionMismatch, ValidatedPageRequest, take_page, take_window,
 };
 pub use palette::{PALETTE_COLOR_COUNT, PaletteEntry, Rgba};
+pub use redact::{ANONYMIZED_ID_CHARS, descriptor_file, instance_id};
 pub use render::{
     ARTIFACT_MAX_BYTES, MAX_RENDER_FRAME_BYTES, RenderFormat, RenderFrameParams, RenderFrameResult,
     RenderInputError,

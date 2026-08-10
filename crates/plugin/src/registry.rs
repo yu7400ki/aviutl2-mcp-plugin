@@ -4,11 +4,11 @@
 //! 原子的に書き込み、DACL を設定する。
 //!
 //! 失敗の説明は上位でログへ出るため、絶対パスと完全な識別子を含めない。
-//! どの descriptor で失敗したかは [`crate::redact`] を通した形で添える。
+//! どの descriptor で失敗したかは [`aviutl2_mcp_core::redact`] を通した形で添える。
 
 use crate::atomic_file::write_protected_atomic;
-use crate::redact::instance_id as redact_instance_id;
 use anyhow::{Context, Result};
+use aviutl2_mcp_core::redact::instance_id as redact_instance_id;
 use aviutl2_mcp_core::{InstanceDescriptor, InstanceId};
 use aviutl2_mcp_win::create_protected_directory;
 use std::path::PathBuf;

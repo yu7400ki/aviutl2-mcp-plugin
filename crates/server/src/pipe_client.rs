@@ -2,13 +2,12 @@
 //!
 //! Windows API（pipe 接続・読み書き）はこの層に閉じ、上位は frame 単位で扱う。
 
-use crate::redact;
 use crate::win_io::{self, WinIoError};
 use aviutl2_mcp_core::{
     AuthSecret, ClientAuth, ClientHello, ErrorCode, ErrorObject, FrameDecoder, InstanceId, Nonce,
     PongResult, ProtocolVersion, RequestEnvelope, RequestId, RequestKind, ResponseEnvelope,
     ResponseResult, ServerAuth, compute_client_mac, compute_server_mac, deserialize_json,
-    encode_frame, pipe_name_for, verify_mac,
+    encode_frame, pipe_name_for, redact, verify_mac,
 };
 use chrono::Utc;
 use serde::Serialize;

@@ -9,7 +9,6 @@ pub mod discovery;
 pub mod identity;
 pub mod mcp;
 pub mod pipe_client;
-pub mod redact;
 pub mod settings;
 #[cfg(test)]
 mod test_support;
@@ -36,7 +35,7 @@ const DEFAULT_LOG_FILTER: &str = aviutl2_mcp_core::settings::DEFAULT_LOG_LEVEL;
 /// 要求・応答の本文をそのまま記録する外部 crate に課すレベル上限。
 ///
 /// 本文には `instance_id` のように対象を一意に特定できる値が原文で現れる。
-/// 自クレートは [`redact`] を通した匿名化表現だけを記録するが、対象を指定しない
+/// 自クレートは [`aviutl2_mcp_core::redact`] を通した匿名化表現だけを記録するが、対象を指定しない
 /// `RUST_LOG=debug` はその外側の crate まで一括で引き上げるため、匿名化が
 /// 迂回される。ログは不具合の報告に添えて持ち出されるので、匿名化を自クレートの
 /// 責務として保てるよう、本文を出す crate には `RUST_LOG` の内容によらず上限を課す。

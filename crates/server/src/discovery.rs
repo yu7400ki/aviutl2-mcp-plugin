@@ -5,11 +5,10 @@
 
 use crate::identity::{ProcessLookup, lookup_process};
 use crate::pipe_client::{PipeClient, PipeClientError};
-use crate::redact;
 use aviutl2_mcp_core::{
     ErrorCode, ErrorObject, InstanceDescriptor, InstanceId, InstanceInfo, InstanceProject,
     InstanceState, PongResult, ProtocolVersion, ScaledBudgets, deserialize_json,
-    parse_utc_timestamp, pipe_name_for,
+    parse_utc_timestamp, pipe_name_for, redact,
 };
 
 #[cfg(test)]

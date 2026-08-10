@@ -12,11 +12,10 @@ use crate::mcp::input::{ListInstancesInput, parse_instance_id};
 use crate::mcp::summary::{MAX_TEXT_CHARS, clamp_chars};
 use crate::mcp::tool_catalog::{ToolListWatch, ToolVisibility};
 use crate::mcp::{describe, failure};
-use crate::redact;
 use crate::settings::SettingsSource;
 use aviutl2_mcp_core::{
     EditInfo, ErrorCode, ErrorObject, GetEditInfoParams, InstanceId, MAX_PAGE_LIMIT,
-    OPERATION_GET_EDIT_INFO, RequestBudgetKind, ScaledBudgets, request_budget_kind,
+    OPERATION_GET_EDIT_INFO, RequestBudgetKind, ScaledBudgets, redact, request_budget_kind,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;

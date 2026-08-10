@@ -31,8 +31,6 @@ pub mod read;
 #[cfg(all(windows, test))]
 mod reason_values;
 #[cfg(windows)]
-pub mod redact;
-#[cfg(windows)]
 pub mod registry;
 #[cfg(windows)]
 pub mod render;
@@ -59,6 +57,8 @@ use std::time::Duration;
 use aviutl2::AnyResult;
 #[cfg(windows)]
 use aviutl2_mcp_core::DescriptorProject;
+#[cfg(windows)]
+use aviutl2_mcp_core::redact;
 
 /// 編集ハンドル。plugin 初期化時に一度だけ設定される。
 #[cfg(windows)]

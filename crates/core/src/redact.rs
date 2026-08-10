@@ -1,11 +1,13 @@
 //! ログへ出す値の匿名化。
 //!
-//! ログは持ち出されうるため、対象を一意に特定できる値をそのまま残さない。
-//! 識別子は先頭だけを残して衝突しない範囲で追跡でき、ファイルは名前だけを出して
-//! 利用者のディレクトリ構成を明かさない。応答へ載せる値の秘匿は
-//! [`crate::mcp::failure`] が担い、本モジュールはログ専用である。
+//! 出力先はホストのログファイルであり、不具合の報告に添えて持ち出される。
+//! そのため対象を一意に特定できる値をそのまま残さない。識別子は先頭だけを
+//! 残して、同時に稼働するインスタンスを衝突しない範囲で見分けられるようにし、
+//! ファイルは名前だけを出して利用者のディレクトリ構成を明かさない。
+//!
+//! 応答へ載せる値の秘匿は本モジュールの担当ではなく、ログ専用である。
 
-use aviutl2_mcp_core::InstanceId;
+use crate::InstanceId;
 use std::path::Path;
 
 /// 匿名化した識別子に残す先頭文字数。
@@ -21,8 +23,9 @@ pub fn instance_id(instance_id: &InstanceId) -> String {
 
 /// ログへ出す descriptor ファイルの表現。
 ///
-/// descriptor は `{instance_id}.json` として登録されるため、拡張子を除いた
-/// 名前の先頭が匿名化した `instance_id` になる。ディレクトリは出さない。
+/// descriptor は `{instance_id}.json` として書き込まれ、書き込み途中の一時
+/// ファイルも同じ名前で始まる。そのため拡張子を除いた名前の先頭が匿名化した
+/// `instance_id` になる。ディレクトリは出さない。
 pub fn descriptor_file(path: &Path) -> String {
     path.file_stem()
         .and_then(|stem| stem.to_str())
@@ -44,6 +47,7 @@ mod tests {
     fn instance_id_keeps_only_a_prefix() {
         let id = InstanceId::new_v4();
         let anonymized = instance_id(&id);
+
         assert_eq!(anonymized.chars().count(), ANONYMIZED_ID_CHARS);
         assert!(
             id.to_string().starts_with(&anonymized),
@@ -57,10 +61,21 @@ mod tests {
         let id = InstanceId::new_v4();
         let path = PathBuf::from(r"C:\Users\someone\AppData\Local\AviUtl2Mcp\instances")
             .join(format!("{id}.json"));
+
         let label = descriptor_file(&path);
+
         assert_eq!(label, instance_id(&id));
         assert!(!label.contains("Users"), "パスが残っています: {label}");
         assert!(!label.contains(".json"));
+    }
+
+    #[test]
+    fn descriptor_file_of_a_temporary_file_keeps_the_same_prefix() {
+        let id = InstanceId::new_v4();
+        let path = PathBuf::from(r"C:\Users\someone\AppData\Local\AviUtl2Mcp\instances")
+            .join(format!("{id}.json.{}.tmp", InstanceId::new_v4()));
+
+        assert_eq!(descriptor_file(&path), instance_id(&id));
     }
 
     #[test]
