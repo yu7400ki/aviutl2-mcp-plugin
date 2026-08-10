@@ -433,10 +433,9 @@ fn accept_loop(
         }
 
         // SAFETY: `name_wide` は NUL 終端の UTF-16 文字列、`sa` は生存中の
-        // `SECURITY_ATTRIBUTES` を指す。返る値の所有権はこの呼び出しだけが持ち、
-        // 失敗時の無効値は解放されない。
-        let pipe_handle = unsafe {
-            Owned::new(CreateNamedPipeW(
+        // `SECURITY_ATTRIBUTES` を指す。
+        let raw = unsafe {
+            CreateNamedPipeW(
                 PCWSTR(name_wide.as_ptr()),
                 PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
@@ -445,16 +444,17 @@ fn accept_loop(
                 PIPE_BUFFER_SIZE,
                 0,
                 Some(sa.as_ptr()),
-            ))
+            )
         };
-        if pipe_handle.is_invalid() {
+        if raw.is_invalid() {
             // 直前の API 呼び出しは `CreateNamedPipeW` のみであり、
             // last error は当該失敗のもの。pipe 名には完全な instance_id が
             // 含まれるため、失敗の説明には載せない。
             let reason = windows::core::Error::from_thread();
             return Err(anyhow::anyhow!("named pipe の作成に失敗しました: {reason}"));
         }
-        let pipe = OwnedPipeHandle(pipe_handle);
+        // SAFETY: `raw` は直前に有効性を確かめており、その所有権はここにしかない。
+        let pipe = OwnedPipeHandle(unsafe { Owned::new(raw) });
 
         match await_connection(&pipe, &stop)? {
             Connection::Established => {
