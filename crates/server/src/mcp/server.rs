@@ -1328,6 +1328,12 @@ impl AviUtl2McpServer {
     /// 数値が値域を外れてクランプされた場合と、小数が項目の桁数へ丸められた場合も
     /// 同じ失敗になる。ホストが値を調整したことと拒否したことは区別できないため、
     /// 要求した値を得られていない点で同じ扱いにする。
+    /// track の params は個数も意味も移動方法ごとに決まる。個数の合わない params は
+    /// 要求として受理され、書き込みも発行される。その先は移動方法で分かれる——
+    /// パラメータを 1 つ取る移動方法ではホストが保存値を既定値へ差し替えるため、
+    /// 照合が差を見て item_value_not_applied になる。時間制御の変種では書いたとおりに
+    /// 保存され、評価だけが既定へ倒れるため失敗として現れない。値域を外れた綴りも
+    /// 後者になる。評価がどうなったかは get_effect_item_values で確かめる。
     #[tool(
         name = "set_object_item",
         annotations(
@@ -4829,6 +4835,26 @@ mod tests {
             ),
             "説明が全種別の照合を述べていません"
         );
+    }
+
+    #[test]
+    fn the_set_object_item_description_states_what_happens_to_movement_parameters() {
+        // 個数は要求の側で検証しない。外した綴りの帰結は移動方法で分かれ、
+        // 片方は失敗として返り、もう片方は成功したまま評価だけが倒れる。
+        // 述べなければ、要求元は成功を評価の妥当性と読む。
+        let description = description_of("set_object_item");
+        for phrase in [
+            "個数も意味も移動方法ごとに決まる",
+            "個数の合わない params",
+            "既定値へ差し替える",
+            "評価だけが既定へ倒れる",
+            "get_effect_item_values",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "set_object_item の説明が {phrase} に触れていません"
+            );
+        }
     }
 
     /// 設定値の種別ごとの分岐に付いた説明を取り出す。
