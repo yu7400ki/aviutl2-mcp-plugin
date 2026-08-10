@@ -6,3 +6,6 @@
 pub mod edit;
 pub mod read;
 pub mod render;
+
+#[cfg(test)]
+mod tests;
