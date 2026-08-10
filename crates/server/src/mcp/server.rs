@@ -1298,8 +1298,9 @@ impl AviUtl2McpServer {
     }
 
     /// effect の設定項目またはトラックバーの値を変更する。
-    /// 書き込みを公開していない設定項目種別があり、その場合は unsupported_operation
-    /// となる。種別は get_object の item_type で確認できる。
+    /// 書き込みを公開していない設定項目種別は item_type が data のものと、
+    /// 種別を解釈できないものだけであり、その場合は unsupported_operation となる。
+    /// 種別は get_object の item_type で確認できる。
     /// 設定項目の種別が値の形を受け付けない場合は invalid_argument となり、
     /// details.item_type に設定項目の種別が、details.value_kind に与えた値の形が入る。
     /// トラックバー以外の設定項目へ track を書いた場合もこれになる。
@@ -4707,6 +4708,24 @@ mod tests {
         rest[..end].split('・').map(str::to_string).collect()
     }
 
+    /// 説明が `item_type が …` の形で挙げている種別の一覧を、並びごと取り出す。
+    ///
+    /// `closing` の直前に在る一覧を取る。同じ形が 1 つの説明に複数現れるため、
+    /// 一覧を閉じる語で位置を決める。語を含むかではなく一覧そのものを取り出す。
+    /// 含むかだけを見ると、一覧から種別が落ちても増えても気付けない。
+    fn item_types_named_before(description: &str, closing: &str) -> Vec<String> {
+        const OPENING: &str = "item_type が ";
+        let end = description
+            .find(closing)
+            .unwrap_or_else(|| panic!("説明が {closing} を述べていません: {description}"));
+        let head = &description[..end];
+        let start = head
+            .rfind(OPENING)
+            .unwrap_or_else(|| panic!("説明が種別を挙げていません: {description}"))
+            + OPENING.len();
+        head[start..].split('・').map(str::to_string).collect()
+    }
+
     /// 移動を含まない値を渡すときの対象。
     ///
     /// 移動の検証は対象を見なければ成立しないが、ここで見るのは種別と値の形の
@@ -4821,52 +4840,102 @@ mod tests {
             .to_string()
     }
 
-    #[test]
-    fn the_numeric_item_descriptions_name_the_only_item_type_that_takes_them() {
-        // `accepts` が通すのは (Integer, Integer) と (Number, Number) だけである。
-        // 片方をもう片方の項目へ書けると読める説明は、通らない要求を組み立て
-        // させる——しかも失敗するのは invalid_argument であり、値を選び直しても
-        // 直らない。**2 つは対称であり、片方だけを名指しすると残りが黙って古くなる。**
-        for (kind, other) in [("integer", "number"), ("number", "integer")] {
-            let description = item_value_description(kind);
-            assert!(
-                description.contains(&format!("item_type: {kind}")),
-                "{kind} が書ける種別を名指ししていません: {description}"
-            );
-            assert!(
-                description.contains(&format!("item_type: {other}"))
-                    && description.contains("invalid_argument"),
-                "{kind} が {other} の項目で落ちることを述べていません: {description}"
-            );
-            assert!(
-                !description.contains(&format!("{other} と同じ")),
-                "{kind} が {other} と同じ扱いだと読めます: {description}"
-            );
-        }
-
-        // 説明を実装から確かめる。値の形と種別は 1 対 1 で対応する。
-        for (value, accepting) in [
-            (ItemValue::Integer { value: 1 }, EffectItemType::Integer),
-            (
-                ItemValue::Number {
-                    value: aviutl2_mcp_core::FiniteF64::try_new(1.0).expect("有限である"),
-                },
-                EffectItemType::Number,
-            ),
-        ] {
-            for item_type in [EffectItemType::Integer, EffectItemType::Number] {
-                let accepted = item_type == accepting;
-                let items = vec![AvailableEffectItem {
-                    name: "項目".to_string(),
-                    item_type,
-                }];
-                assert_eq!(
-                    prepare_item_write(&items, "項目", &value, no_track_target()).is_ok(),
-                    accepted,
-                    "数値の値が受け付けられる種別と説明が食い違います"
-                );
+    /// 与えた値を書き込める設定項目種別を、書き込みの検証そのものから集める。
+    ///
+    /// 判定を書き写さず、公開されている入口へ値を渡して受理されるかで決める。
+    /// 書き込みを公開する種別と、種別が受け付ける値の形の、どちらが動いても
+    /// ここが動く。
+    fn item_types_accepting(value: &ItemValue) -> Vec<String> {
+        let mut names = Vec::new();
+        for item_type in EffectItemType::ALL {
+            let items = vec![AvailableEffectItem {
+                name: "項目".to_string(),
+                item_type: item_type.clone(),
+            }];
+            if prepare_item_write(&items, "項目", value, no_track_target()).is_ok() {
+                names.push(item_type.kind_name());
             }
         }
+        names
+    }
+
+    #[test]
+    fn the_numeric_item_descriptions_name_every_item_type_that_takes_them() {
+        // 挙げた種別だけが書けると読まれるため、一覧が実態と食い違えば、書ける
+        // 種別が使われないか、書けない種別が当て推量で試される。しかも失敗するのは
+        // invalid_argument であり、値を選び直しても直らない。**2 つは対称であり、
+        // 片方が受ける種別はもう片方が拒む種別そのものである**——片方だけを直すと
+        // 残りが黙って古くなる。
+        let integer = ItemValue::Integer { value: 1 };
+        let number = ItemValue::Number {
+            value: aviutl2_mcp_core::FiniteF64::try_new(1.0).expect("有限である"),
+        };
+        for (kind, accepted, refused) in [
+            ("integer", &integer, &number),
+            ("number", &number, &integer),
+        ] {
+            let description = item_value_description(kind);
+            assert_eq!(
+                item_types_named_before(&description, " の項目に書ける"),
+                item_types_accepting(accepted),
+                "{kind} が書ける種別と説明が食い違います: {description}"
+            );
+            assert_eq!(
+                item_types_named_before(&description, " の項目へ書くと invalid_argument"),
+                item_types_accepting(refused),
+                "{kind} が落ちる種別と説明が食い違います: {description}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_integer_item_description_states_what_a_scene_reference_is_not_verified_for() {
+        // 参照先が実在するかをホストは確かめず、読み直しの照合も整数が入ったこと
+        // しか言えない。**引く経路も無い**——挙げられる ID の一覧を返す tool が
+        // 無いことまで述べなければ、要求元は探しに行って空振りする。
+        assert_eq!(
+            item_value_description("integer"),
+            "整数。item_type が integer・scene・range の項目に書ける。\n\
+             item_type が number の項目へ書くと invalid_argument となる。\n\
+             トラックバーへ書くと全区間へ同じ値が入る。\n\
+             移動を持つ項目へは指定できず、unsupported_operation となる。\n\
+             移動を消したい場合は mode を null にした track を送る。\n\
+             item_type: scene が指す先のシーンが実在するかをホストは確かめず、\n\
+             書き込み直後の読み直しも整数が入ったことしか言えない。存在しないシーンを\n\
+             指す値も成功として返る。シーン ID を引く tool は無い。"
+        );
+    }
+
+    /// 書き込みを公開していない既知の設定項目種別を、書き込みの検証から集める。
+    fn item_types_refused_for_write() -> Vec<String> {
+        let mut names = Vec::new();
+        for item_type in EffectItemType::ALL {
+            let items = vec![AvailableEffectItem {
+                name: "項目".to_string(),
+                item_type: item_type.clone(),
+            }];
+            let probe = ItemValue::Text {
+                value: "文字列".to_string(),
+            };
+            if matches!(
+                prepare_item_write(&items, "項目", &probe, no_track_target()),
+                Err(ItemWriteError::UnsupportedItemType { .. })
+            ) {
+                names.push(item_type.kind_name());
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn the_description_names_every_item_type_that_cannot_be_written() {
+        // 説明は保証である。書けない種別を広く名乗れば書ける項目が使われず、
+        // 狭く名乗れば要求元は通らない要求を組み立てる。並びごと突き合わせる。
+        assert_eq!(
+            item_types_named_before(&description_of("set_object_item"), " のものと、"),
+            item_types_refused_for_write(),
+            "説明が挙げる種別と、書き込みを公開しない種別が食い違います"
+        );
     }
 
     #[test]

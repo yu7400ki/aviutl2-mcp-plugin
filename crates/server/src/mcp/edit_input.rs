@@ -251,8 +251,8 @@ impl FocusChangeInput {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ItemValueInput {
-    /// 実数。有限値のみ。item_type: number の項目にだけ書ける。
-    /// item_type: integer の項目へ書くと invalid_argument となる。
+    /// 実数。有限値のみ。item_type が number の項目に書ける。
+    /// item_type が integer・scene・range の項目へ書くと invalid_argument となる。
     /// トラックバーへ書くと全区間へ同じ値が入る。
     /// 移動を持つ項目へは指定できず、unsupported_operation となる。
     /// 移動を消したい場合は mode を null にした track を送る。
@@ -260,11 +260,14 @@ pub enum ItemValueInput {
         /// 値。
         value: f64,
     },
-    /// 整数。item_type: integer の項目にだけ書ける。
-    /// item_type: number の項目へ書くと invalid_argument となる。
+    /// 整数。item_type が integer・scene・range の項目に書ける。
+    /// item_type が number の項目へ書くと invalid_argument となる。
     /// トラックバーへ書くと全区間へ同じ値が入る。
     /// 移動を持つ項目へは指定できず、unsupported_operation となる。
     /// 移動を消したい場合は mode を null にした track を送る。
+    /// item_type: scene が指す先のシーンが実在するかをホストは確かめず、
+    /// 書き込み直後の読み直しも整数が入ったことしか言えない。存在しないシーンを
+    /// 指す値も成功として返る。シーン ID を引く tool は無い。
     Integer {
         /// 値。
         value: i64,
