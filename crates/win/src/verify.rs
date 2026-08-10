@@ -5,7 +5,8 @@
 //! 危険なのは開いていることであり、狭さは後続の入出力が失敗として教える。
 
 use crate::ProtectedDirError;
-use crate::dacl::{SUBJECT_COUNT, protected_sids, to_io_error, to_wide};
+use crate::dacl::{SUBJECT_COUNT, protected_sids, to_io_error};
+use crate::wide::to_wide;
 use std::ffi::c_void;
 use std::mem::MaybeUninit;
 use std::path::Path;

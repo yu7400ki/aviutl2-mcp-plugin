@@ -12,10 +12,9 @@
 //! 呼び名で添える。
 
 use anyhow::{Context, Result};
-use aviutl2_mcp_win::create_protected_file;
+use aviutl2_mcp_win::{create_protected_file, to_wide};
 use std::io::Write;
 use std::mem;
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use windows::Win32::Foundation::HANDLE;
@@ -100,12 +99,4 @@ pub(crate) fn atomic_replace(temp_path: &Path, target_path: &Path) -> Result<()>
         }
     }
     Ok(())
-}
-
-/// パスを NUL 終端の UTF-16 列へ写す。
-pub(crate) fn to_wide(path: &Path) -> Vec<u16> {
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
 }

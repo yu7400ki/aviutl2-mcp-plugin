@@ -1,4 +1,7 @@
-//! 保護された DACL を持つディレクトリとファイルの用意。
+//! Win32 の境界で使うプリミティブ。
+//!
+//! パスを Win32 へ渡す形へ直す [`to_wide`] と、保護された DACL を持つ
+//! ディレクトリ・ファイルの用意を提供する。
 //!
 //! 成果物にも registry にも利用者のプロジェクトの内容が写る。既定の継承 ACE を
 //! そのまま受け取ると、親ディレクトリの権限次第で他のユーザーへ読み取りが開く
@@ -31,11 +34,15 @@ pub mod test_support;
 mod tests;
 #[cfg(windows)]
 mod verify;
+#[cfg(windows)]
+mod wide;
 
 #[cfg(windows)]
 pub use dacl::ProtectedSecurityAttributes;
 #[cfg(windows)]
 pub use protected::{create_protected_directory, create_protected_file};
+#[cfg(windows)]
+pub use wide::to_wide;
 
 /// 保護されたディレクトリ・ファイルの用意に失敗した理由。
 ///

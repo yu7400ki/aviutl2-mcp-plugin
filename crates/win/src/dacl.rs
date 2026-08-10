@@ -6,8 +6,6 @@
 use crate::ProtectedDirError;
 use std::ffi::c_void;
 use std::io;
-use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
 use windows::Win32::Foundation::{CloseHandle, FALSE, GENERIC_ALL, HANDLE};
 use windows::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE, CopySid,
@@ -213,14 +211,6 @@ pub(crate) unsafe fn well_known_sid(
         .map_err(to_io_error)?;
         Ok(buf)
     }
-}
-
-/// パスを NUL 終端の UTF-16 列へ直す。
-pub(crate) fn to_wide(path: &Path) -> Vec<u16> {
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
 }
 
 /// Win32 の失敗を `io::Error` へ包む。

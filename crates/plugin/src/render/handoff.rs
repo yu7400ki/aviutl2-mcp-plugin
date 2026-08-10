@@ -27,10 +27,9 @@ use anyhow::{Context, Result};
 use aviutl2_mcp_core::{
     ARTIFACT_MAX_BYTES, InstanceId, format_sha256, handoff_dir, handoff_file, handoff_temp_file,
 };
-use aviutl2_mcp_win::{create_protected_directory, create_protected_file};
+use aviutl2_mcp_win::{create_protected_directory, create_protected_file, to_wide};
 use sha2::{Digest, Sha256};
 use std::io::Write;
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -367,13 +366,6 @@ fn remove_if_exists(path: &Path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => tracing::warn!("引き渡し用ファイルを削除できませんでした: {e}"),
     }
-}
-
-fn to_wide(path: &Path) -> Vec<u16> {
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
 }
 
 #[cfg(test)]

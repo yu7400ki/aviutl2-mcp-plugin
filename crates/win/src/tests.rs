@@ -3,8 +3,9 @@
 //! DACL の構築も検証も Win32 API の振る舞いそのものであり、模擬に置き換えると
 //! 確かめたい性質が消える。`%TEMP%` の下に一意な名前で作り、必ず片付ける。
 
-use crate::dacl::{ProtectedSecurityAttributes, protected_sids, to_wide, well_known_sid};
+use crate::dacl::{ProtectedSecurityAttributes, protected_sids, well_known_sid};
 use crate::verify::{allowed_subjects, dacl_is_protected, read_security_descriptor};
+use crate::wide::to_wide;
 use crate::{ProtectedDirError, create_protected_directory, create_protected_file};
 use std::io::Write;
 use std::path::{Path, PathBuf};

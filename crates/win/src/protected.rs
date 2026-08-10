@@ -1,8 +1,9 @@
 //! 保護された DACL を持つディレクトリとファイルの用意。
 
 use crate::ProtectedDirError;
-use crate::dacl::{ProtectedSecurityAttributes, to_io_error, to_wide};
+use crate::dacl::{ProtectedSecurityAttributes, to_io_error};
 use crate::verify::verify_protected_dacl;
+use crate::wide::to_wide;
 use std::path::Path;
 use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
 use windows::Win32::Storage::FileSystem::{
