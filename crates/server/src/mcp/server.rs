@@ -1313,9 +1313,9 @@ impl AviUtl2McpServer {
     /// current_value はそのまま送り返せる形ではない。移動を書き戻すには、読み取った
     /// 値ではなく get_object が返す track の形で組み直す。
     /// 移動を持たないトラックバーへ track を書く要求は通り、新しく移動が付く。
-    /// 書き込みは全ての種別で、書いた直後に読み直して要求した値が入ったかを照合する。
-    /// 入っていなければ unsupported_operation となり details.reason は
-    /// item_value_not_applied、details.observed_value に書き込んだ直後に読み直した値が入る。
+    /// 書き込みは全ての種別で、対象を読み直してから設定値を読んで照合する。
+    /// 要求した値が入っていなければ unsupported_operation となり details.reason は
+    /// item_value_not_applied、details.observed_value に照合で読んだ設定値が入る。
     /// この失敗では書き込みは既に発行済みだが、設定項目は書き込み前の値へ戻す。
     /// 戻せたかは details.restored が名乗り、
     /// 戻せなかった場合だけ details.consistency_unknown が true になる。
@@ -4830,9 +4830,8 @@ mod tests {
             "照合しない種別 {unverified:?} を説明が挙げていません"
         );
         assert!(
-            description_of("set_object_item").contains(
-                "書き込みは全ての種別で、書いた直後に読み直して要求した値が入ったかを照合する"
-            ),
+            description_of("set_object_item")
+                .contains("書き込みは全ての種別で、対象を読み直してから設定値を読んで照合する"),
             "説明が全種別の照合を述べていません"
         );
     }
@@ -5033,7 +5032,7 @@ mod tests {
                     // 有効な値の一覧を返す手段が無いため、外した値の直し方を
                     // 示さなければ要求元は当て推量を繰り返す。
                     "item_value_not_applied",
-                    "details.observed_value に書き込んだ直後に読み直した値が入る",
+                    "details.observed_value に照合で読んだ設定値が入る",
                     // 巻き戻すことを述べなければ、要求元は失敗のたびに対象を
                     // 読み直す。**戻した先を機械可読な値でも名乗る**——文章が
                     // 「読み直す必要は無い」と述べる隣で details.retry_requires が
