@@ -176,7 +176,7 @@ impl ItemWriteError {
                 value_kind: "text",
             },
             ItemWriteError::UnsupportedItemType {
-                item_type: "scene".to_string(),
+                item_type: "data".to_string(),
             },
         ];
         all.extend(
@@ -540,9 +540,15 @@ const NO_TRACK_TARGET: TrackWriteTarget<'static> = TrackWriteTarget {
 
 /// 書き込みを公開している種別か。
 ///
-/// 複合種別のうち `scene` / `range` / `data` と未知種別は、値の表記が確定して
-/// いないため公開しない。推測した表記で書き込むと、検証を通ったのに意図と
-/// 異なる値が入る。
+/// `data` と未知種別は公開しない。`data` はホストが設定を表示せず、値を持つ
+/// プラグイン自身が書き換え続けるため、要求元が指す「正しい値」という概念が
+/// 無い。未知種別は値の表記が確定しておらず、推測した表記で書き込むと、検証を
+/// 通ったのに意図と異なる値が入る。
+///
+/// `scene` / `range` の値は十進整数 1 個である。[`accepts`] が
+/// [`ItemValue::Integer`] だけを受けることが、そのまま防御になっている——
+/// 数値として解釈できない文字列をホストへ渡すとプロセスごと落ちるが、その
+/// 綴りを組み立てられる経路が呼び出し側に無い。
 ///
 /// 選択肢から選ぶ 4 種別は表記が確定しているため公開する。読み取りはいずれも
 /// [`ItemValue::Choice`] で返し、有効な値を知る手段は既存のオブジェクトから
@@ -564,6 +570,8 @@ fn is_writable(item_type: &EffectItemType) -> bool {
             | EffectItemType::Combo
             | EffectItemType::Mask
             | EffectItemType::Figure
+            | EffectItemType::Scene
+            | EffectItemType::Range
     )
 }
 
@@ -578,7 +586,8 @@ fn is_writable(item_type: &EffectItemType) -> bool {
 /// 列の完全一致を全種別へ課すと、正しい書き込みまで失敗として返る。
 ///
 /// - 整数・実数は数値として比べる。ホストが桁を整えるため、`100` と `100.00` は
-///   同じ値である
+///   同じ値である。シーン参照とレイヤー範囲の値も十進整数 1 個であり、同じ規則に
+///   載る
 /// - チェックは真偽値として比べる
 /// - 色は 16 進表記の大文字小文字を無視して比べる。ホストは受理した色を小文字で
 ///   返す
@@ -614,9 +623,10 @@ pub fn read_back_check(item_type: &EffectItemType, value: &ItemValue) -> ReadBac
         | ItemValue::Unknown { .. } => {}
     }
     match item_type {
-        EffectItemType::Integer | EffectItemType::Number => {
-            ReadBackCheck::Compare(ReadBackComparison::Numeric)
-        }
+        EffectItemType::Integer
+        | EffectItemType::Number
+        | EffectItemType::Scene
+        | EffectItemType::Range => ReadBackCheck::Compare(ReadBackComparison::Numeric),
         EffectItemType::Check => ReadBackCheck::Compare(ReadBackComparison::Boolean),
         EffectItemType::Color => ReadBackCheck::Compare(ReadBackComparison::IgnoreAsciiCase),
         EffectItemType::Font
@@ -628,10 +638,7 @@ pub fn read_back_check(item_type: &EffectItemType, value: &ItemValue) -> ReadBac
         | EffectItemType::Combo
         | EffectItemType::Mask
         | EffectItemType::Figure => ReadBackCheck::Compare(ReadBackComparison::Exact),
-        EffectItemType::Scene
-        | EffectItemType::Range
-        | EffectItemType::Data
-        | EffectItemType::Unknown(_) => ReadBackCheck::Declared {
+        EffectItemType::Data | EffectItemType::Unknown(_) => ReadBackCheck::Declared {
             reason: ReadBackNotVerified::ItemTypeNotWritable,
         },
     }
@@ -643,14 +650,19 @@ pub fn read_back_check(item_type: &EffectItemType, value: &ItemValue) -> ReadBac
 /// して評価されるものが受け付ける。**評価の種別を引き当てて判定する。** 種別の
 /// 名前を並べ直すと、評価はトラックバーとして行うのに移動は書けない、という
 /// 食い違いを作れてしまう。
+///
+/// `scene` / `range` は [`ItemValue::Integer`] だけを受ける。実数を受ければ
+/// 整数へ落とす変換をどこかへ書くことになり、その変換が防御の位置になる。
 fn accepts(item_type: &EffectItemType, value: &ItemValue) -> bool {
     if matches!(value, ItemValue::Track(_)) {
         return item_type.evaluated_kind() == Some(EvaluatedItemKind::Track);
     }
     matches!(
         (item_type, value),
-        (EffectItemType::Integer, ItemValue::Integer { .. })
-            | (EffectItemType::Number, ItemValue::Number { .. })
+        (
+            EffectItemType::Integer | EffectItemType::Scene | EffectItemType::Range,
+            ItemValue::Integer { .. }
+        ) | (EffectItemType::Number, ItemValue::Number { .. })
             | (EffectItemType::Check, ItemValue::Bool { .. })
             | (
                 EffectItemType::Text | EffectItemType::String,
@@ -888,7 +900,7 @@ mod tests {
     fn write_failures_only_name_reasons_from_the_shared_value_set() {
         let named = [
             ItemWriteError::UnsupportedItemType {
-                item_type: "scene".to_string(),
+                item_type: "data".to_string(),
             },
             ItemWriteError::Text(TextSyntaxError::ContainsNul),
             ItemWriteError::Path(PathSyntaxError::UncPath),
@@ -1370,6 +1382,8 @@ mod tests {
                 },
                 "星型",
             ),
+            (EffectItemType::Scene, ItemValue::Integer { value: 1 }, "1"),
+            (EffectItemType::Range, ItemValue::Integer { value: 2 }, "2"),
         ]
     }
 
@@ -1385,12 +1399,7 @@ mod tests {
 
     /// 書き込みを公開しない種別。
     fn non_writable_item_types() -> Vec<EffectItemType> {
-        vec![
-            EffectItemType::Scene,
-            EffectItemType::Range,
-            EffectItemType::Data,
-            EffectItemType::Unknown(99),
-        ]
+        vec![EffectItemType::Data, EffectItemType::Unknown(99)]
     }
 
     /// 種別ごとに、書き込みを公開するかを述べる。
@@ -1411,11 +1420,10 @@ mod tests {
             | EffectItemType::Select
             | EffectItemType::Combo
             | EffectItemType::Mask
-            | EffectItemType::Figure => true,
-            EffectItemType::Scene
-            | EffectItemType::Range
-            | EffectItemType::Data
-            | EffectItemType::Unknown(_) => false,
+            | EffectItemType::Figure
+            | EffectItemType::Scene
+            | EffectItemType::Range => true,
+            EffectItemType::Data | EffectItemType::Unknown(_) => false,
         }
     }
 
@@ -1442,6 +1450,70 @@ mod tests {
                 Ok(encoded.to_string()),
                 "{item_type}"
             );
+        }
+    }
+
+    #[test]
+    fn scene_and_range_accept_only_integers() {
+        // 受ける形を整数に限ることが防御そのものである。数値以外の形を受ければ
+        // 十進整数へ落とす変換が要り、その変換が防御の位置になる。
+        for item_type in [EffectItemType::Scene, EffectItemType::Range] {
+            assert_eq!(
+                encoded_value(&item_type, &ItemValue::Integer { value: -1 }),
+                Ok("-1".to_string()),
+                "{item_type}"
+            );
+            for value in [
+                ItemValue::Number {
+                    value: FiniteF64::try_new(1.0).unwrap(),
+                },
+                ItemValue::Text {
+                    value: "1".to_string(),
+                },
+                ItemValue::Choice {
+                    value: "1".to_string(),
+                },
+                ItemValue::Bool { value: true },
+                ItemValue::Track(sample_track()),
+            ] {
+                assert_eq!(
+                    encoded_value(&item_type, &value),
+                    Err(ItemWriteError::ValueKindMismatch {
+                        item_type: item_type.kind_name(),
+                        value_kind: value.kind(),
+                    }),
+                    "{item_type} / {}",
+                    value.kind()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scene_and_range_are_verified_as_numbers_after_the_write() {
+        // ホストは受理した値の桁を整えて返す。バイト比較を課すと正しい書き込みが
+        // 失敗として返る。
+        let items = vec![
+            AvailableEffectItem {
+                name: "シーン".to_string(),
+                item_type: EffectItemType::Scene,
+            },
+            AvailableEffectItem {
+                name: "対象レイヤー数".to_string(),
+                item_type: EffectItemType::Range,
+            },
+        ];
+        for item in ["シーン", "対象レイヤー数"] {
+            let write = prepared_write(&items, item, &ItemValue::Integer { value: 1 })
+                .expect("整数の書き込み");
+            assert_eq!(write.value(), "1", "{item}");
+            assert_eq!(
+                write.read_back(),
+                ReadBackCheck::Compare(ReadBackComparison::Numeric),
+                "{item}"
+            );
+            assert_eq!(write.read_back_matches("1.00"), Some(true), "{item}");
+            assert_eq!(write.read_back_matches("0"), Some(false), "{item}");
         }
     }
 
@@ -1590,7 +1662,7 @@ mod tests {
         );
         assert_eq!(
             ItemWriteError::UnsupportedItemType {
-                item_type: "scene".to_string(),
+                item_type: "data".to_string(),
             }
             .error_code(),
             ErrorCode::UnsupportedOperation
@@ -1948,8 +2020,8 @@ mod tests {
                 item_type: EffectItemType::Number,
             },
             AvailableEffectItem {
-                name: "シーン".to_string(),
-                item_type: EffectItemType::Scene,
+                name: "内部データ".to_string(),
+                item_type: EffectItemType::Data,
             },
         ];
 
@@ -1979,13 +2051,13 @@ mod tests {
         assert_eq!(
             prepared_write(
                 &items,
-                "シーン",
+                "内部データ",
                 &ItemValue::Text {
                     value: "0".to_string(),
                 },
             ),
             Err(ItemWriteError::UnsupportedItemType {
-                item_type: "scene".to_string(),
+                item_type: "data".to_string(),
             })
         );
     }
@@ -2005,9 +2077,10 @@ mod tests {
     /// 足すとここが落ち、照合のしかたを書くまでコンパイルできない。**
     fn expects_read_back(item_type: &EffectItemType) -> ReadBackCheck {
         match item_type {
-            EffectItemType::Integer | EffectItemType::Number => {
-                ReadBackCheck::Compare(ReadBackComparison::Numeric)
-            }
+            EffectItemType::Integer
+            | EffectItemType::Number
+            | EffectItemType::Scene
+            | EffectItemType::Range => ReadBackCheck::Compare(ReadBackComparison::Numeric),
             EffectItemType::Check => ReadBackCheck::Compare(ReadBackComparison::Boolean),
             EffectItemType::Color => ReadBackCheck::Compare(ReadBackComparison::IgnoreAsciiCase),
             EffectItemType::Text
@@ -2019,10 +2092,7 @@ mod tests {
             | EffectItemType::Combo
             | EffectItemType::Mask
             | EffectItemType::Figure => ReadBackCheck::Compare(ReadBackComparison::Exact),
-            EffectItemType::Scene
-            | EffectItemType::Range
-            | EffectItemType::Data
-            | EffectItemType::Unknown(_) => ReadBackCheck::Declared {
+            EffectItemType::Data | EffectItemType::Unknown(_) => ReadBackCheck::Declared {
                 reason: ReadBackNotVerified::ItemTypeNotWritable,
             },
         }
@@ -2208,7 +2278,7 @@ mod tests {
             )
             .unwrap_err(),
             encoded_value(
-                &EffectItemType::Scene,
+                &EffectItemType::Data,
                 &ItemValue::Text {
                     value: secret.to_string(),
                 },

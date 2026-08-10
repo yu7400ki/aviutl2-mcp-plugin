@@ -1203,7 +1203,7 @@ pub(crate) mod tests {
                 item: "範囲".to_string(),
             }),
             EditError::ItemWrite(ItemWriteError::UnsupportedItemType {
-                item_type: EffectItemType::Scene.kind_name(),
+                item_type: EffectItemType::Data.kind_name(),
             }),
             EditError::ItemWrite(ItemWriteError::UnknownValue),
             EditError::ItemWrite(ItemWriteError::ValueKindMismatch {
@@ -2230,11 +2230,11 @@ pub(crate) mod tests {
         // 名前だけでは、どの種別が書けないのかが分からない。種別の名前は値も
         // 表記も含まないため、そのまま載せられる。
         let error = EditError::ItemWrite(ItemWriteError::UnsupportedItemType {
-            item_type: EffectItemType::Scene.kind_name(),
+            item_type: EffectItemType::Data.kind_name(),
         });
         let details = error.details();
         assert_eq!(details["reason"], json!("item_type_not_writable"));
-        assert_eq!(details["item_type"], json!("scene"));
+        assert_eq!(details["item_type"], json!("data"));
     }
 
     #[test]
