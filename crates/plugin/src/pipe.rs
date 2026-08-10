@@ -25,7 +25,7 @@ use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
 };
-use windows::core::PCWSTR;
+use windows::core::{Owned, PCWSTR};
 
 /// pipe の入出力バッファサイズ。
 const PIPE_BUFFER_SIZE: u32 = 64 * 1024;
@@ -395,27 +395,18 @@ impl Drop for PipeServer {
 }
 
 /// 所有権つきの pipe ハンドル。早期 return でも確実に閉じる。
-struct OwnedPipeHandle(HANDLE);
+struct OwnedPipeHandle(Owned<HANDLE>);
 
 impl OwnedPipeHandle {
     fn raw(&self) -> HANDLE {
-        self.0
+        *self.0
     }
 
     /// 所有権を呼び出し元へ移す。以後 `Drop` では閉じない。
     fn into_raw(self) -> HANDLE {
-        let handle = self.0;
+        let handle = *self.0;
         std::mem::forget(self);
         handle
-    }
-}
-
-impl Drop for OwnedPipeHandle {
-    fn drop(&mut self) {
-        // SAFETY: `self.0` は本型が所有する有効なハンドル。
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
     }
 }
 
@@ -442,9 +433,10 @@ fn accept_loop(
         }
 
         // SAFETY: `name_wide` は NUL 終端の UTF-16 文字列、`sa` は生存中の
-        // `SECURITY_ATTRIBUTES` を指す。
+        // `SECURITY_ATTRIBUTES` を指す。返る値の所有権はこの呼び出しだけが持ち、
+        // 失敗時の無効値は解放されない。
         let pipe_handle = unsafe {
-            CreateNamedPipeW(
+            Owned::new(CreateNamedPipeW(
                 PCWSTR(name_wide.as_ptr()),
                 PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
@@ -453,7 +445,7 @@ fn accept_loop(
                 PIPE_BUFFER_SIZE,
                 0,
                 Some(sa.as_ptr()),
-            )
+            ))
         };
         if pipe_handle.is_invalid() {
             // 直前の API 呼び出しは `CreateNamedPipeW` のみであり、
