@@ -13,8 +13,9 @@ use crate::edit::fake::{
     MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER, MAX_SCENE_HEIGHT, MAX_SCENE_SAMPLE_RATE, MAX_SCENE_WIDTH,
     MOVE_FRAME_SHIFT, MOVING_ITEM, MUTATIONS, OBSERVED_SCENE, PanicPoint, READ_SECTION,
     RENAMED_SCENE_NAME, SCENE_ID, SCENE_ITEM, SCENE_NAME, SECTION_RANGES, SHAPE, STATIC_ITEM,
-    TRACK_MODES, blur, coordinate, coordinate_catalog_entry, group_control,
-    group_control_catalog_entry, raw_item_value, shape, shape_catalog_entry,
+    TRACK_DEFAULT_PARAM, TRACK_MODES, TRACK_TIME_CONTROL_MODE, blur, coordinate,
+    coordinate_catalog_entry, group_control, group_control_catalog_entry, raw_item_value, shape,
+    shape_catalog_entry,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::{default_page_request, default_page_window, with_silent_panic_hook};
@@ -2538,15 +2539,18 @@ fn changed_item(outcome: &EditOutcome, item: &str) -> ItemValue {
         .clone()
 }
 
-/// 区間 1 個分の移動を持つ値。
+/// パラメータを持たない移動の値。
 fn movement(values: &[f64], mode: &str) -> ItemValue {
+    movement_with_params(values, mode, &[])
+}
+
+/// パラメータを添えた移動の値。
+fn movement_with_params(values: &[f64], mode: &str, params: &[f64]) -> ItemValue {
+    let finite = |value: &f64| FiniteF64::try_new(*value).expect("有限値");
     ItemValue::Track(aviutl2_mcp_core::TrackValue {
-        values: values
-            .iter()
-            .map(|value| FiniteF64::try_new(*value).expect("有限値"))
-            .collect(),
+        values: values.iter().map(finite).collect(),
         mode: Some(mode.to_string()),
-        params: Vec::new(),
+        params: params.iter().map(finite).collect(),
         accelerate: false,
         decelerate: false,
         twopoint: false,
@@ -2618,6 +2622,140 @@ fn a_movement_the_host_knows_is_written_and_read_back() {
         movement(&[0.0, 50.0, 100.0], "曲線移動")
     );
     assert!(harness.host.fatal_movement_writes().is_empty());
+}
+
+/// 対象がいま持っている移動の値を読み取り経路から得る。
+fn stored_movement(harness: &Harness) -> ItemValue {
+    harness
+        .read
+        .get_object(&harness.selector(1, 100))
+        .expect("対象の詳細")
+        .effects
+        .into_iter()
+        .find(|effect| effect.name == COORDINATE)
+        .expect("effect がありません")
+        .items
+        .into_iter()
+        .find(|entry| entry.name == MOVING_ITEM)
+        .expect("設定項目がありません")
+        .value
+}
+
+/// 3 区間分の値と、[`TRACK_DEFAULT_PARAM`] の移動方法へ個数の合わないパラメータ。
+fn movement_with_mismatched_params() -> ItemValue {
+    movement_with_params(&[0.0, 50.0, 100.0], TRACK_DEFAULT_PARAM.0, &[30.0, 40.0])
+}
+
+/// [`movement_with_mismatched_params`] をホストが差し替えた後の生文字列。
+fn replaced_movement_raw() -> String {
+    format!(
+        "0.00,50.00,100.00,{},0|{:.2}",
+        TRACK_DEFAULT_PARAM.0, TRACK_DEFAULT_PARAM.1
+    )
+}
+
+#[test]
+fn a_movement_parameter_the_host_replaces_after_the_write_is_reported_as_a_failure() {
+    // **書き込みの直後の読みは要求どおりを返す。** ホストが保存値を既定値へ
+    // 差し替えるのはその後の解釈し直しであり、対象を読み直した後の設定値に
+    // 現れる。直後の読みだけで照合すると、捨てられたパラメータが成功として返る。
+    let harness = harness_with_track_effect();
+    let error = harness
+        .edit
+        .set_object_item(&set_movement(&harness, movement_with_mismatched_params()))
+        .expect_err("個数の合わない移動パラメータが成功として返りました");
+
+    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
+    assert_eq!(error.details()["reason"], json!("item_value_not_applied"));
+    // 載るのは差し替えの後の値である。要求した 2 つはどこにも残っていない。
+    assert_eq!(
+        error.details()["observed_value"],
+        json!(replaced_movement_raw())
+    );
+}
+
+#[test]
+fn a_replaced_movement_parameter_names_the_write_as_issued_and_restored() {
+    // 書き込みは発行済みであり、失敗は既存の書き込み検証と同じ形を名乗る。
+    let harness = harness_with_track_effect();
+    let before = stored_movement(&harness);
+    let error = harness
+        .edit
+        .set_object_item(&set_movement(&harness, movement_with_mismatched_params()))
+        .expect_err("個数の合わない移動パラメータが成功として返りました");
+
+    let details = error.details();
+    assert_eq!(details["reason"], json!("item_value_not_applied"));
+    assert_eq!(details["mutation_issued"], json!(true));
+    assert_eq!(details["restored"], json!(true));
+    assert!(
+        details.get("consistency_unknown").is_none(),
+        "戻せているのに中途半端な状態を名乗りました: {details}"
+    );
+    assert_eq!(
+        stored_movement(&harness),
+        before,
+        "書き込み前の移動へ戻っていません"
+    );
+}
+
+#[test]
+fn a_movement_written_without_parameters_survives_the_default_the_host_adds() {
+    // **偽の失敗を作らない。** パラメータを省いた書き込みにはホストが既定値を
+    // 書き足すため、読み直しは書いた綴りと違う。求めたのはその既定値そのもので
+    // あり、失敗ではない。
+    let harness = harness_with_track_effect();
+    let outcome = harness
+        .edit
+        .set_object_item(&set_movement(
+            &harness,
+            movement(&[0.0, 50.0, 100.0], TRACK_DEFAULT_PARAM.0),
+        ))
+        .expect("既定値の書き足しが失敗として返りました");
+
+    assert_eq!(
+        changed_item(&outcome, MOVING_ITEM),
+        movement_with_params(
+            &[0.0, 50.0, 100.0],
+            TRACK_DEFAULT_PARAM.0,
+            &[TRACK_DEFAULT_PARAM.1]
+        )
+    );
+}
+
+#[test]
+fn a_time_control_movement_passes_even_though_the_host_reports_no_parameters() {
+    // **偽の失敗を作らない。** 時間制御の変種はパラメータを保存も評価もするのに、
+    // ホストの報告だけが 0 件になる。件数を照合の材料にすれば、正しい綴りが
+    // 1 つ残らず失敗になる。
+    let harness = harness_with_track_effect();
+    let requested = movement_with_params(
+        &[0.0, 50.0, 100.0],
+        TRACK_TIME_CONTROL_MODE,
+        &[0.5, 0.0, 0.0, 0.0],
+    );
+    let outcome = harness
+        .edit
+        .set_object_item(&set_movement(&harness, requested.clone()))
+        .expect("時間制御の変種の正しい綴りが失敗として返りました");
+
+    assert_eq!(changed_item(&outcome, MOVING_ITEM), requested);
+    let reported = outcome
+        .effect
+        .as_ref()
+        .expect("変更後の effect")
+        .items
+        .iter()
+        .find(|entry| entry.name == MOVING_ITEM)
+        .expect("設定項目がありません")
+        .track
+        .as_ref()
+        .expect("移動情報");
+    assert!(
+        reported.params.is_empty(),
+        "報告が 0 件になる標本ではありません: {:?}",
+        reported.params
+    );
 }
 
 #[test]

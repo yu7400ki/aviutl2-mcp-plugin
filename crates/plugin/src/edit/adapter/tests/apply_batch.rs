@@ -909,7 +909,7 @@ fn the_same_movement_write_is_judged_the_same_way_alone_and_in_a_batch() {
 
 #[test]
 fn the_apply_phase_reads_back_once_per_item_sub_operation() {
-    // 照合の費用は sub-operation 1 件あたり 1 回に留まる。逆操作の材料を読む
+    // 設定値の読み直しは sub-operation 1 件あたり 1 回である。逆操作の材料を読む
     // 事前解決相と数を混ぜないため、最初の変更より後だけを数える。**照合が
     // 全種別へ掛かるため、設定項目を変える sub-operation はすべて 1 回ずつ
     // 数える。**
@@ -1050,6 +1050,44 @@ fn the_same_item_value_fails_the_same_way_alone_and_in_a_batch() {
         );
         assert_eq!(batched.details()["failed_index"], json!(0), "{item}");
     }
+}
+
+#[test]
+fn a_replaced_movement_parameter_fails_the_same_way_alone_and_in_a_batch() {
+    // ホストの解釈し直しを見る照合も、単独の変更と一括適用が通る同じ 1 か所に
+    // 置く。片方だけへ足せば、単独で失敗する入力が一括適用では成功する。
+    let requested = movement_with_mismatched_params();
+
+    let alone = harness_with_track_effect();
+    let single = alone
+        .edit
+        .set_object_item(&set_movement(&alone, requested.clone()))
+        .expect_err("個数の合わない移動パラメータが単独で成功として返りました");
+
+    let together = harness_with_track_effect();
+    let batched = together
+        .edit
+        .apply_batch(&batch(vec![BatchOperation::SetObjectItem {
+            selector: together.effect_selector(1, 100, COORDINATE, 0),
+            item: MOVING_ITEM.to_string(),
+            value: requested,
+        }]))
+        .expect_err("個数の合わない移動パラメータが一括適用で受理されました");
+
+    assert_eq!(single.error_code(), batched.error_code());
+    assert_eq!(single.details()["reason"], batched.details()["reason"]);
+    assert_eq!(
+        single.details()["observed_value"],
+        batched.details()["observed_value"]
+    );
+    assert_eq!(
+        batched.details()["observed_value"],
+        json!(replaced_movement_raw())
+    );
+    assert_eq!(batched.details()["failed_index"], json!(0));
+    // 落ちた sub-operation 自身も変更を発行し終えており、巻き戻しの対象になる。
+    assert_eq!(batched.details()["rolled_back"], json!(true));
+    assert_eq!(batched.details()["rolled_back_count"], json!(1));
 }
 
 #[test]

@@ -2338,14 +2338,21 @@ fn host_write(item_type: &EffectItemType, value: &str, fonts: &[String]) -> Opti
 /// 例外が `extern "C"` の境界を越えて入り、巻き戻せずに abort する。フェイクは
 /// これを記録と panic の 2 つで模す。落ちる形を「黙って無視される」として模すと、
 /// 名前の検証を外しても検査が緑のまま通る。
-pub(crate) const TRACK_MODES: [&str; 4] =
-    ["直線移動", "曲線移動", "ランダム移動", "直線移動(時間制御)"];
+pub(crate) const TRACK_MODES: [&str; 4] = [
+    "直線移動",
+    "曲線移動",
+    TRACK_DEFAULT_PARAM.0,
+    TRACK_TIME_CONTROL_MODE,
+];
 
 /// 時間制御を有効にする移動方法の名前の接尾辞。
 ///
 /// 時間制御はフラグではなく移動方法の名前の変種が担う。フラグの欄は変種を
 /// 書いても 0 のままである。
 const TIME_CONTROL_SUFFIX: &str = "(時間制御)";
+
+/// ホストが受け付ける時間制御の変種。
+pub(crate) const TRACK_TIME_CONTROL_MODE: &str = "直線移動(時間制御)";
 
 /// パラメータを取る移動方法と、その既定値。
 ///
