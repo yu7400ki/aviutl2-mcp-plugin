@@ -4,20 +4,15 @@ use crate::mcp::describe;
 use crate::mcp::input::{
     DescribeEffectsInput, GetEffectItemValuesInput, GetObjectInput, GetSelectionInput,
     InstanceInput, ListAvailableEffectsInput, ListFontsInput, ListLayersInput, ListModulesInput,
-    ListObjectAliasesInput, ListObjectsInput, ListPalettesInput, parse_instance_id,
+    ListObjectAliasesInput, ListObjectsInput, ListPalettesInput,
 };
-use crate::mcp::server::{
-    AviUtl2McpServer, CallBudgets, ToolSuccess, request_operation, to_structured,
-};
+use crate::mcp::server::AviUtl2McpServer;
 use aviutl2_mcp_core::{
-    DescribeEffectsResult, EditInfo, EffectItemValues, GetCurrentSceneParams,
-    GetCurrentSceneResult, GetEditInfoParams, ListAvailableEffectsResult, ListFontsResult,
-    ListLayersResult, ListModulesResult, ListObjectAliasesResult, ListObjectsResult,
-    ListPalettesResult, OPERATION_DESCRIBE_EFFECTS, OPERATION_GET_CURRENT_SCENE,
-    OPERATION_GET_EDIT_INFO, OPERATION_GET_EFFECT_ITEM_VALUES, OPERATION_GET_OBJECT,
-    OPERATION_GET_SELECTION, OPERATION_LIST_AVAILABLE_EFFECTS, OPERATION_LIST_FONTS,
-    OPERATION_LIST_LAYERS, OPERATION_LIST_MODULES, OPERATION_LIST_OBJECT_ALIASES,
-    OPERATION_LIST_OBJECTS, OPERATION_LIST_PALETTES, ObjectDetail, SelectionSnapshot,
+    GetCurrentSceneParams, GetEditInfoParams, OPERATION_DESCRIBE_EFFECTS,
+    OPERATION_GET_CURRENT_SCENE, OPERATION_GET_EDIT_INFO, OPERATION_GET_EFFECT_ITEM_VALUES,
+    OPERATION_GET_OBJECT, OPERATION_GET_SELECTION, OPERATION_LIST_AVAILABLE_EFFECTS,
+    OPERATION_LIST_FONTS, OPERATION_LIST_LAYERS, OPERATION_LIST_MODULES,
+    OPERATION_LIST_OBJECT_ALIASES, OPERATION_LIST_OBJECTS, OPERATION_LIST_PALETTES,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -42,23 +37,13 @@ impl AviUtl2McpServer {
         &self,
         Parameters(input): Parameters<InstanceInput>,
     ) -> CallToolResult {
-        let registry_dir = self.registry_dir();
-        let CallBudgets { limits, discovery } = self.call_budgets();
-        self.run("get_edit_info", move || {
-            let instance_id = parse_instance_id(&input.instance_id)?;
-            let result: EditInfo = request_operation(
-                &registry_dir,
-                instance_id,
-                limits,
-                discovery,
-                OPERATION_GET_EDIT_INFO,
-                &GetEditInfoParams {},
-            )?;
-            Ok(ToolSuccess {
-                text: describe::edit_info(&result),
-                structured: to_structured(&result)?,
-            })
-        })
+        self.run_operation(
+            "get_edit_info",
+            OPERATION_GET_EDIT_INFO,
+            input.instance_id,
+            || Ok(GetEditInfoParams {}),
+            describe::edit_info,
+        )
         .await
     }
 
@@ -79,23 +64,13 @@ impl AviUtl2McpServer {
         &self,
         Parameters(input): Parameters<InstanceInput>,
     ) -> CallToolResult {
-        let registry_dir = self.registry_dir();
-        let CallBudgets { limits, discovery } = self.call_budgets();
-        self.run("get_current_scene", move || {
-            let instance_id = parse_instance_id(&input.instance_id)?;
-            let result: GetCurrentSceneResult = request_operation(
-                &registry_dir,
-                instance_id,
-                limits,
-                discovery,
-                OPERATION_GET_CURRENT_SCENE,
-                &GetCurrentSceneParams {},
-            )?;
-            Ok(ToolSuccess {
-                text: describe::current_scene(&result),
-                structured: to_structured(&result)?,
-            })
-        })
+        self.run_operation(
+            "get_current_scene",
+            OPERATION_GET_CURRENT_SCENE,
+            input.instance_id,
+            || Ok(GetCurrentSceneParams {}),
+            describe::current_scene,
+        )
         .await
     }
 
@@ -116,24 +91,14 @@ impl AviUtl2McpServer {
         &self,
         Parameters(input): Parameters<ListLayersInput>,
     ) -> CallToolResult {
-        let registry_dir = self.registry_dir();
-        let CallBudgets { limits, discovery } = self.call_budgets();
-        self.run("list_layers", move || {
-            let instance_id = parse_instance_id(&input.instance_id)?;
-            let params = input.to_params()?;
-            let result: ListLayersResult = request_operation(
-                &registry_dir,
-                instance_id,
-                limits,
-                discovery,
-                OPERATION_LIST_LAYERS,
-                &params,
-            )?;
-            Ok(ToolSuccess {
-                text: describe::layers(&result),
-                structured: to_structured(&result)?,
-            })
-        })
+        let instance_id = input.instance_id.clone();
+        self.run_operation(
+            "list_layers",
+            OPERATION_LIST_LAYERS,
+            instance_id,
+            move || input.to_params(),
+            describe::layers,
+        )
         .await
     }
 
@@ -154,24 +119,14 @@ impl AviUtl2McpServer {
         &self,
         Parameters(input): Parameters<ListObjectsInput>,
     ) -> CallToolResult {
-        let registry_dir = self.registry_dir();
-        let CallBudgets { limits, discovery } = self.call_budgets();
-        self.run("list_objects", move || {
-            let instance_id = parse_instance_id(&input.instance_id)?;
-            let params = input.to_params()?;
-            let result: ListObjectsResult = request_operation(
-                &registry_dir,
-                instance_id,
-                limits,
-                discovery,
-                OPERATION_LIST_OBJECTS,
-                &params,
-            )?;
-            Ok(ToolSuccess {
-                text: describe::objects(&result),
-                structured: to_structured(&result)?,
-            })
-        })
+        let instance_id = input.instance_id.clone();
+        self.run_operation(
+            "list_objects",
+            OPERATION_LIST_OBJECTS,
+            instance_id,
+            move || input.to_params(),
+            describe::objects,
+        )
         .await
     }
 
@@ -194,24 +149,14 @@ impl AviUtl2McpServer {
         &self,
         Parameters(input): Parameters<GetObjectInput>,
     ) -> CallToolResult {
-        let registry_dir = self.registry_dir();
-        let CallBudgets { limits, discovery } = self.call_budgets();
-        self.run("get_object", move || {
-            let instance_id = parse_instance_id(&input.instance_id)?;
-            let params = input.to_params()?;
-            let result: ObjectDetail = request_operation(
-                &registry_dir,
-                instance_id,
-                limits,
-                discovery,
-                OPERATION_GET_OBJECT,
-                &params,
-            )?;
-            Ok(ToolSuccess {
-                text: describe::object_detail(&result),
-                structured: to_structured(&result)?,
-            })
-        })
+        let instance_id = input.instance_id.clone();
+        self.run_operation(
+            "get_object",
+            OPERATION_GET_OBJECT,
+            instance_id,
+            move || input.to_params(),
+            describe::object_detail,
+        )
         .await
     }
 
@@ -240,24 +185,14 @@ impl AviUtl2McpServer {
         &self,
         Parameters(input): Parameters<GetSelectionInput>,
     ) -> CallToolResult {
-        let registry_dir = self.registry_dir();
-        let CallBudgets { limits, discovery } = self.call_budgets();
-        self.run("get_selection", move || {
-            let instance_id = parse_instance_id(&input.instance_id)?;
-            let params = input.to_params()?;
-            let result: SelectionSnapshot = request_operation(
-                &registry_dir,
-                instance_id,
-                limits,
-                discovery,
-                OPERATION_GET_SELECTION,
-                &params,
-            )?;
-            Ok(ToolSuccess {
-                text: describe::selection(&result),
-                structured: to_structured(&result)?,
-            })
-        })
+        let instance_id = input.instance_id.clone();
+        self.run_operation(
+            "get_selection",
+            OPERATION_GET_SELECTION,
+            instance_id,
+            move || input.to_params(),
+            describe::selection,
+        )
         .await
     }
 
@@ -281,24 +216,14 @@ impl AviUtl2McpServer {
         &self,
         Parameters(input): Parameters<ListAvailableEffectsInput>,
     ) -> CallToolResult {
-        let registry_dir = self.registry_dir();
-        let CallBudgets { limits, discovery } = self.call_budgets();
-        self.run("list_available_effects", move || {
-            let instance_id = parse_instance_id(&input.instance_id)?;
-            let params = input.to_params()?;
-            let result: ListAvailableEffectsResult = request_operation(
-                &registry_dir,
-                instance_id,
-                limits,
-                discovery,
-                OPERATION_LIST_AVAILABLE_EFFECTS,
-                &params,
-            )?;
-            Ok(ToolSuccess {
-                text: describe::available_effects(&result),
-                structured: to_structured(&result)?,
-            })
-        })
+        let instance_id = input.instance_id.clone();
+        self.run_operation(
+            "list_available_effects",
+            OPERATION_LIST_AVAILABLE_EFFECTS,
+            instance_id,
+            move || input.to_params(),
+            describe::available_effects,
+        )
         .await
     }
 
@@ -346,24 +271,14 @@ impl AviUtl2McpServer {
         &self,
         Parameters(input): Parameters<DescribeEffectsInput>,
     ) -> CallToolResult {
-        let registry_dir = self.registry_dir();
-        let CallBudgets { limits, discovery } = self.call_budgets();
-        self.run("describe_effects", move || {
-            let instance_id = parse_instance_id(&input.instance_id)?;
-            let params = input.to_params()?;
-            let result: DescribeEffectsResult = request_operation(
-                &registry_dir,
-                instance_id,
-                limits,
-                discovery,
-                OPERATION_DESCRIBE_EFFECTS,
-                &params,
-            )?;
-            Ok(ToolSuccess {
-                text: describe::effect_descriptions(&result),
-                structured: to_structured(&result)?,
-            })
-        })
+        let instance_id = input.instance_id.clone();
+        self.run_operation(
+            "describe_effects",
+            OPERATION_DESCRIBE_EFFECTS,
+            instance_id,
+            move || input.to_params(),
+            describe::effect_descriptions,
+        )
         .await
     }
 
@@ -386,24 +301,14 @@ impl AviUtl2McpServer {
         &self,
         Parameters(input): Parameters<ListFontsInput>,
     ) -> CallToolResult {
-        let registry_dir = self.registry_dir();
-        let CallBudgets { limits, discovery } = self.call_budgets();
-        self.run("list_fonts", move || {
-            let instance_id = parse_instance_id(&input.instance_id)?;
-            let params = input.to_params()?;
-            let result: ListFontsResult = request_operation(
-                &registry_dir,
-                instance_id,
-                limits,
-                discovery,
-                OPERATION_LIST_FONTS,
-                &params,
-            )?;
-            Ok(ToolSuccess {
-                text: describe::fonts(&result),
-                structured: to_structured(&result)?,
-            })
-        })
+        let instance_id = input.instance_id.clone();
+        self.run_operation(
+            "list_fonts",
+            OPERATION_LIST_FONTS,
+            instance_id,
+            move || input.to_params(),
+            describe::fonts,
+        )
         .await
     }
 
@@ -433,24 +338,14 @@ impl AviUtl2McpServer {
         &self,
         Parameters(input): Parameters<ListPalettesInput>,
     ) -> CallToolResult {
-        let registry_dir = self.registry_dir();
-        let CallBudgets { limits, discovery } = self.call_budgets();
-        self.run("list_palettes", move || {
-            let instance_id = parse_instance_id(&input.instance_id)?;
-            let params = input.to_params()?;
-            let result: ListPalettesResult = request_operation(
-                &registry_dir,
-                instance_id,
-                limits,
-                discovery,
-                OPERATION_LIST_PALETTES,
-                &params,
-            )?;
-            Ok(ToolSuccess {
-                text: describe::palettes(&result),
-                structured: to_structured(&result)?,
-            })
-        })
+        let instance_id = input.instance_id.clone();
+        self.run_operation(
+            "list_palettes",
+            OPERATION_LIST_PALETTES,
+            instance_id,
+            move || input.to_params(),
+            describe::palettes,
+        )
         .await
     }
 
@@ -476,24 +371,14 @@ impl AviUtl2McpServer {
         &self,
         Parameters(input): Parameters<ListModulesInput>,
     ) -> CallToolResult {
-        let registry_dir = self.registry_dir();
-        let CallBudgets { limits, discovery } = self.call_budgets();
-        self.run("list_modules", move || {
-            let instance_id = parse_instance_id(&input.instance_id)?;
-            let params = input.to_params()?;
-            let result: ListModulesResult = request_operation(
-                &registry_dir,
-                instance_id,
-                limits,
-                discovery,
-                OPERATION_LIST_MODULES,
-                &params,
-            )?;
-            Ok(ToolSuccess {
-                text: describe::modules(&result),
-                structured: to_structured(&result)?,
-            })
-        })
+        let instance_id = input.instance_id.clone();
+        self.run_operation(
+            "list_modules",
+            OPERATION_LIST_MODULES,
+            instance_id,
+            move || input.to_params(),
+            describe::modules,
+        )
         .await
     }
 
@@ -527,24 +412,14 @@ impl AviUtl2McpServer {
         &self,
         Parameters(input): Parameters<ListObjectAliasesInput>,
     ) -> CallToolResult {
-        let registry_dir = self.registry_dir();
-        let CallBudgets { limits, discovery } = self.call_budgets();
-        self.run("list_object_aliases", move || {
-            let instance_id = parse_instance_id(&input.instance_id)?;
-            let params = input.to_params()?;
-            let result: ListObjectAliasesResult = request_operation(
-                &registry_dir,
-                instance_id,
-                limits,
-                discovery,
-                OPERATION_LIST_OBJECT_ALIASES,
-                &params,
-            )?;
-            Ok(ToolSuccess {
-                text: describe::object_aliases(&result),
-                structured: to_structured(&result)?,
-            })
-        })
+        let instance_id = input.instance_id.clone();
+        self.run_operation(
+            "list_object_aliases",
+            OPERATION_LIST_OBJECT_ALIASES,
+            instance_id,
+            move || input.to_params(),
+            describe::object_aliases,
+        )
         .await
     }
 
@@ -577,24 +452,14 @@ impl AviUtl2McpServer {
         &self,
         Parameters(input): Parameters<GetEffectItemValuesInput>,
     ) -> CallToolResult {
-        let registry_dir = self.registry_dir();
-        let CallBudgets { limits, discovery } = self.call_budgets();
-        self.run("get_effect_item_values", move || {
-            let instance_id = parse_instance_id(&input.instance_id)?;
-            let params = input.to_params()?;
-            let result: EffectItemValues = request_operation(
-                &registry_dir,
-                instance_id,
-                limits,
-                discovery,
-                OPERATION_GET_EFFECT_ITEM_VALUES,
-                &params,
-            )?;
-            Ok(ToolSuccess {
-                text: describe::effect_item_values(&result),
-                structured: to_structured(&result)?,
-            })
-        })
+        let instance_id = input.instance_id.clone();
+        self.run_operation(
+            "get_effect_item_values",
+            OPERATION_GET_EFFECT_ITEM_VALUES,
+            instance_id,
+            move || input.to_params(),
+            describe::effect_item_values,
+        )
         .await
     }
 }

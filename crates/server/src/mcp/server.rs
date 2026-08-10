@@ -474,6 +474,42 @@ impl AviUtl2McpServer {
         }
     }
 
+    /// operation を 1 件送る tool call を実行する。
+    ///
+    /// `instance_id` の解析を `params` の検証より先に行い、どちらも不正な要求は
+    /// instance_id の誤りとして返す。`text` は応答から text content を組み立てる。
+    pub(super) async fn run_operation<P, R>(
+        &self,
+        tool: &'static str,
+        operation: &'static str,
+        instance_id: String,
+        params: impl FnOnce() -> Result<P, ErrorObject> + Send + 'static,
+        text: fn(&R) -> String,
+    ) -> CallToolResult
+    where
+        P: Serialize + Send + 'static,
+        R: DeserializeOwned + Serialize + Send + 'static,
+    {
+        let registry_dir = self.registry_dir();
+        let CallBudgets { limits, discovery } = self.call_budgets();
+        self.run(tool, move || {
+            let instance_id = parse_instance_id(&instance_id)?;
+            let result: R = request_operation(
+                &registry_dir,
+                instance_id,
+                limits,
+                discovery,
+                operation,
+                &params()?,
+            )?;
+            Ok(ToolSuccess {
+                text: text(&result),
+                structured: to_structured(&result)?,
+            })
+        })
+        .await
+    }
+
     /// resource 要求 1 件をブロッキングタスクで実行する。
     async fn run_resource<T, F>(&self, operation: &'static str, body: F) -> Result<T, McpError>
     where
