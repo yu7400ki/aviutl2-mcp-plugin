@@ -19,13 +19,13 @@ use std::os::windows::ffi::OsStrExt;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tracing::{debug, instrument, trace, warn};
-use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_BUSY, HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{ERROR_PIPE_BUSY, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE, OPEN_EXISTING,
 };
 use windows::Win32::System::Pipes::WaitNamedPipeW;
-use windows::core::PCWSTR;
+use windows::core::{Owned, PCWSTR};
 
 /// 1 回の読み取りで受け取る最大バイト数。
 ///
@@ -111,7 +111,11 @@ impl From<WinIoError> for PipeClientError {
 
 /// 認証済み named pipe 接続。
 pub struct PipeClient {
-    handle: HANDLE,
+    /// 接続ハンドル。
+    ///
+    /// read/write は完了・キャンセルのいずれかを確認してから戻るため、本型を
+    /// 解放する時点でこのハンドルに保留中の I/O は存在しない。
+    handle: Owned<HANDLE>,
     instance_id: InstanceId,
     /// フレーム境界を見失った接続を再利用させないための印。
     ///
@@ -380,7 +384,7 @@ impl PipeClient {
 
     fn write_frame(&self, body: &[u8], deadline: Instant) -> Result<(), PipeClientError> {
         let frame = encode_frame(body).map_err(|_| PipeClientError::Framing)?;
-        win_io::write_all(self.handle, &frame, deadline)?;
+        win_io::write_all(*self.handle, &frame, deadline)?;
         Ok(())
     }
 
@@ -400,7 +404,7 @@ impl PipeClient {
                 return Ok(frame);
             }
             let take = decoder.bytes_needed().min(chunk.len());
-            win_io::read_exact(self.handle, &mut chunk[..take], deadline)?;
+            win_io::read_exact(*self.handle, &mut chunk[..take], deadline)?;
             decoder
                 .feed(&chunk[..take])
                 .map_err(|_| PipeClientError::Framing)?;
@@ -420,17 +424,6 @@ fn decode_result_value<R: DeserializeOwned>(
 ) -> Result<R, PipeClientError> {
     let bytes = serde_json::to_vec(result).map_err(|_| PipeClientError::Json)?;
     deserialize_json(&bytes).map_err(|_| PipeClientError::InvalidResponse)
-}
-
-impl Drop for PipeClient {
-    fn drop(&mut self) {
-        // read/write は完了・キャンセルのいずれかを確認してから戻るため、
-        // ここに到達した時点でこのハンドルに保留中の I/O は存在しない。
-        // SAFETY: `self.handle` は本型のみが所有しており、ここでのみ閉じられる。
-        unsafe {
-            let _ = CloseHandle(self.handle);
-        }
-    }
 }
 
 /// 単調時計上の期限を、Envelope が運ぶ壁時計基準の Unix ミリ秒へ変換する。
@@ -491,7 +484,7 @@ fn connect_pipe(
     deadline: Instant,
     connect_reserve: Duration,
     connect_wait_cap: Duration,
-) -> Result<HANDLE, PipeClientError> {
+) -> Result<Owned<HANDLE>, PipeClientError> {
     let wide: Vec<u16> = OsStr::new(pipe_name)
         .encode_wide()
         .chain(std::iter::once(0))
@@ -511,6 +504,7 @@ fn connect_pipe(
         }
 
         // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
+        // 成功時に返るハンドルの所有権はこの呼び出しだけが持つ。
         let handle = unsafe {
             CreateFileW(
                 PCWSTR(wide.as_ptr()),
@@ -521,10 +515,11 @@ fn connect_pipe(
                 FILE_FLAG_OVERLAPPED,
                 None,
             )
+            .map(|h| Owned::new(h))
         };
 
         match handle {
-            Ok(h) if h != INVALID_HANDLE_VALUE => return Ok(h),
+            Ok(h) if *h != INVALID_HANDLE_VALUE => return Ok(h),
             Ok(_) => return Err(PipeClientError::ConnectFailed),
             // 待受インスタンスが全て塞がっている。期限まで待ち直す。
             Err(e) if e.code() == ERROR_PIPE_BUSY.into() => continue,
@@ -540,6 +535,7 @@ mod tests {
     use aviutl2_mcp_core::{InstanceId, InstanceState, ResponseKind, ScaledBudgets};
     use serde::Deserialize;
     use std::time::Duration;
+    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Storage::FileSystem::{PIPE_ACCESS_DUPLEX, ReadFile, WriteFile};
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
@@ -685,9 +681,9 @@ mod tests {
         );
 
         releaser.join().expect("待受の張り直しが完了する");
-        // SAFETY: いずれも本テストが所有する有効なハンドル。
+        drop(handle);
+        // SAFETY: 本テストが所有する有効なハンドル。
         unsafe {
-            let _ = CloseHandle(handle);
             let _ = CloseHandle(server);
         }
     }
@@ -834,18 +830,21 @@ mod tests {
             assert!(!peer.is_invalid(), "テスト用 pipe の作成に失敗しました");
 
             // SAFETY: `wide` は NUL 終端した pipe 名であり、呼び出し中は生存している。
+            // 成功時に返るハンドルの所有権はこの呼び出しだけが持つ。
             let client_handle = unsafe {
-                CreateFileW(
-                    PCWSTR(wide.as_ptr()),
-                    GENERIC_READ.0 | GENERIC_WRITE.0,
-                    FILE_SHARE_NONE,
-                    None,
-                    OPEN_EXISTING,
-                    FILE_FLAG_OVERLAPPED,
-                    None,
+                Owned::new(
+                    CreateFileW(
+                        PCWSTR(wide.as_ptr()),
+                        GENERIC_READ.0 | GENERIC_WRITE.0,
+                        FILE_SHARE_NONE,
+                        None,
+                        OPEN_EXISTING,
+                        FILE_FLAG_OVERLAPPED,
+                        None,
+                    )
+                    .expect("テスト用 pipe への接続に失敗しました"),
                 )
-            }
-            .expect("テスト用 pipe への接続に失敗しました");
+            };
 
             // 接続済みのため `ConnectNamedPipe` は待たずに戻る。
             // SAFETY: `peer` は直前に作成した有効な pipe ハンドル。
