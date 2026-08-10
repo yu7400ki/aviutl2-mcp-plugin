@@ -2338,6 +2338,33 @@ fn a_successful_write_reads_the_value_back_exactly_once() {
 }
 
 #[test]
+fn a_successful_write_reads_the_object_detail_once_after_the_write() {
+    // 照合が読み直した対象をそのまま応答へ回す。応答の組み立てが自分で読み直せば
+    // 同じ状態を 2 度読むことになり、効果を多く持つ対象では詳細の 1 回が SDK
+    // 呼び出しの数十回になる。
+    let harness = harness_with_unlisted_item();
+    let selector = harness.effect_selector(1, 100, "ぼかし", 0);
+    harness.host.clear_calls();
+
+    harness
+        .edit
+        .set_object_item(&SetObjectItemParams {
+            selector,
+            item: "範囲".to_string(),
+            value: ItemValue::Integer { value: 30 },
+        })
+        .expect("設定項目の変更に失敗しました");
+
+    let calls = harness.host.calls();
+    let first = first_mutation(&calls).expect("変更 API が呼ばれていません");
+    assert_eq!(
+        count(&calls[first..], "object_detail"),
+        1,
+        "変更の後に同じ対象を 2 度読みました: {calls:?}"
+    );
+}
+
+#[test]
 fn a_verified_write_reads_the_value_once_before_the_write() {
     // **書き込みの前に読むのは巻き戻しの材料である。** 照合が落ちたときに
     // 書き戻す生文字列は、発行してしまえば失われる。したがって組み合わせに

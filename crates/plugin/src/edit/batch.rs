@@ -469,7 +469,11 @@ fn issue(
             // 適用の直後に照合する。単独の変更で失敗する入力が一括適用では成功
             // する経路を作らないためであり、費用は判定を持つ
             // [`verify_written_item`] の側が述べる。
+            //
+            // 読み直した対象は使わない。結果の組み立ては全 sub-operation の適用が
+            // 終わってから行う（[`summarize`]）。
             verify_written_item(editor, permit, boundary, object, effect, item, write)
+                .map(|_| ())
                 .map_err(IssueFailure::applied)
         }
     }

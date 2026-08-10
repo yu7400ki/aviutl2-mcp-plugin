@@ -564,16 +564,18 @@ pub(crate) fn reread_with_effects(
 /// **設定値を読む前に、対象を 1 度読み直す。** ホストは受理した綴りを後から
 /// 解釈し直して保存値を差し替えることがあり、書き込みの直後に設定値だけを読むと
 /// 差し替わる前の綴りが返る。差し替えは対象の読み直しを経た後の設定値に現れる。
-/// 読み直した内容そのものは使わない——照合の材料は設定値の読みが返す文字列で
-/// ある。
+///
+/// **読み直した対象を返す。** 照合を通った時点で対象は動いていないため、応答を
+/// 組み立てる呼び出し側はこれをそのまま使える。同じ状態を 2 度読まない——効果を
+/// 多く持つ対象では、詳細の 1 回が SDK 呼び出しの数十回になる。
 ///
 /// **読み直す位置は解決済みトークンから引き直す。** 解決の時点の位置は先行する
 /// sub-operation の移動で古くなり得る。トークンは移動で失効しないため、位置は
 /// そこから読める。
 ///
 /// 費用は sub-operation 1 件あたり「位置の読み 1 回 ＋ 対象の読み直し 1 回 ＋
-/// 設定値の読み 1 回」である。**照合しない種別はどれも行わない。** 費用は照合の
-/// 有無と一致する。
+/// 設定値の読み 1 回」である。**照合しない種別はどれも行わず [`None`] を返す。**
+/// 費用は照合の有無と一致する。
 ///
 /// 単独の変更と一括適用が同じ入力に対して同じ失敗を返すよう、判定はこの 1 か所
 /// だけに置く。
@@ -585,12 +587,12 @@ pub(crate) fn verify_written_item(
     effect: &ResolvedEffect<'_>,
     item: &str,
     write: &ItemWrite,
-) -> Result<(), EditError> {
+) -> Result<Option<(ObjectSummary, Vec<HostEffect>)>, EditError> {
     let ReadBackCheck::Compare(_) = write.read_back() else {
-        return Ok(());
+        return Ok(None);
     };
     let position = attribute(permit, boundary, editor.object_position(object))?;
-    attribute(
+    let reread = attribute(
         permit,
         boundary,
         reread_with_effects(editor, boundary, position.layer, position.frame_start),
@@ -598,7 +600,7 @@ pub(crate) fn verify_written_item(
     let observed = attribute(permit, boundary, editor.effect_item_value(effect, item))?;
     // 照合しない種別はこの位置へ来ない。来たとしても `None` は一致を名乗らない。
     if write.read_back_matches(&observed) == Some(true) {
-        return Ok(());
+        return Ok(Some(reread));
     }
     // 巻き戻しはこの関数の外で行う。一括適用も同じ判定を通るが、あちらは要求
     // 全体の巻き戻し計画を別に持つ。
@@ -1352,7 +1354,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             permit.issue(&boundary, |ticket| {
                 editor.set_effect_item(ticket, &effect, &params.item, write.value())
             })?;
-            if let Err(error) = verify_written_item(
+            let verified = match verify_written_item(
                 editor,
                 &permit,
                 &boundary,
@@ -1361,23 +1363,41 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 &params.item,
                 &write,
             ) {
-                return Err(restore_after_failed_verification(
-                    editor,
-                    &permit,
-                    &boundary,
-                    &effect,
-                    &params.item,
-                    origin_value.as_deref(),
-                    error,
-                ));
-            }
+                Ok(verified) => verified,
+                Err(error) => {
+                    return Err(restore_after_failed_verification(
+                        editor,
+                        &permit,
+                        &boundary,
+                        &effect,
+                        &params.item,
+                        origin_value.as_deref(),
+                        error,
+                    ));
+                }
+            };
 
             // 照合を通った値を、種別に応じた形へ解釈し直して応答へ載せる。表記は
-            // ホストが整えたものであり、要求した値そのものである。
-            let (summary, info) = attribute(
-                &permit,
-                &boundary,
-                reread_effect(editor, &boundary, &object, effect.position()),
+            // ホストが整えたものであり、要求した値そのものである。読み直しは
+            // 照合が済ませており、対象はそれから動いていない。
+            let (summary, effects) = match verified {
+                Some(reread) => reread,
+                // 照合しない種別は読み直していない。応答は対象を要する。
+                None => attribute(
+                    &permit,
+                    &boundary,
+                    reread_with_effects(editor, &boundary, object.layer(), object.frame_start()),
+                )?,
+            };
+            let info = effect_info_at(&summary.selector, &effects, effect.position()).ok_or_else(
+                || {
+                    permit.attribute(
+                        &boundary,
+                        EditError::Sdk {
+                            operation: "get_effect_list",
+                        },
+                    )
+                },
             )?;
             Ok(EditOutcome::effect_changed(
                 boundary.epoch(),
