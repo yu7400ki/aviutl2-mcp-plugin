@@ -2249,8 +2249,8 @@ pub(crate) fn raw_item_value(value: &ItemValue) -> String {
 /// 表記へ包み直す。解かずに保持すると、書いた `\` がそのまま残り、実機で起きる
 /// 「`\t` が素通りして `\n` だけ改行になる」形を再現できない。
 ///
-/// 書き込みを公開していない種別は生の文字列のまま保つ。読み取り経路がそれらを
-/// 生値として返すため、書き込みだけが別の形へ写ると場面の状態が種別と食い違う。
+/// `data` と未知種別は生の文字列のまま保つ。読み取り経路がそれらを生値として
+/// 返すため、書き込みだけが別の形へ写ると場面の状態が種別と食い違う。
 fn host_write(item_type: &EffectItemType, value: &str, fonts: &[String]) -> Option<ItemValue> {
     // トラックバーの項目は数値と移動の 2 通りの表記を受ける。移動として読める
     // 文字列を数値として解釈すると、0 へ落ちて書き込みが黙って壊れる。
@@ -2312,10 +2312,12 @@ fn host_write(item_type: &EffectItemType, value: &str, fonts: &[String]) -> Opti
                 .unwrap_or_default()
                 .clamp(MIN_ITEM_VALUE, MAX_ITEM_VALUE),
         }),
-        EffectItemType::Scene
-        | EffectItemType::Range
-        | EffectItemType::Data
-        | EffectItemType::Unknown(_) => Some(ItemValue::Unknown {
+        // 値域も小数桁も持たない。書かれた十進整数がそのまま入り、数値として
+        // 読めない綴りは 0 になる。
+        EffectItemType::Scene | EffectItemType::Range => Some(ItemValue::Integer {
+            value: value.parse::<i64>().unwrap_or_default(),
+        }),
+        EffectItemType::Data | EffectItemType::Unknown(_) => Some(ItemValue::Unknown {
             raw: value.to_string(),
         }),
     }
@@ -2667,6 +2669,57 @@ pub(crate) const MOVING_ITEM: &str = "X";
 
 /// [`coordinate`] が持つ、移動を持たない設定項目の名前。
 pub(crate) const STATIC_ITEM: &str = "拡大率";
+
+/// 参照先を十進整数 1 個で指す設定項目を並べた effect。
+///
+/// レイヤー範囲とシーン参照を併せて持つ。どちらも値域も選択肢も持たず、値の形は
+/// 整数 1 つだけである。**片方だけを置くと、2 種別が同じ経路を通ることを試験群が
+/// 確かめられない。**
+///
+/// 既定の状態には含めない。この 2 種別を要する試験だけが
+/// [`group_control_catalog_entry`] と対にして差し込む。
+pub(crate) fn group_control(index: usize) -> HostEffect {
+    HostEffect {
+        name: GROUP_CONTROL.to_string(),
+        index,
+        enabled: true,
+        locked: false,
+        items: vec![
+            EffectItem {
+                name: LAYER_RANGE_ITEM.to_string(),
+                item_type: EffectItemType::Range,
+                value: ItemValue::Integer { value: 0 },
+                track: None,
+            },
+            EffectItem {
+                name: SCENE_ITEM.to_string(),
+                item_type: EffectItemType::Scene,
+                value: ItemValue::Integer { value: 0 },
+                track: None,
+            },
+        ],
+    }
+}
+
+/// [`group_control`] をカタログへ載せる形。
+pub(crate) fn group_control_catalog_entry() -> FakeCatalogEntry {
+    FakeCatalogEntry {
+        name: GROUP_CONTROL.to_string(),
+        effect_type: EffectType::Filter,
+        flags: EffectFlags::from_raw(1),
+        items: item_definitions(group_control(0).items),
+        facets: HashMap::new(),
+    }
+}
+
+/// [`group_control`] の effect 名。
+pub(crate) const GROUP_CONTROL: &str = "グループ制御";
+
+/// [`group_control`] が持つ、レイヤー範囲の設定項目の名前。
+pub(crate) const LAYER_RANGE_ITEM: &str = "対象レイヤー数";
+
+/// [`group_control`] が持つ、シーン参照の設定項目の名前。
+pub(crate) const SCENE_ITEM: &str = "シーン";
 
 /// 入力 effect。
 fn video() -> HostEffect {

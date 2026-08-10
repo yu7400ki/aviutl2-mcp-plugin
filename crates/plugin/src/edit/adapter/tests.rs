@@ -9,11 +9,12 @@ use crate::alias::tests::{TempDir, write_fixture};
 use crate::edit::fake::{
     CHOICE_VALUES, CLOSURE_ESCAPED, COORDINATE, CREATE_FRAME_SHIFT, DEFAULT_COLOR, DEFAULT_FONT,
     EFFECT_LIST, FakeCatalogEntry, FakeEditHost, FakeLayer, FakeObject, FakeReadHost, Fault,
-    ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX, MAX_FRAME, MAX_ITEM_VALUE,
-    MAX_LAYER, MAX_SCENE_HEIGHT, MAX_SCENE_SAMPLE_RATE, MAX_SCENE_WIDTH, MOVE_FRAME_SHIFT,
-    MOVING_ITEM, MUTATIONS, OBSERVED_SCENE, PanicPoint, READ_SECTION, RENAMED_SCENE_NAME, SCENE_ID,
-    SCENE_NAME, SECTION_RANGES, SHAPE, STATIC_ITEM, TRACK_MODES, blur, coordinate,
-    coordinate_catalog_entry, raw_item_value, shape, shape_catalog_entry,
+    GROUP_CONTROL, ITEM_VALUE, Knobs, LAYER_ATTRIBUTES, LAYER_LOCK, LAYER_MAX, LAYER_RANGE_ITEM,
+    MAX_FRAME, MAX_ITEM_VALUE, MAX_LAYER, MAX_SCENE_HEIGHT, MAX_SCENE_SAMPLE_RATE, MAX_SCENE_WIDTH,
+    MOVE_FRAME_SHIFT, MOVING_ITEM, MUTATIONS, OBSERVED_SCENE, PanicPoint, READ_SECTION,
+    RENAMED_SCENE_NAME, SCENE_ID, SCENE_ITEM, SCENE_NAME, SECTION_RANGES, SHAPE, STATIC_ITEM,
+    TRACK_MODES, blur, coordinate, coordinate_catalog_entry, group_control,
+    group_control_catalog_entry, raw_item_value, shape, shape_catalog_entry,
 };
 use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::{default_page_request, default_page_window, with_silent_panic_hook};
@@ -2447,6 +2448,80 @@ fn the_choice_items_of_the_fake_have_distinct_item_types() {
             EffectItemType::Figure,
         ]
     );
+}
+
+/// レイヤー範囲とシーン参照の設定項目を持つ effect を足したフェイクを組む。
+///
+/// カタログと対象オブジェクトの双方へ同じ effect を足す。種別はカタログの
+/// 一覧から引かれるため、両方を揃えないと本番と同じ経路を通らない。
+fn harness_with_reference_effect() -> Harness {
+    Harness::with(|host| {
+        host.catalog.push(group_control_catalog_entry());
+        host.scene.get_mut().unwrap().layers[1].objects[1]
+            .effects
+            .push(group_control(0));
+    })
+}
+
+/// レイヤー範囲・シーン参照の項目への書き込み要求を組み立てる。
+fn set_reference_item(harness: &Harness, item: &str, value: ItemValue) -> SetObjectItemParams {
+    SetObjectItemParams {
+        selector: harness.effect_selector(1, 300, GROUP_CONTROL, 0),
+        item: item.to_string(),
+        value,
+    }
+}
+
+#[test]
+fn a_layer_range_and_a_scene_reference_take_an_integer() {
+    // 作成の経路が書ける値を、編集の経路も書ける。書いた値は読み直しの照合を
+    // 通り、応答が返す effect に整数として載る。
+    for item in [LAYER_RANGE_ITEM, SCENE_ITEM] {
+        let harness = harness_with_reference_effect();
+        let outcome = harness
+            .edit
+            .set_object_item(&set_reference_item(
+                &harness,
+                item,
+                ItemValue::Integer { value: 1 },
+            ))
+            .unwrap_or_else(|error| panic!("{item} への整数の書き込みが拒否されました: {error}"));
+        assert_eq!(
+            changed_item(&outcome, item),
+            ItemValue::Integer { value: 1 },
+            "{item}"
+        );
+    }
+}
+
+#[test]
+fn a_layer_range_and_a_scene_reference_refuse_every_other_value_shape() {
+    // 受ける形を整数に限ることが、数値として解釈できない綴りをホストへ届かせ
+    // ない形である。実数も文字列も種別と形の照合で落ちる。
+    let harness = harness_with_reference_effect();
+    for item in [LAYER_RANGE_ITEM, SCENE_ITEM] {
+        for value in [
+            ItemValue::Number {
+                value: FiniteF64::try_new(1.0).expect("有限値"),
+            },
+            ItemValue::Text {
+                value: "1".to_string(),
+            },
+        ] {
+            let kind = value.kind();
+            let error = harness
+                .edit
+                .set_object_item(&set_reference_item(&harness, item, value))
+                .expect_err("整数以外の形が受理されました");
+            assert_eq!(
+                error.error_code(),
+                ErrorCode::InvalidArgument,
+                "{item}/{kind}"
+            );
+            assert_eq!(error.details()["value_kind"], json!(kind), "{item}/{kind}");
+        }
+    }
+    harness.assert_untouched();
 }
 
 /// 応答が返した effect から、指定した設定項目の値を取り出す。

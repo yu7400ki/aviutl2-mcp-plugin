@@ -847,10 +847,13 @@ fn item_value(
         EffectItemType::Text | EffectItemType::String => ItemValue::Text {
             value: decode_host_text(&raw),
         },
-        EffectItemType::Scene
-        | EffectItemType::Range
-        | EffectItemType::Data
-        | EffectItemType::Unknown(_) => ItemValue::Unknown { raw },
+        // シーン参照とレイヤー範囲はトラックバーとして評価されず移動を持ち得
+        // ないため、数値として読めない値は移動ではなく本当に未知である。
+        EffectItemType::Scene | EffectItemType::Range => match raw.trim().parse::<i64>() {
+            Ok(value) => ItemValue::Integer { value },
+            Err(_) => ItemValue::Unknown { raw },
+        },
+        EffectItemType::Data | EffectItemType::Unknown(_) => ItemValue::Unknown { raw },
     }
 }
 
@@ -1682,12 +1685,7 @@ mod tests {
 
     #[test]
     fn unsupported_item_types_keep_raw_text() {
-        for item_type in [
-            EffectItemType::Scene,
-            EffectItemType::Range,
-            EffectItemType::Data,
-            EffectItemType::Unknown(99),
-        ] {
+        for item_type in [EffectItemType::Data, EffectItemType::Unknown(99)] {
             assert_eq!(
                 read_value(&item_type, "raw"),
                 ItemValue::Unknown {
@@ -1695,6 +1693,30 @@ mod tests {
                 },
                 "{item_type} が生文字列を保持しません"
             );
+        }
+    }
+
+    #[test]
+    fn scene_and_range_read_as_integers() {
+        // 書ける形と読める形を揃える。生値で返すと、読み取った値をそのまま
+        // 書き戻す経路がこの 2 種別でだけ塞がる。
+        for item_type in [EffectItemType::Scene, EffectItemType::Range] {
+            assert_eq!(
+                read_value(&item_type, "1"),
+                ItemValue::Integer { value: 1 },
+                "{item_type} が整数として返りません"
+            );
+            // 数値として読めない値は移動ではない。この 2 種別はトラックバーと
+            // して評価されず、移動を持ち得ない。
+            for raw in ["?", "0.5", "0,100,直線移動,0"] {
+                assert_eq!(
+                    read_moving_value(&item_type, raw),
+                    ItemValue::Unknown {
+                        raw: raw.to_string()
+                    },
+                    "{item_type} が {raw} を整数以外の形で返します"
+                );
+            }
         }
     }
 
@@ -1814,18 +1836,14 @@ mod tests {
             (
                 EffectItemType::Scene,
                 "0",
-                ItemValue::Unknown {
-                    raw: "0".to_string(),
-                },
-                unknown_value.clone(),
+                ItemValue::Integer { value: 0 },
+                Ok("0".to_string()),
             ),
             (
                 EffectItemType::Range,
-                "0",
-                ItemValue::Unknown {
-                    raw: "0".to_string(),
-                },
-                unknown_value.clone(),
+                "1",
+                ItemValue::Integer { value: 1 },
+                Ok("1".to_string()),
             ),
             (
                 EffectItemType::Combo,
