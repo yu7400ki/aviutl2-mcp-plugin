@@ -1014,7 +1014,9 @@ impl AviUtl2McpServer {
     /// インスタンスへ登録されているスクリプトとプラグインの一覧を取得する。
     /// information はホストが利用者へ表示する説明文である。
     /// 一覧には既知の 9 種別だけが現れる。
-    /// 種別を解釈できないモジュールは一覧から欠落し得る。
+    /// 一覧に現れるのは後から登録されたものである。AviUtl2 に同梱されている
+    /// スクリプトは、種別を解釈できても一覧に現れない。ある種別が 0 件である
+    /// ことは、その種別の機能がインスタンスに無いことを意味しない。
     #[tool(
         name = "list_modules",
         annotations(
@@ -4487,10 +4489,15 @@ mod tests {
 
     #[test]
     fn list_modules_admits_that_the_list_can_be_incomplete() {
-        // 種別を解釈できないモジュールは一覧へ現れない。黙っていると、要求元は
-        // 一覧を登録物の全体だと読む。
+        // 同梱のスクリプトは種別を解釈できても一覧へ現れない。黙っていると、
+        // 要求元は一覧を登録物の全体だと読み、0 件をその機能の不在と読む。
         let description = description_of("list_modules");
-        for phrase in ["既知の 9 種別", "欠落し得る"] {
+        for phrase in [
+            "既知の 9 種別",
+            "後から登録されたもの",
+            "同梱されている",
+            "その種別の機能がインスタンスに無いことを意味しない",
+        ] {
             assert!(
                 description.contains(phrase),
                 "list_modules の説明が {phrase} に触れていません"
