@@ -4893,17 +4893,19 @@ mod tests {
         // 参照先が実在するかをホストは確かめず、読み直しの照合も整数が入ったこと
         // しか言えない。**引く経路も無い**——挙げられる ID の一覧を返す tool が
         // 無いことまで述べなければ、要求元は探しに行って空振りする。
-        assert_eq!(
-            item_value_description("integer"),
-            "整数。item_type が integer・scene・range の項目に書ける。\n\
-             item_type が number の項目へ書くと invalid_argument となる。\n\
-             トラックバーへ書くと全区間へ同じ値が入る。\n\
-             移動を持つ項目へは指定できず、unsupported_operation となる。\n\
-             移動を消したい場合は mode を null にした track を送る。\n\
-             item_type: scene が指す先のシーンが実在するかをホストは確かめず、\n\
-             書き込み直後の読み直しも整数が入ったことしか言えない。存在しないシーンを\n\
-             指す値も成功として返る。シーン ID を引く tool は無い。"
-        );
+        // 種別の一覧は別の検査が実装から導いて握る。ここが握るのは
+        // シーン参照について述べている 3 つだけである。
+        let description = item_value_description("integer");
+        for phrase in [
+            "実在するかをホストは確かめず",
+            "整数が入ったことしか言えない",
+            "シーン ID を引く tool は無い",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "integer の説明が {phrase} に触れていません: {description}"
+            );
+        }
     }
 
     /// 書き込みを公開していない既知の設定項目種別を、書き込みの検証から集める。
