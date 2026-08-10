@@ -41,13 +41,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tracing::{debug, error, warn};
-use windows::Win32::Foundation::{CloseHandle, ERROR_NOTIFY_ENUM_DIR, GENERIC_READ, HANDLE};
+use windows::Win32::Foundation::{ERROR_NOTIFY_ENUM_DIR, GENERIC_READ, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_NOTIFY_CHANGE_FILE_NAME,
     FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, OPEN_EXISTING, ReadDirectoryChangesW,
 };
-use windows::core::PCWSTR;
+use windows::core::{Owned, PCWSTR};
 
 /// 変更の記録を受け取るバッファの大きさ（バイト）。
 ///
@@ -261,10 +261,10 @@ impl Drop for SettingsWatcher {
 }
 
 /// 監視対象のディレクトリハンドル。
-struct DirectoryHandle(HANDLE);
+struct DirectoryHandle(Owned<HANDLE>);
 
 // SAFETY: ファイルハンドルはスレッドを跨いで使用でき、`DirectoryHandle` は
-// 所有権を単一の値に閉じている。閉じるのは `Drop` だけである。
+// 所有権を単一の値に閉じている。複製されたハンドルは存在しない。
 unsafe impl Send for DirectoryHandle {}
 
 impl DirectoryHandle {
@@ -276,33 +276,27 @@ impl DirectoryHandle {
     fn open(path: &Path) -> io::Result<Self> {
         let wide = to_wide(path);
         // SAFETY: `wide` は NUL 終端したパスであり、呼び出しの間だけ参照される。
-        // ディレクトリを開くには backup semantics が要る。
+        // ディレクトリを開くには backup semantics が要る。成功時に返るハンドルの
+        // 所有権はこの値だけが持つ。
         let handle = unsafe {
-            CreateFileW(
-                PCWSTR(wide.as_ptr()),
-                GENERIC_READ.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-                None,
+            Owned::new(
+                CreateFileW(
+                    PCWSTR(wide.as_ptr()),
+                    GENERIC_READ.0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                    None,
+                )
+                .map_err(|e| io::Error::other(format!("ディレクトリを開けませんでした: {e}")))?,
             )
-        }
-        .map_err(|e| io::Error::other(format!("ディレクトリを開けませんでした: {e}")))?;
+        };
         Ok(Self(handle))
     }
 
     fn handle(&self) -> HANDLE {
-        self.0
-    }
-}
-
-impl Drop for DirectoryHandle {
-    fn drop(&mut self) {
-        // SAFETY: 本型のみが所有しており、ここでのみ閉じられる。
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
+        *self.0
     }
 }
 
