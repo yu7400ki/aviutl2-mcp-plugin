@@ -873,6 +873,9 @@ impl AviUtl2McpServer {
     /// どちらもヒントであってゲートではない。候補に無い値でも書き込みは通り、
     /// 値域を外れる値でも書き込みは通る。候補に在る値が必ず通るとも限らない。
     /// 可否を決めるのはホストである。
+    /// range は書き込む値に掛かるヒントであり、評価値の上下界ではない。
+    /// 移動方法によっては、区間の境界へ書いた値が値域の内側でも、
+    /// 途中のフレームの評価値が値域の外へ出る。
     /// group は設定項目が属するグループ（index と item_names）であり、座標の X / Y / Z の
     /// ように 1 つの組を成す項目を示す。属さない項目は null になる。
     /// このグループは名前を持たない。get_effect_item_values の text が示す group=<名前> は
@@ -3334,6 +3337,21 @@ mod tests {
             "値域を外れる値でも書き込みは通る",
             "可否を決めるのはホストである",
         ] {
+            assert!(
+                description.contains(phrase),
+                "describe_effects の説明が {phrase} に触れていません: {description}"
+            );
+        }
+    }
+
+    #[test]
+    fn describe_effects_states_that_range_bounds_the_written_value_and_not_the_evaluated_one() {
+        // 値域を先に引いてから組む要求元ほど、書き込みが通ったことを評価の
+        // 妥当性と読む。移動方法によっては、境界へ書いた値が値域の内側でも
+        // 途中のフレームの評価値が外へ出る。range が掛かる先を述べておく。
+        let description = description_of("describe_effects");
+        for phrase in ["書き込む値に掛かる", "評価値の上下界ではない", "値域の外"]
+        {
             assert!(
                 description.contains(phrase),
                 "describe_effects の説明が {phrase} に触れていません: {description}"
