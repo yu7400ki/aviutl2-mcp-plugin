@@ -700,8 +700,8 @@ fn accepts(item_type: &EffectItemType, value: &ItemValue) -> bool {
 ///
 /// **色の書式も、フォント名が登録済みかも、ここでは検査しない。** ホストが
 /// 受理する表記の全体像を観測できていないため、事前に弾く規則を置くと、通る
-/// はずの値を我々の側が拒むことになる。受け付けられなかったことは、書き込んだ
-/// 直後の読み直しが要求と違う値を返すことで分かる（[`read_back_check`]）。
+/// はずの値を我々の側が拒むことになる。受け付けられなかったことは、書き込みの
+/// 後の読み直しが要求と違う値を返すことで分かる（[`read_back_check`]）。
 /// 観測に基づく規則だけで判定できる場所へ判定を置く、ということである。
 fn encode_value(value: &ItemValue, target: TrackWriteTarget<'_>) -> Result<String, ItemWriteError> {
     match value {
