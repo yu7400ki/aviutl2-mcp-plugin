@@ -366,6 +366,14 @@ impl FakeScene {
             .find(|object| object.placement.frame_start == frame_start)
     }
 
+    fn find_mut(&mut self, layer: usize, frame_start: usize) -> Option<&mut FakeObject> {
+        self.layers
+            .get_mut(layer)?
+            .objects
+            .iter_mut()
+            .find(|object| object.placement.frame_start == frame_start)
+    }
+
     fn by_id(&self, id: usize) -> Option<&FakeObject> {
         self.layers
             .iter()
@@ -1179,13 +1187,14 @@ impl SceneReader for FakeSceneEditor<'_> {
         // effect を必要としない operation が読んでいないことを確かめられる。
         self.host.record(EFFECT_LIST);
         self.on_object_read()?;
-        let scene = self.host.scene.lock().unwrap();
-        Ok(scene
-            .find(layer, frame_start)
+        let mut scene = self.host.scene.lock().unwrap();
+        let object = scene
+            .find_mut(layer, frame_start)
             .ok_or(ReadError::ObjectNotFound {
                 detected_by: "find_object",
-            })?
-            .detail())
+            })?;
+        reinterpret_saved_values(object);
+        Ok(object.detail())
     }
 }
 
@@ -2338,10 +2347,48 @@ pub(crate) const TRACK_MODES: [&str; 4] =
 /// 書いても 0 のままである。
 const TIME_CONTROL_SUFFIX: &str = "(時間制御)";
 
-/// ホストがパラメータ無しの書き込みに対して補う既定値を持つ移動方法。
+/// パラメータを取る移動方法と、その既定値。
 ///
 /// 実機で `ランダム移動,0` を書くと `ランダム移動,0|15` として保存される。
+/// **既定値の並びがそのまま、この移動方法が取るパラメータの個数でもある。**
 pub(crate) const TRACK_DEFAULT_PARAM: (&str, f64) = ("ランダム移動", 15.0);
+
+/// [`TRACK_DEFAULT_PARAM`] の移動方法へホストが入れる既定のパラメータ。
+fn track_default_params() -> Vec<FiniteF64> {
+    vec![FiniteF64::try_new(TRACK_DEFAULT_PARAM.1).expect("有限値")]
+}
+
+/// 保存済みの移動が、ホストの解釈し直しを受ける綴りか。
+///
+/// パラメータを取る移動方法へ個数の合わない綴りを書くと、ホストは受理したうえで
+/// 保存値を既定値へ差し替える。
+fn track_params_get_replaced(track: &TrackValue) -> bool {
+    track.mode.as_deref() == Some(TRACK_DEFAULT_PARAM.0)
+        && track.params.len() != track_default_params().len()
+}
+
+/// ホストが保存値を解釈し直し、個数の合わない移動パラメータを既定値へ差し替える。
+///
+/// **差し替えは書き込みの時点では起きない。** 設定値を書いた直後に読むと書いた
+/// とおりが返り、オブジェクトの詳細を読み直した後の読みで既定値が返る。書き込みの
+/// 時点で差し替える形に模すと、書いた直後の読みだけで照合する実装も緑になる。
+fn reinterpret_saved_values(object: &mut FakeObject) {
+    for effect in &mut object.effects {
+        for item in &mut effect.items {
+            let ItemValue::Track(track) = &item.value else {
+                continue;
+            };
+            if !track_params_get_replaced(track) {
+                continue;
+            }
+            item.value = ItemValue::Track(TrackValue {
+                params: track_default_params(),
+                ..track.clone()
+            });
+            item.track = host_track(&item.value, item.track.as_ref());
+        }
+    }
+}
 
 /// 書き込まれた文字列が、実機ならプロセスを落とす移動方法を名乗るか。
 ///
@@ -2408,7 +2455,7 @@ fn host_write_track(track: &TrackValue) -> ItemValue {
         FiniteF64::try_new(round_to_item_decimals(clamp_item_value(value.get()))).expect("有限値")
     };
     let params = match (track.params.is_empty(), mode == TRACK_DEFAULT_PARAM.0) {
-        (true, true) => vec![FiniteF64::try_new(TRACK_DEFAULT_PARAM.1).expect("有限値")],
+        (true, true) => track_default_params(),
         (true, false) => Vec::new(),
         (false, _) => track.params.iter().map(adjust).collect(),
     };
@@ -2429,15 +2476,23 @@ fn host_write_track(track: &TrackValue) -> ItemValue {
 ///
 /// 所属グループはホストの報告であり、書き込みでは指定できない。書き換えの前後で
 /// 変わらないものとして引き継ぐ。時間制御は移動方法の名前が決める。
+///
+/// **時間制御の変種では、保存値が持つパラメータを 0 件として報告する。** 保存も
+/// 評価も書いた綴りで行われるのに、報告だけが空になる。報告の件数を照合の材料に
+/// すれば、正しい綴りが 1 つ残らず失敗になる。
 fn host_track(value: &ItemValue, before: Option<&TrackInfo>) -> Option<TrackInfo> {
     let ItemValue::Track(track) = value else {
         return None;
     };
     let mode = track.mode.clone()?;
+    let timecontrol = mode.ends_with(TIME_CONTROL_SUFFIX);
     Some(TrackInfo {
-        timecontrol: mode.ends_with(TIME_CONTROL_SUFFIX),
+        timecontrol,
         mode,
-        params: track.params.clone(),
+        params: match timecontrol {
+            true => Vec::new(),
+            false => track.params.clone(),
+        },
         accelerate: track.accelerate,
         decelerate: track.decelerate,
         twopoint: track.twopoint,
