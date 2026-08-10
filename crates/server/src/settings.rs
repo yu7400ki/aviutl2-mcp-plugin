@@ -31,7 +31,7 @@ use aviutl2_mcp_core::settings::{
     SETTINGS_FILE_NAME, SETTINGS_READ_ATTEMPTS, Settings, SettingsReadError, SettingsReader,
     SettingsRefresh,
 };
-use aviutl2_mcp_win::create_protected_directory;
+use aviutl2_mcp_win::{create_protected_directory, to_wide};
 use std::ffi::c_void;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -274,11 +274,7 @@ impl DirectoryHandle {
     /// 間そのディレクトリを消せなくなる**——上書きで指定された場所を使う試験が
     /// 後始末できない。
     fn open(path: &Path) -> io::Result<Self> {
-        let wide: Vec<u16> = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
+        let wide = to_wide(path);
         // SAFETY: `wide` は NUL 終端したパスであり、呼び出しの間だけ参照される。
         // ディレクトリを開くには backup semantics が要る。
         let handle = unsafe {
