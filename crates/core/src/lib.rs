@@ -137,7 +137,7 @@ pub use page::{
     SnapshotRevisionMismatch, ValidatedPageRequest, take_page, take_window,
 };
 pub use palette::{PALETTE_COLOR_COUNT, PaletteEntry, Rgba};
-pub use redact::{ANONYMIZED_ID_CHARS, descriptor_file, instance_id};
+pub use redact::ANONYMIZED_ID_CHARS;
 pub use render::{
     ARTIFACT_MAX_BYTES, MAX_RENDER_FRAME_BYTES, RenderFormat, RenderFrameParams, RenderFrameResult,
     RenderInputError,
