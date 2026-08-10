@@ -9,15 +9,15 @@ use std::io;
 use std::time::{Duration, Instant};
 use tracing::error;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_IO_INCOMPLETE,
-    ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, HANDLE, WAIT_ABANDONED_0, WAIT_FAILED,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING,
+    ERROR_OPERATION_ABORTED, HANDLE, WAIT_ABANDONED_0, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Threading::{
     CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
 };
+use windows::core::Owned;
 
 /// 期限付き I/O のエラー。
 #[derive(Debug, thiserror::Error)]
@@ -63,14 +63,14 @@ pub enum IoIssue {
 
 /// 手動リセットイベントの所有ハンドル。
 ///
-/// `Drop` で `CloseHandle` するため、待機経路がどこで打ち切られてもハンドルは漏れない。
+/// 解放は [`Owned`] が担うため、待機経路がどこで打ち切られてもハンドルは漏れない。
 pub struct EventHandle {
-    handle: HANDLE,
+    handle: Owned<HANDLE>,
 }
 
 // SAFETY: イベントオブジェクトはスレッドを跨いで待機・シグナルしてよく、
-// `EventHandle` はハンドルの所有権を単一の値に閉じている。閉じるのは `Drop`
-// だけであり、複製されたハンドルは存在しない。
+// `EventHandle` はハンドルの所有権を単一の値に閉じている。複製されたハンドルは
+// 存在しない。
 unsafe impl Send for EventHandle {}
 // SAFETY: 共有参照から呼べるのは `SetEvent` と待機だけであり、いずれも
 // カーネル側で直列化される。
@@ -79,40 +79,33 @@ unsafe impl Sync for EventHandle {}
 impl EventHandle {
     /// 非シグナル状態の手動リセットイベントを作成する。
     pub fn new_manual_reset() -> io::Result<Self> {
-        // SAFETY: 引数はいずれも既定値であり、戻り値のハンドルは本型が単独で所有する。
-        let handle = unsafe { CreateEventW(None, true, false, None) }.map_err(to_io_error)?;
+        // SAFETY: 引数はいずれも既定値であり、成功時にのみ返るハンドルの所有権は
+        // 本型が単独で持つ。
+        let handle =
+            unsafe { Owned::new(CreateEventW(None, true, false, None).map_err(to_io_error)?) };
         Ok(Self { handle })
     }
 
     /// 生ハンドルを返す。所有権は移動しない。
     pub fn handle(&self) -> HANDLE {
-        self.handle
+        *self.handle
     }
 
     /// シグナル状態にする。
     pub fn set(&self) -> io::Result<()> {
         // SAFETY: `self.handle` は本型が生存する限り有効なイベントハンドルである。
-        unsafe { SetEvent(self.handle) }.map_err(to_io_error)
+        unsafe { SetEvent(*self.handle) }.map_err(to_io_error)
     }
 
     /// 非シグナル状態に戻す。
     fn reset(&self) -> io::Result<()> {
         // SAFETY: `self.handle` は本型が生存する限り有効なイベントハンドルである。
-        unsafe { ResetEvent(self.handle) }.map_err(to_io_error)
+        unsafe { ResetEvent(*self.handle) }.map_err(to_io_error)
     }
 
     /// `deadline` までシグナル状態を待つ。
     fn wait(&self, deadline: Instant) -> WaitOutcome {
-        wait_one(self.handle, deadline)
-    }
-}
-
-impl Drop for EventHandle {
-    fn drop(&mut self) {
-        // SAFETY: `self.handle` は本型のみが所有しており、ここでのみ閉じられる。
-        unsafe {
-            let _ = CloseHandle(self.handle);
-        }
+        wait_one(*self.handle, deadline)
     }
 }
 
@@ -552,7 +545,7 @@ mod tests {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::{
-        ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, GENERIC_READ, GENERIC_WRITE,
+        CloseHandle, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, GENERIC_READ, GENERIC_WRITE,
     };
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
