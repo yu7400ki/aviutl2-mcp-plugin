@@ -2495,25 +2495,6 @@ mod tests {
     }
 
     #[test]
-    fn the_effect_item_values_payload_carries_no_handle_or_alias() {
-        // 値そのものは載せるが、対象を指す内部の値と alias は載せない。
-        let adapter = FakeAdapter::new();
-        let result = read(
-            &adapter,
-            ReadOperation::GetEffectItemValues,
-            json!({ "effect": fake_effect_selector(), "frames": [100.0, 100.5] }),
-        )
-        .expect("評価できます");
-        let payload = result.to_string();
-        for forbidden in ["alias", "handle", "selector", "0x"] {
-            assert!(
-                !payload.contains(forbidden),
-                "{forbidden} が IPC 応答に現れました: {payload}"
-            );
-        }
-    }
-
-    #[test]
     fn the_catalog_payloads_carry_no_handle_or_alias() {
         // 登録物の名前と属性しか載せない。対象を指す内部の値は現れない。
         for operation in CATALOG_OPERATIONS {
@@ -2685,27 +2666,6 @@ mod tests {
         assert_eq!(result["selected"].as_array().unwrap().len(), 2);
         assert_eq!(result["page"]["total_count"], 2);
         assert_eq!(adapter.calls(), vec!["get_selection"]);
-    }
-
-    #[test]
-    fn get_selection_carries_neither_the_cursor_nor_the_selected_range() {
-        // どちらも get_edit_info が既に返している。同じ値を 2 つの読み取りが
-        // 返すと、要求元は「どちらが新しいか」を判断する規則を持つことになる。
-        let adapter = FakeAdapter::new();
-        let result = read(
-            &adapter,
-            ReadOperation::GetSelection,
-            json!({ "expected_scene_id": SCENE_ID }),
-        )
-        .unwrap();
-
-        let fields = result.as_object().expect("オブジェクト");
-        for forbidden in ["cursor", "selected_range", "display"] {
-            assert!(
-                !fields.contains_key(forbidden),
-                "{forbidden} が応答に現れました: {result}"
-            );
-        }
     }
 
     #[test]

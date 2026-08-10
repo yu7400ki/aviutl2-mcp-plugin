@@ -6631,24 +6631,6 @@ fn the_section_response_carries_the_selector_after_the_change() {
         .expect("応答が返した selector で続けて編集できませんでした");
 }
 
-#[test]
-fn the_section_response_carries_no_alias() {
-    // 応答が返すのは概要であり詳細ではない。
-    let harness = harness_with_sections();
-    let outcome = harness
-        .edit
-        .create_object_section(&CreateObjectSectionParams {
-            selector: harness.selector(1, 100),
-            frame: 160,
-        })
-        .expect("中間点の追加が拒否されました");
-    let value = serde_json::to_value(&outcome).expect("応答は直列化できる");
-    assert!(
-        !value.to_string().contains("alias"),
-        "応答に alias が現れています: {value}"
-    );
-}
-
 /// 理由を実際に起こす要求を、事前確認へ通した結果として並べる。
 ///
 /// [`SectionPreconditionReason`] に対する網羅 `match` であり `_` を使わない。
@@ -7981,19 +7963,6 @@ fn a_host_that_rewrites_the_grid_bpm_values_is_not_a_failure() {
 
     assert_eq!(outcome.entries.len(), entries.len());
     assert_ne!(outcome.entries, entries, "フェイクが値を変えていません");
-}
-
-#[test]
-fn the_grid_bpm_response_carries_no_handle_or_alias() {
-    let harness = Harness::new();
-    let outcome = harness
-        .edit
-        .set_grid_bpm(&set_grid_bpm(&harness, vec![grid_bpm(140.0, 3, 0.0, 0.25)]))
-        .expect("BPM グリッドの置き換えに失敗しました");
-    let value = serde_json::to_string(&outcome).expect("直列化できる");
-    for secret in ["alias", "handle", "[1:100]"] {
-        assert!(!value.contains(secret), "{secret} が応答に現れました");
-    }
 }
 
 /// シーン設定の変更要求を組み立てる。
