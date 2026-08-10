@@ -20,7 +20,7 @@ pub mod render;
 pub mod server;
 pub mod summary;
 pub mod tool_catalog;
-pub mod tools;
+mod tools;
 
 pub use server::{
     ARTIFACTS_RESOURCE_URI_PREFIX, AviUtl2McpServer, CallLimits, INSTANCES_RESOURCE_URI,
