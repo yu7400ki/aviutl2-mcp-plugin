@@ -35,9 +35,9 @@ use aviutl2_mcp_core::settings::{
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
-use windows::core::PCWSTR;
+use windows::core::{Owned, PCWSTR};
 
 /// read-modify-write を調停するユーザー単位の名前付き mutex。
 ///
@@ -294,7 +294,7 @@ struct SettingsMutex(MutexObject);
 /// **所有と獲得を分ける。** ハンドルは作った時点で閉じる責任が生じるが、
 /// 所有権は獲得に成功して初めて生じる。1 つの型に畳むと、獲得に失敗した経路でも
 /// `ReleaseMutex` を呼ぶ形になり、意図を読み違えやすい。
-struct MutexObject(HANDLE);
+struct MutexObject(Owned<HANDLE>);
 
 impl MutexObject {
     fn create() -> Result<Self> {
@@ -303,18 +303,14 @@ impl MutexObject {
             .chain(std::iter::once(0))
             .collect();
         // SAFETY: `name` は NUL 終端しており、呼び出しの間だけ参照される。
-        let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
-            .context("設定の名前付き mutex を作成できませんでした")?;
+        // 返るハンドルは成功時のみ得られ、その所有権はこの値だけが持つ。
+        let handle = unsafe {
+            Owned::new(
+                CreateMutexW(None, false, PCWSTR(name.as_ptr()))
+                    .context("設定の名前付き mutex を作成できませんでした")?,
+            )
+        };
         Ok(Self(handle))
-    }
-}
-
-impl Drop for MutexObject {
-    fn drop(&mut self) {
-        // SAFETY: 本型のみが所有しており、ここでのみ閉じられる。
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
     }
 }
 
@@ -327,7 +323,7 @@ impl SettingsMutex {
         let object = MutexObject::create()?;
         let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
         // SAFETY: `object` は直前に作成した有効なハンドルを所有している。
-        let wait = unsafe { WaitForSingleObject(object.0, millis) };
+        let wait = unsafe { WaitForSingleObject(*object.0, millis) };
         if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
             Ok(Self(object))
         } else {
@@ -341,7 +337,7 @@ impl Drop for SettingsMutex {
     fn drop(&mut self) {
         // SAFETY: 保持しているのは自スレッドが獲得した所有権である。
         unsafe {
-            let _ = ReleaseMutex((self.0).0);
+            let _ = ReleaseMutex(*(self.0).0);
         }
     }
 }
