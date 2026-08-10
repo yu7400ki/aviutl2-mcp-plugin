@@ -455,6 +455,7 @@ fn issue(
                 .map_err(IssueFailure::unapplied)
         }
         PlannedStep::SetItem {
+            object,
             effect,
             item,
             write,
@@ -465,10 +466,10 @@ fn issue(
                     editor.set_effect_item(ticket, effect, item, write.value())
                 })
                 .map_err(IssueFailure::unapplied)?;
-            // 適用の直後に 1 回読み直して照合する。単独の変更で失敗する入力が
-            // 一括適用では成功する経路を作らないためであり、費用は
-            // sub-operation 1 件あたり 1 回に留まる。
-            verify_written_item(editor, permit, boundary, effect, item, write)
+            // 適用の直後に照合する。単独の変更で失敗する入力が一括適用では成功
+            // する経路を作らないためであり、費用は判定を持つ
+            // [`verify_written_item`] の側が述べる。
+            verify_written_item(editor, permit, boundary, object, effect, item, write)
                 .map_err(IssueFailure::applied)
         }
     }

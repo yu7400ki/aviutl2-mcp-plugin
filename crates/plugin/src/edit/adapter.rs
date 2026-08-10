@@ -561,8 +561,19 @@ pub(crate) fn reread_with_effects(
 /// 比べても、同じ値を書いた場合と値が無視された場合はどちらも前後が等しくなり、
 /// 区別できない。比較の規則は種別ごとに違い、[`ItemWrite`] が持つ。
 ///
-/// 読み直しは sub-operation 1 件あたり 1 回である。**照合しない種別は読み直しも
-/// しない。** 費用は照合の有無と一致する。
+/// **設定値を読む前に、対象を 1 度読み直す。** ホストは受理した綴りを後から
+/// 解釈し直して保存値を差し替えることがあり、書き込みの直後に設定値だけを読むと
+/// 差し替わる前の綴りが返る。差し替えは対象の読み直しを経た後の設定値に現れる。
+/// 読み直した内容そのものは使わない——照合の材料は設定値の読みが返す文字列で
+/// ある。
+///
+/// **読み直す位置は解決済みトークンから引き直す。** 解決の時点の位置は先行する
+/// sub-operation の移動で古くなり得る。トークンは移動で失効しないため、位置は
+/// そこから読める。
+///
+/// 費用は sub-operation 1 件あたり「位置の読み 1 回 ＋ 対象の読み直し 1 回 ＋
+/// 設定値の読み 1 回」である。**照合しない種別はどれも行わない。** 費用は照合の
+/// 有無と一致する。
 ///
 /// 単独の変更と一括適用が同じ入力に対して同じ失敗を返すよう、判定はこの 1 か所
 /// だけに置く。
@@ -570,6 +581,7 @@ pub(crate) fn verify_written_item(
     editor: &dyn SceneEditor,
     permit: &MutationPermit<'_>,
     boundary: &Boundary,
+    object: &ResolvedObject<'_>,
     effect: &ResolvedEffect<'_>,
     item: &str,
     write: &ItemWrite,
@@ -577,6 +589,12 @@ pub(crate) fn verify_written_item(
     let ReadBackCheck::Compare(_) = write.read_back() else {
         return Ok(());
     };
+    let position = attribute(permit, boundary, editor.object_position(object))?;
+    attribute(
+        permit,
+        boundary,
+        reread_with_effects(editor, boundary, position.layer, position.frame_start),
+    )?;
     let observed = attribute(permit, boundary, editor.effect_item_value(effect, item))?;
     // 照合しない種別はこの位置へ来ない。来たとしても `None` は一致を名乗らない。
     if write.read_back_matches(&observed) == Some(true) {
@@ -1334,9 +1352,15 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             permit.issue(&boundary, |ticket| {
                 editor.set_effect_item(ticket, &effect, &params.item, write.value())
             })?;
-            if let Err(error) =
-                verify_written_item(editor, &permit, &boundary, &effect, &params.item, &write)
-            {
+            if let Err(error) = verify_written_item(
+                editor,
+                &permit,
+                &boundary,
+                &object,
+                &effect,
+                &params.item,
+                &write,
+            ) {
                 return Err(restore_after_failed_verification(
                     editor,
                     &permit,
