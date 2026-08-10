@@ -1234,6 +1234,36 @@ async fn malformed_instance_id_never_reaches_an_edit_operation() {
     );
 }
 
+/// instance_id と params の両方が不正な要求は、instance_id の誤りとして返る。
+///
+/// cursor と selected_range と focus と display を全て省略した要求は params の
+/// 検証で落ちるため、返った誤りがどちらの検証から来たかを message が見分ける。
+#[tokio::test]
+async fn a_malformed_instance_id_outranks_invalid_parameters() {
+    let harness = Harness::start(responses("set_selection", selection_state()));
+
+    let result = harness
+        .server
+        .set_selection(Parameters(SetSelectionInput {
+            instance_id: "not-a-uuid".to_string(),
+            expected_scene_id: SCENE_ID,
+            cursor: None,
+            selected_range: None,
+            focus: None,
+            display: None,
+            expected_project_epoch: EPOCH.to_string(),
+        }))
+        .await;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = structured(&result);
+    assert_eq!(structured["code"], json!("invalid_argument"));
+    assert_eq!(
+        structured["message"],
+        json!("instance_id はハイフン区切りの UUID である必要があります")
+    );
+}
+
 #[tokio::test]
 async fn precondition_failure_reaches_the_tool_result_with_the_current_revision() {
     let error = ErrorObject::new(ErrorCode::PreconditionFailed, "対象が変化しました", true)
