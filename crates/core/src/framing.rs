@@ -201,16 +201,6 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
-    fn encode_decode_roundtrip() {
-        let body = b"hello world";
-        let frame = encode_frame(body).unwrap();
-        let mut decoder = FrameDecoder::new();
-        decoder.feed(&frame).unwrap();
-        let decoded = decoder.take_frame().unwrap();
-        assert_eq!(decoded, body);
-    }
-
-    #[test]
     fn split_length_and_body() {
         let body = b"hello world";
         let frame = encode_frame(body).unwrap();

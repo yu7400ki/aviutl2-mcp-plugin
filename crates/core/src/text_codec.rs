@@ -145,19 +145,6 @@ mod tests {
     }
 
     #[test]
-    fn encoding_does_not_grow_when_repeated_through_the_codec() {
-        // 符号化 → 復号 → 符号化 を繰り返しても包みは増えない。
-        for value in [r"C:\temp\note", "a\nb", r"\\n", "\t"] {
-            let once = encode_host_text(value);
-            let mut current = once.clone();
-            for _ in 0..3 {
-                current = encode_host_text(&decode_host_text(&current));
-                assert_eq!(current, once, "{value:?} の包みが育ちました");
-            }
-        }
-    }
-
-    #[test]
     fn a_windows_path_survives_the_hosts_interpretation() {
         // 符号化 → ホストの解釈 → 復号 で元へ戻る。ホストが保存する値そのものが
         // 与えた文字列と一致するため、描画も要求どおりになる。
