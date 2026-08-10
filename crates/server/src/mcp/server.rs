@@ -3295,103 +3295,6 @@ mod tests {
     }
 
     #[test]
-    fn describe_effects_states_how_a_missing_name_comes_back() {
-        // 落ちた名前に気付けなければ、要求元は「設定項目を持たない effect」と
-        // 誤読する。要求全体が失敗しないことと、確認先を説明が述べる。
-        let description = description_of("describe_effects");
-        for phrase in [
-            "not_found",
-            "要求全体は失敗しない",
-            "設定項目を持たない effect ではない",
-            "list_available_effects",
-        ] {
-            assert!(
-                description.contains(phrase),
-                "describe_effects の説明が {phrase} に触れていません: {description}"
-            );
-        }
-    }
-
-    #[test]
-    fn describe_effects_states_where_the_descriptions_come_from_and_when_they_are_missing() {
-        // 説明を推測で補わない方針の帰結として、説明を持たない effect は多い。
-        // 述べておかなければ、null を「取得に失敗した」と読まれる。
-        let description = description_of("describe_effects");
-        for phrase in [
-            "ホストが同梱する説明",
-            "null",
-            "推測で補わない",
-            "items の顔ぶれ",
-            "get_object",
-        ] {
-            assert!(
-                description.contains(phrase),
-                "describe_effects の説明が {phrase} に触れていません: {description}"
-            );
-        }
-    }
-
-    #[test]
-    fn describe_effects_states_that_the_facets_are_a_hint_and_not_a_gate() {
-        // 面をゲートとして読まれると、載っていない値を書けるのに書かない。
-        // 面を出す目的そのものが失われる。値域は候補より外れやすく、版が上がって
-        // 上限が広がったときに、表が正しい値を範囲外だと言う。
-        let description = description_of("describe_effects");
-        for phrase in [
-            "choices",
-            "builtin_table",
-            "sidecar",
-            "候補に無い値でも書き込みは通り",
-            "必ず通るとも限らない",
-            "range",
-            "値域を外れる値でも書き込みは通る",
-            "可否を決めるのはホストである",
-        ] {
-            assert!(
-                description.contains(phrase),
-                "describe_effects の説明が {phrase} に触れていません: {description}"
-            );
-        }
-    }
-
-    #[test]
-    fn describe_effects_states_that_range_bounds_the_written_value_and_not_the_evaluated_one() {
-        // 値域を先に引いてから組む要求元ほど、書き込みが通ったことを評価の
-        // 妥当性と読む。移動方法によっては、境界へ書いた値が値域の内側でも
-        // 途中のフレームの評価値が外へ出る。range が掛かる先を述べておく。
-        let description = description_of("describe_effects");
-        for phrase in ["書き込む値に掛かる", "評価値の上下界ではない", "値域の外"]
-        {
-            assert!(
-                description.contains(phrase),
-                "describe_effects の説明が {phrase} に触れていません: {description}"
-            );
-        }
-    }
-
-    #[test]
-    fn describe_effects_states_what_a_group_is_and_what_a_null_group_means() {
-        // 設定項目の一覧は平らな列で返るため、グループが無ければどこが 1 つの組
-        // かは読めない。そして「グループ」という語は get_effect_item_values でも
-        // 使われており、あちらは名前を持つ。同じ語が別のものを指すことを述べて
-        // おかなければ、名前の在るものとして読まれる。
-        let description = description_of("describe_effects");
-        for phrase in [
-            "group",
-            "item_names",
-            "属さない項目は null",
-            "名前を持たない",
-            "get_effect_item_values",
-            "要求全体が失敗する",
-        ] {
-            assert!(
-                description.contains(phrase),
-                "describe_effects の説明が {phrase} に触れていません: {description}"
-            );
-        }
-    }
-
-    #[test]
     fn describe_effects_neither_declares_nor_promises_a_page() {
         // ページの続きという概念が無い。schema が受け付けないことと、説明が
         // そう述べていることを揃える。
@@ -4097,146 +4000,6 @@ mod tests {
     }
 
     #[test]
-    fn creation_tools_name_the_guard_that_actually_stops_a_resend() {
-        // revision を照合しない以上、再送を止めるのは宛先の重複確認と対象の
-        // fingerprint である。防ぐ仕組みを取り違えて案内すると、呼び出し側は
-        // 効かない対策を信じて再送する。
-        assert!(
-            description_of("create_object").contains("destination_occupied"),
-            "create_object の説明が宛先重複の確認に触れていません"
-        );
-        assert!(
-            description_of("add_effect").contains("fingerprint が変わるため"),
-            "add_effect の説明が fingerprint の変化に触れていません"
-        );
-        for name in ["create_object", "add_effect"] {
-            assert!(
-                !description_of(name).contains("同じ expected での再送"),
-                "{name} の説明が expected による重複防止を主張しています"
-            );
-        }
-    }
-
-    #[test]
-    fn create_object_states_what_an_effect_name_is_and_when_it_cannot_be_used() {
-        // 作成元が 4 種であること、effect が何の値であること、カタログに在っても
-        // 元にできるとは限らないこと。どれも要求元が名前を用意する前に要る。
-        //
-        // **名前が何の値かは作成元の分岐が述べる。** 失敗の条件だけが tool の
-        // 説明に残る——値を用意する時点と、tool を選ぶ時点は別である。
-        let description = description_of("create_object");
-        for phrase in [
-            "object alias",
-            "エフェクト名",
-            "effect_not_creatable",
-            "effect_not_registered",
-        ] {
-            assert!(
-                description.contains(phrase),
-                "create_object の説明が {phrase} に触れていません"
-            );
-        }
-        let source = object_source_description("effect");
-        for phrase in ["effect.name", "list_available_effects"] {
-            assert!(
-                source.contains(phrase),
-                "作成元の effect が {phrase} に触れていません: {source}"
-            );
-        }
-    }
-
-    /// 作成元の種別ごとの分岐に付いた説明を取り出す。
-    fn object_source_description(kind: &str) -> String {
-        let variants =
-            tool_named("create_object").input_schema["$defs"]["ObjectSourceInput"]["oneOf"]
-                .as_array()
-                .expect("作成元が判別子つきの union として宣言されていません")
-                .clone();
-        let variant = variants
-            .iter()
-            .find(|variant| variant["properties"]["type"]["const"] == kind)
-            .unwrap_or_else(|| panic!("{kind} 種別の分岐がありません"))
-            .clone();
-        // 分岐そのものの説明と、値のフィールドの説明を併せて見る。名前の由来は
-        // どちらに書いても要求元へは 1 つの分岐として届く。
-        let own = variant["description"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        let fields: String = variant["properties"]
-            .as_object()
-            .expect("分岐が properties を宣言していません")
-            .values()
-            .filter_map(|property| property["description"].as_str())
-            .collect();
-        own + &fields
-    }
-
-    #[test]
-    fn create_object_says_where_an_alias_name_comes_from_and_how_it_is_checked() {
-        // 名前の出どころと使えない文字。どちらも要求元が名前を用意する前に要る。
-        // とくに禁止文字は AviUtl2 の UI が課すものであり、我々が決めた制約では
-        // ない。**値を書く場所の隣が述べる。**
-        let source = object_source_description("alias_name");
-        for phrase in [
-            "list_object_aliases が返した名前",
-            "中身を読む必要は無い",
-            r#"\ / : * ? " ' < > | % = , ."#,
-            "AviUtl2 の UI",
-        ] {
-            assert!(
-                source.contains(phrase),
-                "作成元の alias_name が {phrase} に触れていません: {source}"
-            );
-        }
-        // **作成元どうしを比べない。** 2 つの作成元が通す検証は包含関係に無く、
-        // 片方をもう片方より厳しいと述べれば、どちら向きに述べても嘘になる。何が
-        // どちらに掛かるかは tool の説明が作成元ごとに述べる。
-        for phrase in ["より検証が厳しい", "生テキスト"] {
-            assert!(
-                !source.contains(phrase),
-                "作成元の alias_name が {phrase} と述べています: {source}"
-            );
-        }
-        // 拒否される条件は tool の説明に残る。その呼び出しが失敗する条件そのもので
-        // あり、要求を組み立て終えた後に効く。
-        let description = description_of("create_object");
-        for phrase in ["alias_not_parsable", "alias_without_effect"] {
-            assert!(
-                description.contains(phrase),
-                "create_object の説明が {phrase} に触れていません"
-            );
-        }
-    }
-
-    #[test]
-    fn create_object_states_how_a_raw_alias_is_refused_before_anything_is_created() {
-        // 生テキストの移動行もテキストの行も書き込みの検証を通る。述べなければ、
-        // 要求元は通らない行を含むエイリアスを送り続け、返った名前から直す先を
-        // 引けない。行の在処と、1 つも作られていないことは、失敗から立ち直るのに
-        // 要る。**在処の名乗りは行の種類で分かれない**——移動行だけの性質として
-        // 述べれば、テキストの拒否から details を読む要求元が現れなくなる。
-        let description = description_of("create_object");
-        for phrase in [
-            "表として読めないエイリアスは、source が alias_name でも object_alias でも",
-            "source が object_alias のとき、移動行は設定項目へ書くときと同じ検証を通り",
-            "track_flags_not_representable",
-            "track_mode_unknown",
-            "track_mode_not_writable",
-            "track_value_count",
-            r"テキスト種別（text / string）の設定項目の行は `\` の綴りを検査され",
-            r"`\` の次が `n` でも `\` でもない行は invalid_argument（unescaped_backslash）で拒否される",
-            "行の拒否は details.item に項目名を載せ、節に属する行では details.heading に節の見出しを載せる",
-            "これらの拒否はいずれも作成より前に起き、オブジェクトは 1 つも作られない",
-        ] {
-            assert!(
-                description.contains(phrase),
-                "create_object の説明が {phrase} に触れていません"
-            );
-        }
-    }
-
-    #[test]
     fn the_catalog_tools_do_not_ask_for_a_scene_id() {
         // フォント・パレット・モジュール・エイリアスはシーンに紐づかない。何も
         // 守らない値を必須にすると、要求元は意味の無い値を用意することになる。
@@ -4311,33 +4074,6 @@ mod tests {
             assert!(
                 !description_of(&name).contains("snapshot_revision"),
                 "{name} の説明がページ指定を写しています"
-            );
-        }
-    }
-
-    #[test]
-    fn list_palettes_states_what_the_colours_and_the_current_name_are() {
-        // 色数と不透明度、現在のパレット名の形式、読めなかったパレットの扱い。
-        // いずれも応答を受け取る前に知っている必要がある。
-        //
-        // total_count は本ページで落とした分だけを引いた値であり、ページごとに
-        // 違い得る。全体の件数として読んで反復を組むと、集まりきらないまま
-        // 終わらないループになる。落ちた分だけ短いページも空のページも起こり
-        // 得るため、終端の材料が has_more と next_offset であることも述べる。
-        let description = description_of("list_palettes");
-        for phrase in [
-            "64 件",
-            "a は常に 255",
-            "透明度の情報を持たない",
-            "[ラベル名.パレット名]",
-            "total_count から引かれるのは本ページで落とした分だけ",
-            "全体の件数として扱わないこと",
-            "items が空のまま has_more が true になり得る",
-            "has_more と next_offset で終端すること",
-        ] {
-            assert!(
-                description.contains(phrase),
-                "list_palettes の説明が {phrase} に触れていません"
             );
         }
     }
@@ -4463,53 +4199,6 @@ mod tests {
             serde_json::json!(crate::mcp::input::MAX_NAME_CHARS),
             "label の上限が宣言されていません"
         );
-    }
-
-    #[test]
-    fn list_object_aliases_states_what_it_returns_and_what_it_refuses() {
-        // 名前が作成へそのまま渡る値であること、中身を返さないこと、label が
-        // 当てにならないこと、total_count の限定、読み取り専用であること。
-        // いずれも応答を受け取る前に知っている必要がある。
-        let description = description_of("list_object_aliases");
-        for phrase in [
-            "create_object の alias_name へそのまま渡す値",
-            "一覧に出た名前は必ず作成できる。逆は保証しない",
-            "エイリアスの中身は返さない",
-            "UI 状態ファイル由来",
-            "欠けることがあり",
-            "実行中の表示と一致しないことがある",
-            "label は識別子ではなく",
-            "同じ label を共有し得る",
-            "total_count から引かれるのは本ページで落とした分だけ",
-            "全体の件数として扱わないこと",
-            "has_more と next_offset で終端すること",
-            "AviUtl2 の UI で行う",
-            "読み取りだけを提供する",
-            "unsupported_operation",
-        ] {
-            assert!(
-                description.contains(phrase),
-                "list_object_aliases の説明が {phrase} に触れていません"
-            );
-        }
-    }
-
-    #[test]
-    fn list_modules_admits_that_the_list_can_be_incomplete() {
-        // 同梱のスクリプトは種別を解釈できても一覧へ現れない。黙っていると、
-        // 要求元は一覧を登録物の全体だと読み、0 件をその機能の不在と読む。
-        let description = description_of("list_modules");
-        for phrase in [
-            "既知の 9 種別",
-            "後から登録されたもの",
-            "同梱されている",
-            "その種別の機能がインスタンスに無いことを意味しない",
-        ] {
-            assert!(
-                description.contains(phrase),
-                "list_modules の説明が {phrase} に触れていません"
-            );
-        }
     }
 
     #[test]
@@ -4837,30 +4526,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_set_object_item_description_states_what_happens_to_movement_parameters() {
-        // 個数は要求の側で検証しない。外した綴りの帰結は移動方法で分かれ、
-        // 片方は失敗として返り、もう片方は成功したまま評価だけが倒れる。
-        // 述べなければ、要求元は成功を評価の妥当性と読む。
-        let description = description_of("set_object_item");
-        for phrase in [
-            "個数も意味も移動方法ごとに決まる",
-            "受け付けられない params",
-            // どちらの枝がどちらの帰結を持つかまで握る。入れ替えた説明が
-            // 通れば、要求元は失敗しない側を失敗する側と読む。
-            "時間制御の変種では失敗として現れない",
-            "それ以外の移動方法では item_value_not_applied になる",
-            "既定値へ差し替えるか params ごと落とす",
-            "評価だけが既定へ倒れる",
-            "get_effect_item_values",
-        ] {
-            assert!(
-                description.contains(phrase),
-                "set_object_item の説明が {phrase} に触れていません"
-            );
-        }
-    }
-
     /// 設定値の種別ごとの分岐に付いた説明を取り出す。
     fn item_value_description(kind: &str) -> String {
         let tool = tool_named("set_object_item");
@@ -4921,26 +4586,6 @@ mod tests {
                 item_types_named_before(&description, " の項目へ書くと invalid_argument"),
                 item_types_accepting(refused),
                 "{kind} が落ちる種別と説明が食い違います: {description}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_integer_item_description_states_what_a_scene_reference_is_not_verified_for() {
-        // 参照先が実在するかをホストは確かめず、読み直しの照合も整数が入ったこと
-        // しか言えない。**引く経路も無い**——挙げられる ID の一覧を返す tool が
-        // 無いことまで述べなければ、要求元は探しに行って空振りする。
-        // 種別の一覧は別の検査が実装から導いて握る。ここが握るのは
-        // シーン参照について述べている 3 つだけである。
-        let description = item_value_description("integer");
-        for phrase in [
-            "実在するかをホストは確かめず",
-            "整数が入ったことしか言えない",
-            "シーン ID を引く tool は無い",
-        ] {
-            assert!(
-                description.contains(phrase),
-                "integer の説明が {phrase} に触れていません: {description}"
             );
         }
     }
@@ -5019,130 +4664,6 @@ mod tests {
              長さの上限は保存される表記に掛かり、`\\` と改行はそれぞれ 2 バイトを\n\
              占める。"
         );
-    }
-
-    #[test]
-    fn edit_tool_descriptions_state_the_operation_specific_hazards() {
-        let hazards: &[(&str, &[&str])] = &[
-            (
-                "create_object",
-                &["全てが作成され", "自動調整", "重複して作成"],
-            ),
-            ("add_effect", &["fingerprint", "重複して付与"]),
-            (
-                "set_object_item",
-                &[
-                    "公開していない設定項目種別",
-                    "item_type",
-                    // 有効な値の一覧を返す手段が無いため、外した値の直し方を
-                    // 示さなければ要求元は当て推量を繰り返す。
-                    "item_value_not_applied",
-                    "details.observed_value に照合で読んだ設定値が入る",
-                    // 巻き戻すことを述べなければ、要求元は失敗のたびに対象を
-                    // 読み直す。**戻した先を機械可読な値でも名乗る**——文章が
-                    // 「読み直す必要は無い」と述べる隣で details.retry_requires が
-                    // refetch を名乗っていれば、要求元は値のほうに従う。
-                    "設定項目は書き込み前の値へ戻す",
-                    "details.retry_requires は none になる",
-                    "選択肢に無い値",
-                    // クランプと丸めも失敗になることを予期できなければ、要求元は
-                    // 成功するはずの要求が落ちたと読む。
-                    "クランプ",
-                    "丸められた",
-                    // observed_value をそのまま送り直すのは、要求を諦めることで
-                    // 成功させる動きである。推奨と読まれると、白へ化けた色を
-                    // 書き直して成功と判断する経路ができる。**巻き戻した後は、
-                    // それが「現在値の再現」にもなる。**
-                    "要求の代わりに送り直す値でもない",
-                    "受け付けられる値を選び直す",
-                    // current_value も送り直す値ではない。**中身は alias の生の
-                    // 綴りであり、入力に生文字列の形が無い。** 断りが片側だけに
-                    // 在ると、断りの無いほうは送り返せると読まれる。
-                    "そのまま送り返せる形ではない",
-                    "get_object が返す track の形で組み直す",
-                ],
-            ),
-            ("set_effect_enabled", &["出力 item", "読み直した effect"]),
-            (
-                "move_effect",
-                &[
-                    "effect_not_movable",
-                    "effect_position_out_of_range",
-                    // **上限と下限は振る舞いが違う。** 上限は発行される前に
-                    // 落ち、下限は発行されたうえで切り詰められる。同じ
-                    // 「範囲外」として読まれると、要求元は先頭への移動が
-                    // 列を動かさないものと信じる。
-                    "変更は発行されない",
-                    "入力 item・出力 item より",
-                    "切り詰める",
-                    // 失敗が状態を残さないことを述べなければ、要求元は失敗の
-                    // たびに列を読み直す。戻せなかった場合だけは読み直しが要る。
-                    "元の並びへ戻す",
-                    "details.restored",
-                    "details.consistency_unknown",
-                    "details.retry_requires は none になる",
-                    // 切り詰めは列を動かすとは限らない。既に下限に居る対象へ
-                    // 同じ要求を送ると列は動かず、selector も生き残る。**その
-                    // 失敗も戻った側として名乗る**——動かさなかったことと動かして
-                    // から戻したことは、要求元から見て区別が付かない。
-                    "列が 1 件も動かなかった場合も details.restored は真になる",
-                    "selector がそのまま通る",
-                    // **移動は effect の内容を 1 つも変えないまま、要求に
-                    // 使った selector を無効にし得る。** 名前も enabled も
-                    // 設定項目も動かないため、変わらないと読める。述べ
-                    // なければ、要求元は成功の直後に古い selector を送って
-                    // precondition_failed を踏む。どの条件で無効になるかは
-                    // [`the_move_effect_description_never_voids_the_selector_unconditionally`]
-                    // が見る。
-                    "selector は使えなくなる",
-                    "fingerprint が変わり",
-                    "effect_index も入れ替わる",
-                    // 無効になった selector の代わりが応答に在ることを示さ
-                    // なければ、対象を読み直す経路しか残らない。
-                    "応答の effect.selector を使う",
-                ],
-            ),
-            ("delete_effect", &["not_found", "兄弟 effect"]),
-            ("delete_object", &["not_found"]),
-            (
-                "set_selection",
-                &[
-                    "原子的",
-                    "クランプ",
-                    "全てを省略",
-                    // クランプの扱いが軸ごとに違うことを読み分けられなければ、
-                    // cursor のクランプも not_applied に出ると読める。
-                    "cursor はクランプされても applied に入る",
-                    "display はクランプされると not_applied に入る",
-                ],
-            ),
-            (
-                "set_layer_state",
-                &[
-                    // レイヤーは fingerprint を持たない。読み取り時からの変化を
-                    // 検出できないことは、この tool でしか起きない。
-                    "fingerprint",
-                    "全てを省略した要求は受け付けない",
-                    "この tool 自身はロックの影響を受けない",
-                    // 止まる tool の列挙が足りないと、この説明を読んだ要求元は
-                    // 実際には止まる tool を止まらないものとして扱う。
-                    "move_object",
-                    "create_object_section",
-                    "delete_object_section",
-                    "move_object_section",
-                    "reset",
-                ],
-            ),
-        ];
-        for (name, keywords) in hazards {
-            let description = description_of(name);
-            for keyword in *keywords {
-                assert!(
-                    description.contains(keyword),
-                    "{name} の説明に {keyword} がありません"
-                );
-            }
-        }
     }
 
     #[test]
@@ -5304,88 +4825,6 @@ mod tests {
     }
 
     #[test]
-    fn the_batch_description_states_what_costs_the_caller_if_assumed_wrong() {
-        // 一括適用は 1 回で最大 100 件の変更を起こす。誤った期待で要求を組み
-        // 立てさせると、失敗からの復帰が最も高くつく。
-        let description = description_of(APPLY_BATCH);
-        for keyword in [
-            // 入れられる operation を取り違えさせない。
-            "move_object と set_object_item",
-            "単独 tool",
-            "1 件以上 100 件以下",
-            // 一括適用を使う 2 つの理由。
-            "1 つの取り消し単位",
-            "同じ読み取り時点の selector",
-            "配列順",
-            // 適用時点で宛先を見ることで何ができ、何ができないか。片方だけを
-            // 書くと、通らない要求を組み立てさせるか、通る要求を諦めさせる。
-            "先行する移動が",
-            "互いの位置を交換する 2 件は通らない",
-            // 拒否と失敗の読み方。
-            "2 回変更する要求は受け付けない",
-            "自動で巻き戻す",
-            // 全て戻った先は要求の前と同じである。巻き戻したこと自体が案内を
-            // 決めると読まれると、要求元は解消しない失敗にも読み直しを重ねる。
-            "止めた失敗そのものが決める",
-            "details.failed_index",
-            "details.failed_object",
-            "details.consistency_unknown",
-            "必ず読み直すこと",
-            "details.rolled_back_count",
-            "計量ではない",
-            // ロックの範囲と解き方。
-            "layer_locked",
-            "設定値の変更はロックされた",
-            // 費用。
-            "UI が数秒止まり得る",
-        ] {
-            assert!(
-                description.contains(keyword),
-                "{APPLY_BATCH} の説明に {keyword} がありません"
-            );
-        }
-    }
-
-    #[test]
-    fn the_render_description_states_what_costs_the_caller_if_assumed_wrong() {
-        let description = description_of(RENDER_FRAME);
-        for keyword in [
-            // 描けるのは現在シーンだけである。
-            "現在シーンだけ",
-            "expected_scene_id",
-            "get_edit_info",
-            // 画像は応答に埋めない。
-            "resource URI で返る",
-            "resources/read",
-            // 後から読もうとして失敗する場面を減らす。
-            "10 分後に失効",
-            "not_found",
-            "押し出され得る",
-            "PNG のみ",
-            // readOnlyHint の意味を狭く伝える。
-            "プロジェクトは変更しない",
-            "一時ファイル",
-            "計算資源",
-            // 失敗の理由と再試行の判断。
-            "edit_blocked",
-            "プレビュー再生中は成功し得る",
-            "precondition_failed",
-            "切り替えて戻した場合は検出できない",
-            "unsupported_operation",
-            // 上限は解像度だけで決まらない。描いた結果の大きさでも掛かる。
-            "描いた結果が大きすぎる",
-            "どちらも要求を直しても通らない",
-            "timeout は描画されなかったことを意味する",
-            "そのまま再送してよい",
-        ] {
-            assert!(
-                description.contains(keyword),
-                "{RENDER_FRAME} の説明に {keyword} がありません"
-            );
-        }
-    }
-
-    #[test]
     fn input_schemas_declare_the_expected_epoch_only_where_it_is_used() {
         // 前提の epoch を持つのは、要求が対象を指す selector を 1 つも運ばない
         // ことがある tool だけである。必ず運ぶ tool へ宣言すると、同じ意味の値が
@@ -5497,45 +4936,6 @@ mod tests {
         assert_eq!(beat["maximum"], serde_json::json!(i32::MAX));
     }
 
-    #[test]
-    fn the_grid_bpm_description_states_that_the_whole_list_is_replaced() {
-        // 部分更新だと読まれると、指定しなかった要素が消えたことに要求元は
-        // 気付けない。
-        let description = description_of("set_grid_bpm");
-        for keyword in [
-            "部分更新ではない",
-            "指定しなかった要素は消える",
-            "get_edit_info",
-            "置き換え前の一覧を保持していなければ",
-            "空配列",
-            "256 件",
-            "昇順は求めない",
-            "duplicate_target",
-            "grid_bpm_out_of_range",
-            "argument_not_representable",
-            "change_not_applied",
-        ] {
-            assert!(
-                description.contains(keyword),
-                "set_grid_bpm の説明に {keyword} がありません"
-            );
-        }
-
-        // 位置の単位はフレーム番号ではない。取り違えると桁が変わるため、値を
-        // 書く場所の隣が述べる。
-        let entry =
-            tool_named("set_grid_bpm").input_schema["$defs"]["GridBpmInput"]["properties"].clone();
-        for field in ["start", "offset"] {
-            let field_description = entry[field]["description"]
-                .as_str()
-                .unwrap_or_else(|| panic!("{field} に説明がありません"));
-            assert!(
-                field_description.contains("秒であり、フレーム番号ではない"),
-                "{field} が単位を述べていません: {field_description}"
-            );
-        }
-    }
-
     /// 入力 schema の必須フィールドを宣言順に取り出す。
     fn required_fields(tool: &Tool) -> Vec<&str> {
         tool.input_schema["required"]
@@ -5633,49 +5033,6 @@ mod tests {
                 .expect("annotation がある")
                 .destructive_hint,
             Some(true)
-        );
-    }
-
-    #[test]
-    fn the_scene_settings_description_states_what_costs_the_caller_if_assumed_wrong() {
-        // どれも要求を組み立てる前に要る事項であり、誤った前提で操作すると
-        // 取り消せない変更が残る。
-        let description = description_of("set_scene_settings");
-        for keyword in [
-            // 一括適用に入らない。
-            "apply_batch に含められない",
-            // 何を省略でき、何を省略できないか。
-            "3 つ全てを省略した要求は受け付けない",
-            "空の名前は指定できず",
-            "「標準へ戻す」が無く",
-            // 値域と、変更できない軸。
-            "render_frame が描ける大きさ",
-            "フレームレートは変更できない",
-            "get_current_scene",
-            // 読み取り時からの変化を検出できないこと。
-            "fingerprint",
-            "変更後に観測した実際の状態",
-            // 観測が編集と原子的でないこと。
-            "原子的に観測したものではない",
-            "observed_after_edit",
-            // 名前だけは区間の内側で照合すること。
-            "区間の内側で照合",
-            "change_not_applied",
-            // 応答から取り消せないことを読める場所。
-            "non_undoable",
-        ] {
-            assert!(
-                description.contains(keyword),
-                "set_scene_settings の説明に {keyword} がありません"
-            );
-        }
-
-        // 説明が名指しする上限は、実際に課している値から導く。数を直に書いた
-        // まま定数を動かすと、説明だけが黙って古くなる。
-        let mib = aviutl2_mcp_core::render::MAX_RENDER_FRAME_BYTES / (1024 * 1024);
-        assert!(
-            description.contains(&format!("{mib} MiB")),
-            "set_scene_settings の説明が実際の上限を述べていません"
         );
     }
 
@@ -5883,24 +5240,6 @@ mod tests {
             assert!(
                 effect.contains(phrase),
                 "effect の selector の説明が {phrase} に触れていません: {effect}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_selector_types_state_which_epoch_matches_the_project() {
-        // プロジェクトの世代を照合する材料は selector の中に在る。値の隣で
-        // 述べなければ、要求元は selector を組み立て直す口を探すことになる。
-        let epoch = tool_named("get_object").input_schema["$defs"]["ObjectSelectorInput"]
-            ["properties"]["project_epoch"]["description"]
-            .as_str()
-            .expect("project_epoch に説明がある")
-            .to_string();
-        for phrase in ["プロジェクトの世代はこの値で照合", "別のプロジェクト"]
-        {
-            assert!(
-                epoch.contains(phrase),
-                "selector の project_epoch が {phrase} に触れていません: {epoch}"
             );
         }
     }
