@@ -1104,7 +1104,8 @@ fn fill_track_error_details(details: &mut Map<String, Value>, error: &TrackValue
         TrackValueError::ModeNotWritable
         | TrackValueError::ModeReadsAsNumber
         | TrackValueError::MovementWithoutMode
-        | TrackValueError::FlagsNotRepresentable => {}
+        | TrackValueError::FlagsNotRepresentable
+        | TrackValueError::ExpressionMissing => {}
     }
 }
 

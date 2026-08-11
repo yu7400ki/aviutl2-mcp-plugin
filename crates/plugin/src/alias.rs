@@ -1764,18 +1764,26 @@ pub(crate) mod tests {
 
     #[test]
     fn a_movement_row_the_host_cannot_evaluate_is_refused() {
-        // 実測: 末尾フラグに 4 つ目のビットを立てた項目は 1 フレームも動かない。
+        // 4 つ目のビットは参照式を持つことを示す。式の無い行を通すと、ホストは
+        // 1 つ目の節をパラメータとして読み、その項目は 1 フレームも動かない。
         // ホストは受理し、読み取りは移動が在ると答え続ける。
         for row in [
             "X=-600.00,0.00,600.00,直線移動,8",
             "X=-600.00,0.00,600.00,直線移動,8|",
-            "X=0.00,50.00,100.00,直線移動,8|30",
         ] {
             assert_eq!(
                 row_reason(&with_row(row)),
-                Some("track_flags_not_representable"),
+                Some("track_expression_missing"),
                 "{row}"
             );
+        }
+        // 式を伴う行は通る。**節の中の `,` は値の欄の数え方に関わらない。**
+        for row in [
+            "X=-600.00,0.00,600.00,直線移動,8|透明度",
+            "X=-600.00,0.00,600.00,直線移動,8|@clamp($,0,10)",
+            "X=-600.00,0.00,600.00,直線移動,8|X*2|30",
+        ] {
+            assert_eq!(row_reason(&with_row(row)), None, "{row}");
         }
     }
 
@@ -1849,7 +1857,7 @@ pub(crate) mod tests {
         ] {
             assert_eq!(
                 row_reason(alias),
-                Some("track_flags_not_representable"),
+                Some("track_expression_missing"),
                 "{alias}"
             );
         }
@@ -1879,7 +1887,7 @@ pub(crate) mod tests {
         };
         assert_eq!(heading.as_deref(), Some("1.1"));
         assert_eq!(item, "中心Z");
-        assert_eq!(source.reason(), Some("track_flags_not_representable"));
+        assert_eq!(source.reason(), Some("track_expression_missing"));
     }
 
     #[test]
@@ -2064,7 +2072,7 @@ pub(crate) mod tests {
                 "テキスト",
                 &["テキスト=-600.00,0.00,600.00,直線移動,8"]
             )),
-            Some("track_flags_not_representable")
+            Some("track_expression_missing")
         );
         // 移動行として読めないテキストは、綴りの規則だけを見られる。
         assert_eq!(

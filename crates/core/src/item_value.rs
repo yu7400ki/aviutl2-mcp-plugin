@@ -990,6 +990,7 @@ mod tests {
             decelerate: false,
             twopoint: false,
             reserved_flags: 0,
+            expression: None,
         }
     }
 
@@ -1058,6 +1059,7 @@ mod tests {
                 "decelerate": false,
                 "twopoint": false,
                 "reserved_flags": 0,
+                "expression": null,
             })
         );
     }
@@ -1141,6 +1143,7 @@ mod tests {
             decelerate: false,
             twopoint: false,
             reserved_flags: 0,
+            expression: None,
         }
     }
 

@@ -435,11 +435,20 @@ fn track_number_strategy() -> impl Strategy<Value = FiniteF64> {
 
 /// 名前を持たないフラグのビット。
 ///
-/// **下位 4 ビットを生成しない。** 名前を持つ 3 つの位置と、パラメータ節の印は、
+/// **下位 4 ビットを生成しない。** 名前を持つ 3 つの位置と参照式の位置は、
 /// どちらも符号化が拒む。生成しても「符号化できない」を数えるだけになる。拒否
 /// そのものは単体検査が固定する。
 fn track_reserved_flags_strategy() -> impl Strategy<Value = u32> {
     any::<u32>().prop_map(|bits| bits & !0xF)
+}
+
+/// 符号化が受け付ける参照式。
+///
+/// **`,` を含む式を生成する。** 式は `|` の後ろの節にあり、値の欄の数え方には
+/// 関わらない。区切りと同じ文字を含む式が往復することは、節の切り出しが
+/// 欄の切り出しと別であることそのものである。
+fn track_expression_strategy() -> impl Strategy<Value = Option<String>> {
+    prop::option::of("[a-zA-Z0-9$@.,*+_-]{1,10}")
 }
 
 /// 符号化が受け付ける移動の値。
@@ -450,9 +459,17 @@ fn track_value_strategy() -> impl Strategy<Value = TrackValue> {
         prop::collection::vec(track_number_strategy(), 0..4),
         any::<(bool, bool, bool)>(),
         track_reserved_flags_strategy(),
+        track_expression_strategy(),
     )
         .prop_map(
-            |(values, mode, params, (accelerate, decelerate, twopoint), reserved_flags)| {
+            |(
+                values,
+                mode,
+                params,
+                (accelerate, decelerate, twopoint),
+                reserved_flags,
+                expression,
+            )| {
                 TrackValue {
                     values,
                     mode: Some(mode),
@@ -461,6 +478,7 @@ fn track_value_strategy() -> impl Strategy<Value = TrackValue> {
                     decelerate,
                     twopoint,
                     reserved_flags,
+                    expression,
                 }
             },
         );
@@ -472,6 +490,7 @@ fn track_value_strategy() -> impl Strategy<Value = TrackValue> {
         decelerate: false,
         twopoint: false,
         reserved_flags: 0,
+        expression: None,
     });
     prop_oneof![moving, still]
 }

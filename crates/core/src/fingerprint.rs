@@ -230,6 +230,7 @@ fn write_item_value(input: &mut FingerprintInput, value: &ItemValue) {
                 "item_value.track.reserved_flags",
                 i64::from(track.reserved_flags),
             );
+            input.optional_text("item_value.track.expression", track.expression.as_deref());
         }
         ItemValue::Unknown { raw } => {
             input.text("item_value.kind", "unknown");
@@ -661,6 +662,7 @@ mod tests {
             decelerate: false,
             twopoint: false,
             reserved_flags: 0,
+            expression: None,
         };
         let make = |track: crate::track_value::TrackValue| {
             effect_with(&[EffectItem {
@@ -704,6 +706,7 @@ mod tests {
             },
             crate::track_value::TrackValue {
                 reserved_flags: 16,
+                expression: None,
                 ..base.clone()
             },
             // 要素数だけが違う組。内容が違う組だけを並べると、並びの長さの

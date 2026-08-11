@@ -419,6 +419,7 @@ mod tests {
                 decelerate: false,
                 twopoint: false,
                 reserved_flags: 0,
+                expression: None,
             };
             let reason = validate_track_value(&value, target)
                 .err()

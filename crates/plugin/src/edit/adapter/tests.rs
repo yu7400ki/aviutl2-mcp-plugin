@@ -616,6 +616,7 @@ fn movement_with_params(values: &[f64], mode: &str, params: &[f64]) -> ItemValue
         decelerate: false,
         twopoint: false,
         reserved_flags: 0,
+        expression: None,
     })
 }
 

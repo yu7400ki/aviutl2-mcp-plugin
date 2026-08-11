@@ -359,6 +359,10 @@ pub enum ItemValueInput {
     /// get_object の track が返す timecontrol はホストの報告であり、ここで
     /// 指定する先は無い。
     /// params を空にすると移動方法ごとの既定値が入る。
+    /// expression は AviUtl2 の参照式であり、ホストが評価して最終的な値を決める。
+    /// 読み取った値をそのまま書き戻せば式は保たれ、省いて書けば式は消える。
+    /// 式にならない綴りも書き込みは通り、その項目は 1 フレームも動かなくなる。
+    /// 記法は AviUtl2 の説明が正本であり、この server は中身を解釈しない。
     Track {
         /// 区間の境界ごとの値。
         values: Vec<f64>,
@@ -377,6 +381,11 @@ pub enum ItemValueInput {
         /// 表せない値を綴ると invalid_argument となり track_flags_not_representable を返す。
         #[serde(default)]
         reserved_flags: u32,
+        /// 参照式。省略すると持たない。
+        /// 空文字列・制御文字・`|` を含む式は invalid_argument となる。
+        #[serde(default)]
+        #[schemars(length(max = MAX_ITEM_VALUE_CHARS))]
+        expression: Option<String>,
     },
     /// 未対応種別の生値。読み取りは返すが、書き込みには指定できない。
     Unknown {
@@ -423,6 +432,7 @@ impl ItemValueInput {
                 decelerate,
                 twopoint,
                 reserved_flags,
+                expression,
             } => ItemValue::Track(TrackValue {
                 values: finite_values("values", values)?,
                 mode: mode.clone(),
@@ -431,6 +441,7 @@ impl ItemValueInput {
                 decelerate: *decelerate,
                 twopoint: *twopoint,
                 reserved_flags: *reserved_flags,
+                expression: expression.clone(),
             }),
             ItemValueInput::Unknown { raw } => ItemValue::Unknown { raw: raw.clone() },
         })
@@ -2081,6 +2092,7 @@ mod tests {
                 // 名前を持たないビットも往復の対象である。0 を標本に置くと、
                 // 入力型がこのフィールドを持たなくても往復が成り立ってしまう。
                 reserved_flags: 16,
+                expression: None,
             }),
             ItemValue::Track(_) => ItemValue::Unknown {
                 raw: "future=1".to_string(),
@@ -2228,6 +2240,7 @@ mod tests {
                 decelerate: false,
                 twopoint: false,
                 reserved_flags: 0,
+                expression: None,
             })
         );
         assert_eq!(aviutl2_mcp_core::validate_item_value(&value), Ok(()));
@@ -2270,6 +2283,7 @@ mod tests {
             decelerate: false,
             twopoint: false,
             reserved_flags: 16,
+            expression: None,
         });
         let input: ItemValueInput =
             serde_json::from_value(serde_json::to_value(&read).expect("直列化できる"))
@@ -2308,6 +2322,7 @@ mod tests {
             decelerate: false,
             twopoint: false,
             reserved_flags: 0,
+            expression: None,
         };
         for input in [
             track(vec![0.0, f64::INFINITY], Vec::new()),

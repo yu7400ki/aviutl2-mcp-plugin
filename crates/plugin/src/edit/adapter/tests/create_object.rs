@@ -715,7 +715,7 @@ fn a_raw_alias_whose_movement_row_cannot_be_written_is_refused_before_the_edit_s
 
     assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
     let details = error.details();
-    assert_eq!(details["reason"], json!("track_flags_not_representable"));
+    assert_eq!(details["reason"], json!("track_expression_missing"));
     // どの節のどの項目かが分からなければ、要求元は直す行を選べない。
     assert_eq!(details["heading"], json!("Object.0"));
     assert_eq!(details["item"], json!("X"));

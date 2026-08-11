@@ -34,6 +34,50 @@ fn a_movement_the_host_knows_is_written_and_read_back() {
     assert!(harness.host.fatal_movement_writes().is_empty());
 }
 
+#[test]
+fn an_expression_survives_the_write_and_the_read_back() {
+    // 参照式はホストが評価して最終的な値を決める。書き込みが落とせば、利用者が
+    // UI で設定した式が、無関係な項目の書き換えで黙って消える。
+    let harness = harness_with_track_effect();
+    let with_expression = |expression: Option<&str>| {
+        let finite = |value: f64| FiniteF64::try_new(value).expect("有限値");
+        ItemValue::Track(aviutl2_mcp_core::TrackValue {
+            values: vec![finite(0.0), finite(50.0), finite(100.0)],
+            mode: Some("曲線移動".to_string()),
+            params: Vec::new(),
+            accelerate: false,
+            decelerate: false,
+            twopoint: false,
+            reserved_flags: 0,
+            expression: expression.map(str::to_string),
+        })
+    };
+
+    // 式は `,` を含み得る。値の欄の数え方はそれに影響されない。
+    let outcome = harness
+        .edit
+        .set_object_item(&set_movement(
+            &harness,
+            with_expression(Some("@clamp($,0,10)")),
+        ))
+        .expect("参照式を伴う書き込みが拒否されました");
+    assert_eq!(
+        changed_item(&outcome, MOVING_ITEM),
+        with_expression(Some("@clamp($,0,10)"))
+    );
+    assert_eq!(
+        stored_movement(&harness),
+        with_expression(Some("@clamp($,0,10)"))
+    );
+
+    // 式を省いて書けば式は消える。**消えることは、消せることの裏である。**
+    harness
+        .edit
+        .set_object_item(&set_movement(&harness, with_expression(None)))
+        .expect("参照式を持たない書き込みが拒否されました");
+    assert_eq!(stored_movement(&harness), with_expression(None));
+}
+
 /// 対象がいま持っている移動の値を読み取り経路から得る。
 fn stored_movement(harness: &Harness) -> ItemValue {
     harness
@@ -291,6 +335,7 @@ fn a_movement_is_removed_by_writing_a_value_without_a_mode() {
                 decelerate: false,
                 twopoint: false,
                 reserved_flags: 0,
+                expression: None,
             }),
         ))
         .expect("移動を消す書き込みが拒否されました");

@@ -1215,6 +1215,7 @@ fn track_item(name: &str, group: Option<(&str, usize, usize)>) -> EffectItem {
             decelerate: false,
             twopoint: false,
             reserved_flags: 0,
+            expression: None,
         }),
         track: Some(TrackInfo {
             mode: MOVEMENT_MODE.to_string(),

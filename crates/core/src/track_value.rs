@@ -13,10 +13,11 @@
 //! 作れるのは符号化であり、作らせない規則を別の口に置くと、その口を通らない
 //! 呼び出しがそのまま落とす文字列を組み立てられる。
 //!
-//! **壊れ方はもう 1 つある。** フラグの 4 つ目のビットはフラグではなく、
-//! パラメータ節が続くことを示す構造上の印である（[`PARAM_SECTION_BIT`]）。立った
-//! 行はプロセスを落とさず、ホストが値を解けずにその項目が 1 フレームも動かなく
-//! なる。**落ちないため、書いた側も読んだ側も気付かない。**
+//! **フラグの 4 つ目のビットは参照式の有無を表す**（[`FLAG_EXPRESSION`]）。立つと
+//! `|` の後ろが 2 節になり、前が参照式、後ろが移動方法のパラメータになる。
+//! 参照式はホストが評価して最終的な値を決める式であり、この型は中身を解釈せず
+//! 文字列のまま運ぶ。**式にならない綴りを置くと、ホストは値を解けずにその項目が
+//! 1 フレームも動かない。** 落ちないため、書いた側も読んだ側も気付かない。
 
 use crate::item_value::ItemWriteError;
 use crate::number::FiniteF64;
@@ -43,12 +44,12 @@ const FLAG_TWOPOINT: u32 = 4;
 /// この型が名前を持つフラグのビット。
 const NAMED_FLAGS: u32 = FLAG_ACCELERATE | FLAG_DECELERATE | FLAG_TWOPOINT;
 
-/// パラメータ節が続くことを示す構造上の印。
+/// 参照式を持つことを示すビット。
 ///
-/// **フラグではない。** ホストの UI が立て下げするのは 1 / 2 / 4 / 16 であり、
-/// この位置に対応するチェックボックスは無い。立った行をホストは「パラメータ節が
-/// 続く」と読み、空の節を書き、評価でその値を解けなくなる。
-const PARAM_SECTION_BIT: u32 = 8;
+/// **この型では [`TrackValue::expression`] が表す。** 立て下げするのはその欄で
+/// あり、フラグの整数へ現れるのは符号化の中だけである。ホストの UI もチェック
+/// ボックスではなく、項目名のクリックメニューから開くダイアログで設定する。
+const FLAG_EXPRESSION: u32 = 8;
 
 /// 移動を持つ値が取り得る最小の要素数。区間 1 個の境界の数である。
 const MIN_MOVING_VALUES: usize = 2;
@@ -106,6 +107,15 @@ pub struct TrackValue {
     /// 名前を持つビットの位置は、ここではなく 3 つの真偽値が表す。両方から同じ
     /// 整数を綴れる形は書き込みが拒否する（[`validate_track_value`]）。
     pub reserved_flags: u32,
+    /// 参照式。持たない項目では `None`。
+    ///
+    /// ホストが評価して最終的な値を決める式であり、他の項目や別レイヤーの
+    /// オブジェクトの値を参照できる。**この型は中身を解釈しない**——記法は
+    /// ホストが決めており、我々が読める形にしても正本が 2 つになる。
+    ///
+    /// 式を持つ値は移動方法も持つ。式の在処はフラグの整数が示し、その整数は
+    /// 移動を持つ値にしか無いためである。
+    pub expression: Option<String>,
 }
 
 /// ホストが受け付ける移動方法 1 件。
@@ -157,11 +167,17 @@ pub enum TrackValueError {
     #[error("移動方法の名前に数値として読める文字列は指定できません")]
     ModeReadsAsNumber,
     /// 移動を持たない値に、移動の付帯情報が指定された。
-    #[error("移動を持たない値にフラグとパラメータは指定できません")]
+    #[error("移動を持たない値にフラグ・パラメータ・参照式は指定できません")]
     MovementWithoutMode,
     /// 名前を持たないビットに、この型が表せない値が指定された。
     #[error("移動のフラグに、この形では表せないビットが含まれています")]
     FlagsNotRepresentable,
+    /// 参照式を持つと名乗るフラグに対して、式が無い。
+    ///
+    /// **読み取った値にしか現れない。** 書き込みの入力では参照式の有無が欄で
+    /// 決まり、フラグの整数から立てる経路が無い。
+    #[error("参照式を持つと示すフラグに対して、式がありません")]
+    ExpressionMissing,
 }
 
 impl TrackValueError {
@@ -179,6 +195,7 @@ impl TrackValueError {
         TrackValueError::ModeReadsAsNumber,
         TrackValueError::MovementWithoutMode,
         TrackValueError::FlagsNotRepresentable,
+        TrackValueError::ExpressionMissing,
     ];
 
     /// 失敗の種別を表す機械可読な名前を返す。
@@ -192,6 +209,7 @@ impl TrackValueError {
             TrackValueError::ModeReadsAsNumber => "track_mode_reads_as_number",
             TrackValueError::MovementWithoutMode => "track_movement_without_mode",
             TrackValueError::FlagsNotRepresentable => "track_flags_not_representable",
+            TrackValueError::ExpressionMissing => "track_expression_missing",
         }
     }
 }
@@ -224,9 +242,9 @@ pub enum TrackDecodeError {
 /// 失敗の名前を要求元へ返す側だけである。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum UnrepresentableMovement {
-    /// フラグに、この型が表せないビットが立っている。
-    #[error("移動のフラグに、この形では表せないビットが含まれています")]
-    Flags,
+    /// 参照式を持つと名乗っているのに、式が無い。
+    #[error("参照式を持つと示すフラグに対して、式がありません")]
+    Expression,
     /// 移動を持つ値の境界が足りない。
     #[error("移動の値は区間の境界の数だけ必要です")]
     ValueCount,
@@ -235,8 +253,8 @@ pub enum UnrepresentableMovement {
 impl UnrepresentableMovement {
     /// 同じ事実に、書き込みの検証が与える失敗。
     ///
-    /// **要求元が直す先は経路で変わらない。** フラグは整数を書き直すことでしか
-    /// 直らず、境界は値を足すことでしか直らない。
+    /// **要求元が直す先は経路で変わらない。** 参照式は式を書くことでしか直らず、
+    /// 境界は値を足すことでしか直らない。
     ///
     /// 境界が足りない行は必ず値を 1 つだけ持つ——読み始めるには値の欄が
     /// 1 つ以上要り（[`MIN_MOVING_FIELDS`]）、2 つ以上あれば表せる
@@ -244,7 +262,7 @@ impl UnrepresentableMovement {
     /// 対象の区間の数は復号が見ない。
     pub fn as_write_error(self) -> TrackValueError {
         match self {
-            UnrepresentableMovement::Flags => TrackValueError::FlagsNotRepresentable,
+            UnrepresentableMovement::Expression => TrackValueError::ExpressionMissing,
             UnrepresentableMovement::ValueCount => TrackValueError::ValueCount {
                 expected: MIN_MOVING_VALUES,
                 actual: 1,
@@ -280,14 +298,18 @@ pub struct TrackWriteTarget<'a> {
 
 /// フラグのビット列を組み立てる。
 ///
-/// 名前を持つ 3 つのビットへ、名前を持たない分（[`TrackValue::reserved_flags`]）を
+/// 名前を持つ 4 つのビットへ、名前を持たない分（[`TrackValue::reserved_flags`]）を
 /// 重ねる。ホストが受け渡すのはこの整数 1 つであり、名前の有無は我々の側の区別で
 /// しかない。
+///
+/// 参照式のビットは欄の有無から導く。**整数の側から立てる経路を作らない**
+/// ——立てても式が無ければ、ホストは節の並びを読み違える。
 fn flag_bits(value: &TrackValue) -> u32 {
     let bit = |enabled: bool, mask: u32| if enabled { mask } else { 0 };
     bit(value.accelerate, FLAG_ACCELERATE)
         | bit(value.decelerate, FLAG_DECELERATE)
         | bit(value.twopoint, FLAG_TWOPOINT)
+        | bit(value.expression.is_some(), FLAG_EXPRESSION)
         | value.reserved_flags
 }
 
@@ -295,7 +317,9 @@ fn flag_bits(value: &TrackValue) -> u32 {
 ///
 /// ここで見るのは、書式そのものを壊す指定と、値の中で閉じた矛盾である。
 ///
-/// - 移動を持たない値は 1 要素であり、フラグもパラメータも持たない
+/// - 移動を持たない値は 1 要素であり、フラグもパラメータも参照式も持たない
+/// - 参照式は空でなく、区切り文字も制御文字も含まない。節を区切る `|` を含む
+///   式はホストが 2 つの節として読み、パラメータの位置がずれる
 /// - 移動方法の名前は区切り文字を含まない。含むと値の個数の数え方が狂い、
 ///   末尾から移動方法を取るホストの解析が別の位置を指す
 /// - 移動方法の名前は数値として読めない。**区切り文字とまったく同じ失敗を
@@ -304,11 +328,10 @@ fn flag_bits(value: &TrackValue) -> u32 {
 /// - 移動を持つ値は 2 要素以上である。区間は必ず 1 つ以上あるためで、
 ///   正確な個数は区間の数を渡す [`validate_track_value`] が見る
 /// - 名前を持たないビット（[`TrackValue::reserved_flags`]）が、この型で表せる
-///   値である。表せないビットは 2 つに分かれる——[`PARAM_SECTION_BIT`] は
-///   ホストが移動として評価できず、[`NAMED_FLAGS`] の位置は 3 つの真偽値が
-///   表す。どちらも同じ理由で拒否する。**黙って落とさない。** 落とせば要求元は
-///   自分が何を書いたか分からなくなり、通せば、評価の死んだ項目か、同じ整数を
-///   2 通りに綴れる値ができる
+///   値である。名前を持つ位置——[`NAMED_FLAGS`] と [`FLAG_EXPRESSION`]——は
+///   3 つの真偽値と参照式の欄が表す。**黙って落とさない。** 落とせば要求元は
+///   自分が何を書いたか分からなくなり、通せば、同じ整数を 2 通りに綴れる値が
+///   できる
 pub(crate) fn validate_track_syntax(value: &TrackValue) -> Result<(), ItemWriteError> {
     let Some(mode) = value.mode.as_deref() else {
         if value.values.len() != 1 {
@@ -323,8 +346,17 @@ pub(crate) fn validate_track_syntax(value: &TrackValue) -> Result<(), ItemWriteE
         }
         return Ok(());
     };
-    if value.reserved_flags & (NAMED_FLAGS | PARAM_SECTION_BIT) != 0 {
+    if value.reserved_flags & (NAMED_FLAGS | FLAG_EXPRESSION) != 0 {
         return Err(TrackValueError::FlagsNotRepresentable.into());
+    }
+    if let Some(expression) = value.expression.as_deref() {
+        validate_item_text(expression)?;
+        if expression.is_empty() {
+            return Err(TextSyntaxError::Empty.into());
+        }
+        if expression.contains(PARAM_SEPARATOR) {
+            return Err(TextSyntaxError::ForbiddenCharacter.into());
+        }
     }
     validate_item_text(mode)?;
     if mode.is_empty() {
@@ -409,6 +441,10 @@ pub fn validate_track_value(
 /// **フラグは常に書く。** 省略するとホストは末尾から数えた位置を移動方法の名前
 /// として読み、数値をそこに見つけて例外を投げ、プロセスごと落ちる。
 ///
+/// **参照式は `|` の直後、パラメータより前へ書く。** 実測: ホストは
+/// `直線移動(時間制御),8|透明度` の形で保存し、パラメータを持つ移動方法では
+/// `ランダム移動,8|30|15` のように 2 つ目の節へパラメータを置く。
+///
 /// **`params` が空のときは `|` を書かない。** パラメータを持たない移動方法を
 /// `|` 無しで書いた要求が受理され、ホストが既定値を補って保存することは観測して
 /// いる。`|` だけを書いた要求が受理されるかは観測していないため、観測した形だけ
@@ -437,6 +473,10 @@ pub fn encode_track_value(
             encoded.push_str(mode);
             encoded.push(FIELD_SEPARATOR);
             encoded.push_str(&flag_bits(value).to_string());
+            if let Some(expression) = value.expression.as_deref() {
+                encoded.push(PARAM_SEPARATOR);
+                encoded.push_str(expression);
+            }
             if !value.params.is_empty() {
                 encoded.push(PARAM_SEPARATOR);
                 for (index, param) in value.params.iter().enumerate() {
@@ -472,9 +512,9 @@ pub fn encode_track_value(
 ///   含まないことを要求する。**ここまでが「移動行として読み始められるか」の
 ///   判定であり、届かなかった文字列は [`TrackDecodeError::NotAMovement`] に
 ///   なる**
-/// - フラグに [`PARAM_SECTION_BIT`] が立った行は表せない。ホストはその行を
-///   「パラメータ節が続く」と読んで評価で値を解けなくなり、項目は動かない。
-///   フラグとして運べば符号化がその行を書き戻せてしまう
+/// - フラグに [`FLAG_EXPRESSION`] が立っていれば、`|` の後ろの先頭の節を参照式
+///   として取り、残りをパラメータとする。式の無い行と空の式は表せない
+///   ——書き戻すとフラグと節の数が食い違う
 /// - 値と、`|` より後ろのパラメータを有限な数値として読む。**読めない欄が
 ///   あれば移動行ではない**——`こんにちは,さようなら,0` のように、末尾が
 ///   整数でその手前が数値として読めないだけのテキストがこの形になる。`|` の
@@ -521,6 +561,7 @@ pub fn decode_track_value(raw: &str) -> Result<TrackValue, TrackDecodeError> {
             decelerate: false,
             twopoint: false,
             reserved_flags: 0,
+            expression: None,
         });
     }
     if fields.len() < MIN_MOVING_FIELDS {
@@ -534,9 +575,7 @@ pub fn decode_track_value(raw: &str) -> Result<TrackValue, TrackDecodeError> {
     if mode.is_empty() || reads_as_number(mode) || validate_control_free(mode).is_err() {
         return Err(TrackDecodeError::NotAMovement);
     }
-    if flags & PARAM_SECTION_BIT != 0 {
-        return Err(UnrepresentableMovement::Flags.into());
-    }
+    let (expression, tail) = split_expression(flags, tail)?;
     let fields = &fields[..fields.len() - 2];
     let values = fields
         .iter()
@@ -562,8 +601,35 @@ pub fn decode_track_value(raw: &str) -> Result<TrackValue, TrackDecodeError> {
         accelerate: flags & FLAG_ACCELERATE != 0,
         decelerate: flags & FLAG_DECELERATE != 0,
         twopoint: flags & FLAG_TWOPOINT != 0,
-        reserved_flags: flags & !NAMED_FLAGS,
+        reserved_flags: flags & !(NAMED_FLAGS | FLAG_EXPRESSION),
+        expression,
     })
+}
+
+/// `|` の後ろを、参照式とパラメータの節へ分ける。
+///
+/// [`FLAG_EXPRESSION`] が下りていれば節は 1 つであり、全体がパラメータになる。
+/// 立っていれば先頭の節が参照式であり、残りがパラメータになる。**残りが無い形も
+/// ある**——パラメータを持たない移動方法では、ホストは `8|透明度` の形で保存する。
+///
+/// 立っているのに節が無い行と、式が空の行は表せない。書き戻すとフラグと節の
+/// 数が食い違い、ホストは 1 つ目の節をパラメータとして読む。
+fn split_expression(
+    flags: u32,
+    tail: Option<&str>,
+) -> Result<(Option<String>, Option<&str>), TrackDecodeError> {
+    if flags & FLAG_EXPRESSION == 0 {
+        return Ok((None, tail));
+    }
+    let tail = tail.ok_or(UnrepresentableMovement::Expression)?;
+    let (expression, params) = match tail.split_once(PARAM_SEPARATOR) {
+        Some((expression, params)) => (expression, Some(params)),
+        None => (tail, None),
+    };
+    if expression.is_empty() || validate_control_free(expression).is_err() {
+        return Err(UnrepresentableMovement::Expression.into());
+    }
+    Ok((Some(expression.to_string()), params))
 }
 
 /// 十進表記を有限な実数として読む。
@@ -630,6 +696,7 @@ mod tests {
             decelerate: false,
             twopoint: false,
             reserved_flags: 0,
+            expression: None,
         }
     }
 
@@ -642,6 +709,7 @@ mod tests {
             decelerate: false,
             twopoint: false,
             reserved_flags: 0,
+            expression: None,
         }
     }
 
@@ -755,32 +823,59 @@ mod tests {
     }
 
     #[test]
-    fn the_fourth_bit_is_refused_by_the_decoding_because_the_host_cannot_evaluate_it() {
-        // 実測: 末尾フラグだけを 8 にした項目は 1 フレームも動かない。同じ
-        // オブジェクトの別項目を 0 にした場合は動く。ホストの UI が立て下げる
-        // ビットは 1 / 2 / 4 / 16 であり、この位置は含まれない——立てるとホストは
-        // 空のパラメータ節を書き、評価で値を解けなくなる。
-        //
-        // 3 つのフラグを偽として読むと、動かない項目を「移動を持つ」と報告し、
-        // 書き戻しでその状態が黙って直る。**移動行として読み始められはするため、
-        // 移動行ではない値とは別の理由で失敗する。**
+    fn the_fourth_bit_carries_the_expression_and_shifts_the_parameters() {
+        // 実測: 参照式を設定した項目は `直線移動(時間制御),8|透明度` として
+        // 保存され、評価はその式の値になる。パラメータを持つ移動方法では
+        // `ランダム移動,8|30|15` のように 2 つ目の節へパラメータが入る。
+        let single = decode_track_value("0,0,直線移動(時間制御),8|透明度").expect("解析できる");
+        assert_eq!(single.expression.as_deref(), Some("透明度"));
+        assert!(single.params.is_empty());
+        assert_eq!(single.reserved_flags, 0);
+        assert_eq!(
+            encoded(&single),
+            Ok("0,0,直線移動(時間制御),8|透明度".to_string())
+        );
+
+        let with_params = decode_track_value("0,100,ランダム移動,8|X*2|15").expect("解析できる");
+        assert_eq!(with_params.expression.as_deref(), Some("X*2"));
+        assert_eq!(with_params.params, finite(&[15.0]));
+        assert_eq!(
+            encoded(&with_params),
+            Ok("0,100,ランダム移動,8|X*2|15".to_string())
+        );
+
+        // 式の中の `,` は節の内側であり、値の欄の数え方に影響しない。
+        let commas = decode_track_value("0,100,直線移動,8|@clamp($,0,10)").expect("解析できる");
+        assert_eq!(commas.expression.as_deref(), Some("@clamp($,0,10)"));
+        assert_eq!(commas.values, finite(&[0.0, 100.0]));
+    }
+
+    #[test]
+    fn a_row_that_claims_an_expression_without_one_is_not_representable() {
+        // 式の無い行を「式を持つ」と読むと、書き戻しでフラグと節の数が食い違い、
+        // ホストは 1 つ目の節をパラメータとして読む。
         for raw in [
             "-600,600,直線移動,8",
             "-600,600,直線移動,8|",
-            "0,100,ランダム移動,8|30",
-            // 値の個数が書けない形であっても、先にこのビットで落ちる。
-            "100,直線移動,8",
-            "100,直線移動,8|",
-            // 値が数値として読めなくても落ちる。その行をホストがパラメータ節の
-            // 印と読むかは、フラグの整数だけで決まる。
-            "あ,い,直線移動,8",
+            "-600,600,直線移動,8|\u{7}",
         ] {
             assert_eq!(
                 decode_track_value(raw),
-                Err(UnrepresentableMovement::Flags.into()),
+                Err(UnrepresentableMovement::Expression.into()),
                 "{raw}"
             );
         }
+
+        // 式は読めても、値の個数が書けない行はその理由で落ちる。
+        assert_eq!(
+            decode_track_value("100,直線移動,8|X"),
+            Err(UnrepresentableMovement::ValueCount.into())
+        );
+        // 値が数値として読めない行は、移動行ではない。
+        assert_eq!(
+            decode_track_value("あ,い,直線移動,8|X"),
+            Err(TrackDecodeError::NotAMovement)
+        );
     }
 
     #[test]
@@ -947,8 +1042,10 @@ mod tests {
         // 要求元が直す先は経路で変わらない。ホストが返した文字列として読んでも、
         // 要求として受け取っても、同じ事実には同じ名前が付く。
         assert_eq!(
-            UnrepresentableMovement::Flags.as_write_error().reason(),
-            "track_flags_not_representable"
+            UnrepresentableMovement::Expression
+                .as_write_error()
+                .reason(),
+            "track_expression_missing"
         );
         assert_eq!(
             UnrepresentableMovement::ValueCount
@@ -1205,7 +1302,7 @@ mod tests {
                 .parse()
                 .expect("フラグは整数");
             assert_eq!(
-                written & PARAM_SECTION_BIT,
+                written & FLAG_EXPRESSION,
                 0,
                 "{raw} から {encoded} が作られました"
             );
@@ -1247,7 +1344,7 @@ mod tests {
     fn spelling_the_fourth_bit_into_the_unnamed_flags_is_refused() {
         let movements = movements();
         let mut value = moving(&[0.0, 100.0], "直線移動");
-        value.reserved_flags = PARAM_SECTION_BIT;
+        value.reserved_flags = FLAG_EXPRESSION;
         // 検証と符号化の両方が拒否する。符号化だけが拒めば、検証を先に呼ぶ
         // 経路が書き込みを発行してしまう。
         assert_eq!(
@@ -1266,7 +1363,7 @@ mod tests {
         // 名前を持つビットや他の名前の無いビットと重ねても変わらない。
         let mut mixed = moving(&[0.0, 100.0], "直線移動");
         mixed.accelerate = true;
-        mixed.reserved_flags = PARAM_SECTION_BIT | 16;
+        mixed.reserved_flags = FLAG_EXPRESSION | 16;
         assert_eq!(
             encode_track_value(&mixed, target(1, &movements)),
             Err(TrackValueError::FlagsNotRepresentable.into())
@@ -1274,7 +1371,7 @@ mod tests {
 
         // 移動を持たない値では、フラグを持つこと自体が拒否の理由である。
         let mut still = static_value(0.0);
-        still.reserved_flags = PARAM_SECTION_BIT;
+        still.reserved_flags = FLAG_EXPRESSION;
         assert_eq!(
             encode_track_value(&still, target(1, &movements)),
             Err(TrackValueError::MovementWithoutMode.into())
@@ -1296,6 +1393,7 @@ mod tests {
                 "track_mode_reads_as_number",
                 "track_movement_without_mode",
                 "track_flags_not_representable",
+                "track_expression_missing",
             ]
         );
     }

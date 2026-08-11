@@ -2433,9 +2433,14 @@ fn raw_track_value(track: &TrackValue) -> String {
     let flags = u32::from(track.accelerate)
         | (u32::from(track.decelerate) << 1)
         | (u32::from(track.twopoint) << 2)
+        | (u32::from(track.expression.is_some()) << 3)
         | track.reserved_flags;
     fields.push(flags.to_string());
     let mut raw = fields.join(",");
+    if let Some(expression) = track.expression.as_deref() {
+        raw.push('|');
+        raw.push_str(expression);
+    }
     raw.push('|');
     raw.push_str(
         &track
@@ -2686,6 +2691,7 @@ pub(crate) fn coordinate(index: usize, values: &[f64]) -> HostEffect {
         decelerate: false,
         twopoint: false,
         reserved_flags: 0,
+        expression: None,
     };
     let moving = ItemValue::Track(track);
     HostEffect {
@@ -3051,11 +3057,7 @@ mod tests {
         let before = ItemValue::Number {
             value: FiniteF64::try_new(1.0).expect("有限値"),
         };
-        for raw in [
-            "-600.00,600.00,直線移動,8",
-            "-600.00,600.00,直線移動,8|",
-            "0.00,100.00,ランダム移動,8|30.00",
-        ] {
+        for raw in ["-600.00,600.00,直線移動,8", "-600.00,600.00,直線移動,8|"] {
             assert_eq!(
                 written_back(&EffectItemType::Number, raw, &before),
                 raw,
@@ -3083,6 +3085,7 @@ mod tests {
             decelerate: false,
             twopoint: false,
             reserved_flags: 0,
+            expression: None,
         })
     }
 
