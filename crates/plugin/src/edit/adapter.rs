@@ -12,14 +12,16 @@
 //! JSON への変換と応答の送信は区間の外で行う。区間の内側は SDK 呼び出しと
 //! 所有型へのコピーに限る。
 
+mod effect_column;
 pub(crate) mod placement;
+mod restore;
 mod section;
 mod selection;
 
 use crate::alias::AdmittedAlias;
 use crate::edit::EditAdapter;
 use crate::edit::batch;
-use crate::edit::error::{EditError, EffectPreconditionReason, ItemRestore, UnsupportedReason};
+use crate::edit::error::{EditError, ItemRestore, UnsupportedReason};
 use crate::edit::host::{EditHost, SceneEditor};
 use crate::edit::precondition::{
     Boundary, EditKind, ExpectedEpoch, MutationPermit, MutationTicket, verify_boundary,
@@ -35,18 +37,23 @@ use crate::read::resolve::{effect_info_at, object_summary, scene_info};
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, AvailableEffectItem, BatchOperation, BatchOutcome,
     CreateObjectParams, CreateObjectSectionParams, DeleteEffectParams, DeleteObjectParams,
-    DeleteObjectSectionParams, EditOutcome, EffectInfo, EffectType, FocusChange, GridBpmOutcome,
-    ItemValue, ItemWrite, ItemWriteError, LayerInfo, LayerStateOutcome, MoveEffectParams,
-    MoveObjectParams, MoveObjectSectionParams, Movement, ObjectSectionsOutcome, ObjectSelector,
-    ObjectSource, ObjectSummary, ReadBackCheck, SceneSettingsOutcome, SectionRange, SelectionState,
+    DeleteObjectSectionParams, EditOutcome, EffectType, FocusChange, GridBpmOutcome, ItemValue,
+    ItemWrite, ItemWriteError, LayerInfo, LayerStateOutcome, MoveEffectParams, MoveObjectParams,
+    MoveObjectSectionParams, Movement, ObjectSectionsOutcome, ObjectSelector, ObjectSource,
+    ObjectSummary, ReadBackCheck, SceneSettingsOutcome, SectionRange, SelectionState,
     SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
     SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams, TrackWriteTarget,
     movement_check_reads_current_value, prepare_item_write, write_drops_existing_movement,
+};
+use effect_column::{
+    added_effect_position, effect_names, ensure_effect_position_in_range, is_same_effect,
+    is_same_effect_column, reread_effect,
 };
 use placement::{
     created_placements, creation_scan_range, ensure_destination_free, ensure_layer_unlocked,
     ensure_layers_unlocked, scene_placements,
 };
+use restore::{restore_after_failed_verification, restore_moved_effect};
 use section::{
     ensure_section_can_be_created, ensure_section_exists,
     ensure_section_move_stays_between_neighbours,
@@ -351,50 +358,6 @@ pub(crate) fn index(value: u32) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
-/// 移動先が、いま読み直した effect の列を指していることを確かめる。
-///
-/// 位置の値域は要求内容だけの検証で済んでいるため、ここで見るのは列の長さとの
-/// 比較だけである。列の長さは対象の現在の状態であり、要求元の手元では確定しない。
-///
-/// ホストが範囲外の移動先を切り詰めるかどうかは問わない。切り詰めるなら要求と
-/// 違う位置で成功を返すことになり、切り詰めないなら理由の読めない失敗になる。
-fn ensure_effect_position_in_range(count: usize, position: usize) -> Result<(), EditError> {
-    if position < count {
-        return Ok(());
-    }
-    Err(EditError::EffectPrecondition {
-        reason: EffectPreconditionReason::PositionOutOfRange,
-    })
-}
-
-/// 移動の前後で同じ effect を指しているかを判定する。
-///
-/// 比べるのは名前・有効・ロック・設定項目の値である。fingerprint は材料に列の
-/// 位置と effect の総数を含むため、移動が成功すれば必ず変わる。同名 effect の
-/// 順序も、同名の 1 件を動かせば入れ替わる。
-///
-/// **同じ材料を持つ effect が 2 つ並んでいる場合は区別できない。** 移動先に
-/// 求めた状態が在るかを見る限り、区別する必要が無い——観測できる状態が同じで
-/// あれば、要求した状態は達成されている。
-fn is_same_effect(before: &HostEffect, after: &HostEffect) -> bool {
-    before.name == after.name
-        && before.enabled == after.enabled
-        && before.locked == after.locked
-        && before.items == after.items
-}
-
-/// 2 つの列が 1 件ずつ同じ effect を並べているかを判定する。
-///
-/// 同名 effect の順序は列の並びから決まるため、[`is_same_effect`] の材料が位置
-/// ごとに一致すれば順序も一致する。
-fn is_same_effect_column(before: &[HostEffect], after: &[HostEffect]) -> bool {
-    before.len() == after.len()
-        && before
-            .iter()
-            .zip(after)
-            .all(|(before, after)| is_same_effect(before, after))
-}
-
 /// 変更後の対象を読み直し、応答へ載せる概要を得る。
 ///
 /// 配下 effect は読まない。応答が effect を含まない operation では、effect の
@@ -483,48 +446,6 @@ pub(crate) fn verify_written_item(
     // 巻き戻しはこの関数の外で行う。一括適用も同じ判定を通るが、あちらは要求
     // 全体の巻き戻し計画を別に持つ。
     Err(permit.attribute(boundary, EditError::ItemValueNotApplied { observed }))
-}
-
-/// 変更後の対象から、指定位置の effect 情報を読み直す。
-fn reread_effect(
-    editor: &dyn SceneEditor,
-    boundary: &Boundary,
-    object: &ResolvedObject<'_>,
-    position: usize,
-) -> Result<(ObjectSummary, EffectInfo), EditError> {
-    let (summary, effects) =
-        reread_with_effects(editor, boundary, object.layer(), object.frame_start())?;
-    let info = effect_info_at(&summary.selector, &effects, position).ok_or(EditError::Sdk {
-        operation: "get_effect_list",
-    })?;
-    Ok((summary, info))
-}
-
-/// 付与前後の effect 名の列から、増えた 1 件の列全体での位置を求める。
-///
-/// ハンドルの同値比較には依存しない。生ポインタの一致が同一 effect を意味する
-/// 保証は無く、差分は名前の列だけで取れる。
-///
-/// 差分が 1 件でない場合は位置を確定できない。付与されたのに応答の selector を
-/// 組み立てられない状態であり、呼び出し側は失敗として扱う。
-fn added_effect_position(before: &[String], after: &[String]) -> Option<usize> {
-    if after.len() != before.len() + 1 {
-        return None;
-    }
-    let position = before
-        .iter()
-        .zip(after)
-        .position(|(before, after)| before != after)
-        .unwrap_or(before.len());
-    if before[position..] != after[position + 1..] {
-        return None;
-    }
-    Some(position)
-}
-
-/// effect 名の列を取り出す。
-fn effect_names(effects: &[HostEffect]) -> Vec<String> {
-    effects.iter().map(|effect| effect.name.clone()).collect()
 }
 
 /// 移動を書き込む対象の性質を、いま読み直して組み立てる。
@@ -667,155 +588,6 @@ fn read_before_write(
         return Ok(None);
     };
     editor.effect_item_value(effect, item).map(Some)
-}
-
-/// 書き込み検証が落ちたとき、対象を書き込み前の値へ戻してから失敗を返す。
-///
-/// **[`verify_written_item`] の内側へは入れない。** 一括適用も同じ関数を通るが、
-/// あちらは要求全体の巻き戻し計画を別に持ち、逆操作の材料も戻す順序もそちらが
-/// 握っている。sub-operation ごとにここで戻せば、同じ書き込みを 2 度戻すことに
-/// なる。
-///
-/// 戻す書き込みを発行するかは、**書き込み前の値と読み直した値の比較**で決まる。
-/// 同じならホストは何も変えておらず（選択肢に無い値・未登録のフォント名・書式の
-/// 合わない色がこれにあたる）、戻すものが無い。**階級に名前は与えない**——
-/// 要求元が取る行動はどちらでも変わらず、変わるのは我々が発行する書き込みの数
-/// だけである。
-///
-/// **読み直しそのものが落ちた場合も戻しに行く。** 比較する材料は無いが、書き
-/// 戻す材料は手元にある。適用されたかが分からない以上、戻さずに残す理由が無い。
-/// 戻せたことを確かめられなければ [`ItemRestore::Failed`] であり、確かめられ
-/// ないまま「戻せた」と名乗らない。
-fn restore_after_failed_verification(
-    editor: &dyn SceneEditor,
-    permit: &MutationPermit<'_>,
-    boundary: &Boundary,
-    effect: &ResolvedEffect<'_>,
-    item: &str,
-    origin: Option<&str>,
-    error: EditError,
-) -> EditError {
-    // 照合しない種別はここへ来ない。検証が落ちる契機を持たず、書き込みの前の
-    // 読み取りも行っていない。
-    let Some(origin) = origin else {
-        return error;
-    };
-    let restore = match error.observed_item_value() {
-        // ホストは値を動かしていない。戻すものが無い。
-        Some(observed) if observed == origin => ItemRestore::Restored,
-        _ => restore_item_value(editor, permit, boundary, effect, item, origin),
-    };
-    error.with_item_restore(restore)
-}
-
-/// 書き込み前の生文字列を書き戻し、戻せたことを読み直して確かめる。
-///
-/// **発行は同じ [`MutationPermit`] で行う。** 最初の発行で確定した revision が
-/// そのまま応答へ載るため、巻き戻しを挟んでも 1 要求が進める revision は高々 1
-/// である。
-///
-/// **「書き込み API が真を返した」を成功と読まない。** ホストは書き込みの成否を
-/// 返さず、返った真は要求した値が入ったことを示さない。読み直して元の文字列と
-/// 一致することだけが、戻せたことの根拠である。
-fn restore_item_value(
-    editor: &dyn SceneEditor,
-    permit: &MutationPermit<'_>,
-    boundary: &Boundary,
-    effect: &ResolvedEffect<'_>,
-    item: &str,
-    origin: &str,
-) -> ItemRestore {
-    let outcome = permit
-        .issue(boundary, |ticket| {
-            editor.set_effect_item(ticket, effect, item, origin)
-        })
-        .and_then(|()| editor.effect_item_value(effect, item))
-        .and_then(|current| match current == origin {
-            true => Ok(()),
-            // 書き込みも読み直しも通ったのに値が戻っていない。ホストが黙って
-            // 捨てた場合がこれである。
-            false => Err(EditError::UnsupportedTarget {
-                reason: UnsupportedReason::ChangeNotApplied,
-            }),
-        });
-    let Err(error) = outcome else {
-        return ItemRestore::Restored;
-    };
-    tracing::warn!(
-        item,
-        code = %error.error_code().as_snake_case(),
-        "書き込み検証に落ちた設定値を元へ戻せませんでした"
-    );
-    ItemRestore::Failed
-}
-
-/// 要求と違う位置へ動いた effect を、移動前の位置へ戻す。
-///
-/// **発行は同じ [`MutationPermit`] で行う。** 最初の発行で確定した revision が
-/// そのまま応答へ載るため、巻き戻しを挟んでも 1 要求が進める revision は高々 1
-/// である。
-///
-/// 戻す先は移動前の位置である。その effect が現に居た位置であり、受け付けられる
-/// 移動先であることを、居たという事実が示している。
-///
-/// **戻せたことの根拠は列全体の一致である。** 移動は 1 件を抜いて別の位置へ
-/// 挿し込むため、間に在った effect もすべてずれる。移動前の位置に居ることだけ
-/// では並びが戻ったことを示さない。
-fn restore_moved_effect<'sec>(
-    editor: &'sec dyn SceneEditor,
-    permit: &MutationPermit<'_>,
-    boundary: &Boundary,
-    object: &ResolvedObject<'sec>,
-    before: &[HostEffect],
-    observed: &[HostEffect],
-    from: usize,
-) -> ItemRestore {
-    let outcome = restore_target(before, observed, from)
-        .and_then(|position| effect_info_at(&object.summary().selector, observed, position))
-        .ok_or(EditError::UnsupportedTarget {
-            reason: UnsupportedReason::ChangeNotApplied,
-        })
-        .and_then(|info| resolve_effect_of(editor, object, observed, &info.selector))
-        .and_then(|target| {
-            permit.issue(boundary, |ticket| {
-                editor.move_effect(ticket, object, &target, from)
-            })
-        })
-        .and_then(|_| reread_with_effects(editor, boundary, object.layer(), object.frame_start()))
-        .and_then(
-            |(_, restored)| match is_same_effect_column(before, &restored) {
-                true => Ok(()),
-                // 戻す移動が効かなかった場合も、動いたのに並びが揃わない場合も
-                // ここへ来る。
-                false => Err(EditError::UnsupportedTarget {
-                    reason: UnsupportedReason::ChangeNotApplied,
-                }),
-            },
-        );
-    let Err(error) = outcome else {
-        return ItemRestore::Restored;
-    };
-    tracing::warn!(
-        code = %error.error_code().as_snake_case(),
-        "要求と違う位置へ動いた effect を移動前の位置へ戻せませんでした"
-    );
-    ItemRestore::Failed
-}
-
-/// 読み直した列のうち、戻せば移動前の並びになる 1 件の位置を求める。
-///
-/// **先頭から一致を採ってはならない。** [`is_same_effect`] の材料は同じ設定の
-/// effect を区別しないため、動いていない方を掴み得る。抜いて `from` へ挿した
-/// 列が移動前と一致するものだけが、戻せる 1 件である。
-///
-/// 条件を満たす位置が複数あっても、戻した列はいずれも移動前と一致する。
-fn restore_target(before: &[HostEffect], observed: &[HostEffect], from: usize) -> Option<usize> {
-    (0..observed.len()).find(|&position| {
-        let mut candidate = observed.to_vec();
-        let moved = candidate.remove(position);
-        candidate.insert(from, moved);
-        is_same_effect_column(before, &candidate)
-    })
 }
 
 /// 列挙に現れない設定項目名を、値が読めるかどうかで分ける。

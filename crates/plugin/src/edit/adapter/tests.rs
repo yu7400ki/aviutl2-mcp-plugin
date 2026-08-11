@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::alias::tests::{TempDir, write_fixture};
-use crate::edit::error::SectionPreconditionReason;
+use crate::edit::error::{EffectPreconditionReason, SectionPreconditionReason};
 use crate::edit::fake::{
     CHOICE_VALUES, CLOSURE_ESCAPED, COORDINATE, CREATE_FRAME_SHIFT, DEFAULT_COLOR, DEFAULT_FONT,
     EFFECT_LIST, FakeCatalogEntry, FakeEditHost, FakeLayer, FakeObject, FakeReadHost, Fault,
