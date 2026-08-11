@@ -1,8 +1,11 @@
 //! 編集 operation の params / result の検査。
 
 use super::*;
+use crate::edit_info::{Cursor, DisplayRange, FrameRange, SceneInfo};
 use crate::error::REASON_VALUES;
 use crate::fingerprint::{EffectFingerprintInput, ObjectFingerprintInput};
+use crate::item_value::ItemValue;
+use crate::object::{LayerInfo, SectionRange};
 use crate::validation::{MAX_ALIAS_BYTES, MAX_NAME_UTF16_UNITS, MAX_PATH_UTF16_UNITS};
 use serde_json::{Value, json};
 
