@@ -204,6 +204,7 @@ impl fmt::Display for ErrorCode {
 /// 返るかは名前とは独立に決まる。
 pub const REASON_VALUES: &[&str] = &[
     "alias_directory_unavailable",
+    "alias_file_unreadable",
     "alias_not_parsable",
     "alias_without_effect",
     "alternate_data_stream",

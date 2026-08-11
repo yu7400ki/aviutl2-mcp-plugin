@@ -74,7 +74,7 @@ pub use edit::{
     MoveObjectSectionParams, ObjectSectionsOutcome, ObjectSource, ObservedSelection, Placement,
     RangeChange, SceneSettingsOutcome, SceneSize, SelectionField, SelectionState,
     SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams, SetObjectItemParams,
-    SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams,
+    SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams, validate_source_path,
 };
 pub use edit_info::{Cursor, DisplayRange, EditInfo, Extent, FrameRange, GridBpm, SceneInfo};
 pub use effect::{
@@ -87,7 +87,7 @@ pub use envelope::{
     ResponseResult,
 };
 pub use error::{ErrorCode, ErrorObject};
-pub use file::read_bounded;
+pub use file::{AliasFileError, read_alias_file, read_bounded};
 pub use fingerprint::{
     EffectFingerprintInput, Fingerprint, FingerprintAlgorithm, FingerprintFormatError,
     ObjectFingerprintInput, effect_fingerprint, object_fingerprint,

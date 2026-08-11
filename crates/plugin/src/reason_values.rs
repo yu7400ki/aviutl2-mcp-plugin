@@ -10,22 +10,23 @@
 //! 後者を担うのは、名前を持つ値を並べる一覧ではなく、**その値を実際に返した
 //! 呼び出し**である。一覧を回して失敗値を組み立てると、名前を生む呼び出しが
 //! 製品に 1 つも無くても検査が通る。したがってここへ集めるのは、検証関数・
-//! 編集手順・SDK 失敗の写しが**返した**値だけである。
+//! 編集手順・ファイル読み取り・SDK 失敗の写しが**返した**値だけである。
 
 use crate::edit::error::EditError;
 use crate::render::error::RenderError;
 use crate::session::{batch_input_error, describe_effects_error, edit_input_error};
 use aviutl2_mcp_core::error::REASON_VALUES;
 use aviutl2_mcp_core::{
-    BatchInputError, DescribeEffectsInputError, DescribeEffectsParams, EditInputError,
-    ItemWriteError, MAX_DESCRIBED_EFFECTS, MAX_ITEM_VALUE_BYTES, MAX_NAME_UTF16_UNITS,
-    MAX_PATH_UTF16_UNITS, PathSyntaxError, TextSyntaxError, validate_alias,
-    validate_alias_text_escapes, validate_item_text, validate_multiline_item_text, validate_name,
-    validate_object_alias_name, validate_path,
+    AliasFileError, BatchInputError, DescribeEffectsInputError, DescribeEffectsParams,
+    EditInputError, ItemWriteError, MAX_ALIAS_BYTES, MAX_DESCRIBED_EFFECTS, MAX_ITEM_VALUE_BYTES,
+    MAX_NAME_UTF16_UNITS, MAX_PATH_UTF16_UNITS, PathSyntaxError, TextSyntaxError, read_alias_file,
+    validate_alias, validate_alias_text_escapes, validate_item_text, validate_multiline_item_text,
+    validate_name, validate_object_alias_name, validate_path,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::mem::discriminant;
+use std::path::Path;
 
 /// variant を実際に起こす検証の呼び出しを並べる。
 ///
@@ -116,6 +117,48 @@ fn path_syntax_case(variant: &PathSyntaxError) -> Vec<PathSyntaxError> {
         PathSyntaxError::AlternateDataStream => vec![rejected(r"C:\movie.mp4:stream")],
         PathSyntaxError::NotAbsolute => vec![rejected("movie.mp4")],
         PathSyntaxError::UncPath => vec![rejected(r"\\server\share")],
+    }
+}
+
+/// variant を実際に起こすエイリアスファイルの読み取りを並べる。網羅 `match` の
+/// 理由は同上。
+///
+/// 起こすのは `dir` の下に実際に置いたファイルへの読み取りであり、失敗値を手で
+/// 組み立てない。ディレクトリそのものを渡す形が、不在ではないのに読めない読み
+/// 取りに当たる。
+fn alias_file_case(variant: &AliasFileError, dir: &Path) -> Vec<AliasFileError> {
+    let rejected = |path: &Path| read_alias_file(path).expect_err("受理されました");
+    let written = |name: &str, contents: &[u8]| {
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    };
+    match variant {
+        AliasFileError::NotFound => vec![rejected(&dir.join("居ない.object"))],
+        AliasFileError::Unreadable => vec![rejected(dir)],
+        AliasFileError::TooLarge => {
+            vec![rejected(&written(
+                "巨大.object",
+                &vec![b'a'; MAX_ALIAS_BYTES + 1],
+            ))]
+        }
+        AliasFileError::NotUtf8 => vec![rejected(&written(
+            "非UTF8.object",
+            b"[Object]\r\nname=\xff\xfe\r\n",
+        ))],
+    }
+}
+
+/// variant を表す名前を返す。網羅 `match` の理由は同上。
+///
+/// 名前を持たない variant があるため、突き合わせの報告には
+/// [`AliasFileError::reason`] を使えない。
+fn alias_file_variant_name(error: &AliasFileError) -> &'static str {
+    match error {
+        AliasFileError::NotFound => "NotFound",
+        AliasFileError::Unreadable => "Unreadable",
+        AliasFileError::TooLarge => "TooLarge",
+        AliasFileError::NotUtf8 => "NotUtf8",
     }
 }
 
@@ -253,6 +296,18 @@ fn produced_reasons() -> BTreeSet<String> {
         )
         .into_iter()
         .filter_map(|error| reason_of(&describe_effects_error(error).details)),
+    );
+    // 読み取りの失敗は補助情報を自分では組み立てない。名前は失敗そのものから
+    // 取り、名前を持たない失敗はここで落ちる。
+    let alias_files = crate::alias::tests::TempDir::new();
+    reasons.extend(
+        produced_variants(
+            AliasFileError::ALL,
+            |variant| alias_file_case(variant, alias_files.path()),
+            alias_file_variant_name,
+        )
+        .iter()
+        .filter_map(|error| error.reason().map(str::to_string)),
     );
     reasons
 }
