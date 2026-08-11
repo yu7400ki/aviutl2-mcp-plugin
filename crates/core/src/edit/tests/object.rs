@@ -265,3 +265,38 @@ fn set_object_item_rejects_unknown_values() {
     );
     assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
 }
+
+#[test]
+fn set_object_item_bounds_integers_to_a_signed_32bit_integer() {
+    for value in [i64::from(i32::MIN), i64::from(i32::MAX)] {
+        assert_eq!(
+            SetObjectItemParams {
+                value: ItemValue::Integer { value },
+                ..sample_set_object_item()
+            }
+            .validate(),
+            Ok(()),
+            "{value}"
+        );
+    }
+
+    for value in [i64::from(i32::MIN) - 1, i64::from(i32::MAX) + 1] {
+        let error = SetObjectItemParams {
+            value: ItemValue::Integer { value },
+            ..sample_set_object_item()
+        }
+        .validate()
+        .expect_err("幅を外れた整数が受理されました");
+        assert_eq!(
+            error,
+            EditInputError::ItemValue(ItemWriteError::IntegerNotRepresentable),
+            "{value}"
+        );
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument, "{value}");
+        assert_eq!(
+            error.reason(),
+            Some("argument_not_representable"),
+            "{value}"
+        );
+    }
+}

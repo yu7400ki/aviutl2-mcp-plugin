@@ -935,6 +935,33 @@ mod tests {
     }
 
     #[test]
+    fn an_integer_wider_than_the_sub_operation_accepts_stops_the_whole_batch() {
+        // 幅を外れた 1 件は、発行される前に一括適用ごと落ちる。
+        let error = params(vec![
+            move_object(2),
+            BatchOperation::SetObjectItem {
+                selector: effect_selector(3),
+                item: "X".to_string(),
+                value: ItemValue::Integer {
+                    value: i64::from(i32::MAX) + 1,
+                },
+            },
+            move_object(4),
+        ])
+        .validate()
+        .unwrap_err();
+        assert_eq!(error.failed_index(), Some(1));
+        assert_eq!(
+            error,
+            BatchInputError::Operation {
+                index: 1,
+                source: EditInputError::ItemValue(ItemWriteError::IntegerNotRepresentable),
+            }
+        );
+        assert_eq!(error.error_code(), ErrorCode::InvalidArgument);
+    }
+
+    #[test]
     fn step_outcome_carries_the_effect_only_for_item_changes() {
         let outcome = BatchOutcome {
             project_epoch: EPOCH.to_string(),
