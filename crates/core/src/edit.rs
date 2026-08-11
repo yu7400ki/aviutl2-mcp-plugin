@@ -87,7 +87,7 @@ impl EditOutcome {
     /// `created` に作成された全件を、`object` にその先頭を載せる。
     ///
     /// `placement_adjusted` は、要求した配置と `created` の配置が 1 件でも違う
-    /// かである。呼び出し元だけが要求した配置を知っているため、引数で受け取る。
+    /// かである。
     pub fn created(
         project_epoch: impl Into<String>,
         project_revision: u64,
