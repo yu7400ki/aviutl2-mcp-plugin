@@ -700,59 +700,6 @@ fn a_locked_layer_is_rejected() {
 }
 
 #[test]
-fn a_locked_destination_layer_is_rejected() {
-    let harness = Harness::new();
-    let mut params = move_params(&harness);
-    params.destination.layer = 2;
-    params.destination.frame = 500;
-
-    let error = harness
-        .edit
-        .move_object(&params)
-        .expect_err("ロックされたレイヤーへ移動できました");
-    assert_eq!(error.details()["reason"], json!("layer_locked"));
-    harness.assert_untouched();
-}
-
-#[test]
-fn an_occupied_destination_is_rejected() {
-    let harness = Harness::new();
-    let mut params = move_params(&harness);
-    params.destination.frame = 350;
-
-    let error = harness
-        .edit
-        .move_object(&params)
-        .expect_err("既存の対象へ重ねて移動できました");
-    assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
-    assert_eq!(error.details()["reason"], json!("destination_occupied"));
-    assert_eq!(error.details()["layer"], json!(1));
-    assert_eq!(error.details()["frame"], json!(350));
-    // 塞いでいる範囲が返るため、次の宛先を選ぶのに読み直しが要らない。
-    assert_eq!(
-        error.details()["occupied_by"],
-        json!({"frame_start": 300, "frame_end": 400})
-    );
-    // 塞いでいる対象の名前と fingerprint は載せない。
-    let text = error.details().to_string();
-    assert!(!text.contains("字幕"), "{text}");
-    assert!(!text.contains("fingerprint"), "{text}");
-    harness.assert_untouched();
-}
-
-#[test]
-fn moving_an_object_onto_itself_is_not_treated_as_occupied() {
-    let harness = Harness::new();
-    let mut params = move_params(&harness);
-    params.destination.frame = 100;
-
-    harness
-        .edit
-        .move_object(&params)
-        .expect("自分自身の位置が塞がりとして扱われました");
-}
-
-#[test]
 fn an_occupied_creation_target_is_rejected() {
     let harness = Harness::new();
     let error = harness
@@ -1022,22 +969,6 @@ fn every_effect_type_in_the_catalog_reaches_the_creation_api() {
             effect.effect_type
         );
     }
-}
-
-#[test]
-fn an_unregistered_effect_name_is_rejected_without_entering_the_section() {
-    let harness = Harness::new();
-    let error = harness
-        .edit
-        .add_effect(&AddEffectParams {
-            object: harness.selector(1, 100),
-            effect_name: "存在しないエフェクト".to_string(),
-        })
-        .expect_err("未登録の effect が付与されました");
-
-    assert_eq!(error.error_code(), ErrorCode::UnsupportedOperation);
-    assert_eq!(error.details()["reason"], json!("effect_not_registered"));
-    assert_eq!(harness.host.enter_calls(), 0);
 }
 
 // ------------------------------------------ 登録済みエイリアス名からの作成
@@ -4260,155 +4191,6 @@ fn the_item_value_mismatch_has_a_request_that_produces_it() {
     }
 }
 
-#[test]
-fn an_added_effect_is_located_by_the_difference_in_the_name_list() {
-    let harness = Harness::new();
-    let outcome = harness
-        .edit
-        .add_effect(&AddEffectParams {
-            object: harness.selector(1, 100),
-            effect_name: "ぼかし".to_string(),
-        })
-        .expect("effect の付与に失敗しました");
-
-    let effect = outcome.effect.expect("付与された effect");
-    assert_eq!(effect.name, "ぼかし");
-    // 既に同名が 1 つあるため、同名内の順序は 1 になる。
-    assert_eq!(effect.index, 1);
-    assert_eq!(effect.selector.effect_index, 1);
-}
-
-#[test]
-fn an_added_effect_reports_where_it_landed_in_the_column() {
-    // 既定の対象は `動画ファイル` と `ぼかし` を持つ。末尾へ `ぼかし` が入ると
-    // 同名内の順序は 1、列の位置は 2 になり、2 つの数が食い違う。
-    let harness = Harness::new();
-    let outcome = harness
-        .edit
-        .add_effect(&AddEffectParams {
-            object: harness.selector(1, 100),
-            effect_name: "ぼかし".to_string(),
-        })
-        .expect("effect の付与に失敗しました");
-
-    let effect = outcome.effect.expect("付与された effect");
-    let scene = harness.host.scene();
-    let effects = &scene.layers[1].objects[0].effects;
-    assert_eq!(effect.position, effects.len() - 1);
-    assert_eq!(effects[effect.position].name, effect.name);
-    assert_eq!(effects[effect.position].index, effect.index);
-    assert_ne!(effect.position, effect.index);
-}
-
-#[test]
-fn every_effect_changing_response_reports_the_column_position() {
-    // 既定の対象は `動画ファイル` と `ぼかし` を持つ。先頭の `ぼかし` は同名内で
-    // 0 番目・列では 1 番目であり、2 つの数が食い違う。位置は対象を解決した時点の
-    // 列から求め、変更後に読み直した列へ当てる。どちらの operation も列の構成を
-    // 変えないため、2 つの列で同じ effect を指す。
-    let harness = Harness::new();
-    let outcomes = [
-        (
-            "set_object_item",
-            harness
-                .edit
-                .set_object_item(&SetObjectItemParams {
-                    selector: harness.effect_selector(1, 100, "ぼかし", 0),
-                    item: "範囲".to_string(),
-                    value: ItemValue::Integer { value: 30 },
-                })
-                .expect("set_object_item"),
-        ),
-        (
-            "set_effect_enabled",
-            harness
-                .edit
-                .set_effect_enabled(&SetEffectEnabledParams {
-                    selector: harness.effect_selector(1, 100, "ぼかし", 0),
-                    enabled: false,
-                })
-                .expect("set_effect_enabled"),
-        ),
-    ];
-    for (tool, outcome) in outcomes {
-        let effect = outcome.effect.expect("変更後の effect");
-        assert_eq!(effect.index, 0, "{tool}");
-        assert_eq!(effect.position, 1, "{tool}");
-        let scene = harness.host.scene();
-        let effects = &scene.layers[1].objects[0].effects;
-        assert_eq!(effects[effect.position].name, effect.name, "{tool}");
-        assert_eq!(effects[effect.position].index, effect.index, "{tool}");
-    }
-}
-
-#[test]
-fn moving_reports_the_placement_the_host_chose() {
-    // ホストが宛先を調整しても移動そのものは成功している。要求値との一致を
-    // 求めると、成功した移動が対象の不在として返る。
-    let harness =
-        Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::AdjustMoveDestination)));
-    let params = move_params(&harness);
-    let outcome = harness
-        .edit
-        .move_object(&params)
-        .expect("宛先を調整されただけで移動が失敗しました");
-
-    let moved = outcome.object.expect("移動後の対象");
-    assert_eq!(
-        moved.frame_start,
-        500 + MOVE_FRAME_SHIFT,
-        "要求した宛先をそのまま応答へ載せています"
-    );
-    // 応答が返した selector はそのまま次の要求へ渡せる。
-    harness
-        .read
-        .get_object(&moved.selector)
-        .expect("応答が返した selector で引けません");
-}
-
-#[test]
-fn moving_fails_when_the_new_placement_cannot_be_read() {
-    // read-back が無くなるわけではない。位置を読めなければ応答を組み立てられず、
-    // 変更を発行した後の失敗として返す。
-    let harness =
-        Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::PositionUnreadable)));
-    let params = move_params(&harness);
-    let error = harness
-        .edit
-        .move_object(&params)
-        .expect_err("位置を読めないのに成功として返りました");
-
-    assert_eq!(error.error_code(), ErrorCode::SdkError);
-    assert_eq!(
-        error.details()["sdk_operation"],
-        json!("get_object_layer_frame")
-    );
-    assert_eq!(error.details()["mutation_issued"], json!(true));
-}
-
-#[test]
-fn a_read_back_failure_after_a_mutation_keeps_the_revision_and_reports_it() {
-    let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::ReadBack)));
-    let params = move_params(&harness);
-    let error = harness
-        .edit
-        .move_object(&params)
-        .expect_err("読み直しの失敗が成功として返りました");
-
-    assert_eq!(error.error_code(), ErrorCode::SdkError);
-    assert_eq!(error.details()["mutation_issued"], json!(true));
-    assert_eq!(error.details()["current_project_revision"], json!(1));
-    assert_eq!(
-        harness.project.revision(),
-        1,
-        "変更が入ったのに revision が戻されました"
-    );
-    assert!(
-        harness.project.modified(),
-        "変更が入ったのに未保存の変更なしと報告されます"
-    );
-}
-
 // ------------------------------------------------------------- revision の更新
 
 #[test]
@@ -4817,82 +4599,6 @@ fn the_fake_scene_exposes_layers_and_objects() {
     let object: &FakeObject = &layer.objects[0];
     assert_eq!(object.placement.frame_start, 100);
     assert!(!layer.locked);
-}
-
-#[test]
-fn an_added_effect_is_located_even_when_the_host_does_not_append_it() {
-    // 付与位置が末尾だと決めつけると、先頭へ挿入するホストで別の effect を
-    // 指す selector を返してしまう。
-    let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::PrependEffect)));
-    let outcome = harness
-        .edit
-        .add_effect(&AddEffectParams {
-            object: harness.selector(1, 100),
-            effect_name: "ぼかし".to_string(),
-        })
-        .expect("effect の付与に失敗しました");
-
-    let effect = outcome.effect.expect("付与された effect");
-    assert_eq!(effect.name, "ぼかし");
-    // 先頭へ挿入されたため、同名内の順序は 0 になり既存の方が 1 へ繰り上がる。
-    assert_eq!(effect.index, 0);
-    // 列の位置も先頭である。末尾を決め打つと、ここで別の要素を指す。
-    assert_eq!(effect.position, 0);
-    let scene = harness.host.scene();
-    let effects = &scene.layers[1].objects[0].effects;
-    assert_eq!(effects[0].name, "ぼかし");
-    assert_eq!(effects[0].index, 0);
-}
-
-#[test]
-fn an_ambiguous_effect_difference_is_reported_instead_of_being_guessed() {
-    let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::AddTwoEffects)));
-    let error = harness
-        .edit
-        .add_effect(&AddEffectParams {
-            object: harness.selector(1, 100),
-            effect_name: "ぼかし".to_string(),
-        })
-        .expect_err("位置を特定できないのに selector が返りました");
-
-    assert_eq!(error.error_code(), ErrorCode::SdkError);
-    assert_eq!(error.details()["sdk_operation"], json!("create_effect"));
-    assert_eq!(error.details()["mutation_issued"], json!(true));
-}
-
-#[test]
-fn the_added_position_comes_from_the_difference_in_the_name_list() {
-    let names = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
-
-    // 末尾・中間・先頭のいずれへ挿入されても位置が求まる。
-    assert_eq!(
-        added_effect_position(&names(&["a", "b"]), &names(&["a", "b", "c"])),
-        Some(2)
-    );
-    assert_eq!(
-        added_effect_position(&names(&["a", "b"]), &names(&["a", "c", "b"])),
-        Some(1)
-    );
-    assert_eq!(
-        added_effect_position(&names(&["a", "b"]), &names(&["c", "a", "b"])),
-        Some(0)
-    );
-    // 同名が並んでいても件数が 1 つ増えていれば位置が定まる。
-    assert_eq!(
-        added_effect_position(&names(&["a", "a"]), &names(&["a", "a", "a"])),
-        Some(2)
-    );
-
-    // 増減が 1 件でない、あるいは並びが入れ替わった場合は位置を名乗らない。
-    assert_eq!(added_effect_position(&names(&["a"]), &names(&["a"])), None);
-    assert_eq!(
-        added_effect_position(&names(&["a"]), &names(&["a", "b", "c"])),
-        None
-    );
-    assert_eq!(
-        added_effect_position(&names(&["a", "b"]), &names(&["b", "a", "c"])),
-        None
-    );
 }
 
 #[test]
@@ -5448,100 +5154,6 @@ fn the_layer_lock_table_leaves_out_only_the_declared_operations() {
 }
 
 #[test]
-fn moving_checks_the_lock_of_both_the_source_and_the_destination() {
-    // 移動元だけがロックされている場合。
-    let harness = Harness::new();
-    let error = harness
-        .edit
-        .move_object(&MoveObjectParams {
-            selector: harness.selector(2, 0),
-            destination: Destination {
-                layer: 1,
-                frame: 500,
-            },
-        })
-        .expect_err("ロックされたレイヤーから移動できました");
-    assert_eq!(error.details()["reason"], json!("layer_locked"));
-    assert_eq!(error.details()["layer"], json!(2));
-    harness.assert_untouched();
-
-    // 移動先だけがロックされている場合。
-    let harness = Harness::new();
-    let mut params = move_params(&harness);
-    params.destination.layer = 2;
-    params.destination.frame = 500;
-    let error = harness
-        .edit
-        .move_object(&params)
-        .expect_err("ロックされたレイヤーへ移動できました");
-    assert_eq!(error.details()["reason"], json!("layer_locked"));
-    assert_eq!(error.details()["layer"], json!(2));
-    harness.assert_untouched();
-}
-
-#[test]
-fn the_lock_check_reads_only_the_lock_state() {
-    // ここで使うのは 1 ビットである。名前と表示まで読むと、応答に現れない値の
-    // 読み取り失敗が移動と削除の可否を左右する。
-    let harness = Harness::new();
-    let params = move_params(&harness);
-    harness.host.clear_calls();
-    harness
-        .edit
-        .move_object(&params)
-        .expect("移動に失敗しました");
-
-    let calls = harness.host.calls();
-    assert!(
-        !calls.contains(&LAYER_ATTRIBUTES),
-        "ロックの確認がレイヤー属性をまとめて読みました: {calls:?}"
-    );
-}
-
-#[test]
-fn moving_within_one_layer_reads_the_lock_state_once() {
-    // 移動元と移動先が同じレイヤーになる移動で 2 回読む理由が無い。
-    let harness = Harness::new();
-    let params = move_params(&harness);
-    harness.host.clear_calls();
-    harness
-        .edit
-        .move_object(&params)
-        .expect("移動に失敗しました");
-    assert_eq!(
-        harness
-            .host
-            .calls()
-            .iter()
-            .filter(|call| **call == LAYER_LOCK)
-            .count(),
-        1,
-        "同一レイヤー内の移動でロック状態を 2 回読みました"
-    );
-
-    // レイヤーを跨ぐ移動では移動元と移動先の双方を読む。
-    let harness = Harness::new();
-    let mut params = move_params(&harness);
-    params.destination.layer = 0;
-    params.destination.frame = 500;
-    harness.host.clear_calls();
-    harness
-        .edit
-        .move_object(&params)
-        .expect("移動に失敗しました");
-    assert_eq!(
-        harness
-            .host
-            .calls()
-            .iter()
-            .filter(|call| **call == LAYER_LOCK)
-            .count(),
-        2,
-        "レイヤーを跨ぐ移動で片方のロックしか確かめていません"
-    );
-}
-
-#[test]
 fn every_content_edit_refuses_a_target_from_another_project() {
     // fingerprint の材料に project_epoch は含まれない。同じプロジェクトを複製
     // した 2 つのインスタンスでは fingerprint も revision も一致し得るため、
@@ -5615,29 +5227,6 @@ fn creation_checks_the_scene_guard_of_its_placement() {
     assert_eq!(error.details()["mismatch"], json!("scene_id"));
     assert_eq!(error.details()["expected_scene_id"], json!(SCENE_ID + 7));
     harness.assert_untouched();
-}
-
-#[test]
-fn the_response_revision_comes_from_the_increment_not_from_a_reread() {
-    // ホストが plugin 発の編集にも対象更新を配送する環境では、加算のあとに
-    // 読み直すと別の値を読む。応答が返す revision が非決定になり、要求元の
-    // 次の編集が確率的に前提条件で落ちる。
-    let harness = Harness::with(|host| host.arm(|knobs| knobs.bump_after_mutation = 3));
-    let params = move_params(&harness);
-    let outcome = harness
-        .edit
-        .move_object(&params)
-        .expect("移動に失敗しました");
-
-    assert_eq!(
-        outcome.project_revision, 1,
-        "応答が加算時点の値ではなく読み直した値を返しています"
-    );
-    assert_eq!(
-        harness.project.revision(),
-        4,
-        "読み直せば別の値になる状況が作れていません"
-    );
 }
 
 #[test]
@@ -6111,10 +5700,14 @@ fn every_unsupported_reason_has_a_request_that_produces_it() {
     unsupported_target_failures();
 }
 
+/// effect 付与の統合テスト。
+mod add_effect;
 /// 一括適用の統合テスト。
 mod apply_batch;
 /// effect の順序移動の統合テスト。
 mod move_effect;
+/// 対象移動の統合テスト。
+mod move_object;
 /// 区間の作成・削除・移動の統合テスト。
 mod object_section;
 /// BPM グリッド置き換えの統合テスト。

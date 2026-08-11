@@ -297,7 +297,6 @@ fn a_scene_guard_protects_the_selection() {
     assert!(!harness.host.mutated());
 }
 
-
 #[test]
 fn the_selection_change_names_which_epoch_did_not_match() {
     // 前提と focus の双方から epoch を受け取るのは選択状態の変更だけである。
