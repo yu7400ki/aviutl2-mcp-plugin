@@ -3,8 +3,11 @@
 use crate::error::ErrorObject;
 use crate::identifier::{InstanceId, ProtocolVersion, RequestId};
 use crate::state::InstanceState;
-use serde::de;
+use serde::de::{self, MapAccess, Visitor};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashSet;
+use std::fmt;
 
 /// 要求 Envelope の種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,78 +124,80 @@ impl RequestEnvelope {
     }
 }
 
-/// 値が在ることと `null` であることを区別して読む。
-///
-/// `Option<T>` の既定の逆直列化は `null` を欠落と同じ `None` へ潰す。こちらは
-/// `null` を `Some` として読み、欠落だけを `#[serde(default)]` 経由の `None` に
-/// する。
-fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    T::deserialize(deserializer).map(Some)
-}
-
-/// [`ResponseResult`] のワイヤ表現。
-///
-/// `ok` の真偽が `result` と `error` のどちらを必須にするかを決める。載せない側の
-/// フィールドは書き出さない。未知フィールドは拒否せず読み飛ばす。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ResponseResultRepr {
-    ok: bool,
-    #[serde(
-        default,
-        deserialize_with = "present",
-        skip_serializing_if = "Option::is_none"
-    )]
-    result: Option<serde_json::Value>,
-    #[serde(
-        default,
-        deserialize_with = "present",
-        skip_serializing_if = "Option::is_none"
-    )]
-    error: Option<ErrorObject>,
-}
-
 /// 応答結果。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "ResponseResultRepr", into = "ResponseResultRepr")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ResponseResult {
     Ok { result: serde_json::Value },
     Err { error: ErrorObject },
 }
 
-impl TryFrom<ResponseResultRepr> for ResponseResult {
-    type Error = &'static str;
-
-    fn try_from(repr: ResponseResultRepr) -> Result<Self, &'static str> {
-        if repr.ok {
-            Ok(ResponseResult::Ok {
-                result: repr.result.ok_or("missing field `result`")?,
-            })
-        } else {
-            Ok(ResponseResult::Err {
-                error: repr.error.ok_or("missing field `error`")?,
-            })
+impl Serialize for ResponseResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(2))?;
+        match self {
+            ResponseResult::Ok { result } => {
+                map.serialize_entry("ok", &true)?;
+                map.serialize_entry("result", result)?;
+            }
+            ResponseResult::Err { error } => {
+                map.serialize_entry("ok", &false)?;
+                map.serialize_entry("error", error)?;
+            }
         }
+        map.end()
     }
 }
 
-impl From<ResponseResult> for ResponseResultRepr {
-    fn from(value: ResponseResult) -> Self {
-        match value {
-            ResponseResult::Ok { result } => ResponseResultRepr {
-                ok: true,
-                result: Some(result),
-                error: None,
-            },
-            ResponseResult::Err { error } => ResponseResultRepr {
-                ok: false,
-                result: None,
-                error: Some(error),
-            },
+impl<'de> Deserialize<'de> for ResponseResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ResponseResultVisitor;
+        impl<'de> Visitor<'de> for ResponseResultVisitor {
+            type Value = ResponseResult;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("ok boolean と result/error フィールドを持つオブジェクト")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut ok = None;
+                let mut result = None;
+                let mut error = None;
+                let mut seen = HashSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if !seen.insert(key.clone()) {
+                        return Err(de::Error::custom(format!("重複した key です: {}", key)));
+                    }
+                    match key.as_str() {
+                        "ok" => ok = Some(map.next_value::<bool>()?),
+                        "result" => result = Some(map.next_value::<serde_json::Value>()?),
+                        "error" => error = Some(map.next_value::<ErrorObject>()?),
+                        _ => {
+                            // 知らないフィールドは読み飛ばす。受け手が使わない値 1 つの
+                            // ために応答そのものを落とさない。
+                            map.next_value::<serde_json::Value>()?;
+                        }
+                    }
+                }
+                let ok = ok.ok_or_else(|| de::Error::missing_field("ok"))?;
+                if ok {
+                    let result = result.ok_or_else(|| de::Error::missing_field("result"))?;
+                    Ok(ResponseResult::Ok { result })
+                } else {
+                    let error = error.ok_or_else(|| de::Error::missing_field("error"))?;
+                    Ok(ResponseResult::Err { error })
+                }
+            }
         }
+        deserializer.deserialize_map(ResponseResultVisitor)
     }
 }
 
@@ -200,6 +205,9 @@ impl From<ResponseResult> for ResponseResultRepr {
 ///
 /// 結果は `ok` / `result` / `error` として同じ階層へ並ぶ。未知フィールドは拒否
 /// しない。受け手が使わない値 1 つのために応答そのものを落とさない。
+///
+/// 重複 key は拒否する。同じ階層へ並ぶ `ok` / `result` / `error` と未知フィールドは
+/// [`ResponseResult`] が、残る 4 欄は derive がそれぞれ見る。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResponseEnvelope {
     /// 応答の名乗り。`"response"` 以外を名乗るフレームは受理しない。
@@ -473,8 +481,7 @@ mod tests {
 
     #[test]
     fn duplicate_keys_are_rejected_before_the_envelope_is_built() {
-        // 重複 key の拒否は strict パースが担う。Envelope の型は既知・未知を
-        // 問わず重複を見ない。
+        // 重複 key はワイヤ経路でも落ちる。
         for tail in [
             r#""ok":true,"result":{},"result":{}"#,
             r#""ok":true,"result":{},"future":1,"future":2"#,
