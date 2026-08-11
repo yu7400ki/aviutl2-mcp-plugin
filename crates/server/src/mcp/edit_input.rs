@@ -268,8 +268,9 @@ pub enum ItemValueInput {
     /// item_type: scene が指す先のシーンが実在するかをホストは確かめず、
     /// 照合の読み直しも整数が入ったことしか言えない。存在しないシーンを
     /// 指す値も成功として返る。シーン ID を引く tool は無い。
-    /// 書ける整数には幅があり、値の宣言がその上下界を持つ。幅を外した値は
-    /// 書き込みを発行せずに invalid_argument となり argument_not_representable を返す。
+    /// 書ける整数は 32bit 符号付き整数の幅（-2147483648 以上 2147483647 以下）に
+    /// 収まる必要がある。外れた値は書き込みを発行せずに invalid_argument となり
+    /// argument_not_representable を返す。
     Integer {
         /// 値。
         ///
