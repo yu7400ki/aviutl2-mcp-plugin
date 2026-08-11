@@ -9,6 +9,7 @@ use aviutl2_mcp_core::{
     Cursor, DisplayRange, DisplayStart, FocusChange, FrameRange, ObservedSelection, RangeChange,
     SelectionField, SelectionState, SetSelectionParams,
 };
+
 /// 適用を試みた結果。
 ///
 /// ここが持つのは**変更 API を呼んだ結果だけ**であり、応答の `applied` とは

@@ -2,6 +2,7 @@
 
 use crate::edit::error::{EditError, SectionPreconditionReason};
 use aviutl2_mcp_core::SectionRange;
+
 /// 中間点を置くフレームが、いま読み直した区間と両立することを確かめる。
 ///
 /// 見るのはオブジェクトの範囲に入ることと、既存の境界と重ならないことである。

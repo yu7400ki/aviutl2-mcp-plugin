@@ -8,6 +8,7 @@ use crate::edit::resolve::ResolvedObject;
 use crate::read::host::HostEffect;
 use crate::read::resolve::effect_info_at;
 use aviutl2_mcp_core::{EffectInfo, ObjectSummary};
+
 /// 移動先が、いま読み直した effect の列を指していることを確かめる。
 ///
 /// 位置の値域は要求内容だけの検証で済んでいるため、ここで見るのは列の長さとの

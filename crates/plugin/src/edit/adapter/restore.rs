@@ -8,6 +8,7 @@ use crate::edit::precondition::{Boundary, MutationPermit};
 use crate::edit::resolve::{ResolvedEffect, ResolvedObject, resolve_effect_of};
 use crate::read::host::HostEffect;
 use crate::read::resolve::effect_info_at;
+
 /// 書き込み検証が落ちたとき、対象を書き込み前の値へ戻してから失敗を返す。
 ///
 /// **[`verify_written_item`] の内側へは入れない。** 一括適用も同じ関数を通るが、

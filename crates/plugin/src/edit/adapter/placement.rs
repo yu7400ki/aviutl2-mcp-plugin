@@ -4,6 +4,7 @@ use crate::edit::error::{EditError, OccupiedRange};
 use crate::edit::host::SceneEditor;
 use crate::read::host::HostObjectPlacement;
 use std::ops::RangeInclusive;
+
 /// レイヤーのロックが止める編集であることを確かめる。
 ///
 /// SDK はレイヤーのロックを尊重しないため、このガードだけが利用者の表明を守る。

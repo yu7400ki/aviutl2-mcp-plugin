@@ -11,6 +11,7 @@ use aviutl2_mcp_core::{
     ReadBackCheck, TrackWriteTarget, movement_check_reads_current_value,
     write_drops_existing_movement,
 };
+
 /// 書き込んだ設定値が要求どおり入ったことを、読み直して確かめる。
 ///
 /// 照合した種別では、そのとき読み直した対象を [`Some`] で返す。照合しない種別は
