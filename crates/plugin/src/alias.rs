@@ -17,10 +17,11 @@
 
 use aviutl2::alias::Table;
 use aviutl2_mcp_core::{
-    AvailableEffectItem, EffectItemType, ErrorCode, ItemWriteError, ListObjectAliasesResult,
-    MAX_ALIAS_BYTES, Movement, ObjectAliasSummary, PageWindow, TextSyntaxError, TrackDecodeError,
-    TrackWriteTarget, decode_track_value, read_bounded, take_window, validate_alias,
-    validate_alias_text_escapes, validate_object_alias_name, validate_track_value,
+    AliasFileError, AvailableEffectItem, EffectItemType, ErrorCode, ItemWriteError,
+    ListObjectAliasesResult, MAX_ALIAS_BYTES, Movement, ObjectAliasSummary, PageWindow,
+    TextSyntaxError, TrackDecodeError, TrackWriteTarget, decode_track_value, read_alias_file,
+    read_bounded, take_window, validate_alias, validate_alias_text_escapes,
+    validate_object_alias_name, validate_track_value,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -278,6 +279,18 @@ impl AliasDirectory {
     }
 
     /// 直下のエイリアスファイルのパスを組み立てる。
+    ///
+    /// `CON` や `NUL` といった Windows の予約デバイス名は禁止文字の集合に現れず、
+    /// エイリアス名としては通る。**禁止文字を増やす形は採らない。** 集合は
+    /// AviUtl2 の UI が課すものであり、我々が広げると UI から登録できる名前を
+    /// 我々だけが拒むことになる。防ぐのはここであり、この型が保証する `\\?\`
+    /// 前置の下では置換が起きないことを実測している。
+    ///
+    /// **拡張子を付ける形が単独で効いているかは当てにしない。** 実測では
+    /// `<dir>\NUL.object` は素の連結でもデバイスへ解決しなかったが、`<dir>\NUL`
+    /// は解決した。どちらが効いているかは Windows の版に依る話であり、**置換が
+    /// 起きない形を我々の側で作っておくことと、拡張子が結果的に助けていることは
+    /// 別である。**
     fn file(&self, name: &str) -> PathBuf {
         self.0.join(format!("{name}.{ALIAS_EXTENSION}"))
     }
@@ -341,27 +354,15 @@ fn admit_named_file(dir: &AliasDirectory, name: &str) -> Result<AdmittedAlias, A
     })
 }
 
-/// エイリアスファイルを読み、大きさと符号化を確かめる。
+/// 受け入れ規則の条件 2 と 3 を判定する。
 ///
-/// `CON` や `NUL` といった Windows の予約デバイス名は禁止文字の集合に現れず、
-/// エイリアス名としては通る。**禁止文字を増やす形は採らない。** 集合は AviUtl2
-/// の UI が課すものであり、我々が広げると UI から登録できる名前を我々だけが
-/// 拒むことになる。防ぐのはパスの組み立ての側であり、[`AliasDirectory`] が
-/// 保証する `\\?\` 前置の下では置換が起きないことを実測している。
-///
-/// **拡張子を付ける形が単独で効いているかは当てにしない。** 実測では
-/// `<dir>\NUL.object` は素の連結でもデバイスへ解決しなかったが、`<dir>\NUL` は
-/// 解決した。どちらが効いているかは Windows の版に依る話であり、**置換が起き
-/// ない形を我々の側で作っておくことと、拡張子が結果的に助けていることは別で
-/// ある。**
+/// 読み取りの失敗を、名前で指定する経路の語彙へ写す。
 fn read_alias(dir: &AliasDirectory, name: &str) -> Result<String, AliasRejection> {
-    let path = dir.file(name);
-    let bytes = match read_bounded(&path, MAX_ALIAS_BYTES as u64) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return Err(AliasRejection::TooLarge),
-        Err(_) => return Err(AliasRejection::NotFound),
-    };
-    let text = String::from_utf8(bytes).map_err(|_| AliasRejection::NotParsable)?;
+    let text = read_alias_file(&dir.file(name)).map_err(|error| match error {
+        AliasFileError::NotFound | AliasFileError::Unreadable => AliasRejection::NotFound,
+        AliasFileError::TooLarge => AliasRejection::TooLarge,
+        AliasFileError::NotUtf8 => AliasRejection::NotParsable,
+    })?;
     validate_alias(&text).map_err(|error| match error {
         TextSyntaxError::TooLongBytes { .. } => AliasRejection::TooLarge,
         _ => AliasRejection::NotParsable,
