@@ -129,12 +129,12 @@ const MEASUREMENT_MARK: &str = "実測";
 /// alias の書式を定めている参照文書。
 const ALIAS_REFERENCE: &str = "references/object-alias.md";
 
-/// 移動のフラグに書いてよい値の上限。
+/// 参照式を持つことを示すビット。
 ///
-/// [`ALIAS_REFERENCE`] 自身が「フラグに書いてよいのは 0〜7」と定めている。
-const MAX_TRACK_FLAGS: u64 = 7;
+/// [`ALIAS_REFERENCE`] 自身が、このビットは式を伴わなければ書けないと定めている。
+const EXPRESSION_BIT: u64 = 8;
 
-/// 上限の外の値を挙げてよい行——禁止そのものを述べる行——を見分ける語。
+/// 式を伴わない綴りを挙げてよい行——禁止そのものを述べる行——を見分ける語。
 const FORBIDDEN_BIT: &str = "bit3";
 
 /// 待つべき時間を運ぶ `details` のキー。
@@ -149,19 +149,28 @@ const RETRY_AFTER_KEY: &str = "retry_after_ms";
 /// られる。**
 const WAITING_FAILURE_NAMES: &[&str] = &["host_busy", "instance_stale"];
 
-/// 行に現れるインラインコードのうち、移動行として読めるものからフラグを返す。
+/// 行に現れるインラインコードのうち、移動行として読めるものを返す。
 ///
-/// 移動行は `<値>,…,<移動モード名>,<フラグ>[|<パラメータ>…]` であり、フラグは
-/// 最後のコンマの後ろに在る。**整数として読めない末尾は移動行ではない**——
-/// フラグを欠いた行も、コンマを含むただのテキストも、ここで落ちる。
-fn track_flags(line: &str) -> Vec<u64> {
+/// 移動行は `<値>,…,<移動モード名>,<フラグ>[|<節>…]` であり、フラグは最後の
+/// コンマの後ろに在る。**整数として読めない末尾は移動行ではない**——フラグを
+/// 欠いた行も、コンマを含むただのテキストも、ここで落ちる。
+///
+/// 返すのはフラグと、`|` の後ろの先頭の節である。節はフラグが参照式を名乗って
+/// いるときにその式が入る位置であり、無ければ `None` になる。
+fn track_rows(line: &str) -> Vec<(u64, Option<&str>)> {
     line.split('`')
         .skip(1)
         .step_by(2)
         .filter_map(|span| {
             let (_, tail) = span.rsplit_once(',')?;
-            let flags = tail.split_once('|').map_or(tail, |(flags, _)| flags);
-            flags.parse::<u64>().ok()
+            let (flags, section) = match tail.split_once('|') {
+                Some((flags, sections)) => (
+                    flags,
+                    Some(sections.split_once('|').map_or(sections, |(head, _)| head)),
+                ),
+                None => (tail, None),
+            };
+            Some((flags.parse::<u64>().ok()?, section))
         })
         .collect()
 }
@@ -382,10 +391,11 @@ fn the_skill_copies_no_choice_from_the_builtin_table() {
 }
 
 #[test]
-fn the_alias_reference_grounds_its_flag_bits_in_a_value_it_allows() {
-    // **文書が自らの禁止に触れる例を根拠にしない。** 0〜7 の外を挙げれば、
-    // 写した読み手はその文書が禁じた状態を作る。禁止そのものを述べる行だけが
-    // 外の値を挙げてよい——そこでは値が根拠ではなく対象である。
+fn the_alias_reference_grounds_its_flag_bits_in_a_row_it_allows() {
+    // **文書が自らの禁止に触れる例を根拠にしない。** 参照式を名乗るフラグへ式を
+    // 伴わない綴りを挙げれば、写した読み手はその文書が禁じた状態を作る。禁止
+    // そのものを述べる行だけが外の綴りを挙げてよい——そこでは綴りが根拠ではなく
+    // 対象である。
     let name = format!("{SKILL_NAME}/{ALIAS_REFERENCE}");
     let body = skill_files()
         .into_iter()
@@ -397,11 +407,13 @@ fn the_alias_reference_grounds_its_flag_bits_in_a_value_it_allows() {
         if !line.contains(MEASUREMENT_MARK) || line.contains(FORBIDDEN_BIT) {
             continue;
         }
-        for flags in track_flags(line) {
-            assert!(
-                flags <= MAX_TRACK_FLAGS,
-                "{name} が 0〜{MAX_TRACK_FLAGS} の外のフラグを根拠にしています（{flags}）: {line}"
-            );
+        for (flags, section) in track_rows(line) {
+            if flags & EXPRESSION_BIT != 0 {
+                assert!(
+                    section.is_some_and(|section| !section.is_empty()),
+                    "{name} が参照式を伴わない綴りを根拠にしています（{flags}）: {line}"
+                );
+            }
             grounds += 1;
         }
     }
