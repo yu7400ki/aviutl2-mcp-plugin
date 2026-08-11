@@ -18,12 +18,12 @@
 //!
 //! opaque handle は params にも result にも現れない。
 
-pub mod effect;
-pub mod layer;
-pub mod object;
-pub mod scene;
-pub mod section;
-pub mod selection;
+mod effect;
+mod layer;
+mod object;
+mod scene;
+mod section;
+mod selection;
 
 use crate::edit_info::GridBpm;
 use crate::effect::EffectInfo;
