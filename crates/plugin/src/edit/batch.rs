@@ -27,9 +27,10 @@
 //! 現れる手掛かりが無い。ここで「許可より前」と書けば、テストが裏付けていない
 //! ことを主張することになる。
 
+use crate::edit::adapter::placement::{ensure_destination_free, ensure_layers_unlocked};
 use crate::edit::adapter::{
-    attribute, ensure_destination_free, ensure_layers_unlocked, ensure_movement_write, index,
-    reread_with_effects, track_write_target, unlisted_item, verify_written_item,
+    attribute, ensure_movement_write, index, reread_with_effects, track_write_target,
+    unlisted_item, verify_written_item,
 };
 use crate::edit::error::{EditError, RollbackOutcome, UnsupportedReason};
 use crate::edit::host::{ObjectPosition, SceneEditor};

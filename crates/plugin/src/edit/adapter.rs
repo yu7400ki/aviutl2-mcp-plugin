@@ -12,15 +12,14 @@
 //! JSON への変換と応答の送信は区間の外で行う。区間の内側は SDK 呼び出しと
 //! 所有型へのコピーに限る。
 
+pub(crate) mod placement;
+mod section;
 mod selection;
 
 use crate::alias::AdmittedAlias;
 use crate::edit::EditAdapter;
 use crate::edit::batch;
-use crate::edit::error::{
-    EditError, EffectPreconditionReason, ItemRestore, OccupiedRange, SectionPreconditionReason,
-    UnsupportedReason,
-};
+use crate::edit::error::{EditError, EffectPreconditionReason, ItemRestore, UnsupportedReason};
 use crate::edit::host::{EditHost, SceneEditor};
 use crate::edit::precondition::{
     Boundary, EditKind, ExpectedEpoch, MutationPermit, MutationTicket, verify_boundary,
@@ -31,7 +30,7 @@ use crate::edit::resolve::{
 };
 use crate::project::ProjectState;
 use crate::read::ReadError;
-use crate::read::host::{EditState, HostEffect, HostLayer, HostObjectPlacement};
+use crate::read::host::{EditState, HostEffect, HostLayer};
 use crate::read::resolve::{effect_info_at, object_summary, scene_info};
 use aviutl2_mcp_core::{
     AddEffectParams, ApplyBatchParams, AvailableEffectItem, BatchOperation, BatchOutcome,
@@ -44,8 +43,15 @@ use aviutl2_mcp_core::{
     SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams, TrackWriteTarget,
     movement_check_reads_current_value, prepare_item_write, write_drops_existing_movement,
 };
+use placement::{
+    created_placements, creation_scan_range, ensure_destination_free, ensure_layer_unlocked,
+    ensure_layers_unlocked, scene_placements,
+};
+use section::{
+    ensure_section_can_be_created, ensure_section_exists,
+    ensure_section_move_stays_between_neighbours,
+};
 use selection::{apply_selection, selection_state};
-use std::ops::RangeInclusive;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
@@ -345,110 +351,6 @@ pub(crate) fn index(value: u32) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
-/// レイヤーのロックが止める編集であることを確かめる。
-///
-/// SDK はレイヤーのロックを尊重しないため、このガードだけが利用者の表明を守る。
-/// ただし守る範囲はレイヤーのロックが UI で止めるものに揃える——オブジェクトの
-/// 削除と、時間軸上の移動と、中間点の追加・移動・削除である。設定値の変更も
-/// effect の増減も UI の設定パネルから行えるため、ここでは止めない。
-///
-/// 同じレイヤーを 2 度渡しても読み取りは 1 回に畳む。移動元と移動先が同じ
-/// レイヤーになる移動が最も多い使い方であり、そこで 2 回読む理由が無い。
-///
-/// 読むのはロック状態だけである。ここで使うのは 1 ビットであり、名前と表示の
-/// 読み取り失敗が移動や削除の可否を左右する理由が無い。
-pub(crate) fn ensure_layers_unlocked(
-    editor: &dyn SceneEditor,
-    layers: [usize; 2],
-) -> Result<(), EditError> {
-    let [first, second] = layers;
-    ensure_layer_unlocked(editor, first)?;
-    if second != first {
-        ensure_layer_unlocked(editor, second)?;
-    }
-    Ok(())
-}
-
-/// 対象のレイヤーがロックされていないことを確かめる。
-fn ensure_layer_unlocked(editor: &dyn SceneEditor, layer: usize) -> Result<(), EditError> {
-    if editor.reader().layer_locked(layer)? {
-        return Err(EditError::LayerLocked { layer });
-    }
-    Ok(())
-}
-
-/// 宛先が空いていることを確かめる。
-///
-/// `moving_from` には移動する対象自身の開始フレームを渡す。自分自身との重なりを
-/// 塞がりとして扱わないためである。
-///
-/// 事前確認と SDK の失敗の双方を用いる。事前確認だけでは足りない——作成される
-/// オブジェクトの長さはホストが決めるため、開始位置が空いていても後続の対象と
-/// 重なり得る。SDK の失敗だけでも足りない——失敗は理由を区別しないため、何が
-/// 起きたのかを要求元へ伝えられない。
-///
-/// 塞いでいた対象の範囲は失敗へ載せる。要求元は「どこまで塞がっているか」を
-/// 知らなければ次の宛先を選べず、走査済みの値を捨てると読み直しを強いることに
-/// なる。
-pub(crate) fn ensure_destination_free(
-    occupants: &[HostObjectPlacement],
-    layer: usize,
-    frame: usize,
-    moving_from: Option<usize>,
-) -> Result<(), EditError> {
-    let occupant = occupants
-        .iter()
-        .filter(|placement| placement.layer == layer)
-        .filter(|placement| Some(placement.frame_start) != moving_from)
-        .find(|placement| placement.frame_start <= frame && frame <= placement.frame_end);
-    if let Some(occupant) = occupant {
-        return Err(EditError::DestinationOccupied {
-            layer,
-            frame,
-            occupied_by: OccupiedRange {
-                frame_start: occupant.frame_start,
-                frame_end: occupant.frame_end,
-            },
-        });
-    }
-    Ok(())
-}
-
-/// 中間点を置くフレームが、いま読み直した区間と両立することを確かめる。
-///
-/// 見るのはオブジェクトの範囲に入ることと、既存の境界と重ならないことである。
-/// どちらも対象の現在の状態で決まるため、要求内容だけの検証では判定できない。
-fn ensure_section_can_be_created(sections: &[SectionRange], frame: usize) -> Result<(), EditError> {
-    let outside = || EditError::SectionPrecondition {
-        reason: SectionPreconditionReason::FrameOutsideObject,
-    };
-    let (Some(first), Some(last)) = (sections.first(), sections.last()) else {
-        return Err(outside());
-    };
-    if frame < first.start || last.end < frame {
-        return Err(outside());
-    }
-    if sections.iter().any(|section| section.start == frame) {
-        return Err(EditError::SectionPrecondition {
-            reason: SectionPreconditionReason::SectionBoundaryExists,
-        });
-    }
-    Ok(())
-}
-
-/// 区間番号が、いま読み直した区間の列を指していることを確かめる。
-///
-/// 番号 0 は要求内容だけで拒否済みであるため、ここで見るのは総数との比較だけで
-/// ある。区間の数はオブジェクトの現在の状態であり、要求元の手元では確定しない。
-fn ensure_section_exists(sections: &[SectionRange], section: usize) -> Result<(), EditError> {
-    if section < sections.len() {
-        return Ok(());
-    }
-    Err(EditError::SectionPrecondition {
-        reason: SectionPreconditionReason::SectionIndexOutOfRange,
-    })
-}
-
 /// 移動先が、いま読み直した effect の列を指していることを確かめる。
 ///
 /// 位置の値域は要求内容だけの検証で済んでいるため、ここで見るのは列の長さとの
@@ -491,35 +393,6 @@ fn is_same_effect_column(before: &[HostEffect], after: &[HostEffect]) -> bool {
             .iter()
             .zip(after)
             .all(|(before, after)| is_same_effect(before, after))
-}
-
-/// 中間点の移動先が隣の中間点を越えないことを確かめる。
-///
-/// 動かせるのは 1 つ前の区間の開始位置より後、1 つ後の区間の開始位置より前
-/// である。1 つ後が無ければオブジェクトの終了フレームまでとなる。中間点の順序が
-/// 入れ替わらないことは SDK の不変条件であり、崩す要求は届く前に落とす。
-fn ensure_section_move_stays_between_neighbours(
-    sections: &[SectionRange],
-    section: usize,
-    frame: usize,
-) -> Result<(), EditError> {
-    let crosses = EditError::SectionPrecondition {
-        reason: SectionPreconditionReason::SectionMoveCrossesBoundary,
-    };
-    let Some(previous) = section.checked_sub(1).and_then(|index| sections.get(index)) else {
-        return Err(crosses);
-    };
-    if frame <= previous.start {
-        return Err(crosses);
-    }
-    let upper_limit_passed = match sections.get(section + 1) {
-        Some(next) => frame >= next.start,
-        None => sections.last().is_none_or(|last| frame > last.end),
-    };
-    if upper_limit_passed {
-        return Err(crosses);
-    }
-    Ok(())
 }
 
 /// 変更後の対象を読み直し、応答へ載せる概要を得る。
@@ -652,60 +525,6 @@ fn added_effect_position(before: &[String], after: &[String]) -> Option<usize> {
 /// effect 名の列を取り出す。
 fn effect_names(effects: &[HostEffect]) -> Vec<String> {
     effects.iter().map(|effect| effect.name.clone()).collect()
-}
-
-/// 作成の差分を取るために走査するレイヤーの範囲。
-///
-/// 配置先のレイヤーだけでは足りない。複数オブジェクトを含む alias は各
-/// オブジェクトが自分のレイヤーを持てるため、別のレイヤーへ作られた分が差分に
-/// 現れず、要求元は自分が作ったものを移動も削除もできなくなる。
-///
-/// 上限は、オブジェクトが存在する最大レイヤーと `floor` の大きい方とする。
-/// 作成の前は配置先を `floor` に渡す——まだ何も無いレイヤーへ作れば最大が配置先
-/// まで伸びるためである。作成の後は作成前の上限を渡し、最大を読み直す。alias が
-/// どのレイヤーへ展開するかは事前に分からないが、作られたものは必ず「存在する
-/// 最大レイヤー」の内側にあるため、読み直した値までを見れば取りこぼさない。
-fn creation_scan_range(
-    editor: &dyn SceneEditor,
-    floor: usize,
-) -> Result<RangeInclusive<usize>, EditError> {
-    Ok(0..=editor.occupied_layer_max()?.max(floor))
-}
-
-/// 指定範囲のレイヤーからオブジェクトの位置を集める。
-///
-/// alias も effect も読まない。差分を取るのに要るのは位置だけである。
-fn scene_placements(
-    editor: &dyn SceneEditor,
-    layers: RangeInclusive<usize>,
-) -> Result<Vec<HostObjectPlacement>, EditError> {
-    let mut placements = Vec::new();
-    for layer in layers {
-        placements.extend(editor.reader().object_placements(layer)?);
-    }
-    Ok(placements)
-}
-
-/// 作成前後の走査から、新たに現れた対象のレイヤーと開始フレームを求める。
-///
-/// SDK は複数オブジェクトを含む alias でも先頭のハンドルしか返さない。差分を
-/// 取らないと 2 件目以降が要求元から到達不能になり、個別に移動も削除もできなく
-/// なる。
-fn created_placements(
-    before: &[HostObjectPlacement],
-    after: Vec<HostObjectPlacement>,
-) -> Vec<(usize, usize)> {
-    let mut created: Vec<(usize, usize)> = after
-        .into_iter()
-        .map(|placement| (placement.layer, placement.frame_start))
-        .filter(|created| {
-            !before
-                .iter()
-                .any(|placement| (placement.layer, placement.frame_start) == *created)
-        })
-        .collect();
-    created.sort_unstable();
-    created
 }
 
 /// 移動を書き込む対象の性質を、いま読み直して組み立てる。
