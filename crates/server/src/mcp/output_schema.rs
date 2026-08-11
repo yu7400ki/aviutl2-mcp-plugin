@@ -169,58 +169,59 @@ fn track_group() -> Value {
 /// `create_object` の出力。
 ///
 /// `created` に作成された全件が入り、`object` はその先頭を指す。
+/// `placement_adjusted` は要求した配置との食い違いを示す。
 pub fn create_object() -> Value {
-    edit_outcome(object_summary(), null(), array(object_summary()))
+    edit_outcome(object_summary(), null(), array(object_summary()), boolean())
 }
 
 /// `move_object` の出力。
 pub fn move_object() -> Value {
-    edit_outcome(object_summary(), null(), nothing_created())
+    edit_outcome(object_summary(), null(), nothing_created(), null())
 }
 
 /// `set_object_name` の出力。
 pub fn set_object_name() -> Value {
-    edit_outcome(object_summary(), null(), nothing_created())
+    edit_outcome(object_summary(), null(), nothing_created(), null())
 }
 
 /// `delete_object` の出力。
 ///
 /// 対象は消えているため `object` は必ず null になる。
 pub fn delete_object() -> Value {
-    edit_outcome(null(), null(), nothing_created())
+    edit_outcome(null(), null(), nothing_created(), null())
 }
 
 /// `set_object_item` の出力。
 ///
 /// `effect` には書き込み後に読み直した値が入る。
 pub fn set_object_item() -> Value {
-    edit_outcome(object_summary(), effect_info(), nothing_created())
+    edit_outcome(object_summary(), effect_info(), nothing_created(), null())
 }
 
 /// `add_effect` の出力。
 ///
 /// effect の付与はオブジェクトを作らないため `created` は空である。
 pub fn add_effect() -> Value {
-    edit_outcome(object_summary(), effect_info(), nothing_created())
+    edit_outcome(object_summary(), effect_info(), nothing_created(), null())
 }
 
 /// `set_effect_enabled` の出力。
 pub fn set_effect_enabled() -> Value {
-    edit_outcome(object_summary(), effect_info(), nothing_created())
+    edit_outcome(object_summary(), effect_info(), nothing_created(), null())
 }
 
 /// `move_effect` の出力。
 ///
 /// `effect` には移動後に読み直した値が入る。`position` が移動先である。
 pub fn move_effect() -> Value {
-    edit_outcome(object_summary(), effect_info(), nothing_created())
+    edit_outcome(object_summary(), effect_info(), nothing_created(), null())
 }
 
 /// `delete_effect` の出力。
 ///
 /// effect は消えているため `effect` は必ず null になる。
 pub fn delete_effect() -> Value {
-    edit_outcome(object_summary(), null(), nothing_created())
+    edit_outcome(object_summary(), null(), nothing_created(), null())
 }
 
 /// `create_object_section` の出力。
@@ -358,16 +359,17 @@ pub fn set_selection() -> Value {
 
 /// 構造を変更する編集の結果。
 ///
-/// `object` / `effect` / `created` に何が入るかは operation ごとに決まるため、
-/// tool ごとに別の schema として宣言する。1 つへ畳むと「この tool では必ず
-/// object が入る」という情報が失われる。
-fn edit_outcome(target: Value, effect: Value, created: Value) -> Value {
+/// `object` / `effect` / `created` / `placement_adjusted` に何が入るかは
+/// operation ごとに決まるため、tool ごとに別の schema として宣言する。1 つへ
+/// 畳むと「この tool では必ず object が入る」という情報が失われる。
+fn edit_outcome(target: Value, effect: Value, created: Value, placement_adjusted: Value) -> Value {
     object(&[
         ("project_epoch", string()),
         ("project_revision", unsigned()),
         ("object", target),
         ("effect", effect),
         ("created", created),
+        ("placement_adjusted", placement_adjusted),
     ])
 }
 
@@ -1514,6 +1516,7 @@ mod tests {
             "78be92d1-c8c9-44c6-ae52-387548971468",
             43,
             vec![sample_object_summary(), sample_object_summary()],
+            false,
         );
         assert_conforms(create_object(), &to_value(&outcome));
     }
@@ -1751,6 +1754,7 @@ mod tests {
             "78be92d1-c8c9-44c6-ae52-387548971468",
             43,
             vec![sample_object_summary(), sample_object_summary()],
+            false,
         );
         assert_conforms(create_object(), &to_value(&outcome));
     }

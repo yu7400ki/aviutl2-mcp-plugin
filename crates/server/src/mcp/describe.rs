@@ -457,6 +457,11 @@ pub fn create_object(outcome: &EditOutcome) -> String {
     text.push_line(
         "長さと挿入位置はホストが決めるため、要求した位置と異なることがあります。上の位置が実際の配置です",
     );
+    if outcome.placement_adjusted == Some(true) {
+        text.push_line(
+            "要求した配置とは違う位置へ調整されました。structuredContent の created を全件確認してください",
+        );
+    }
     finish_edit(text, outcome.project_revision)
 }
 
@@ -1527,6 +1532,7 @@ mod tests {
             "78be92d1-c8c9-44c6-ae52-387548971468",
             43,
             vec![summary.clone(), summary.clone()],
+            false,
         );
         let deleted = EditOutcome::deleted("78be92d1-c8c9-44c6-ae52-387548971468", 43);
         let selection = SelectionState::observed(
@@ -1871,13 +1877,40 @@ mod tests {
             },
         );
         let created: Vec<ObjectSummary> = (0..OVERSIZED_COUNT).map(|_| summary.clone()).collect();
-        let outcome = EditOutcome::created("78be92d1-c8c9-44c6-ae52-387548971468", 43, created);
+        let outcome =
+            EditOutcome::created("78be92d1-c8c9-44c6-ae52-387548971468", 43, created, false);
         let text = create_object(&outcome);
         assert!(
             text.chars().count() <= MAX_TEXT_CHARS,
             "上限を超えています: {}",
             text.chars().count()
         );
+    }
+
+    #[test]
+    fn creation_text_tells_that_the_placement_was_adjusted_only_when_it_was() {
+        // 起きていないときに行を足すと、合図としての意味が消える。
+        let unadjusted = EditOutcome::created(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            vec![sample_summary()],
+            false,
+        );
+        assert!(
+            !create_object(&unadjusted).contains("調整"),
+            "{}",
+            create_object(&unadjusted)
+        );
+
+        let adjusted = EditOutcome::created(
+            "78be92d1-c8c9-44c6-ae52-387548971468",
+            43,
+            vec![sample_summary()],
+            true,
+        );
+        let text = create_object(&adjusted);
+        assert!(text.contains("調整"), "{text}");
+        assert!(text.contains("created"), "{text}");
     }
 
     #[test]

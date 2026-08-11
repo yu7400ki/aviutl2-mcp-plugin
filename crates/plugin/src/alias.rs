@@ -57,6 +57,12 @@ const EFFECT_NAME_KEY: &str = "effect.name";
 /// `<開始>,<中間点…>,<終了>` であり、要素数は移動を持つ値の個数と一致する。
 const FRAME_KEY: &str = "frame";
 
+/// 単一オブジェクト形式が持つ、オブジェクトの節の名前。
+const OBJECT_KEY: &str = "Object";
+
+/// 配置先からの相対レイヤーを持つキーの名前。
+const LAYER_KEY: &str = "layer";
+
 /// UI 状態ファイルとして読み込む最大バイト数。
 ///
 /// この経路の費用は要求の内容で決まらないため、予算では守れない。上限は
@@ -430,16 +436,53 @@ fn summarize(table: &Table) -> AliasStructure {
 
 /// 作られるオブジェクト数を判別する。
 ///
-/// 単一オブジェクト形式はルート直下に `Object` を持ち、複数オブジェクト形式は
-/// `0` / `1` / … を順に持つ。どちらとも読めない構造では数を名乗らない。判別の
-/// 失敗を一覧からの除外にはしない——除外にすると受け入れ規則に 5 つ目の条件が
-/// 生える。
+/// どちらの形式とも読めない構造では数を名乗らない。判別の失敗を一覧からの除外
+/// にはしない——除外にすると受け入れ規則に 5 つ目の条件が生える。
 fn object_count(table: &Table) -> Option<u32> {
-    if table.get_table("Object").is_some() {
-        return Some(1);
-    }
-    let count = table.iter_subtables_as_array().count();
+    let count = object_nodes(table).len();
     (count > 0).then_some(count as u32)
+}
+
+/// オブジェクト 1 個を表す節を、エイリアスの文書順に集める。
+///
+/// 単一オブジェクト形式はルート直下に `Object` を持ち、複数オブジェクト形式は
+/// `0` / `1` / … を順に持つ。番号は最初の欠番で途切れる。
+fn object_nodes(table: &Table) -> Vec<&Table> {
+    if let Some(object) = table.get_table(OBJECT_KEY) {
+        return vec![object];
+    }
+    table.iter_subtables_as_array().collect()
+}
+
+/// エイリアスが並べるオブジェクトの、配置先からの相対位置。
+///
+/// 要素は `(相対レイヤー, 相対開始フレーム)` であり、並びはエイリアスの文書順で
+/// ある。どちらの形式とも読めない構造と、表として読めない入力では空になる。
+///
+/// 相対フレームは `frame=` の先頭要素である。`layer=` も `frame=` も、欠けて
+/// いれば 0 であり、整数として読めない綴りも 0 として扱う——ホストも既定へ倒す。
+pub fn relative_placements(raw: &str) -> Vec<(i64, i64)> {
+    let Some(table) = parse_table(raw) else {
+        return Vec::new();
+    };
+    object_nodes(&table)
+        .into_iter()
+        .map(relative_placement)
+        .collect()
+}
+
+/// 節 1 つが述べる相対位置。
+fn relative_placement(node: &Table) -> (i64, i64) {
+    let layer = node
+        .get_value(LAYER_KEY)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let frame = node
+        .get_value(FRAME_KEY)
+        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    (layer, frame)
 }
 
 /// effect 名を出現順に集める。

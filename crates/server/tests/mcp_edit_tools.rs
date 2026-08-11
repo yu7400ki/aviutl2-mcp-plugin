@@ -222,6 +222,7 @@ fn created() -> Value {
         EPOCH,
         APPLIED_REVISION,
         vec![sample_summary(), sample_summary()],
+        false,
     ))
     .expect("直列化できる")
 }

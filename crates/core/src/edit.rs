@@ -73,16 +73,26 @@ pub struct EditOutcome {
     /// 複数オブジェクトを含む alias では 2 件以上になる。`object` はその
     /// 先頭を指す。
     pub created: Vec<ObjectSummary>,
+    /// 要求した配置と、実際に生まれた配置が 1 件でも違うか。作成以外では null。
+    ///
+    /// 真なら `created` の全件を見る。どの 1 件が違うかは名乗らない——実際の
+    /// 配置は `created` の各要素が持っている。比べるのは `(レイヤー, 開始
+    /// フレーム)` の組だけであり、長さは含まない。
+    pub placement_adjusted: Option<bool>,
 }
 
 impl EditOutcome {
     /// 作成の結果を組み立てる（`create_object`）。
     ///
     /// `created` に作成された全件を、`object` にその先頭を載せる。
+    ///
+    /// `placement_adjusted` は、要求した配置と `created` の配置が 1 件でも違う
+    /// かである。呼び出し元だけが要求した配置を知っているため、引数で受け取る。
     pub fn created(
         project_epoch: impl Into<String>,
         project_revision: u64,
         created: Vec<ObjectSummary>,
+        placement_adjusted: bool,
     ) -> Self {
         Self {
             project_epoch: project_epoch.into(),
@@ -90,6 +100,7 @@ impl EditOutcome {
             object: created.first().cloned(),
             effect: None,
             created,
+            placement_adjusted: Some(placement_adjusted),
         }
     }
 
@@ -106,6 +117,7 @@ impl EditOutcome {
             object: Some(object),
             effect: None,
             created: Vec::new(),
+            placement_adjusted: None,
         }
     }
 
@@ -126,6 +138,7 @@ impl EditOutcome {
             object: Some(object),
             effect: Some(effect),
             created: Vec::new(),
+            placement_adjusted: None,
         }
     }
 
@@ -137,6 +150,7 @@ impl EditOutcome {
             object: None,
             effect: None,
             created: Vec::new(),
+            placement_adjusted: None,
         }
     }
 }

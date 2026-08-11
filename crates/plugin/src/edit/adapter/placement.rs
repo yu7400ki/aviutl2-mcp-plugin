@@ -77,6 +77,61 @@ pub(crate) fn ensure_destination_free(
     Ok(())
 }
 
+/// 作成元が要求した配置の並びを、相対位置と配置先から求める。
+///
+/// 並びはエイリアスの文書順であり、**先頭は必ず在る。** 宛先の事前確認はその
+/// 1 件を見る——相対 `frame` を持つエイリアスでは、配置先が空いていても先頭の
+/// オブジェクトは埋まった位置へ来る。
+///
+/// 相対位置を持たない作成元——メディアファイルと effect 名、および構造を読め
+/// なかったエイリアス——は、配置先そのものの 1 件になる。
+///
+/// 0 未満へ回った位置は 0 へ寄せる。ホストがそこへ置かなければ、実際の配置との
+/// 食い違いとして現れる。
+pub(super) fn requested_placements(
+    relative: &[(i64, i64)],
+    layer: usize,
+    frame: usize,
+) -> Vec<(usize, usize)> {
+    if relative.is_empty() {
+        return vec![(layer, frame)];
+    }
+    relative
+        .iter()
+        .map(|(relative_layer, relative_frame)| {
+            (
+                absolute(layer, *relative_layer),
+                absolute(frame, *relative_frame),
+            )
+        })
+        .collect()
+}
+
+/// 配置先へ相対値を加える。
+fn absolute(base: usize, relative: i64) -> usize {
+    let base = i64::try_from(base).unwrap_or(i64::MAX);
+    usize::try_from(base.saturating_add(relative).max(0)).unwrap_or(usize::MAX)
+}
+
+/// 要求した配置と、実際に生まれた配置が 1 件でも違うか。
+///
+/// 比べるのは `(レイヤー, 開始フレーム)` の組だけであり、並び順を持たない
+/// 多重集合として突き合わせる。件数が違えば真である。
+///
+/// **長さは比べない。** メディアファイルは素材が、effect は既定が長さを決める
+/// ——要求が長さを持たない作成元がある。要求していないものと実際を比べれば常に
+/// 真になり、作成元によって名乗る条件が変わる。
+pub(super) fn placement_adjusted(requested: &[(usize, usize)], created: &[(usize, usize)]) -> bool {
+    if requested.len() != created.len() {
+        return true;
+    }
+    let mut requested = requested.to_vec();
+    requested.sort_unstable();
+    let mut created = created.to_vec();
+    created.sort_unstable();
+    requested != created
+}
+
 /// 作成の差分を取るために走査するレイヤーの範囲。
 ///
 /// 配置先のレイヤーだけでは足りない。複数オブジェクトを含む alias は各

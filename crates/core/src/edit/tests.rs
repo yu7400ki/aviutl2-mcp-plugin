@@ -854,15 +854,19 @@ fn names_are_limited_in_utf16_code_units() {
 /// 読み手へ示すための注記である。
 #[test]
 fn edit_outcome_matches_the_operation_table() {
+    /// operation 名と、その結果が持つ object / effect / created の有無、
+    /// created の件数、placement_adjusted の値。
+    type Case = (&'static str, EditOutcome, bool, bool, usize, Option<bool>);
+
     let created = vec![sample_summary(), sample_summary()];
-    // operation ごとの object / effect / created の設定内容。
-    let cases: Vec<(&str, EditOutcome, bool, bool, usize)> = vec![
+    let cases: Vec<Case> = vec![
         (
             "create_object",
-            EditOutcome::created(EPOCH, 43, created.clone()),
+            EditOutcome::created(EPOCH, 43, created.clone(), true),
             true,
             false,
             2,
+            Some(true),
         ),
         (
             "move_object",
@@ -870,6 +874,7 @@ fn edit_outcome_matches_the_operation_table() {
             true,
             false,
             0,
+            None,
         ),
         (
             "delete_object",
@@ -877,6 +882,7 @@ fn edit_outcome_matches_the_operation_table() {
             false,
             false,
             0,
+            None,
         ),
         (
             "set_object_name",
@@ -884,6 +890,7 @@ fn edit_outcome_matches_the_operation_table() {
             true,
             false,
             0,
+            None,
         ),
         (
             "set_object_item",
@@ -891,6 +898,7 @@ fn edit_outcome_matches_the_operation_table() {
             true,
             true,
             0,
+            None,
         ),
         (
             "add_effect",
@@ -898,6 +906,7 @@ fn edit_outcome_matches_the_operation_table() {
             true,
             true,
             0,
+            None,
         ),
         (
             "delete_effect",
@@ -905,6 +914,7 @@ fn edit_outcome_matches_the_operation_table() {
             true,
             false,
             0,
+            None,
         ),
         (
             "set_effect_enabled",
@@ -912,13 +922,20 @@ fn edit_outcome_matches_the_operation_table() {
             true,
             true,
             0,
+            None,
         ),
     ];
 
-    for (operation, outcome, has_object, has_effect, created_count) in cases {
+    for (operation, outcome, has_object, has_effect, created_count, adjusted) in cases {
         assert_eq!(outcome.object.is_some(), has_object, "{operation}: object");
         assert_eq!(outcome.effect.is_some(), has_effect, "{operation}: effect");
         assert_eq!(outcome.created.len(), created_count, "{operation}: created");
+        // 配置の調整は作成にしかない。作成以外が真偽値を運ぶと、要求元は
+        // 意味の無い偽を読むことになる。
+        assert_eq!(
+            outcome.placement_adjusted, adjusted,
+            "{operation}: placement_adjusted"
+        );
         assert_eq!(outcome.project_epoch, EPOCH, "{operation}");
         assert_eq!(outcome.project_revision, 43, "{operation}");
     }
@@ -927,12 +944,12 @@ fn edit_outcome_matches_the_operation_table() {
 #[test]
 fn created_outcome_points_at_the_first_object() {
     let created = vec![sample_summary(), sample_summary()];
-    let outcome = EditOutcome::created(EPOCH, 43, created.clone());
+    let outcome = EditOutcome::created(EPOCH, 43, created.clone(), false);
     assert_eq!(outcome.object.as_ref(), created.first());
     assert_eq!(outcome.created, created);
 
     // 作成された件数が 0 の場合は対象を名乗らない。
-    let empty = EditOutcome::created(EPOCH, 43, Vec::new());
+    let empty = EditOutcome::created(EPOCH, 43, Vec::new(), false);
     assert_eq!(empty.object, None);
     assert!(empty.created.is_empty());
 }
@@ -1020,7 +1037,13 @@ fn results_allow_unknown_optional_fields() {
 #[test]
 fn results_do_not_expose_handles() {
     let documents = [
-        serde_json::to_string(&EditOutcome::created(EPOCH, 43, vec![sample_summary()])).unwrap(),
+        serde_json::to_string(&EditOutcome::created(
+            EPOCH,
+            43,
+            vec![sample_summary()],
+            false,
+        ))
+        .unwrap(),
         serde_json::to_string(&EditOutcome::effect_changed(
             EPOCH,
             43,

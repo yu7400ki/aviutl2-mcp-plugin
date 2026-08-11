@@ -1163,3 +1163,202 @@ fn creation_checks_the_scene_guard_of_its_placement() {
     assert_eq!(error.details()["expected_scene_id"], json!(SCENE_ID + 7));
     harness.assert_untouched();
 }
+
+// ------------------------------------------------ 配置が調整されたことの申告
+
+/// 配置先からの相対位置を並べた、複数オブジェクト形式のエイリアスを綴る。
+///
+/// フェイクは作成のたびに開始フレームを [`CREATE_FRAME_SHIFT`] だけ後ろへ
+/// ずらす。その分を織り込んだ相対フレームだけが、実際に生まれる配置と一致する。
+fn alias_with_relative_frames(first: usize, second: usize) -> String {
+    format!(
+        "[0]\r\nlayer=0\r\nframe={first},{}\r\n[0.0]\r\neffect.name=図形\r\n[1]\r\nlayer=1\r\nframe={second},{}\r\n[1.0]\r\neffect.name=図形\r\n",
+        first + 59,
+        second + 59,
+    )
+}
+
+/// 生テキストのエイリアスを、2 件が生まれる一式へ配置先 (0, 600) で渡す。
+fn create_pair_from_alias(alias: &str) -> Result<EditOutcome, EditError> {
+    let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::CreatePair)));
+    harness.edit.create_object(&CreateObjectParams {
+        source: ObjectSource::ObjectAlias {
+            alias: alias.to_string(),
+        },
+        placement: Placement {
+            scene_id: SCENE_ID,
+            layer: 0,
+            frame: 600,
+        },
+        expected_project_epoch: harness.epoch(),
+    })
+}
+
+/// 応答が並べる、実際に生まれた配置。
+fn created_positions(outcome: &EditOutcome) -> Vec<(usize, usize)> {
+    outcome
+        .created
+        .iter()
+        .map(|item| (item.layer, item.frame_start))
+        .collect()
+}
+
+#[test]
+fn an_alias_that_landed_where_it_asked_does_not_claim_an_adjustment() {
+    // 相対値へ配置先を加えたものが要求した配置である。実際の配置がそれと 1 件も
+    // 違わなければ、要求元が全件を見る理由は無い。
+    let outcome = create_pair_from_alias(&alias_with_relative_frames(
+        CREATE_FRAME_SHIFT,
+        CREATE_FRAME_SHIFT + 60,
+    ))
+    .expect("作成に失敗しました");
+
+    assert_eq!(
+        created_positions(&outcome),
+        vec![
+            (0, 600 + CREATE_FRAME_SHIFT),
+            (1, 600 + CREATE_FRAME_SHIFT + 60)
+        ]
+    );
+    assert_eq!(outcome.placement_adjusted, Some(false));
+}
+
+#[test]
+fn an_alias_with_a_single_object_out_of_place_claims_the_adjustment_without_naming_it() {
+    // 1 件だけがずれた結果と、全件がずれた結果は同じ真を返す。どの 1 件かは
+    // 名乗らない——実際の配置は created の各要素が既に持っている。
+    let one_moved = create_pair_from_alias(&alias_with_relative_frames(
+        CREATE_FRAME_SHIFT,
+        CREATE_FRAME_SHIFT + 61,
+    ))
+    .expect("作成に失敗しました");
+    assert_eq!(
+        created_positions(&one_moved),
+        vec![
+            (0, 600 + CREATE_FRAME_SHIFT),
+            (1, 600 + CREATE_FRAME_SHIFT + 60)
+        ],
+        "先頭は要求どおりの位置に生まれています"
+    );
+    assert_eq!(one_moved.placement_adjusted, Some(true));
+
+    let all_moved =
+        create_pair_from_alias(&alias_with_relative_frames(0, 60)).expect("作成に失敗しました");
+    assert_eq!(
+        all_moved.placement_adjusted, one_moved.placement_adjusted,
+        "ずれた件数が応答から読めています"
+    );
+}
+
+#[test]
+fn an_alias_that_produced_a_different_number_of_objects_claims_the_adjustment() {
+    // 件数が違えば、位置を突き合わせるまでもなく要求どおりではない。
+    let outcome =
+        create_pair_from_alias("[Object]\r\nframe=0\r\n[Object.0]\r\neffect.name=図形\r\n")
+            .expect("作成に失敗しました");
+
+    assert_eq!(outcome.created.len(), 2);
+    assert_eq!(outcome.placement_adjusted, Some(true));
+}
+
+#[test]
+fn a_media_file_and_an_effect_name_are_compared_against_the_placement_itself() {
+    // 相対位置を持たない作成元では、要求した配置は配置先そのものである。
+    // フェイクは開始フレームを後ろへずらすため、どちらも調整として現れる。
+    let harness = Harness::new();
+    let from_media = harness
+        .edit
+        .create_object(&CreateObjectParams {
+            source: ObjectSource::MediaFile {
+                path: r"C:\media\clip.mp4".to_string(),
+            },
+            placement: Placement {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame: 600,
+            },
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect("作成に失敗しました");
+    assert_eq!(
+        created_positions(&from_media),
+        vec![(1, 600 + CREATE_FRAME_SHIFT)]
+    );
+    assert_eq!(from_media.placement_adjusted, Some(true));
+
+    let harness = Harness::new();
+    let from_effect = harness
+        .edit
+        .create_object(&create_from_effect(&harness, "ぼかし", 1, 600))
+        .expect("作成に失敗しました");
+    assert_eq!(
+        created_positions(&from_effect),
+        vec![(1, 600 + CREATE_FRAME_SHIFT)]
+    );
+    assert_eq!(from_effect.placement_adjusted, Some(true));
+}
+
+#[test]
+fn a_length_the_host_chose_is_not_counted_as_an_adjustment() {
+    // 比べるのは配置だけである。長さを含めると、長さを要求できない作成元では
+    // 常に真になり、作成元によって名乗る条件が変わる。
+    let harness = Harness::new();
+    let outcome = harness
+        .edit
+        .create_object(&CreateObjectParams {
+            source: ObjectSource::ObjectAlias {
+                alias: format!(
+                    "[Object]\r\nframe={CREATE_FRAME_SHIFT},{}\r\n[Object.0]\r\neffect.name=図形\r\n",
+                    CREATE_FRAME_SHIFT + 999
+                ),
+            },
+            placement: Placement {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame: 600,
+            },
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect("作成に失敗しました");
+
+    let created = &outcome.created[0];
+    assert_eq!(
+        (created.layer, created.frame_start),
+        (1, 600 + CREATE_FRAME_SHIFT)
+    );
+    assert_ne!(
+        created.frame_end,
+        600 + CREATE_FRAME_SHIFT + 999,
+        "要求した長さがそのまま入っており、長さの調整を作れていません"
+    );
+    assert_eq!(outcome.placement_adjusted, Some(false));
+}
+
+#[test]
+fn a_registered_alias_is_compared_against_the_relative_placements_of_its_own_body() {
+    // 名前で指定されたエイリアスも、相対位置は本文から引く。配置先だけを要求と
+    // すれば、2 件を生む本文との件数が食い違い、常に真になる。
+    let dir = TempDir::new();
+    dir.write_alias(
+        "相対",
+        alias_with_relative_frames(CREATE_FRAME_SHIFT, CREATE_FRAME_SHIFT + 60).as_bytes(),
+    );
+    let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::CreatePair)));
+    harness
+        .host
+        .set_alias_data_directory(Some(dir.path().to_path_buf()));
+
+    let outcome = harness
+        .edit
+        .create_object(&create_from_alias_name(&harness, "相対", 0, 600))
+        .expect("作成に失敗しました");
+
+    assert_eq!(
+        created_positions(&outcome),
+        vec![
+            (0, 600 + CREATE_FRAME_SHIFT),
+            (1, 600 + CREATE_FRAME_SHIFT + 60)
+        ]
+    );
+    assert_eq!(outcome.placement_adjusted, Some(false));
+}

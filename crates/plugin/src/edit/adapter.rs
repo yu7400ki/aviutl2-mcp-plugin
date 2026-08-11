@@ -54,7 +54,7 @@ use item_write::{
 };
 use placement::{
     created_placements, creation_scan_range, ensure_destination_free, ensure_layer_unlocked,
-    ensure_layers_unlocked, scene_placements,
+    ensure_layers_unlocked, placement_adjusted, requested_placements, scene_placements,
 };
 use restore::{restore_after_failed_verification, restore_moved_effect};
 use section::{
@@ -470,6 +470,14 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
         let project = self.project.as_ref();
         let layer = index(params.placement.layer);
         let frame = index(params.placement.frame);
+        // 要求した配置は要求だけで決まる。エイリアスを読むのは区間の外に留め、
+        // 区間の内側へは求まった並びの参照だけを持ち込む。
+        let relative = match source {
+            ResolvedSource::Alias(alias) => crate::alias::relative_placements(alias),
+            ResolvedSource::MediaFile(_) | ResolvedSource::Effect(_) => Vec::new(),
+        };
+        let requested = requested_placements(&relative, layer, frame);
+        let requested = requested.as_slice();
 
         self.edit_section(move |editor| {
             let boundary = verify_boundary(
@@ -531,6 +539,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 ));
             }
 
+            let adjusted = placement_adjusted(requested, &created);
             let mut summaries = Vec::with_capacity(created.len());
             for (created_layer, frame_start) in created {
                 let summary = attribute(
@@ -544,6 +553,7 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
                 boundary.epoch(),
                 permit.project_revision(&boundary),
                 summaries,
+                adjusted,
             ))
         })
     }

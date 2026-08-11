@@ -1313,6 +1313,7 @@ fn edit_tool_call_and_resource_read_survive_overlapping() {
         "object": null,
         "effect": null,
         "created": [],
+        "placement_adjusted": null,
     });
     // 編集に時間の掛かるインスタンスを演じさせ、その最中に resource を読む。
     let mock = MockPipeServer::start_with_delayed_operations(
