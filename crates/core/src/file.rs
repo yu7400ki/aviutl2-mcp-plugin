@@ -57,16 +57,11 @@ impl AliasFileError {
 
     /// 失敗の種別を表す機械可読な名前を返す。
     ///
-    /// 名前はパスもファイルの内容も含まない。
+    /// 名前はパスもファイルの内容も含まない。上限超過と UTF-8 として読めない
+    /// 本文は、要求へ直接書かれた alias が同じ事実で落ちたときの名前を名乗る。
     ///
-    /// 上限超過と UTF-8 として読めない本文は、既にある名前を名乗る。前者は要求
-    /// へ直接書かれた alias が上限を超えたときと同じ事実であり、後者は本文を
-    /// 解釈できないという同じ事実である。
-    ///
-    /// 不在と読み取り不能は 1 つの種別へ畳まない。綴りの誤りと、権限や掴まれて
-    /// いるファイルは、要求元にとって別の対処になる。**両者を分けるのは
-    /// [`AliasFileError::error_code`] と、読み取り不能だけが名乗る名前の組で
-    /// ある。** 不在は名前を持たない。
+    /// 不在は名前を持たず、[`AliasFileError::error_code`] だけがその事実を
+    /// 述べる。
     pub fn reason(&self) -> Option<&'static str> {
         match self {
             AliasFileError::NotFound => None,
@@ -93,9 +88,8 @@ impl AliasFileError {
 /// エイリアスファイルを読み、大きさと符号化を確かめる。
 ///
 /// 確かめるのは [`MAX_ALIAS_BYTES`] を超えないことと UTF-8 として解釈できること
-/// までであり、本文はそのまま返る。本文の構文は、読んだ文字列を作成元として
-/// 組んだ後に [`ObjectSource::validate`](crate::edit::ObjectSource::validate) が
-/// 掛ける。
+/// までであり、本文はそのまま返る。本文の構文は
+/// [`validate_alias`](crate::validate_alias) が読み取りの後に掛ける。
 pub fn read_alias_file(path: &Path) -> Result<String, AliasFileError> {
     let bytes = match read_bounded(path, MAX_ALIAS_BYTES as u64) {
         Ok(Some(bytes)) => bytes,
@@ -111,6 +105,18 @@ pub fn read_alias_file(path: &Path) -> Result<String, AliasFileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// variant の名前を返す。
+    ///
+    /// `_` を使わない網羅 match であり、variant を足すとここが落ちる。
+    fn alias_file_variant_name(error: &AliasFileError) -> &'static str {
+        match error {
+            AliasFileError::NotFound => "NotFound",
+            AliasFileError::Unreadable => "Unreadable",
+            AliasFileError::TooLarge => "TooLarge",
+            AliasFileError::NotUtf8 => "NotUtf8",
+        }
+    }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -215,6 +221,27 @@ mod tests {
         assert_eq!(read_alias_file(&path), Err(AliasFileError::NotUtf8));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn alias_file_all_covers_every_variant() {
+        const VARIANTS: &[&str] = &["NotFound", "Unreadable", "TooLarge", "NotUtf8"];
+        let covered: Vec<&str> = AliasFileError::ALL
+            .iter()
+            .map(alias_file_variant_name)
+            .collect();
+        for variant in VARIANTS {
+            assert!(
+                covered.contains(variant),
+                "{variant} の代表値が一覧にありません"
+            );
+        }
+        for variant in &covered {
+            assert!(
+                VARIANTS.contains(variant),
+                "{variant} が網羅すべき variant の一覧にありません"
+            );
+        }
     }
 
     #[test]
