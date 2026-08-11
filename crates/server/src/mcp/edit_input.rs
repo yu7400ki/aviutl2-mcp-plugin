@@ -268,8 +268,13 @@ pub enum ItemValueInput {
     /// item_type: scene が指す先のシーンが実在するかをホストは確かめず、
     /// 照合の読み直しも整数が入ったことしか言えない。存在しないシーンを
     /// 指す値も成功として返る。シーン ID を引く tool は無い。
+    /// 書ける整数には幅があり、値の宣言がその上下界を持つ。幅を外した値は
+    /// 書き込みを発行せずに invalid_argument となり argument_not_representable を返す。
     Integer {
         /// 値。
+        ///
+        /// 宣言した範囲は [`SetObjectItemParams::validate`] が実際に確かめる。
+        #[schemars(range(min = MIN_ITEM_INTEGER, max = MAX_ITEM_INTEGER))]
         value: i64,
     },
     /// 真偽値。
@@ -378,6 +383,14 @@ pub enum ItemValueInput {
         raw: String,
     },
 }
+
+/// 設定項目へ書く整数に許す最小値。
+///
+/// ホストは設定項目の整数を 32bit 符号付き整数で受け渡す。
+const MIN_ITEM_INTEGER: i64 = i32::MIN as i64;
+
+/// 設定項目へ書く整数に許す最大値。
+const MAX_ITEM_INTEGER: i64 = i32::MAX as i64;
 
 impl ItemValueInput {
     /// 設定値へ変換する。書き込みの可否は変換後の検証が判定する。
