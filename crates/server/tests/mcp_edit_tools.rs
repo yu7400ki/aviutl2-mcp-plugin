@@ -1210,6 +1210,70 @@ async fn a_batch_names_the_same_rule_as_the_same_edit_on_its_own() {
 }
 
 #[tokio::test]
+async fn an_item_integer_past_the_representable_width_never_reaches_the_instance() {
+    // schema の上下界は宣言であり、要求がそれを満たすかを rmcp は検証しない。
+    // 宣言した幅は server 側で実際に確かめ、書き込みを発行せずに落とす。
+    for value in [i64::from(i32::MAX) + 1, i64::from(i32::MIN) - 1] {
+        let harness = Harness::start(OperationResponses::new());
+
+        let result = harness
+            .server
+            .set_object_item(Parameters(SetObjectItemInput {
+                instance_id: harness.instance_id(),
+                selector: effect_selector_input(),
+                item: "対象レイヤー数".to_string(),
+                value: ItemValueInput::Integer { value },
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true), "{value}");
+        let structured = structured(&result);
+        assert_eq!(structured["code"], json!("invalid_argument"), "{value}");
+        assert_eq!(
+            structured["details"]["reason"],
+            json!("argument_not_representable"),
+            "{value}"
+        );
+        assert!(harness.requests().is_empty(), "{value} が IPC へ届きました");
+    }
+}
+
+#[tokio::test]
+async fn a_batch_holding_one_over_wide_integer_applies_none_of_its_operations() {
+    // 幅を外した 1 件は、並んだ他の sub-operation ごと発行前に落とす。
+    for value in [i64::from(i32::MAX) + 1, i64::from(i32::MIN) - 1] {
+        let harness = Harness::start(OperationResponses::new());
+
+        let result = harness
+            .server
+            .apply_batch(Parameters(ApplyBatchInput {
+                instance_id: harness.instance_id(),
+                operations: vec![
+                    distinct_move_operation(4),
+                    BatchOperationInput::SetObjectItem {
+                        selector: effect_selector_input(),
+                        item: "対象レイヤー数".to_string(),
+                        value: ItemValueInput::Integer { value },
+                    },
+                    distinct_move_operation(6),
+                ],
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true), "{value}");
+        let structured = structured(&result);
+        assert_eq!(structured["code"], json!("invalid_argument"), "{value}");
+        assert_eq!(
+            structured["details"]["reason"],
+            json!("argument_not_representable"),
+            "{value}"
+        );
+        assert_eq!(structured["details"]["failed_index"], json!(1), "{value}");
+        assert!(harness.requests().is_empty(), "{value} が IPC へ届きました");
+    }
+}
+
+#[tokio::test]
 async fn malformed_instance_id_never_reaches_an_edit_operation() {
     let harness = Harness::start(responses("set_selection", selection_state()));
 
