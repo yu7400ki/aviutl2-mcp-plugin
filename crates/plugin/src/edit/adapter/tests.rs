@@ -1028,6 +1028,12 @@ fn the_item_value_mismatch_has_a_request_that_produces_it() {
     }
 }
 
+#[test]
+fn every_unsupported_reason_has_a_request_that_produces_it() {
+    // 要求を書かないまま理由を足すと、応答に現れない名前が一覧へ残る。
+    unsupported_target_failures();
+}
+
 // ------------------------------------------------------------- revision の更新
 
 #[test]
@@ -1422,6 +1428,83 @@ fn responses_and_failures_never_carry_a_handle_or_a_pointer() {
     let text = serde_json::to_string(&outcome).expect("応答の直列化");
     assert!(!text.contains("0x"), "{text}");
     assert!(!text.to_lowercase().contains("handle"), "{text}");
+}
+
+#[test]
+fn the_fake_names_the_call_that_could_not_produce_a_value() {
+    // `sdk_operation` は失敗の出所を伝える値である。種別が違えば呼ばれる関数も
+    // 違うのだから、名乗る関数も違う。フェイクが片方の名前で固定していると、
+    // 出所の取り違えに気付ける経路がどこにも無くなる。
+    use crate::read::host::{ReadHost, SceneValueReader};
+
+    let harness = Harness::new();
+    let object = harness.summary(1, 100);
+    let host = FakeReadHost(harness.host.clone());
+
+    let named = |missing_as_check: bool| {
+        host.enter_read_section(move |scene: &dyn SceneValueReader| {
+            let error = if missing_as_check {
+                scene
+                    .effect_check_values(object.layer, object.frame_start, 0, &["無い項目"], &[0])
+                    .expect_err("存在しない項目で値が返りました")
+            } else {
+                scene
+                    .effect_track_values(object.layer, object.frame_start, 0, &["無い項目"], &[0.0])
+                    .expect_err("存在しない項目で値が返りました")
+            };
+            error.details()["sdk_operation"].clone()
+        })
+        .expect("参照区間へ入れます")
+    };
+
+    assert_eq!(named(false), json!("get_effect_track_value"));
+    assert_eq!(named(true), json!("get_effect_check_value"));
+}
+
+/// 選択の取得がハンドルを参照区間の外へ出さないことを確かめる。
+///
+/// 選択はハンドルを 2 段で受け取る唯一の読み取りである。3 件を選択したフェイクで、
+/// 応答が位置と同一性の材料だけで組み立てられることと、対象を指す内部の値が
+/// 現れないことを見る。
+#[test]
+fn the_selection_of_three_objects_carries_no_handle() {
+    let harness = Harness::new();
+    // ホストが返す順序は規定されていない。昇順とは逆に並べて渡す。ホストが既に
+    // 昇順で返していれば、並べ替えを外した実装でも同じ結果になる。
+    let armed = [(1, 300), (1, 100), (0, 0)];
+    let mut ascending = armed;
+    ascending.sort();
+    assert_ne!(armed, ascending, "フェイクが昇順で返しています");
+    harness.host.select_objects(&armed);
+    harness.host.focus_object(Some((1, 100)), Some(1));
+
+    let snapshot = harness
+        .read
+        .get_selection(SCENE_ID, &default_page_request())
+        .expect("選択を取得できます")
+        .expect("ページ要求が拒否されました");
+
+    // 列挙が返す概要とそのまま一致する。fingerprint まで同じであるため、
+    // 要求元は返ってきた対象をそのまま編集へ渡せる。
+    assert_eq!(
+        snapshot.selected,
+        vec![
+            harness.summary(0, 0),
+            harness.summary(1, 100),
+            harness.summary(1, 300),
+        ]
+    );
+    assert_eq!(snapshot.focus, Some(harness.summary(1, 100)));
+    assert_eq!(snapshot.focus_section, Some(1));
+
+    let payload = serde_json::to_string(&snapshot).expect("直列化できます");
+    let lowered = payload.to_lowercase();
+    for forbidden in ["handle", "pointer", "0x", "alias"] {
+        assert!(
+            !lowered.contains(forbidden),
+            "{forbidden} が応答に現れました: {payload}"
+        );
+    }
 }
 
 /// 参照のみを取り込む使い方をしていることを、型として固定する。
@@ -1966,7 +2049,7 @@ mod set_grid_bpm;
 mod set_layer_state;
 /// 設定項目の値変更の統合テスト。
 mod set_object_item;
-/// 移動 (トラックバー) を持つ設定項目の統合テスト。
+/// 移動(トラックバー)を持つ設定項目の統合テスト。
 mod set_object_item_movement;
 /// 対象名変更の統合テスト。
 mod set_object_name;
