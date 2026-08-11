@@ -392,7 +392,8 @@ fn item_value_strategy() -> impl Strategy<Value = ItemValue> {
             .prop_map(|v| ItemValue::Number {
                 value: FiniteF64::try_new(v).expect("有限数のみを生成する"),
             }),
-        any::<i64>().prop_map(|value| ItemValue::Integer { value }),
+        // 整数は書き戻せる幅だけを生成する。読み取りが返すのもこの幅である。
+        (i64::from(i32::MIN)..=i64::from(i32::MAX)).prop_map(|value| ItemValue::Integer { value }),
         any::<bool>().prop_map(|value| ItemValue::Bool { value }),
         ".*".prop_map(|value| ItemValue::Color { value }),
         ".*".prop_map(|value| ItemValue::Choice { value }),

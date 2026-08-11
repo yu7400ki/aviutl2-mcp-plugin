@@ -148,6 +148,9 @@ pub enum ItemWriteError {
         /// 設定項目の種別名。
         item_type: String,
     },
+    /// 整数が 32bit 符号付き整数の範囲に収まらない。
+    #[error("整数は {} 以上 {} 以下である必要があります", i32::MIN, i32::MAX)]
+    IntegerNotRepresentable,
     /// 文字列値の検証に失敗した。
     #[error(transparent)]
     Text(#[from] TextSyntaxError),
@@ -178,6 +181,7 @@ impl ItemWriteError {
             ItemWriteError::UnsupportedItemType {
                 item_type: "data".to_string(),
             },
+            ItemWriteError::IntegerNotRepresentable,
         ];
         all.extend(
             TextSyntaxError::ALL
@@ -208,6 +212,9 @@ impl ItemWriteError {
     pub fn reason(&self) -> Option<&'static str> {
         match self {
             ItemWriteError::UnsupportedItemType { .. } => Some("item_type_not_writable"),
+            // 指すのは「引数を SDK の型へ写せない」という事実であり、同じ事実を
+            // 他の変更 API の入口で見つけた場合の失敗と同じ名前を名乗る。
+            ItemWriteError::IntegerNotRepresentable => Some("argument_not_representable"),
             ItemWriteError::Text(error) => Some(error.reason()),
             ItemWriteError::Path(error) => Some(error.reason()),
             ItemWriteError::Track(error) => Some(error.reason()),
@@ -224,6 +231,7 @@ impl ItemWriteError {
             ItemWriteError::UnsupportedItemType { .. } => ErrorCode::UnsupportedOperation,
             ItemWriteError::UnknownValue
             | ItemWriteError::ValueKindMismatch { .. }
+            | ItemWriteError::IntegerNotRepresentable
             | ItemWriteError::Text(_)
             | ItemWriteError::Path(_)
             | ItemWriteError::Track(_) => ErrorCode::InvalidArgument,
@@ -513,11 +521,17 @@ pub(crate) fn encode_item_value(
 /// 移動方法の名前は実行環境が受け付ける一覧で決まる。どちらも要求内容だけでは
 /// 判定できないため、[`prepare_item_write`] が対象を伴って見る。**ここを通った
 /// ことは、移動を書き込んでよいことを意味しない。**
+///
+/// **整数には幅がある。** [`ItemValue::Integer`] の値は 32bit 符号付き整数へ
+/// 収まる必要がある。幅は書き込む先の種別に依らないため、種別を引き当てる前の
+/// この層が課す。
 pub fn validate_item_value(value: &ItemValue) -> Result<(), ItemWriteError> {
     match value {
         ItemValue::Track(track) => validate_track_syntax(track),
+        ItemValue::Integer { value } => i32::try_from(*value)
+            .map(|_| ())
+            .map_err(|_| ItemWriteError::IntegerNotRepresentable),
         ItemValue::Unknown { .. }
-        | ItemValue::Integer { .. }
         | ItemValue::Number { .. }
         | ItemValue::Bool { .. }
         | ItemValue::Text { .. }
@@ -815,6 +829,7 @@ mod tests {
             ItemWriteError::ItemNotFound { .. } => "ItemNotFound",
             ItemWriteError::ValueKindMismatch { .. } => "ValueKindMismatch",
             ItemWriteError::UnsupportedItemType { .. } => "UnsupportedItemType",
+            ItemWriteError::IntegerNotRepresentable => "IntegerNotRepresentable",
             ItemWriteError::Text(_) => "Text",
             ItemWriteError::Path(_) => "Path",
             ItemWriteError::Track(_) => "Track",
@@ -828,6 +843,7 @@ mod tests {
             "ItemNotFound",
             "ValueKindMismatch",
             "UnsupportedItemType",
+            "IntegerNotRepresentable",
             "Text",
             "Path",
             "Track",
@@ -902,6 +918,7 @@ mod tests {
             ItemWriteError::UnsupportedItemType {
                 item_type: "data".to_string(),
             },
+            ItemWriteError::IntegerNotRepresentable,
             ItemWriteError::Text(TextSyntaxError::ContainsNul),
             ItemWriteError::Path(PathSyntaxError::UncPath),
             ItemWriteError::Track(TrackValueError::UnknownMode { known: Vec::new() }),
@@ -1674,6 +1691,29 @@ mod tests {
             .error_code(),
             ErrorCode::NotFound
         );
+    }
+
+    #[test]
+    fn an_integer_must_fit_in_a_signed_32bit_integer() {
+        // 幅は書き込む先の種別に依らない。境界そのものを固定する。
+        for value in [i64::from(i32::MIN), i64::from(i32::MAX)] {
+            assert_eq!(
+                validate_item_value(&ItemValue::Integer { value }),
+                Ok(()),
+                "{value}"
+            );
+        }
+        for value in [i64::from(i32::MIN) - 1, i64::from(i32::MAX) + 1] {
+            let error = validate_item_value(&ItemValue::Integer { value })
+                .expect_err("幅を外れた整数が受理されました");
+            assert_eq!(error, ItemWriteError::IntegerNotRepresentable, "{value}");
+            assert_eq!(error.error_code(), ErrorCode::InvalidArgument, "{value}");
+            assert_eq!(
+                error.reason(),
+                Some("argument_not_representable"),
+                "{value}"
+            );
+        }
     }
 
     #[test]

@@ -1077,7 +1077,9 @@ fn fill_item_write_details(details: &mut Map<String, Value>, error: &ItemWriteEr
             details.insert("item_type".to_string(), json!(truncate(item_type)));
         }
         ItemWriteError::Track(error) => fill_track_error_details(details, error),
-        ItemWriteError::Text(_) | ItemWriteError::Path(_) => {}
+        ItemWriteError::IntegerNotRepresentable
+        | ItemWriteError::Text(_)
+        | ItemWriteError::Path(_) => {}
     }
     if let Some(reason) = error.reason() {
         details.insert("reason".to_string(), json!(reason));
