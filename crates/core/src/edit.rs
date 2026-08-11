@@ -636,8 +636,8 @@ fn validate_index(field: &'static str, value: usize) -> Result<(), EditInputErro
 
 /// 作成元が指すファイルのパスを検証する。
 ///
-/// 規則も失敗が指す `details.field` も `media_file` のパスと同じである。作成元の
-/// 種別ごとに書き分けると、受け付けるパスの集合が種別ごとに分かれる。
+/// 規則は `media_file` のパスと同じである。作成元の種別ごとに書き分けると、
+/// 受け付けるパスの集合が種別ごとに分かれる。
 pub fn validate_source_path(path: &str) -> Result<(), EditInputError> {
     validate_path_field(FIELD_PATH, path)
 }

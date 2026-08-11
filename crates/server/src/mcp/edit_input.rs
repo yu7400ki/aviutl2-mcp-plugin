@@ -498,7 +498,7 @@ pub struct CreateObjectInput {
 impl CreateObjectInput {
     /// IPC の params へ変換する。
     pub fn to_params(&self) -> Result<CreateObjectParams, ErrorObject> {
-        // 作成元はファイルを開くことがある。開かずに決まる検証を先に済ませる。
+        // 作成元はファイルを開くことがある。epoch の構文は開かずに決まるため先に見る。
         let expected_project_epoch = expected_project_epoch(&self.expected_project_epoch)?;
         let params = CreateObjectParams {
             source: self.source.to_source()?,
