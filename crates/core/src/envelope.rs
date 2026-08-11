@@ -3,11 +3,8 @@
 use crate::error::ErrorObject;
 use crate::identifier::{InstanceId, ProtocolVersion, RequestId};
 use crate::state::InstanceState;
-use serde::de::{self, MapAccess, Visitor};
-use serde::ser::SerializeMap;
+use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashSet;
-use std::fmt;
 
 /// 要求 Envelope の種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,85 +121,86 @@ impl RequestEnvelope {
     }
 }
 
+/// 値が在ることと `null` であることを区別して読む。
+///
+/// `Option<T>` の既定の逆直列化は `null` を欠落と同じ `None` へ潰す。こちらは
+/// `null` を `Some` として読み、欠落だけを `#[serde(default)]` 経由の `None` に
+/// する。
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// [`ResponseResult`] のワイヤ表現。
+///
+/// `ok` の真偽が `result` と `error` のどちらを必須にするかを決める。載せない側の
+/// フィールドは書き出さない。未知フィールドは拒否せず読み飛ばす。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResponseResultRepr {
+    ok: bool,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    result: Option<serde_json::Value>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    error: Option<ErrorObject>,
+}
+
 /// 応答結果。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "ResponseResultRepr", into = "ResponseResultRepr")]
 pub enum ResponseResult {
     Ok { result: serde_json::Value },
     Err { error: ErrorObject },
 }
 
-impl Serialize for ResponseResult {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(2))?;
-        match self {
-            ResponseResult::Ok { result } => {
-                map.serialize_entry("ok", &true)?;
-                map.serialize_entry("result", result)?;
-            }
-            ResponseResult::Err { error } => {
-                map.serialize_entry("ok", &false)?;
-                map.serialize_entry("error", error)?;
-            }
+impl TryFrom<ResponseResultRepr> for ResponseResult {
+    type Error = &'static str;
+
+    fn try_from(repr: ResponseResultRepr) -> Result<Self, &'static str> {
+        if repr.ok {
+            Ok(ResponseResult::Ok {
+                result: repr.result.ok_or("missing field `result`")?,
+            })
+        } else {
+            Ok(ResponseResult::Err {
+                error: repr.error.ok_or("missing field `error`")?,
+            })
         }
-        map.end()
     }
 }
 
-impl<'de> Deserialize<'de> for ResponseResult {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct ResponseResultVisitor;
-        impl<'de> Visitor<'de> for ResponseResultVisitor {
-            type Value = ResponseResult;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("ok boolean と result/error フィールドを持つオブジェクト")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut ok = None;
-                let mut result = None;
-                let mut error = None;
-                let mut seen = HashSet::new();
-                while let Some(key) = map.next_key::<String>()? {
-                    if !seen.insert(key.clone()) {
-                        return Err(de::Error::custom(format!("重複した key です: {}", key)));
-                    }
-                    match key.as_str() {
-                        "ok" => ok = Some(map.next_value::<bool>()?),
-                        "result" => result = Some(map.next_value::<serde_json::Value>()?),
-                        "error" => error = Some(map.next_value::<ErrorObject>()?),
-                        _ => {
-                            // 知らないフィールドは読み飛ばす。受け手が使わない値 1 つの
-                            // ために応答そのものを落とさない。
-                            map.next_value::<serde_json::Value>()?;
-                        }
-                    }
-                }
-                let ok = ok.ok_or_else(|| de::Error::missing_field("ok"))?;
-                if ok {
-                    let result = result.ok_or_else(|| de::Error::missing_field("result"))?;
-                    Ok(ResponseResult::Ok { result })
-                } else {
-                    let error = error.ok_or_else(|| de::Error::missing_field("error"))?;
-                    Ok(ResponseResult::Err { error })
-                }
-            }
+impl From<ResponseResult> for ResponseResultRepr {
+    fn from(value: ResponseResult) -> Self {
+        match value {
+            ResponseResult::Ok { result } => ResponseResultRepr {
+                ok: true,
+                result: Some(result),
+                error: None,
+            },
+            ResponseResult::Err { error } => ResponseResultRepr {
+                ok: false,
+                result: None,
+                error: Some(error),
+            },
         }
-        deserializer.deserialize_map(ResponseResultVisitor)
     }
 }
 
 /// 応答 Envelope。
-#[derive(Debug, Clone, PartialEq)]
+///
+/// 結果は `ok` / `result` / `error` として同じ階層へ並ぶ。未知フィールドは拒否
+/// しない。受け手が使わない値 1 つのために応答そのものを落とさない。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResponseEnvelope {
     /// 応答の名乗り。`"response"` 以外を名乗るフレームは受理しない。
     pub kind: ResponseKind,
@@ -211,6 +209,7 @@ pub struct ResponseEnvelope {
     pub request_id: RequestId,
     /// 接続先インスタンス ID。
     pub instance_id: InstanceId,
+    #[serde(flatten)]
     pub result: ResponseResult,
 }
 
@@ -273,108 +272,6 @@ impl ResponseEnvelope {
                 result: serde_json::to_value(result).unwrap_or(serde_json::Value::Null),
             },
         }
-    }
-}
-
-impl Serialize for ResponseEnvelope {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("kind", &self.kind)?;
-        map.serialize_entry("protocol_version", &self.protocol_version)?;
-        map.serialize_entry("request_id", &self.request_id)?;
-        map.serialize_entry("instance_id", &self.instance_id)?;
-        match &self.result {
-            ResponseResult::Ok { result } => {
-                map.serialize_entry("ok", &true)?;
-                map.serialize_entry("result", result)?;
-            }
-            ResponseResult::Err { error } => {
-                map.serialize_entry("ok", &false)?;
-                map.serialize_entry("error", error)?;
-            }
-        }
-        map.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for ResponseEnvelope {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct ResponseEnvelopeVisitor;
-        impl<'de> Visitor<'de> for ResponseEnvelopeVisitor {
-            type Value = ResponseEnvelope;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("response envelope")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut kind = None;
-                let mut protocol_version = None;
-                let mut request_id = None;
-                let mut instance_id = None;
-                let mut ok = None;
-                let mut result = None;
-                let mut error = None;
-                let mut seen = HashSet::new();
-                while let Some(key) = map.next_key::<String>()? {
-                    if !seen.insert(key.clone()) {
-                        return Err(de::Error::custom(format!("重複した key です: {}", key)));
-                    }
-                    match key.as_str() {
-                        "kind" => kind = Some(map.next_value::<ResponseKind>()?),
-                        "protocol_version" => {
-                            protocol_version = Some(map.next_value::<ProtocolVersion>()?)
-                        }
-                        "request_id" => request_id = Some(map.next_value::<RequestId>()?),
-                        "instance_id" => instance_id = Some(map.next_value::<InstanceId>()?),
-                        "ok" => ok = Some(map.next_value::<bool>()?),
-                        "result" => result = Some(map.next_value::<serde_json::Value>()?),
-                        "error" => error = Some(map.next_value::<ErrorObject>()?),
-                        _ => {
-                            // 知らないフィールドは読み飛ばす。受け手が使わない値 1 つの
-                            // ために応答そのものを落とさない。名乗りを完全一致で求める
-                            // ことと矛盾しない——`kind` はフレームの取り違えを捕まえる
-                            // 値であり、こちらは中身に足された値である。
-                            map.next_value::<serde_json::Value>()?;
-                        }
-                    }
-                }
-                let kind = kind.ok_or_else(|| de::Error::missing_field("kind"))?;
-                let protocol_version =
-                    protocol_version.ok_or_else(|| de::Error::missing_field("protocol_version"))?;
-                let request_id =
-                    request_id.ok_or_else(|| de::Error::missing_field("request_id"))?;
-                let instance_id =
-                    instance_id.ok_or_else(|| de::Error::missing_field("instance_id"))?;
-                let ok = ok.ok_or_else(|| de::Error::missing_field("ok"))?;
-                let result = if ok {
-                    ResponseResult::Ok {
-                        result: result.ok_or_else(|| de::Error::missing_field("result"))?,
-                    }
-                } else {
-                    ResponseResult::Err {
-                        error: error.ok_or_else(|| de::Error::missing_field("error"))?,
-                    }
-                };
-                Ok(ResponseEnvelope {
-                    kind,
-                    protocol_version,
-                    request_id,
-                    instance_id,
-                    result,
-                })
-            }
-        }
-        deserializer.deserialize_map(ResponseEnvelopeVisitor)
     }
 }
 
@@ -485,6 +382,109 @@ mod tests {
         let s = serde_json::to_string(&err).unwrap();
         assert!(s.contains("\"ok\":false"));
         assert!(s.contains("\"error\""));
+    }
+
+    /// 応答 Envelope の JSON を、末尾だけ差し替えて組み立てる。
+    fn response_json(tail: &str) -> String {
+        format!(
+            r#"{{"kind":"response","protocol_version":"1.0","request_id":"8df98c04-e7c2-4f98-b3ce-fc1c39d76414","instance_id":"8df98c04-e7c2-4f98-b3ce-fc1c39d76414",{tail}}}"#
+        )
+    }
+
+    #[test]
+    fn response_envelope_field_order_and_absent_branch() {
+        // フィールドの並びと、載せない側を書き出さないことを、バイト列で固定する。
+        let succeeded = response_json(r#""ok":true,"result":{"n":1}"#);
+        let decoded: ResponseEnvelope = serde_json::from_str(&succeeded).unwrap();
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), succeeded);
+
+        let error =
+            serde_json::to_string(&ErrorObject::new(ErrorCode::HostBusy, "busy", true)).unwrap();
+        let failed = response_json(&format!(r#""ok":false,"error":{error}"#));
+        let decoded: ResponseEnvelope = serde_json::from_str(&failed).unwrap();
+        let reserialized = serde_json::to_string(&decoded).unwrap();
+        assert_eq!(reserialized, failed);
+        assert!(!reserialized.contains(r#""result""#), "{reserialized}");
+    }
+
+    #[test]
+    fn response_envelope_accepts_a_null_result_but_not_an_absent_one() {
+        // `null` は値が在ることを表す。欠落だけが `result` の不在である。
+        let accepted: ResponseEnvelope =
+            serde_json::from_str(&response_json(r#""ok":true,"result":null"#)).unwrap();
+        assert_eq!(
+            accepted.result,
+            ResponseResult::Ok {
+                result: serde_json::Value::Null
+            }
+        );
+
+        for tail in [r#""ok":true"#, r#""ok":false"#] {
+            let json = response_json(tail);
+            assert!(
+                serde_json::from_str::<ResponseEnvelope>(&json).is_err(),
+                "{json} が受理されました"
+            );
+        }
+    }
+
+    #[test]
+    fn response_envelope_reads_the_branch_it_discards() {
+        // 判別で捨てる側のフィールドも、載っている限り型に適合していなければ
+        // ならない。壊れた値が判別の向き次第で素通りしない。
+        let error = r#""code":"host_busy","message":"m","retryable":true"#;
+        for tail in [
+            &format!(r#""ok":true,"result":{{}},"error":{{{error}}}"#),
+            &format!(r#""ok":false,"error":{{{error}}},"result":{{"x":1}}"#),
+        ] {
+            let json = response_json(tail);
+            assert!(
+                serde_json::from_str::<ResponseEnvelope>(&json).is_ok(),
+                "{json} が拒否されました"
+            );
+        }
+
+        for tail in [
+            r#""ok":true,"result":{},"error":123"#,
+            r#""ok":true,"result":{},"error":null"#,
+        ] {
+            let json = response_json(tail);
+            assert!(
+                serde_json::from_str::<ResponseEnvelope>(&json).is_err(),
+                "{json} が受理されました"
+            );
+        }
+    }
+
+    #[test]
+    fn response_envelope_requires_ok_to_be_a_boolean() {
+        for tail in [
+            r#""result":{}"#,
+            r#""ok":"true","result":{}"#,
+            r#""ok":1,"result":{}"#,
+        ] {
+            let json = response_json(tail);
+            assert!(
+                serde_json::from_str::<ResponseEnvelope>(&json).is_err(),
+                "{json} が受理されました"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_keys_are_rejected_before_the_envelope_is_built() {
+        // 重複 key の拒否は strict パースが担う。Envelope の型は既知・未知を
+        // 問わず重複を見ない。
+        for tail in [
+            r#""ok":true,"result":{},"result":{}"#,
+            r#""ok":true,"result":{},"future":1,"future":2"#,
+        ] {
+            let json = response_json(tail);
+            assert!(
+                crate::json::deserialize_json::<ResponseEnvelope>(json.as_bytes()).is_err(),
+                "{json} が受理されました"
+            );
+        }
     }
 
     #[test]
