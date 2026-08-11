@@ -156,7 +156,13 @@ fn the_create_object_input_declares_exactly_the_sources_it_accepts() {
         .collect();
     assert_eq!(
         tags,
-        vec!["media_file", "object_alias", "effect", "alias_name"]
+        vec![
+            "media_file",
+            "object_alias",
+            "alias_file",
+            "effect",
+            "alias_name"
+        ]
     );
 
     // 判別子と対になる値のフィールド名も固定する。タグだけが合っていても、
@@ -177,6 +183,7 @@ fn the_create_object_input_declares_exactly_the_sources_it_accepts() {
         vec![
             vec!["type", "path"],
             vec!["type", "alias"],
+            vec!["type", "path"],
             vec!["type", "name"],
             vec!["type", "name"],
         ]

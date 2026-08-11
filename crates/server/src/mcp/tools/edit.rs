@@ -23,8 +23,13 @@ use rmcp::{tool, tool_router};
 
 #[tool_router(router = edit_tools_router, vis = "pub(in crate::mcp)")]
 impl AviUtl2McpServer {
-    /// メディアファイル・object alias・エフェクト名・登録済みエイリアス名のいずれかから
-    /// オブジェクトを作成する。
+    /// メディアファイル・object alias・エイリアスファイルのパス・エフェクト名・
+    /// 登録済みエイリアス名のいずれかからオブジェクトを作成する。
+    /// source が alias_file のとき、読んだ本文を object_alias に指定したのと同じであり、
+    /// object_alias について述べる拒否がそのまま掛かる。読み取り自体が失敗した場合は、
+    /// ファイルが無ければ not_found、読み取れなければ invalid_argument（alias_file_unreadable）、
+    /// 大きすぎれば invalid_argument（too_long）、UTF-8 として読めなければ
+    /// invalid_argument（alias_not_parsable）となる。
     /// source が effect のとき、カタログに在る名前でも作成元にできるとは限らず、
     /// その場合は unsupported_operation（effect_not_creatable）となる。
     /// 名前がカタログに無い場合は unsupported_operation（effect_not_registered）となる。

@@ -31,18 +31,19 @@ use crate::mcp::input::{
     ensure_length,
 };
 use aviutl2_mcp_core::{
-    AddEffectParams, ApplyBatchParams, BatchInputError, BatchOperation, CreateObjectParams,
-    CreateObjectSectionParams, CursorPosition, DeleteEffectParams, DeleteObjectParams,
-    DeleteObjectSectionParams, Destination, DisplayStart, EditInputError, ErrorObject, FiniteF64,
-    FocusChange, GridBpm, ItemValue, LayerNameChange, MAX_ALIAS_BYTES, MAX_BATCH_OPERATIONS,
-    MAX_GRID_BPM_ENTRIES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS, MAX_POSITION,
-    MoveEffectParams, MoveObjectParams, MoveObjectSectionParams, ObjectSource, Placement,
-    RangeChange, SceneSize, SetEffectEnabledParams, SetGridBpmParams, SetLayerStateParams,
-    SetObjectItemParams, SetObjectNameParams, SetSceneSettingsParams, SetSelectionParams,
-    TrackValue,
+    AddEffectParams, AliasFileError, ApplyBatchParams, BatchInputError, BatchOperation,
+    CreateObjectParams, CreateObjectSectionParams, CursorPosition, DeleteEffectParams,
+    DeleteObjectParams, DeleteObjectSectionParams, Destination, DisplayStart, EditInputError,
+    ErrorObject, FiniteF64, FocusChange, GridBpm, ItemValue, LayerNameChange, MAX_ALIAS_BYTES,
+    MAX_BATCH_OPERATIONS, MAX_GRID_BPM_ENTRIES, MAX_ITEM_VALUE_BYTES, MAX_PATH_UTF16_UNITS,
+    MAX_POSITION, MoveEffectParams, MoveObjectParams, MoveObjectSectionParams, ObjectSource,
+    Placement, RangeChange, SceneSize, SetEffectEnabledParams, SetGridBpmParams,
+    SetLayerStateParams, SetObjectItemParams, SetObjectNameParams, SetSceneSettingsParams,
+    SetSelectionParams, TrackValue, read_alias_file, validate_source_path,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::path::Path;
 
 /// 区間番号に許す最小値。
 ///
@@ -122,6 +123,14 @@ pub enum ObjectSourceInput {
         #[schemars(length(max = MAX_ALIAS_CHARS))]
         alias: String,
     },
+    /// エイリアスファイルのパスから作成する。
+    AliasFile {
+        /// エイリアスファイルの絶対パス。受け付けるパスの規則は media_file と同じ。
+        ///
+        /// 読んだ本文を object_alias へ渡したときと同じに扱う。
+        #[schemars(length(min = 1, max = MAX_PATH_CHARS))]
+        path: String,
+    },
     /// エフェクト名から作成する。
     Effect {
         /// エイリアスファイルの effect.name の値。list_available_effects が返す名前をそのまま指定する。
@@ -138,15 +147,25 @@ pub enum ObjectSourceInput {
 }
 
 impl ObjectSourceInput {
-    fn to_source(&self) -> ObjectSource {
-        match self {
+    /// 要求が運ぶ作成元へ変換する。
+    ///
+    /// パスで指定されたエイリアスファイルはここで読み、本文を持つ object alias へ
+    /// 写す。読んだ後は要求へ直接書かれた alias と同じ経路を通る。
+    fn to_source(&self) -> Result<ObjectSource, ErrorObject> {
+        Ok(match self {
             ObjectSourceInput::MediaFile { path } => ObjectSource::MediaFile { path: path.clone() },
             ObjectSourceInput::ObjectAlias { alias } => ObjectSource::ObjectAlias {
                 alias: alias.clone(),
             },
+            ObjectSourceInput::AliasFile { path } => {
+                validate_source_path(path).map_err(from_input_error)?;
+                ObjectSource::ObjectAlias {
+                    alias: read_alias_file(Path::new(path)).map_err(from_alias_file_error)?,
+                }
+            }
             ObjectSourceInput::Effect { name } => ObjectSource::Effect { name: name.clone() },
             ObjectSourceInput::AliasName { name } => ObjectSource::AliasName { name: name.clone() },
-        }
+        })
     }
 }
 
@@ -479,10 +498,12 @@ pub struct CreateObjectInput {
 impl CreateObjectInput {
     /// IPC の params へ変換する。
     pub fn to_params(&self) -> Result<CreateObjectParams, ErrorObject> {
+        // 作成元はファイルを開くことがある。開かずに決まる検証を先に済ませる。
+        let expected_project_epoch = expected_project_epoch(&self.expected_project_epoch)?;
         let params = CreateObjectParams {
-            source: self.source.to_source(),
+            source: self.source.to_source()?,
             placement: self.placement.to_placement(),
-            expected_project_epoch: expected_project_epoch(&self.expected_project_epoch)?,
+            expected_project_epoch,
         };
         params.validate().map_err(from_input_error)?;
         Ok(params)
@@ -1198,6 +1219,17 @@ fn expected_project_epoch(value: &str) -> Result<String, ErrorObject> {
 /// 説明にも補助情報にも、検証に失敗した値そのものを含めない。過大な入力を
 /// そのまま応答へ写すと、入力の誤りを伝える応答自体が過大になる。
 fn from_input_error(error: EditInputError) -> ErrorObject {
+    with_input_details(
+        from_code(error.error_code(), error.to_string()),
+        error.reason(),
+        None,
+    )
+}
+
+/// エイリアスファイルを読めなかった失敗を tool result のエラーへ写す。
+///
+/// 説明にも補助情報にも、読もうとしたパスを含めない。
+fn from_alias_file_error(error: AliasFileError) -> ErrorObject {
     with_input_details(
         from_code(error.error_code(), error.to_string()),
         error.reason(),
@@ -1984,6 +2016,164 @@ mod tests {
         }))
         .expect("入力型としては受理される");
         assert!(input.to_params().is_ok());
+    }
+
+    /// 作成元だけを差し替えた `create_object` の入力を params へ写す。
+    fn create_from_source(source: Value) -> Result<CreateObjectParams, ErrorObject> {
+        let input: CreateObjectInput = serde_json::from_value(json!({
+            "instance_id": SAMPLE_ID,
+            "source": source,
+            "placement": { "scene_id": 3, "layer": 1, "frame": 0 },
+            "expected_project_epoch": SAMPLE_EPOCH,
+        }))
+        .expect("入力型としては受理される");
+        input.to_params()
+    }
+
+    /// 何も置かれていない一時パス。
+    fn temp_alias_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "aviutl2-mcp-edit-input-test-{name}-{}",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    /// 一時パスを片付ける。ファイルとディレクトリのどちらでも消す。
+    fn remove_temp(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(path);
+    }
+
+    /// エイリアスファイルのパスを作成元とした入力を params へ写す。
+    fn create_from_alias_file(path: &std::path::Path) -> Result<CreateObjectParams, ErrorObject> {
+        create_from_source(json!({
+            "type": "alias_file",
+            "path": path.to_str().expect("一時パスは UTF-8"),
+        }))
+    }
+
+    /// 読み取りが失敗する 4 種のパスを、期待するコードと名前と共に作る。
+    ///
+    /// 作ったパスは呼び出し側が [`remove_temp`] で片付ける。
+    fn failing_alias_files() -> Vec<(std::path::PathBuf, ErrorCode, Option<&'static str>)> {
+        let unreadable = temp_alias_path("unreadable");
+        std::fs::create_dir(&unreadable).expect("一時ディレクトリを作れる");
+
+        let too_large = temp_alias_path("too-large");
+        std::fs::write(&too_large, vec![b'a'; MAX_ALIAS_BYTES + 1]).expect("一時ファイルを書ける");
+
+        let not_utf8 = temp_alias_path("not-utf8");
+        std::fs::write(&not_utf8, b"[Object]\r\nname=\xff\xfe\r\n").expect("一時ファイルを書ける");
+
+        vec![
+            (temp_alias_path("missing"), ErrorCode::NotFound, None),
+            (
+                unreadable,
+                ErrorCode::InvalidArgument,
+                Some("alias_file_unreadable"),
+            ),
+            (too_large, ErrorCode::InvalidArgument, Some("too_long")),
+            (
+                not_utf8,
+                ErrorCode::InvalidArgument,
+                Some("alias_not_parsable"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn an_alias_file_source_carries_the_body_of_the_file() {
+        let path = temp_alias_path("body");
+        let body = "[Object]\r\nframe=0,80\r\n[Object.0]\r\neffect.name=図形\r\n";
+        std::fs::write(&path, body).expect("一時ファイルを書ける");
+
+        let params = create_from_alias_file(&path).expect("読めるファイルは受理される");
+        assert_eq!(
+            params.source,
+            ObjectSource::ObjectAlias {
+                alias: body.to_string(),
+            }
+        );
+
+        remove_temp(&path);
+    }
+
+    #[test]
+    fn an_alias_file_path_is_rejected_by_the_same_rules_as_a_media_path() {
+        // パスの構文は読み取りより先に掛かる。読んでから判定する実装では、
+        // 実在しないこれらのパスは不在として返る。
+        for path in [
+            "",
+            r"..\alias.exo",
+            r"\\.\PhysicalDrive0",
+            r"C:\alias.exo:stream",
+            "alias.exo",
+            r"\\server\share\alias.exo",
+            "//server/share/alias.exo",
+        ] {
+            let from_file = create_from_source(json!({ "type": "alias_file", "path": path }))
+                .err()
+                .unwrap_or_else(|| panic!("{path} が受理されました"));
+            let media = create_from_source(json!({ "type": "media_file", "path": path }))
+                .err()
+                .unwrap_or_else(|| panic!("{path} が受理されました"));
+            assert_eq!(from_file.code, media.code, "{path}");
+            assert_eq!(from_file.details, media.details, "{path}");
+            assert!(from_file.details["reason"].is_string(), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_failed_alias_file_read_names_its_code_and_reason() {
+        // 不在はコードだけで名乗り、名前を持たない。名前が付くと、要求元は
+        // 綴りの誤りと権限や排他の失敗を同じものとして扱う。
+        for (path, code, reason) in failing_alias_files() {
+            let error = create_from_alias_file(&path)
+                .err()
+                .unwrap_or_else(|| panic!("{} が受理されました", path.display()));
+            assert_eq!(error.code, code, "{}", path.display());
+            match reason {
+                Some(reason) => assert_eq!(error.details["reason"], json!(reason), "{error:?}"),
+                None => assert!(error.details.get("reason").is_none(), "{error:?}"),
+            }
+            remove_temp(&path);
+        }
+    }
+
+    #[test]
+    fn a_failed_alias_file_read_never_echoes_the_path() {
+        // 応答へ載せてよいのは失敗の名前だけである。読もうとした場所は
+        // 要求元が既に知っており、応答へ写す理由が無い。
+        for (path, _, _) in failing_alias_files() {
+            let error = create_from_alias_file(&path)
+                .err()
+                .unwrap_or_else(|| panic!("{} が受理されました", path.display()));
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("一時パスは UTF-8");
+            let response = format!("{} {}", error.message, error.details);
+            assert!(!response.contains(name), "{response}");
+            remove_temp(&path);
+        }
+    }
+
+    #[test]
+    fn the_body_of_an_alias_file_is_validated_like_a_directly_given_alias() {
+        // 読み取りの後に既存の検証が掛かる。読めた本文をそのまま送る実装では、
+        // 直接指定なら拒否される本文が通る。
+        let path = temp_alias_path("nul-body");
+        let body = "[Object]\u{0}\r\n";
+        std::fs::write(&path, body).expect("一時ファイルを書ける");
+
+        let from_file = create_from_alias_file(&path).expect_err("本文の構文で拒否される");
+        let direct = create_from_source(json!({ "type": "object_alias", "alias": body }))
+            .expect_err("本文の構文で拒否される");
+        assert_eq!(from_file.code, direct.code);
+        assert_eq!(from_file.details, direct.details);
+        assert_eq!(from_file.details["reason"], json!("contains_nul"));
+
+        remove_temp(&path);
     }
 
     #[test]
