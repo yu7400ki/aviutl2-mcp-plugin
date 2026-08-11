@@ -2127,6 +2127,58 @@ mod tests {
             .collect()
     }
 
+    /// 入力 schema が整数へ宣言する上下界。
+    fn declared_integer_bounds() -> (i64, i64) {
+        let schema = serde_json::to_value(schemars::schema_for!(ItemValueInput))
+            .expect("schema は直列化できる");
+        let branch = schema["oneOf"]
+            .as_array()
+            .expect("種別ごとの分岐がある")
+            .iter()
+            .find(|branch| branch["properties"]["type"]["const"] == json!("integer"))
+            .expect("整数の分岐がある")
+            .clone();
+        let value = &branch["properties"]["value"];
+        (
+            value["minimum"].as_i64().expect("下限を宣言している"),
+            value["maximum"].as_i64().expect("上限を宣言している"),
+        )
+    }
+
+    /// 整数を入力型として受け取り、設定値へ写す。
+    fn integer_input(value: i64) -> ItemValue {
+        let input: ItemValueInput =
+            serde_json::from_value(json!({ "type": "integer", "value": value }))
+                .expect("入力型としては受理される");
+        input.to_value().expect("変換できる")
+    }
+
+    #[test]
+    fn the_integer_input_declares_the_width_that_the_validation_enforces() {
+        // 宣言した値そのものを検証へ通す。宣言と検証が離れれば、要求元は schema を
+        // 満たしたまま拒まれるか、宣言の外の値を送れるようになる。
+        let (min, max) = declared_integer_bounds();
+
+        for value in [min, max] {
+            assert_eq!(
+                aviutl2_mcp_core::validate_item_value(&integer_input(value)),
+                Ok(()),
+                "{value}"
+            );
+        }
+
+        for value in [min - 1, max + 1] {
+            let error = aviutl2_mcp_core::validate_item_value(&integer_input(value))
+                .expect_err("宣言の外は拒否される");
+            assert_eq!(error.error_code(), ErrorCode::InvalidArgument, "{value}");
+            assert_eq!(
+                error.reason(),
+                Some("argument_not_representable"),
+                "{value}"
+            );
+        }
+    }
+
     #[test]
     fn every_read_item_value_round_trips_through_the_input_type() {
         // 読み取りが返す値の形と入力型がずれると、読めた値を書き戻せなくなる。
