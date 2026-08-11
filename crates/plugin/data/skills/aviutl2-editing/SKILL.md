@@ -31,7 +31,11 @@ selector は自分で組み立てない。読み取りの応答が返した値�
 
 プロジェクト境界の照合材料は selector が運ぶ project_epoch である。要求が selector を 1 つも運ばないことがある tool（create_object・set_layer_state・set_selection・set_grid_bpm・set_scene_settings）だけが expected_project_epoch を要求し、そちらは省略できない。
 
-要求は project_revision を運ばない。読み取りから編集までに revision が進んでいても拒否されない。拒否を避けるために revision を取り直す必要は無い。
+編集の要求は project_revision を運ばない。読み取りから編集までに revision が進んでいても拒否されない。拒否を避けるために revision を取り直す必要は無い。
+
+**一覧の続きを引く要求だけは運ぶ。** 先頭ページが返した値をそのまま送り返す欄であり、**間に編集が挟まると拒否される。**
+
+**拒否されたら先頭のページから引き直す。** 取り直すのは revision ではなく一覧である。
 
 ## 取り消しの単位
 
