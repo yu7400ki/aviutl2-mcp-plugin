@@ -414,7 +414,11 @@ struct Relocation {
     /// 入力 schema が受け取る分。
     to_input_schema: Option<InputSchemaLanding>,
     /// skill が受け取る分。**skill が本文に書く内容である。**
-    to_skill: Option<&'static str>,
+    ///
+    /// **1 続きの文ではなく、言い換えても残る単位で並べる。** 文を丸ごと置けば
+    /// 固定されるのは語順であり、内容ではない——限定を前置しただけの本文は
+    /// 部分文字列として素通りし、同じことを別の語順で述べた本文は落ちる。
+    to_skill: Option<&'static [&'static str]>,
 }
 
 /// 層 1 から落とした反復句と、その行き先。
@@ -446,10 +450,10 @@ const RELOCATED_CONVENTIONS: &[Relocation] = &[
         // 起点そのものは値の隣で足りるが、**UI と 1 ずれることは引数の隣に
         // 書いても遅い。** 画面で見た番号をそのまま送る判断は、要求を組み立てる
         // 前に起きる。
-        to_skill: Some(
-            "AviUtl2 の UI はレイヤーとフレームを 1 始まりで表示する。\
-             tool が受け渡すのは 0 始まりの番号であり、画面で見た番号より 1 小さい",
-        ),
+        to_skill: Some(&[
+            "AviUtl2 の UI はレイヤーとフレームを 1 始まりで表示する",
+            "tool が受け渡すのは 0 始まりの番号であり、画面で見た番号より 1 小さい",
+        ]),
     },
     Relocation {
         statement: "応答が返した selector は組み立て直さず、読み直さずにそのまま次の要求へ渡せる",
@@ -461,10 +465,11 @@ const RELOCATED_CONVENTIONS: &[Relocation] = &[
             fields: &[],
             reaches: 14,
         }),
-        to_skill: Some(
-            "selector は自分で組み立てない。読み取りの応答が返した値をそのまま編集へ渡し、\
+        to_skill: Some(&[
+            "selector は自分で組み立てない",
+            "読み取りの応答が返した値をそのまま編集へ渡し、\
              編集の応答が返した値をそのまま次の編集へ渡す",
-        ),
+        ]),
     },
     Relocation {
         statement: "プロジェクトの世代は selector が運ぶ project_epoch で照合する",
@@ -476,12 +481,12 @@ const RELOCATED_CONVENTIONS: &[Relocation] = &[
             fields: &["project_epoch"],
             reaches: 14,
         }),
-        to_skill: Some(
-            "プロジェクト境界の照合材料は selector が運ぶ project_epoch である。\
-             要求が selector を 1 つも運ばないことがある tool（create_object・\
+        to_skill: Some(&[
+            "プロジェクト境界の照合材料は selector が運ぶ project_epoch である",
+            "要求が selector を 1 つも運ばないことがある tool（create_object・\
              set_layer_state・set_selection・set_grid_bpm・set_scene_settings）だけが\
              expected_project_epoch を要求し、そちらは省略できない",
-        ),
+        ]),
     },
     Relocation {
         statement: "対象が変化していた precondition_failed は、対象の現在の姿を details へ添える。\
@@ -497,12 +502,12 @@ const RELOCATED_CONVENTIONS: &[Relocation] = &[
             fields: &[],
             reaches: 14,
         }),
-        to_skill: Some(
+        to_skill: Some(&[
             "対象が変化していた precondition_failed では details.current_object に\
-             対象の現在の姿が入り、そのまま次の要求の selector にできる。\
-             apply_batch だけは何番目で落ちたかを併せて示すため details.failed_object という\
+             対象の現在の姿が入り、そのまま次の要求の selector にできる",
+            "apply_batch だけは何番目で落ちたかを併せて示すため details.failed_object という\
              別のキーで返す",
-        ),
+        ]),
     },
     Relocation {
         statement: "offset と limit（1〜200、既定 50）でページを指定し、\
@@ -537,10 +542,17 @@ const RELOCATED_CONVENTIONS: &[Relocation] = &[
         dropped: &["project_revision を運ばない"],
         // 引数に無いものの不在は、引数の隣に書けない。
         to_input_schema: None,
-        to_skill: Some(
-            "要求は project_revision を運ばない。読み取りから編集までに revision が\
-             進んでいても拒否されない。拒否を避けるために revision を取り直す必要は無い",
-        ),
+        // **層 3 が述べるのは層 1 より狭い。** 運ばないのは編集の要求であり、
+        // 一覧の続きを引く要求は先頭ページが返した値を送り返す。層 1 の言い切りを
+        // そのまま置くと、本文が足した限定を検査が見ないまま通る。
+        to_skill: Some(&[
+            "編集の要求",
+            "project_revision を運ばない",
+            "revision が進んでいても拒否されない",
+            "revision を取り直す必要は無い",
+            "一覧の続き",
+            "編集が挟まると拒否される",
+        ]),
     },
     Relocation {
         statement: "変更が起きた編集 tool の呼び出し 1 回が、1 つの取り消し単位になる。\
@@ -549,10 +561,10 @@ const RELOCATED_CONVENTIONS: &[Relocation] = &[
         applies_to: 16,
         dropped: &["この呼び出し 1 回が 1 つの取り消し単位になる"],
         to_input_schema: None,
-        to_skill: Some(
-            "変更が起きた編集 tool の呼び出し 1 回が、1 つの取り消し単位になる。\
-             まとめて 1 単位にしたいときは apply_batch を選ぶ",
-        ),
+        to_skill: Some(&[
+            "変更が起きた編集 tool の呼び出し 1 回が、1 つの取り消し単位になる",
+            "まとめて 1 単位にしたいときは apply_batch を選ぶ",
+        ]),
     },
     Relocation {
         statement: "timeout は変更が無かったことを意味しない。\
@@ -562,10 +574,11 @@ const RELOCATED_CONVENTIONS: &[Relocation] = &[
         applies_to: 16,
         dropped: &["details.change_applied"],
         to_input_schema: None,
-        to_skill: Some(
-            "timeout は変更が無かったことを意味しない。details.change_applied が \"no\" なら\
-             未適用のため再送してよく、\"unknown\" なら読み直して確認してから再送する",
-        ),
+        to_skill: Some(&[
+            "timeout は変更が無かったことを意味しない",
+            "details.change_applied が \"no\" なら未適用のため再送してよく、\
+             \"unknown\" なら読み直して確認してから再送する",
+        ]),
     },
     Relocation {
         // **層 1 で述べていたのは 1 tool だけだが、キーは汎用である。**
@@ -578,12 +591,13 @@ const RELOCATED_CONVENTIONS: &[Relocation] = &[
         applies_to: 16,
         dropped: &["details.mutation_issued"],
         to_input_schema: None,
-        to_skill: Some(
-            "書き込みを発行した後に落ちた失敗には details.mutation_issued が true で付く。\
-             付かない失敗は 1 バイトも書いていないため、対象を読み直さずに要求を直して\
-             送り直せる。付く失敗が読み直しを要するかは details.retry_requires が名乗る\
+        to_skill: Some(&[
+            "書き込みを発行した後に落ちた失敗には details.mutation_issued が true で付く",
+            "付かない失敗は 1 バイトも書いていないため、対象を読み直さずに要求を直して\
+             送り直せる",
+            "付く失敗が読み直しを要するかは details.retry_requires が名乗る\
              ——発行した変更が戻っていれば読み直す先は無い",
-        ),
+        ]),
     },
     Relocation {
         // 値の書式は値を書く場所の隣が正本である。層 1 にも置くと、
@@ -610,12 +624,13 @@ const RELOCATED_CONVENTIONS: &[Relocation] = &[
             "登録済みのフォント名は list_fonts が返す",
         ],
         to_input_schema: None,
-        to_skill: Some(
-            "設定項目に何を書けるか分からないときは describe_effects を呼ぶ。\
-             choices が候補を、range が値域と小数桁を返す。どちらも null の項目は\
-             表に載っていないだけであり、既存オブジェクトの値を get_object で読んで倣う。\
-             フォント名は list_fonts が返す",
-        ),
+        to_skill: Some(&[
+            "設定項目に何を書けるか分からないときは describe_effects を呼ぶ",
+            "choices が候補を、range が値域と小数桁を返す",
+            "どちらも null の項目は表に載っていないだけであり、\
+             既存オブジェクトの値を get_object で読んで倣う",
+            "フォント名は list_fonts が返す",
+        ]),
     },
 ];
 
@@ -634,7 +649,9 @@ struct HandedCheck {
 const CHECKS_HANDED_TO_THE_SKILL: &[HandedCheck] = &[
     HandedCheck {
         checked: "編集 tool すべての説明が「要求は project_revision を運ばない」と述べること",
-        becomes: "SKILL.md の本文が同じことを 1 度述べること",
+        becomes: "SKILL.md の本文が、運ばないのは編集の要求であることを 1 度述べること。\
+                  一覧の続きを引く要求だけは先頭ページが返した値を送り返すため、\
+                  層 1 の言い切りをそのまま写すと述べすぎになる",
     },
     HandedCheck {
         checked: "10 tool の説明が「この呼び出し 1 回が 1 つの取り消し単位になる」と述べること",
@@ -723,11 +740,14 @@ fn the_phrases_dropped_from_the_tool_descriptions_live_in_another_layer() {
                 landing.reaches
             );
         }
-        if let Some(statement) = relocation.to_skill {
+        if let Some(phrases) = relocation.to_skill {
             // 本文との突き合わせは
             // [`the_conventions_handed_to_the_skill_are_in_its_body`] が行う。
             // ここで見るのは、行き先の宣言が空でないことだけである。
-            assert!(!statement.is_empty(), "skill が受け取る内容が空です");
+            assert!(!phrases.is_empty(), "skill が受け取る内容が空です");
+            for phrase in phrases {
+                assert!(!phrase.is_empty(), "skill が受け取る単位が空です");
+            }
         }
     }
 
@@ -842,15 +862,17 @@ fn the_conventions_handed_to_the_skill_are_in_its_body() {
     let body = skill_body();
     let mut handed = 0usize;
     for relocation in RELOCATED_CONVENTIONS {
-        let Some(statement) = relocation.to_skill else {
+        let Some(phrases) = relocation.to_skill else {
             continue;
         };
         handed += 1;
-        assert!(
-            occurrences(&body, statement) >= 1,
-            "層 1 の {} tool が述べていた事実が skill の本文にありません: {statement}",
-            relocation.was_stated_by
-        );
+        for phrase in phrases {
+            assert!(
+                occurrences(&body, phrase) >= 1,
+                "層 1 の {} tool が述べていた事実が skill の本文にありません: {phrase}",
+                relocation.was_stated_by
+            );
+        }
     }
     assert!(handed > 0, "skill が受け取った句が 1 つもありません");
 }
