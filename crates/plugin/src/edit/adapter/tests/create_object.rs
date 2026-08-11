@@ -1168,14 +1168,18 @@ fn creation_checks_the_scene_guard_of_its_placement() {
 
 /// 配置先からの相対位置を並べた、複数オブジェクト形式のエイリアスを綴る。
 ///
-/// フェイクは作成のたびに開始フレームを [`CREATE_FRAME_SHIFT`] だけ後ろへ
-/// ずらす。その分を織り込んだ相対フレームだけが、実際に生まれる配置と一致する。
-fn alias_with_relative_frames(first: usize, second: usize) -> String {
-    format!(
-        "[0]\r\nlayer=0\r\nframe={first},{}\r\n[0.0]\r\neffect.name=図形\r\n[1]\r\nlayer=1\r\nframe={second},{}\r\n[1.0]\r\neffect.name=図形\r\n",
-        first + 59,
-        second + 59,
-    )
+/// 節は渡された順に番号を持つ。フェイクは作成のたびに開始フレームを
+/// [`CREATE_FRAME_SHIFT`] だけ後ろへずらすため、その分を織り込んだ相対フレーム
+/// だけが実際に生まれる配置と一致する。
+fn alias_with_relative_placements(nodes: [(usize, usize); 2]) -> String {
+    let mut alias = String::new();
+    for (index, (layer, frame)) in nodes.into_iter().enumerate() {
+        alias.push_str(&format!(
+            "[{index}]\r\nlayer={layer}\r\nframe={frame},{}\r\n[{index}.0]\r\neffect.name=図形\r\n",
+            frame + 59,
+        ));
+    }
+    alias
 }
 
 /// 生テキストのエイリアスを、2 件が生まれる一式へ配置先 (0, 600) で渡す。
@@ -1207,10 +1211,31 @@ fn created_positions(outcome: &EditOutcome) -> Vec<(usize, usize)> {
 fn an_alias_that_landed_where_it_asked_does_not_claim_an_adjustment() {
     // 相対値へ配置先を加えたものが要求した配置である。実際の配置がそれと 1 件も
     // 違わなければ、要求元が全件を見る理由は無い。
-    let outcome = create_pair_from_alias(&alias_with_relative_frames(
-        CREATE_FRAME_SHIFT,
-        CREATE_FRAME_SHIFT + 60,
-    ))
+    let outcome = create_pair_from_alias(&alias_with_relative_placements([
+        (0, CREATE_FRAME_SHIFT),
+        (1, CREATE_FRAME_SHIFT + 60),
+    ]))
+    .expect("作成に失敗しました");
+
+    assert_eq!(
+        created_positions(&outcome),
+        vec![
+            (0, 600 + CREATE_FRAME_SHIFT),
+            (1, 600 + CREATE_FRAME_SHIFT + 60)
+        ]
+    );
+    assert_eq!(outcome.placement_adjusted, Some(false));
+}
+
+#[test]
+fn the_comparison_does_not_depend_on_the_order_the_alias_numbers_its_objects() {
+    // 要求した配置は節の番号順に並び、実際の配置はレイヤーの昇順に並ぶ。順序を
+    // 持つ突き合わせにすると、番号を降順に綴ったエイリアスは要求どおりに生まれ
+    // ても真になる。
+    let outcome = create_pair_from_alias(&alias_with_relative_placements([
+        (1, CREATE_FRAME_SHIFT + 60),
+        (0, CREATE_FRAME_SHIFT),
+    ]))
     .expect("作成に失敗しました");
 
     assert_eq!(
@@ -1227,10 +1252,10 @@ fn an_alias_that_landed_where_it_asked_does_not_claim_an_adjustment() {
 fn an_alias_with_a_single_object_out_of_place_claims_the_adjustment_without_naming_it() {
     // 1 件だけがずれた結果と、全件がずれた結果は同じ真を返す。どの 1 件かは
     // 名乗らない——実際の配置は created の各要素が既に持っている。
-    let one_moved = create_pair_from_alias(&alias_with_relative_frames(
-        CREATE_FRAME_SHIFT,
-        CREATE_FRAME_SHIFT + 61,
-    ))
+    let one_moved = create_pair_from_alias(&alias_with_relative_placements([
+        (0, CREATE_FRAME_SHIFT),
+        (1, CREATE_FRAME_SHIFT + 61),
+    ]))
     .expect("作成に失敗しました");
     assert_eq!(
         created_positions(&one_moved),
@@ -1242,8 +1267,8 @@ fn an_alias_with_a_single_object_out_of_place_claims_the_adjustment_without_nami
     );
     assert_eq!(one_moved.placement_adjusted, Some(true));
 
-    let all_moved =
-        create_pair_from_alias(&alias_with_relative_frames(0, 60)).expect("作成に失敗しました");
+    let all_moved = create_pair_from_alias(&alias_with_relative_placements([(0, 0), (1, 60)]))
+        .expect("作成に失敗しました");
     assert_eq!(
         all_moved.placement_adjusted, one_moved.placement_adjusted,
         "ずれた件数が応答から読めています"
@@ -1341,7 +1366,8 @@ fn a_registered_alias_is_compared_against_the_relative_placements_of_its_own_bod
     let dir = TempDir::new();
     dir.write_alias(
         "相対",
-        alias_with_relative_frames(CREATE_FRAME_SHIFT, CREATE_FRAME_SHIFT + 60).as_bytes(),
+        alias_with_relative_placements([(0, CREATE_FRAME_SHIFT), (1, CREATE_FRAME_SHIFT + 60)])
+            .as_bytes(),
     );
     let harness = Harness::with(|host| host.arm(|knobs| knobs.fault = Some(Fault::CreatePair)));
     harness
@@ -1416,4 +1442,45 @@ fn the_occupancy_check_looks_at_the_first_object_rather_than_at_the_placement() 
             expected_project_epoch: harness.epoch(),
         })
         .expect("空いている配置先への作成が拒まれました");
+}
+
+/// 同じ 2 つの相対位置を、番号の順だけ入れ替えたエイリアスへ渡す。
+///
+/// 配置先はレイヤー 1 のフレーム 0 である。相対フレーム 150 の側は 100-200 の
+/// 対象と重なり、相対フレーム 0 の側は空いている。
+fn create_from_swapped_pair(occupied_first: bool) -> Result<EditOutcome, EditError> {
+    let nodes = match occupied_first {
+        true => [(0, 150), (0, 0)],
+        false => [(0, 0), (0, 150)],
+    };
+    let harness = Harness::new();
+    harness.edit.create_object(&CreateObjectParams {
+        source: ObjectSource::ObjectAlias {
+            alias: alias_with_relative_placements(nodes),
+        },
+        placement: Placement {
+            scene_id: SCENE_ID,
+            layer: 1,
+            frame: 0,
+        },
+        expected_project_epoch: harness.epoch(),
+    })
+}
+
+#[test]
+fn the_occupancy_check_looks_at_the_first_object_rather_than_at_a_later_one() {
+    // 確かめるのは 1 点だけであり、それは番号が先頭の節である。2 つの要求は同じ
+    // 2 つの位置を持ち、番号の順だけが違う。
+    let error =
+        create_from_swapped_pair(true).expect_err("先頭が埋まったエイリアスが受理されました");
+    assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+    let details = error.details();
+    assert_eq!(details["reason"], json!("destination_occupied"));
+    assert_eq!(details["layer"], json!(1));
+    assert_eq!(details["frame"], json!(150));
+
+    // 先頭以外が埋まっていても拒まない。ずれるかどうかはホストが決めることで
+    // あり、その規則を我々は持っていない。要求は成功し、応答が調整を名乗る。
+    let outcome = create_from_swapped_pair(false).expect("先頭以外の重なりで作成が拒まれました");
+    assert_eq!(outcome.placement_adjusted, Some(true));
 }
