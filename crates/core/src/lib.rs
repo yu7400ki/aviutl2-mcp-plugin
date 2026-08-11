@@ -28,6 +28,7 @@ pub mod edit_info;
 pub mod effect;
 pub mod envelope;
 pub mod error;
+pub mod file;
 pub mod fingerprint;
 pub mod framing;
 pub mod handoff;
@@ -86,6 +87,7 @@ pub use envelope::{
     ResponseResult,
 };
 pub use error::{ErrorCode, ErrorObject};
+pub use file::read_bounded;
 pub use fingerprint::{
     EffectFingerprintInput, Fingerprint, FingerprintAlgorithm, FingerprintFormatError,
     ObjectFingerprintInput, effect_fingerprint, object_fingerprint,

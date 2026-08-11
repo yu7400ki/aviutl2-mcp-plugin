@@ -19,13 +19,11 @@ use aviutl2::alias::Table;
 use aviutl2_mcp_core::{
     AvailableEffectItem, EffectItemType, ErrorCode, ItemWriteError, ListObjectAliasesResult,
     MAX_ALIAS_BYTES, Movement, ObjectAliasSummary, PageWindow, TextSyntaxError, TrackDecodeError,
-    TrackWriteTarget, decode_track_value, take_window, validate_alias, validate_alias_text_escapes,
-    validate_object_alias_name, validate_track_value,
+    TrackWriteTarget, decode_track_value, read_bounded, take_window, validate_alias,
+    validate_alias_text_escapes, validate_object_alias_name, validate_track_value,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -369,24 +367,6 @@ fn read_alias(dir: &AliasDirectory, name: &str) -> Result<String, AliasRejection
         _ => AliasRejection::NotParsable,
     })?;
     Ok(text)
-}
-
-/// 上限を超えないことを確かめながらファイルを読む。
-///
-/// 上限は開いた直後の大きさで判定し、読み取り自体にも同じ上限を掛ける。判定と
-/// 読み取りの間にファイルが伸びても、上限を超えて読むことはない。上限を超えて
-/// いれば `Ok(None)` を返す。
-pub(crate) fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Option<Vec<u8>>> {
-    let file = File::open(path)?;
-    if file.metadata()?.len() > limit {
-        return Ok(None);
-    }
-    let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Ok(None);
-    }
-    Ok(Some(bytes))
 }
 
 /// 表としてパースする。安全に扱えない入力は `None` を返す。
@@ -880,6 +860,7 @@ pub(crate) mod tests {
     use aviutl2_mcp_core::DEFAULT_PAGE_LIMIT;
     use std::cell::Cell;
     use std::collections::BTreeSet;
+    use std::fs::File;
 
     /// 全 variant の代表値。新しい variant を足したらここへも足す。
     pub(crate) fn all_rejections() -> Vec<AliasRejection> {

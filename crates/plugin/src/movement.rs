@@ -49,9 +49,9 @@
 //! - `writable` は真偽値であり、省略できない。「測っていない」を表す形は無い
 //!   ——測れていない名前は表に載せない。
 
-use crate::alias::{data_directory, read_bounded};
+use crate::alias::data_directory;
 use crate::item_facets::parse_object;
-use aviutl2_mcp_core::Movement;
+use aviutl2_mcp_core::{Movement, read_bounded};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;

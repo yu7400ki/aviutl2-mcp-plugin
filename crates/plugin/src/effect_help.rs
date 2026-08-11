@@ -38,8 +38,8 @@
 //! その中の `キー=値` だけであり、行を直に読めば取りこぼしが無い
 //! （[`crate::movement`] が同じ理由で見出しを直に読んでいる）。
 
-use crate::alias::read_bounded;
 use crate::read::host::HostEffectHelp;
+use aviutl2_mcp_core::read_bounded;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

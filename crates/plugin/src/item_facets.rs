@@ -143,8 +143,8 @@
 //! - 基底はこれ以外のキーを持てない。サイドカーでは無視される。読む人の居ない
 //!   注記も、算出に全 effect × 全項目の列挙を要する陳腐化の印も持たない。
 
-use crate::alias::{data_directory, read_bounded};
-use aviutl2_mcp_core::{FiniteF64, ItemChoices, ItemFacets, ItemRange, TableSource};
+use crate::alias::data_directory;
+use aviutl2_mcp_core::{FiniteF64, ItemChoices, ItemFacets, ItemRange, TableSource, read_bounded};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
