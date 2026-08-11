@@ -480,16 +480,66 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_keys_are_rejected_before_the_envelope_is_built() {
-        // 重複 key はワイヤ経路でも落ちる。
+    fn non_object_input_is_rejected() {
+        // 応答結果はマップとしてしか読まない。列として並べた値は、要素の型が
+        // 揃っていても応答ではない。
+        for json in [
+            r#"[true,{}]"#,
+            r#"[true,{},{"code":"host_busy","message":"m","retryable":true}]"#,
+            r#"[]"#,
+            r#"12"#,
+            r#""x""#,
+            r#"true"#,
+            r#"null"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ResponseResult>(json).is_err(),
+                "ResponseResult が {json} を受理しました"
+            );
+            assert!(
+                crate::json::deserialize_json::<ResponseResult>(json.as_bytes()).is_err(),
+                "ResponseResult が {json} を受理しました"
+            );
+        }
+
+        for json in [
+            r#"["response","1.0","8df98c04-e7c2-4f98-b3ce-fc1c39d76414","8df98c04-e7c2-4f98-b3ce-fc1c39d76414",true,{}]"#,
+            r#"[]"#,
+            r#"12"#,
+            r#""x""#,
+            r#"true"#,
+            r#"null"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ResponseEnvelope>(json).is_err(),
+                "ResponseEnvelope が {json} を受理しました"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_keys_are_rejected_whether_known_or_unknown() {
+        for json in [
+            r#"{"ok":true,"result":{},"result":{}}"#,
+            r#"{"ok":true,"ok":false,"result":{}}"#,
+            r#"{"ok":true,"result":{},"future":1,"future":2}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ResponseResult>(json).is_err(),
+                "ResponseResult が {json} を受理しました"
+            );
+        }
+
         for tail in [
             r#""ok":true,"result":{},"result":{}"#,
+            r#""ok":true,"ok":false,"result":{}"#,
             r#""ok":true,"result":{},"future":1,"future":2"#,
+            r#""ok":true,"result":{},"kind":"response""#,
         ] {
             let json = response_json(tail);
             assert!(
-                crate::json::deserialize_json::<ResponseEnvelope>(json.as_bytes()).is_err(),
-                "{json} が受理されました"
+                serde_json::from_str::<ResponseEnvelope>(&json).is_err(),
+                "ResponseEnvelope が {json} を受理しました"
             );
         }
     }
