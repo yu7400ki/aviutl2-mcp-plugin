@@ -1362,3 +1362,58 @@ fn a_registered_alias_is_compared_against_the_relative_placements_of_its_own_bod
     );
     assert_eq!(outcome.placement_adjusted, Some(false));
 }
+
+#[test]
+fn the_occupancy_check_looks_at_the_first_object_rather_than_at_the_placement() {
+    // レイヤー 1 はフレーム 0 が空いており、100-200 が埋まっている。相対 frame を
+    // 持つエイリアスの先頭はその埋まった区間へ来る。要求元は名乗られた位置を見て
+    // 次の宛先を選ぶため、空いている配置先を返せば同じ失敗を繰り返す経路になる。
+    let harness = Harness::new();
+    let error = harness
+        .edit
+        .create_object(&CreateObjectParams {
+            source: ObjectSource::ObjectAlias {
+                alias: "[Object]\r\nframe=150\r\n[Object.0]\r\neffect.name=図形\r\n".to_string(),
+            },
+            placement: Placement {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame: 0,
+            },
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect_err("埋まった位置へ来るエイリアスが受理されました");
+
+    assert_eq!(error.error_code(), ErrorCode::PreconditionFailed);
+    let details = error.details();
+    assert_eq!(details["reason"], json!("destination_occupied"));
+    assert_eq!(details["layer"], json!(1));
+    assert_eq!(
+        details["frame"],
+        json!(150),
+        "空いている配置先を、衝突する位置として名乗っています"
+    );
+    assert_eq!(
+        details["occupied_by"],
+        json!({ "frame_start": 100, "frame_end": 200 })
+    );
+    harness.assert_untouched();
+
+    // 同じ配置先へ、相対 frame を持たないエイリアスは置ける。落ちたのは配置先で
+    // はなく先頭オブジェクトの位置である。
+    let harness = Harness::new();
+    harness
+        .edit
+        .create_object(&CreateObjectParams {
+            source: ObjectSource::ObjectAlias {
+                alias: "[Object]\r\nframe=0\r\n[Object.0]\r\neffect.name=図形\r\n".to_string(),
+            },
+            placement: Placement {
+                scene_id: SCENE_ID,
+                layer: 1,
+                frame: 0,
+            },
+            expected_project_epoch: harness.epoch(),
+        })
+        .expect("空いている配置先への作成が拒まれました");
+}

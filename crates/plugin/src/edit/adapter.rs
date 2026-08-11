@@ -493,7 +493,8 @@ impl<H: EditHost> EditAdapter for HostEditAdapter<H> {
             // 作成前の走査はここ 1 回で足りる。
             let layers = creation_scan_range(editor, layer)?;
             let before = scene_placements(editor, layers.clone())?;
-            ensure_destination_free(&before, layer, frame, None)?;
+            let (occupied_layer, occupied_frame) = requested[0];
+            ensure_destination_free(&before, occupied_layer, occupied_frame, None)?;
             // 拡張子だけの確認に留める。実際に読めるかを調べる確認はファイルを
             // 開くため、割り込めない編集区間の内側では行えない。拡張子が通った
             // うえでの失敗は理由を区別できないので、対応していないファイルだとは
