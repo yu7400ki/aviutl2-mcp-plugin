@@ -21,11 +21,12 @@ use crate::read::{HostReadAdapter, ReadAdapter};
 use crate::test_support::{default_page_request, default_page_window, with_silent_panic_hook};
 use aviutl2_mcp_core::{
     ApplyBatchParams, AvailableEffectItem, BatchOperation, CreateObjectSectionParams,
-    CursorPosition, DeleteObjectSectionParams, Destination, EditOperation, EffectFlags, EffectItem,
-    EffectItemType, EffectSelector, EffectType, ErrorCode, Fingerprint, FiniteF64, GridBpm,
-    ItemChoices, ItemFacets, ItemRange, ItemValue, LayerNameChange, MAX_GRID_BPM_ENTRIES,
-    MoveEffectParams, MoveObjectSectionParams, Movement, ObjectSectionsOutcome, ObjectSelector,
-    Placement, SceneSize, TableSource,
+    CursorPosition, DeleteObjectSectionParams, Destination, DisplayStart, EditOperation,
+    EffectFlags, EffectItem, EffectItemType, EffectSelector, EffectType, ErrorCode, Fingerprint,
+    FiniteF64, GridBpm, ItemChoices, ItemFacets, ItemRange, ItemValue, LayerNameChange,
+    MAX_GRID_BPM_ENTRIES, MoveEffectParams, MoveObjectSectionParams, Movement,
+    ObjectSectionsOutcome, ObjectSelector, Placement, RangeChange, SceneSize, SelectionField,
+    TableSource,
 };
 use serde_json::json;
 use std::collections::HashMap;
