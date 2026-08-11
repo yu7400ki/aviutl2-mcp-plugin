@@ -1,7 +1,4 @@
 //! 復号済みの要求を実行口へ発行する。
-//!
-//! 実行口は SDK の参照区間・編集区間を抜けてから所有型の DTO を返す。JSON への
-//! 変換は区間の外側で行い、区間の内側には持ち込まない。
 
 use super::decode::{EditRequest, ReadRequest, RenderRequest};
 use super::{edit_error, error_object, read_error, render_error, snapshot_revision_error};

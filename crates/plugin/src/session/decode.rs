@@ -1,7 +1,4 @@
-//! operation 別の params の復号。
-//!
-//! 復号と同時に、要求内容だけで決まる検証を済ませる。この段を通った要求は、
-//! ライフサイクル状態にも期限にも実行口の応答にも依存しない誤りを持たない。
+//! 要求 params の復号。
 
 use super::{
     batch_input_error, describe_effects_error, edit_input_error, error_object, filter_error,
