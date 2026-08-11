@@ -546,12 +546,11 @@ const RELOCATED_CONVENTIONS: &[Relocation] = &[
         // 一覧の続きを引く要求は先頭ページが返した値を送り返す。層 1 の言い切りを
         // そのまま置くと、本文が足した限定を検査が見ないまま通る。
         to_skill: Some(&[
-            "編集の要求",
-            "project_revision を運ばない",
+            "編集の要求は project_revision を運ばない",
             "revision が進んでいても拒否されない",
             "revision を取り直す必要は無い",
-            "一覧の続き",
-            "編集が挟まると拒否される",
+            "一覧の続きを引く要求だけは運ぶ",
+            "間に編集が挟まると拒否される",
         ]),
     },
     Relocation {
@@ -889,8 +888,10 @@ fn the_checks_handed_to_the_skill_are_satisfied_by_its_body() {
         "持ち越す検査が増減しています。本文側の検査も併せて見直してください"
     );
 
-    // 1. 要求が project_revision を運ばないこと。**1 度だけ述べる**——
+    // 1. 編集の要求が project_revision を運ばないこと。**1 度だけ述べる**——
     //    層 1 で 16 tool へ並んでいた句を、層 3 でも並べては移した意味が無い。
+    //    **主語まで含めて固定するのは [`RELOCATED_CONVENTIONS`] の側である**
+    //    ——ここが見るのは回数だけであり、無限定の言い切りも同じ回数で通る。
     assert_eq!(
         occurrences(&body, "project_revision を運ばない"),
         1,
